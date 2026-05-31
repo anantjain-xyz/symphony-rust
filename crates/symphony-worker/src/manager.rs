@@ -25,6 +25,8 @@ pub enum WorkerError {
     AlreadyRunning,
     #[error("workflow error: {0}")]
     Workflow(#[from] symphony_core::WorkflowError),
+    #[error("tracker error: {0}")]
+    Tracker(#[from] TrackerError),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 }
@@ -142,10 +144,7 @@ async fn run_worker(
 ) -> Result<(), WorkerError> {
     repo.upsert_workflow(&config.workflow).await?;
     let tracker = LinearTracker::new(config.workflow.front_matter.tracker.clone());
-    tracker
-        .preflight()
-        .await
-        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    tracker.preflight().await?;
     recover(&repo, &tracker, &config).await?;
     let started_at = now_iso();
     repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
@@ -239,7 +238,7 @@ async fn tick<T: TrackerClient>(
     config: &RuntimeConfig,
     stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
-    let active = tracker.fetch_active().await.map_err(tracker_to_storage)?;
+    let active = tracker.fetch_active().await?;
     repo.upsert_issues(&active).await?;
 
     let active_ids = active
@@ -288,11 +287,7 @@ async fn tick<T: TrackerClient>(
         {
             break;
         }
-        if let Some(issue) = tracker
-            .fetch_by_id(&retry.issue_id)
-            .await
-            .map_err(tracker_to_storage)?
-        {
+        if let Some(issue) = tracker.fetch_by_id(&retry.issue_id).await? {
             reserve_and_dispatch(
                 repo.clone(),
                 config.clone(),
@@ -652,6 +647,19 @@ fn due_after(ms: u64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn tracker_to_storage(err: TrackerError) -> StorageError {
-    StorageError::Sqlx(sqlx::Error::Protocol(err.to_string()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracker_auth_errors_are_not_reported_as_storage_errors() {
+        let err = WorkerError::from(TrackerError::Auth("401 Unauthorized".to_string()));
+
+        assert_eq!(
+            err.to_string(),
+            "tracker error: Linear auth failed: 401 Unauthorized"
+        );
+        assert!(!err.to_string().contains("storage error"));
+        assert!(!err.to_string().contains("database error"));
+    }
 }
