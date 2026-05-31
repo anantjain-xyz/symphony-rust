@@ -1,0 +1,41 @@
+[package]
+name = "symphony-desktop"
+version = "0.1.0"
+description = "Symphony desktop operator app"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "symphony_rust_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+keyring.workspace = true
+keyring-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+symphony-agents = { path = "../crates/symphony-agents" }
+symphony-core = { path = "../crates/symphony-core" }
+symphony-storage = { path = "../crates/symphony-storage" }
+symphony-tracker = { path = "../crates/symphony-tracker" }
+symphony-worker = { path = "../crates/symphony-worker" }
+tauri.workspace = true
+tauri-plugin-opener.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+which.workspace = true

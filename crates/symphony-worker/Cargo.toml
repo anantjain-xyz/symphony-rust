@@ -1,0 +1,27 @@
+[package]
+name = "symphony-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+sqlx.workspace = true
+symphony-agents = { path = "../symphony-agents" }
+symphony-core = { path = "../symphony-core" }
+symphony-storage = { path = "../symphony-storage" }
+symphony-tracker = { path = "../symphony-tracker" }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
