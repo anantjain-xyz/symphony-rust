@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -24,9 +24,24 @@ const emptyOverview: Overview = {
   rate_limits: [],
 };
 
+const previewSettings: AppSettings = {
+  workflow_source:
+    "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved workflow.",
+  repo_url: "",
+  tracker_workspace: null,
+  tracker_prefix: null,
+  tracker_project_id: null,
+  workspace_root: null,
+  agent_backend: "codex",
+  linear_api_key_set: false,
+};
+
 function App() {
+  const runtimeAvailable = isTauri();
   const [view, setView] = useState<View>("overview");
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(
+    runtimeAvailable ? null : previewSettings,
+  );
   const [linearKey, setLinearKey] = useState("");
   const [overview, setOverview] = useState<Overview>(emptyOverview);
   const [runs, setRuns] = useState<RunWithIssueRow[]>([]);
@@ -42,6 +57,7 @@ function App() {
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
+    if (!runtimeAvailable) return;
     const [nextSettings, nextOverview, nextRuns, nextIssues, nextWorker] =
       await Promise.all([
         invoke<AppSettings>("load_settings"),
@@ -58,16 +74,21 @@ function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(String(err)));
-    const unsubs = [
+    if (!runtimeAvailable) return;
+
+    refresh().catch((err) => setError(formatError(err)));
+    const unsubs = Promise.all([
       listen("db_changed", () => refresh().catch(() => undefined)),
       listen("agent_event", () => refresh().catch(() => undefined)),
       listen("rate_limit_changed", () => refresh().catch(() => undefined)),
-    ];
+    ]).catch((err) => {
+      setError(formatError(err));
+      return [];
+    });
     return () => {
-      Promise.all(unsubs).then((items) => items.forEach((unlisten) => unlisten()));
+      unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, []);
+  }, [runtimeAvailable]);
 
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
@@ -75,12 +96,16 @@ function App() {
   );
 
   async function call<T>(fn: () => Promise<T>) {
+    if (!runtimeAvailable) {
+      setError("Connect through the Symphony desktop app to run this action.");
+      return undefined as T;
+    }
     setBusy(true);
     setError(null);
     try {
       return await fn();
     } catch (err) {
-      setError(String(err));
+      setError(formatError(err));
       throw err;
     } finally {
       setBusy(false);
@@ -143,6 +168,7 @@ function App() {
             <button
               key={item}
               className={view === item ? "nav-active" : ""}
+              aria-current={view === item ? "page" : undefined}
               onClick={() => setView(item)}
             >
               {label(item)}
@@ -150,30 +176,53 @@ function App() {
           ))}
         </nav>
 
-        <div className="worker-panel">
-          <span className={`status-dot ${worker.state}`} />
-          <div>
+        <div className={`worker-panel ${worker.state}`} aria-live="polite">
+          <span className={`status-dot ${worker.state}`} aria-hidden="true" />
+          <div className="worker-status-copy">
             <strong>{worker.state}</strong>
             <small>{worker.started_at ? shortTime(worker.started_at) : "not started"}</small>
           </div>
           {worker.state === "running" ? (
-            <button className="icon-button" disabled={busy} onClick={stopWorker} title="Stop worker">
-              ■
+            <button
+              className="icon-button worker-action"
+              disabled={busy || !runtimeAvailable}
+              onClick={stopWorker}
+              title="Stop worker"
+              aria-label="Stop worker"
+            >
+              <span aria-hidden="true">■</span>
             </button>
           ) : (
-            <button className="icon-button" disabled={busy} onClick={startWorker} title="Start worker">
-              ▶
+            <button
+              className="icon-button worker-action"
+              disabled={busy || !runtimeAvailable || worker.state === "stopping"}
+              onClick={startWorker}
+              title={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
+              aria-label={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
+            >
+              <span aria-hidden="true">{worker.state === "stopping" ? "…" : "▶"}</span>
             </button>
           )}
         </div>
       </aside>
 
       <section className="content">
+        {!runtimeAvailable ? (
+          <RuntimeBanner
+            title="Desktop runtime unavailable"
+            message="This browser preview is disconnected from Tauri commands. Launch the desktop app to load live data, save settings, and start the worker."
+          />
+        ) : null}
         {error ? <div className="banner error">{error}</div> : null}
         {worker.last_error ? <div className="banner">{worker.last_error}</div> : null}
 
         {view === "overview" ? (
-          <OverviewView overview={overview} onOpenRun={openRun} />
+          <OverviewView
+            overview={overview}
+            canStartWorker={runtimeAvailable && !busy}
+            onOpenRun={openRun}
+            onStartWorker={startWorker}
+          />
         ) : null}
         {view === "runs" ? (
           <RunsView
@@ -183,7 +232,9 @@ function App() {
             onOpenRun={openRun}
           />
         ) : null}
-        {view === "issues" ? <IssuesView issues={issues} /> : null}
+        {view === "issues" ? (
+          <IssuesView issues={issues} onOpenSettings={() => setView("settings")} />
+        ) : null}
         {view === "settings" && settings ? (
           <SettingsView
             settings={settings}
@@ -192,6 +243,7 @@ function App() {
             setLinearKey={setLinearKey}
             validation={validation}
             busy={busy}
+            runtimeAvailable={runtimeAvailable}
             onSave={saveSettings}
             onValidate={validate}
           />
@@ -203,10 +255,14 @@ function App() {
 
 function OverviewView({
   overview,
+  canStartWorker,
   onOpenRun,
+  onStartWorker,
 }: {
   overview: Overview;
+  canStartWorker: boolean;
   onOpenRun: (id: string) => void;
+  onStartWorker: () => void;
 }) {
   return (
     <>
@@ -222,15 +278,39 @@ function OverviewView({
         </div>
       </header>
 
+      <div className="status-strip">
+        <StatusItem label="Heartbeat" value={overview.worker_heartbeat ? shortTime(overview.worker_heartbeat.last_beat_at) : "No heartbeat"} />
+        <StatusItem label="Live sessions" value={overview.live_sessions.length} />
+        <StatusItem label="Rate limits" value={overview.rate_limits.length ? "Active signals" : "Clear"} tone={overview.rate_limits.length ? "warning" : "ok"} />
+      </div>
+
       <div className="grid two">
         <Panel title="Active runs">
-          <RunTable runs={overview.active_runs} onOpenRun={onOpenRun} empty="No active runs" />
+          <RunTable
+            runs={overview.active_runs}
+            onOpenRun={onOpenRun}
+            emptyTitle="No active runs"
+            emptyText="Start the worker when you are ready to dispatch agent work."
+            actionLabel="Start worker"
+            actionDisabled={!canStartWorker}
+            onAction={onStartWorker}
+          />
         </Panel>
         <Panel title="Retry queue">
           {overview.retry_queue.length === 0 ? (
-            <Empty text="No scheduled retries" />
+            <Empty
+              title="No scheduled retries"
+              text="Failed runs with retry windows will appear here."
+            />
           ) : (
             <table>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Run</th>
+                  <th>Due</th>
+                </tr>
+              </thead>
               <tbody>
                 {overview.retry_queue.map((retry) => (
                   <tr key={retry.issue_id}>
@@ -253,14 +333,25 @@ function OverviewView({
           <RunTable
             runs={overview.recent_failures}
             onOpenRun={onOpenRun}
-            empty="No recent failures"
+            emptyTitle="No recent failures"
+            emptyText="Worker failures will be collected here for triage."
           />
         </Panel>
         <Panel title="Rate limits">
           {overview.rate_limits.length === 0 ? (
-            <Empty text="No active rate-limit signals" />
+            <Empty
+              title="No active rate-limit signals"
+              text="Provider limits are clear. New limits will show reset timing here."
+            />
           ) : (
             <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Remaining</th>
+                  <th>Reset</th>
+                </tr>
+              </thead>
               <tbody>
                 {overview.rate_limits.map((limit) => (
                   <tr key={limit.source}>
@@ -302,13 +393,25 @@ function RunsView({
       </header>
       <div className="split">
         <Panel title="Run history">
-          <RunTable runs={runs} onOpenRun={onOpenRun} empty="No runs yet" activeRunIds={activeRunIds} />
+          <RunTable
+            runs={runs}
+            onOpenRun={onOpenRun}
+            emptyTitle="No runs yet"
+            emptyText="Runs will appear after the worker dispatches the first issue."
+            activeRunIds={activeRunIds}
+          />
         </Panel>
         <Panel title={selected ? selected.run.issue_identifier : "Event stream"}>
           {!selected ? (
-            <Empty text="Select a run to inspect events" />
+            <Empty
+              title="Select a run"
+              text="Choose a run from the history table to inspect its event stream."
+            />
           ) : selected.events.length === 0 ? (
-            <Empty text="No events recorded for this run" />
+            <Empty
+              title="No events recorded"
+              text="This run has no agent events yet."
+            />
           ) : (
             <div className="events">
               {selected.events.map((event) => (
@@ -328,7 +431,13 @@ function RunsView({
   );
 }
 
-function IssuesView({ issues }: { issues: IssueRow[] }) {
+function IssuesView({
+  issues,
+  onOpenSettings,
+}: {
+  issues: IssueRow[];
+  onOpenSettings: () => void;
+}) {
   return (
     <>
       <header className="page-header">
@@ -339,9 +448,22 @@ function IssuesView({ issues }: { issues: IssueRow[] }) {
       </header>
       <Panel title="Issue cache">
         {issues.length === 0 ? (
-          <Empty text="No issues cached yet" />
+          <Empty
+            title="No issues cached"
+            text="Configure Linear and validate settings to populate the local SQLite cache."
+            actionLabel="Open settings"
+            onAction={onOpenSettings}
+          />
         ) : (
           <table>
+            <thead>
+              <tr>
+                <th>Issue</th>
+                <th>State</th>
+                <th>Priority</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
             <tbody>
               {issues.map((issue) => (
                 <tr key={issue.id}>
@@ -369,6 +491,7 @@ function SettingsView({
   setLinearKey,
   validation,
   busy,
+  runtimeAvailable,
   onSave,
   onValidate,
 }: {
@@ -378,97 +501,135 @@ function SettingsView({
   setLinearKey: (value: string) => void;
   validation: ValidationResult | null;
   busy: boolean;
+  runtimeAvailable: boolean;
   onSave: () => void;
   onValidate: () => void;
 }) {
   return (
-    <>
+    <form
+      className="settings-form"
+      autoComplete="off"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave();
+      }}
+    >
       <header className="page-header">
         <div>
           <h2>Settings</h2>
           <p>First-run configuration, workflow source, and local paths.</p>
         </div>
         <div className="actions">
-          <button disabled={busy} onClick={onValidate}>Validate</button>
-          <button disabled={busy} className="primary" onClick={onSave}>Save</button>
+          <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>Validate</button>
+          <button disabled={busy || !runtimeAvailable} className="primary" type="submit">Save</button>
         </div>
       </header>
 
+      {!runtimeAvailable ? (
+        <div className="banner info">
+          Settings are shown in preview mode. Open Symphony as a Tauri desktop app to edit, validate, and save configuration.
+        </div>
+      ) : null}
+
       <div className="settings-grid">
-        <label>
-          Repo URL
-          <input
-            value={settings.repo_url}
-            onChange={(e) => setSettings({ ...settings, repo_url: e.currentTarget.value })}
-            placeholder="git@github.com:org/repo.git"
-          />
-        </label>
-        <label>
-          Linear API key
-          <input
-            value={linearKey}
-            type="password"
-            onChange={(e) => setLinearKey(e.currentTarget.value)}
-            placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
-          />
-        </label>
-        <label>
-          Linear workspace
-          <input
-            value={settings.tracker_workspace ?? ""}
-            onChange={(e) =>
-              setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
-            }
-          />
-        </label>
-        <label>
-          Tracker prefix
-          <input
-            value={settings.tracker_prefix ?? ""}
-            onChange={(e) =>
-              setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
-            }
-          />
-        </label>
-        <label>
-          Project ID
-          <input
-            value={settings.tracker_project_id ?? ""}
-            onChange={(e) =>
-              setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
-            }
-          />
-        </label>
-        <label>
-          Agent backend
-          <select
-            value={settings.agent_backend}
-            onChange={(e) =>
-              setSettings({ ...settings, agent_backend: e.currentTarget.value as AppSettings["agent_backend"] })
-            }
-          >
-            <option value="codex">Codex</option>
-            <option value="claude">Claude</option>
-          </select>
-        </label>
+        <section className="settings-section">
+          <h3>Repository</h3>
+          <label>
+            Repo URL
+            <input
+              value={settings.repo_url}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) => setSettings({ ...settings, repo_url: e.currentTarget.value })}
+              placeholder="git@github.com:org/repo.git"
+            />
+          </label>
+        </section>
+
+        <section className="settings-section">
+          <h3>Linear</h3>
+          <label>
+            API key
+            <input
+              value={linearKey}
+              disabled={!runtimeAvailable}
+              type="password"
+              autoComplete="new-password"
+              onChange={(e) => setLinearKey(e.currentTarget.value)}
+              placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
+            />
+          </label>
+          <label>
+            Workspace
+            <input
+              value={settings.tracker_workspace ?? ""}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) =>
+                setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
+              }
+            />
+          </label>
+          <label>
+            Project ID
+            <input
+              value={settings.tracker_project_id ?? ""}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) =>
+                setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
+              }
+            />
+          </label>
+          <label>
+            Tracker prefix
+            <input
+              value={settings.tracker_prefix ?? ""}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) =>
+                setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
+              }
+            />
+          </label>
+        </section>
+
+        <section className="settings-section">
+          <h3>Agent</h3>
+          <label>
+            Backend
+            <select
+              value={settings.agent_backend}
+              disabled={!runtimeAvailable}
+              onChange={(e) =>
+                setSettings({ ...settings, agent_backend: e.currentTarget.value as AppSettings["agent_backend"] })
+              }
+            >
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+            </select>
+          </label>
+        </section>
       </div>
 
       {validation ? (
-        <div className={validation.workflow_ok ? "banner ok" : "banner error"}>
-          Workflow {validation.workflow_ok ? "valid" : validation.workflow_error}
-          <span>codex: {validation.codex_found ? "found" : "missing"}</span>
-          <span>claude: {validation.claude_found ? "found" : "missing"}</span>
+        <div className={validation.workflow_ok ? "banner ok validation" : "banner error validation"}>
+          <strong>Workflow {validation.workflow_ok ? "valid" : "needs attention"}</strong>
+          <span>{validation.workflow_ok ? validation.app_data_dir : validation.workflow_error}</span>
+          <span>Codex: {validation.codex_found ? "found" : "missing"}</span>
+          <span>Claude: {validation.claude_found ? "found" : "missing"}</span>
         </div>
       ) : null}
 
       <Panel title="Workflow">
         <textarea
           value={settings.workflow_source}
+          disabled={!runtimeAvailable}
           onChange={(e) => setSettings({ ...settings, workflow_source: e.currentTarget.value })}
           spellCheck={false}
         />
       </Panel>
-    </>
+    </form>
   );
 }
 
@@ -476,19 +637,60 @@ function RunTable({
   runs,
   onOpenRun,
   empty,
+  emptyTitle,
+  emptyText,
+  actionLabel,
+  actionDisabled,
+  onAction,
   activeRunIds,
 }: {
   runs: RunWithIssueRow[];
   onOpenRun: (id: string) => void;
-  empty: string;
+  empty?: string;
+  emptyTitle?: string;
+  emptyText?: string;
+  actionLabel?: string;
+  actionDisabled?: boolean;
+  onAction?: () => void;
   activeRunIds?: Set<string>;
 }) {
-  if (runs.length === 0) return <Empty text={empty} />;
+  if (runs.length === 0) {
+    return (
+      <Empty
+        title={emptyTitle ?? empty ?? "No runs"}
+        text={emptyText}
+        actionLabel={actionLabel}
+        actionDisabled={actionDisabled}
+        onAction={onAction}
+      />
+    );
+  }
   return (
     <table>
+      <thead>
+        <tr>
+          <th>Issue</th>
+          <th>Run</th>
+          <th>Status</th>
+          <th>Created</th>
+        </tr>
+      </thead>
       <tbody>
         {runs.map((run) => (
-          <tr key={run.id} onClick={() => onOpenRun(run.id)}>
+          <tr
+            key={run.id}
+            className="clickable-row"
+            tabIndex={0}
+            role="button"
+            aria-label={`Open run ${run.issue_identifier} number ${run.run_number}`}
+            onClick={() => onOpenRun(run.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onOpenRun(run.id);
+              }
+            }}
+          >
             <td>
               <strong>
                 {run.issue_identifier}
@@ -515,6 +717,34 @@ function Kpi({ label, value }: { label: string; value: number }) {
   );
 }
 
+function StatusItem({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: "ok" | "warning";
+}) {
+  return (
+    <div className={`status-item ${tone ?? ""}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function RuntimeBanner({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="runtime-banner" role="status">
+      <div>
+        <strong>{title}</strong>
+        <span>{message}</span>
+      </div>
+    </div>
+  );
+}
+
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="panel">
@@ -524,8 +754,30 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function Empty({ text }: { text: string }) {
-  return <div className="empty">{text}</div>;
+function Empty({
+  title,
+  text,
+  actionLabel,
+  actionDisabled,
+  onAction,
+}: {
+  title: string;
+  text?: string;
+  actionLabel?: string;
+  actionDisabled?: boolean;
+  onAction?: () => void;
+}) {
+  return (
+    <div className="empty">
+      <strong>{title}</strong>
+      {text ? <span>{text}</span> : null}
+      {actionLabel ? (
+        <button disabled={actionDisabled} onClick={onAction}>
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 function Badge({ status }: { status: string }) {
@@ -534,6 +786,14 @@ function Badge({ status }: { status: string }) {
 
 function label(view: View) {
   return view[0].toUpperCase() + view.slice(1);
+}
+
+function formatError(err: unknown) {
+  const message = String(err);
+  if (message.includes("invoke") || message.includes("transformCallback")) {
+    return "Unable to reach the Symphony desktop runtime. Open the Tauri app to use live worker actions.";
+  }
+  return message;
 }
 
 export default App;
