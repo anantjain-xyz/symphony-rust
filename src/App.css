@@ -82,18 +82,24 @@ tr:focus-visible {
 
 .brand-mark {
   align-items: center;
-  background: #49a078;
-  border-radius: 8px;
-  color: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
   display: flex;
-  font-weight: 800;
-  height: 38px;
+  flex: 0 0 40px;
+  height: 40px;
   justify-content: center;
-  width: 38px;
+  overflow: hidden;
+  width: 40px;
 }
 
-.brand h1,
-.brand p {
+.brand-icon {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.brand h1 {
   margin: 0;
 }
 
@@ -101,7 +107,6 @@ tr:focus-visible {
   font-size: 18px;
 }
 
-.brand p,
 small {
   color: #6b7788;
   display: block;
