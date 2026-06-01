@@ -209,20 +209,18 @@ tr:focus-visible {
 
 .brand-mark {
   align-items: center;
-  border-radius: 10px;
-  box-shadow: var(--shadow-sm);
   display: flex;
   flex: 0 0 38px;
   height: 38px;
   justify-content: center;
-  overflow: hidden;
   width: 38px;
 }
 
 .brand-icon {
   display: block;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.24));
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   width: 100%;
 }
 
