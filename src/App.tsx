@@ -15,6 +15,30 @@ import symphonyIcon from "./assets/symphony-app-icon.png";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "settings";
+type Theme = "light" | "dark";
+
+const THEME_STORAGE_KEY = "symphony-theme";
+
+function getInitialTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === "light" || stored === "dark") return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function useTheme(): [Theme, () => void] {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    root.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const toggle = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  return [theme, toggle];
+}
 
 const emptyOverview: Overview = {
   active_runs: [],
@@ -39,6 +63,7 @@ const previewSettings: AppSettings = {
 
 function App() {
   const runtimeAvailable = isTauri();
+  const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
   const [settings, setSettings] = useState<AppSettings | null>(
     runtimeAvailable ? null : previewSettings,
@@ -156,13 +181,24 @@ function App() {
   return (
     <main className="app">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <img className="brand-icon" src={symphonyIcon} alt="" />
+        <div className="brand-row">
+          <div className="brand">
+            <div className="brand-mark" aria-hidden="true">
+              <img className="brand-icon" src={symphonyIcon} alt="" />
+            </div>
+            <div>
+              <h1>Symphony</h1>
+            </div>
           </div>
-          <div>
-            <h1>Symphony</h1>
-          </div>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          >
+            <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+          </button>
         </div>
 
         <nav>
