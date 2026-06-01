@@ -82,20 +82,18 @@ tr:focus-visible {
 
 .brand-mark {
   align-items: center;
-  border-radius: 10px;
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22);
   display: flex;
   flex: 0 0 40px;
   height: 40px;
   justify-content: center;
-  overflow: hidden;
   width: 40px;
 }
 
 .brand-icon {
   display: block;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.24));
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   width: 100%;
 }
 
