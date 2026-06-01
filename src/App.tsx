@@ -219,7 +219,7 @@ function App() {
         {view === "overview" ? (
           <OverviewView
             overview={overview}
-            canStartWorker={runtimeAvailable && !busy}
+            canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
             onOpenRun={openRun}
             onStartWorker={startWorker}
           />
