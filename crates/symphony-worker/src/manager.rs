@@ -112,6 +112,7 @@ impl WorkerManager {
                 let result = run_worker(repo, runtime, stop_for_task).await;
                 let mut inner = manager.inner.lock().await;
                 inner.status.state = WorkerState::Stopped;
+                inner.status.started_at = None;
                 inner.status.last_error = result.err().map(|err| err.to_string());
                 inner.stop = None;
                 inner.handle = None;
@@ -122,6 +123,11 @@ impl WorkerManager {
 
     pub async fn stop(&self) -> WorkerStatus {
         let mut inner = self.inner.lock().await;
+        if inner.stop.is_none() && inner.handle.is_none() {
+            inner.status.state = WorkerState::Stopped;
+            inner.status.started_at = None;
+            return inner.status.clone();
+        }
         inner.status.state = WorkerState::Stopping;
         if let Some(stop) = &inner.stop {
             stop.cancel();
@@ -661,5 +667,29 @@ mod tests {
         );
         assert!(!err.to_string().contains("storage error"));
         assert!(!err.to_string().contains("database error"));
+    }
+
+    #[tokio::test]
+    async fn stop_without_active_worker_remains_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.status = WorkerStatus {
+                state: WorkerState::Running,
+                started_at: Some(now_iso()),
+                last_error: None,
+            };
+        }
+
+        let status = manager.stop().await;
+
+        assert_eq!(status.state, WorkerState::Stopped);
+        assert_eq!(status.started_at, None);
     }
 }
