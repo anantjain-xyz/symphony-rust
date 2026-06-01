@@ -11,6 +11,7 @@ import type {
   WorkerStatus,
 } from "./bindings";
 import { nullable, prettyPayload, shortTime } from "./format";
+import symphonyIcon from "./assets/symphony-app-icon.png";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "settings";
@@ -156,7 +157,9 @@ function App() {
     <main className="app">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">S</div>
+          <div className="brand-mark" aria-hidden="true">
+            <img className="brand-icon" src={symphonyIcon} alt="" />
+          </div>
           <div>
             <h1>Symphony</h1>
             <p>Desktop operator</p>
