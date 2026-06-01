@@ -14,6 +14,9 @@ target
 .cache
 *.local
 
+# Playwright MCP screenshot/snapshot artifacts
+.playwright-mcp
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
