@@ -99,8 +99,7 @@ tr:focus-visible {
   width: 100%;
 }
 
-.brand h1,
-.brand p {
+.brand h1 {
   margin: 0;
 }
 
@@ -108,7 +107,6 @@ tr:focus-visible {
   font-size: 18px;
 }
 
-.brand p,
 small {
   color: #6b7788;
   display: block;

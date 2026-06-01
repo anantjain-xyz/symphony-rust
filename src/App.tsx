@@ -162,7 +162,6 @@ function App() {
           </div>
           <div>
             <h1>Symphony</h1>
-            <p>Desktop operator</p>
           </div>
         </div>
 
