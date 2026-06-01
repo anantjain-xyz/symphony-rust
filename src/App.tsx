@@ -116,6 +116,32 @@ function App() {
     };
   }, [runtimeAvailable]);
 
+  useEffect(() => {
+    if (!runtimeAvailable || worker.state === "stopped") return;
+
+    let cancelled = false;
+    const refreshWorker = () => {
+      invoke<WorkerStatus>("get_worker_status")
+        .then((nextWorker) => {
+          if (!cancelled) {
+            setWorker(nextWorker);
+          }
+        })
+        .catch(() => undefined);
+    };
+
+    refreshWorker();
+    const interval = window.setInterval(
+      refreshWorker,
+      worker.state === "stopping" ? 500 : 2000,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [runtimeAvailable, worker.state]);
+
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
     [overview.active_runs],
