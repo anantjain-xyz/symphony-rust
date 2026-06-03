@@ -12,9 +12,6 @@
   --card: hsl(0 0% 100%);
   --card-foreground: hsl(240 10% 9%);
 
-  --sidebar: hsl(240 5% 98%);
-  --sidebar-foreground: hsl(240 5% 26%);
-
   --muted: hsl(240 5% 96%);
   --muted-foreground: hsl(240 4% 46%);
 
@@ -58,9 +55,6 @@
 
   --card: hsl(240 8% 7%);
   --card-foreground: hsl(0 0% 96%);
-
-  --sidebar: hsl(240 9% 6%);
-  --sidebar-foreground: hsl(240 5% 72%);
 
   --muted: hsl(240 6% 12%);
   --muted-foreground: hsl(240 5% 60%);
@@ -186,34 +180,53 @@ tr:focus-visible {
 }
 
 .app {
-  display: grid;
-  grid-template-columns: 248px 1fr;
   min-height: 100vh;
 }
 
-.sidebar {
-  background: var(--sidebar);
-  border-right: 1px solid var(--border);
-  color: var(--sidebar-foreground);
+.topbar {
+  align-items: center;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
   display: flex;
-  flex-direction: column;
-  gap: 22px;
-  padding: 22px;
+  gap: 16px;
+  justify-content: space-between;
+  min-height: 64px;
+  padding: 10px 28px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.topbar-primary {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 20px;
+  min-width: 0;
+}
+
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  min-width: 0;
 }
 
 .brand {
   align-items: center;
   display: flex;
-  gap: 12px;
+  flex: 0 0 auto;
+  gap: 10px;
 }
 
 .brand-mark {
   align-items: center;
   display: flex;
-  flex: 0 0 38px;
-  height: 38px;
+  flex: 0 0 34px;
+  height: 34px;
   justify-content: center;
-  width: 38px;
+  width: 34px;
 }
 
 .brand-icon {
@@ -228,15 +241,8 @@ tr:focus-visible {
   color: var(--foreground);
   font-size: 17px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   margin: 0;
-}
-
-.brand-row {
-  align-items: center;
-  display: flex;
-  gap: 12px;
-  justify-content: space-between;
 }
 
 small {
@@ -261,45 +267,60 @@ small {
   color: var(--foreground);
 }
 
-.sidebar nav {
-  display: grid;
+.topnav {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
   gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 3px;
+  scrollbar-width: none;
 }
 
-.sidebar nav button {
+.topnav::-webkit-scrollbar {
+  display: none;
+}
+
+.topnav button {
   background: transparent;
   border-color: transparent;
   color: var(--muted-foreground);
+  flex: 0 0 auto;
   font-weight: 500;
-  justify-content: flex-start;
+  height: 32px;
+  justify-content: center;
   line-height: 1.2;
-  text-align: left;
-  width: 100%;
+  min-height: 32px;
+  padding: 0 11px;
+  text-align: center;
 }
 
-.sidebar nav button:hover {
+.topnav button:hover:not(:disabled) {
   background: var(--accent);
   color: var(--foreground);
 }
 
-.sidebar nav button.nav-active {
-  background: var(--secondary);
+.topnav button.nav-active {
+  background: var(--card);
   border-color: var(--border);
+  box-shadow: var(--shadow-sm);
   color: var(--foreground);
   font-weight: 600;
 }
 
-.worker-panel {
+.worker-pill {
   align-items: center;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: grid;
-  gap: 12px;
-  grid-template-columns: 14px minmax(0, 1fr) 38px;
-  margin-top: auto;
-  min-height: 70px;
-  padding: 14px;
+  gap: 9px;
+  grid-template-columns: 12px minmax(76px, max-content) 32px;
+  min-height: 38px;
+  padding: 4px 5px 4px 12px;
 }
 
 .status-dot {
@@ -325,13 +346,13 @@ small {
 
 .worker-status-copy {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
 .worker-status-copy strong {
   color: var(--foreground);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.15;
   text-transform: capitalize;
@@ -339,9 +360,11 @@ small {
 
 .worker-status-copy small {
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.25;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .icon-button {
@@ -355,9 +378,9 @@ small {
 .worker-action {
   border-radius: 8px;
   font-size: 13px;
-  height: 38px;
-  min-height: 38px;
-  width: 38px;
+  height: 30px;
+  min-height: 30px;
+  width: 30px;
 }
 
 .content {
@@ -386,7 +409,7 @@ small {
 .page-header h2 {
   font-size: 26px;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   line-height: 1.1;
 }
 
@@ -416,7 +439,7 @@ small {
   font-size: 22px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .kpi span {
@@ -508,7 +531,7 @@ th {
   color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: 0;
   padding: 10px 15px;
   text-align: left;
   text-transform: uppercase;
@@ -794,33 +817,26 @@ textarea {
 }
 
 @media (max-width: 980px) {
-  .app {
-    grid-template-columns: 1fr;
+  .topbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 14px 22px;
   }
 
-  .sidebar {
-    border-bottom: 1px solid var(--border);
-    border-right: 0;
-    display: grid;
-    gap: 16px;
-    grid-template-columns: 1fr;
-    position: static;
+  .topbar-primary {
+    flex: 1 1 520px;
+    flex-wrap: wrap;
+    gap: 12px 16px;
   }
 
-  .sidebar nav {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
+  .topnav {
+    flex: 1 1 360px;
   }
 
-  .sidebar nav button {
-    justify-content: center;
-    min-width: 0;
-    padding: 0 8px;
-    text-align: center;
-  }
-
-  .worker-panel {
-    margin-top: 0;
+  .topnav button {
+    flex: 1 1 0;
+    min-width: max-content;
+    padding: 0 10px;
   }
 
   .page-header {
@@ -841,8 +857,46 @@ textarea {
 }
 
 @media (max-width: 520px) {
-  .sidebar {
-    padding: 18px 22px;
+  .topbar {
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .topbar-primary,
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .topbar-primary {
+    gap: 10px;
+  }
+
+  .topbar-actions {
+    justify-content: space-between;
+  }
+
+  .brand-mark {
+    flex-basis: 32px;
+    height: 32px;
+    width: 32px;
+  }
+
+  .topnav {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .topnav button {
+    flex: 1 1 0;
+    font-size: 12px;
+    min-width: 0;
+    padding: 0 6px;
+  }
+
+  .worker-pill {
+    flex: 1 1 auto;
+    grid-template-columns: 12px minmax(0, 1fr) 32px;
   }
 
   .content {

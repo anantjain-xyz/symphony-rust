@@ -206,8 +206,8 @@ function App() {
 
   return (
     <main className="app">
-      <aside className="sidebar">
-        <div className="brand-row">
+      <header className="topbar">
+        <div className="topbar-primary">
           <div className="brand">
             <div className="brand-mark" aria-hidden="true">
               <img className="brand-icon" src={symphonyIcon} alt="" />
@@ -216,6 +216,22 @@ function App() {
               <h1>Symphony</h1>
             </div>
           </div>
+
+          <nav className="topnav" aria-label="Primary">
+            {(["overview", "runs", "issues", "settings"] as View[]).map((item) => (
+              <button
+                key={item}
+                className={view === item ? "nav-active" : ""}
+                aria-current={view === item ? "page" : undefined}
+                onClick={() => setView(item)}
+              >
+                {label(item)}
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <div className="topbar-actions">
           <button
             type="button"
             className="theme-toggle"
@@ -225,50 +241,36 @@ function App() {
           >
             <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
           </button>
-        </div>
-
-        <nav>
-          {(["overview", "runs", "issues", "settings"] as View[]).map((item) => (
-            <button
-              key={item}
-              className={view === item ? "nav-active" : ""}
-              aria-current={view === item ? "page" : undefined}
-              onClick={() => setView(item)}
-            >
-              {label(item)}
-            </button>
-          ))}
-        </nav>
-
-        <div className={`worker-panel ${worker.state}`} aria-live="polite">
-          <span className={`status-dot ${worker.state}`} aria-hidden="true" />
-          <div className="worker-status-copy">
-            <strong>{worker.state}</strong>
-            <small>{worker.started_at ? shortTime(worker.started_at) : "not started"}</small>
+          <div className={`worker-pill ${worker.state}`} aria-live="polite">
+            <span className={`status-dot ${worker.state}`} aria-hidden="true" />
+            <div className="worker-status-copy">
+              <strong>{worker.state}</strong>
+              <small>{worker.started_at ? shortTime(worker.started_at) : "not started"}</small>
+            </div>
+            {worker.state === "running" ? (
+              <button
+                className="icon-button worker-action"
+                disabled={busy || !runtimeAvailable}
+                onClick={stopWorker}
+                title="Stop worker"
+                aria-label="Stop worker"
+              >
+                <span aria-hidden="true">■</span>
+              </button>
+            ) : (
+              <button
+                className="icon-button worker-action"
+                disabled={busy || !runtimeAvailable || worker.state === "stopping"}
+                onClick={startWorker}
+                title={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
+                aria-label={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
+              >
+                <span aria-hidden="true">{worker.state === "stopping" ? "…" : "▶"}</span>
+              </button>
+            )}
           </div>
-          {worker.state === "running" ? (
-            <button
-              className="icon-button worker-action"
-              disabled={busy || !runtimeAvailable}
-              onClick={stopWorker}
-              title="Stop worker"
-              aria-label="Stop worker"
-            >
-              <span aria-hidden="true">■</span>
-            </button>
-          ) : (
-            <button
-              className="icon-button worker-action"
-              disabled={busy || !runtimeAvailable || worker.state === "stopping"}
-              onClick={startWorker}
-              title={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
-              aria-label={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
-            >
-              <span aria-hidden="true">{worker.state === "stopping" ? "…" : "▶"}</span>
-            </button>
-          )}
         </div>
-      </aside>
+      </header>
 
       <section className="content">
         {!runtimeAvailable ? (
