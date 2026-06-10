@@ -39,6 +39,9 @@ pub struct AgentRunRequest {
     pub network_access: bool,
     pub turn_timeout_ms: u64,
     pub claude: ClaudeRunOptions,
+    /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
+    /// which lives in the OS keychain and is absent from the inherited env).
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,7 +149,7 @@ async fn run_codex(
         }
     }
 
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &[])?;
+    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
     let pid = child.id();
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(request.prompt.as_bytes()).await?;
@@ -357,7 +360,7 @@ async fn run_claude(
         args.push(dir.clone());
     }
 
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &[])?;
+    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
     let pid = child.id();
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(request.prompt.as_bytes()).await?;
@@ -616,7 +619,7 @@ fn spawn_shell_command(
     command: &str,
     args: &[String],
     cwd: &PathBuf,
-    envs: &[(&str, String)],
+    envs: &[(String, String)],
 ) -> Result<tokio::process::Child, AgentError> {
     let full = if args.is_empty() {
         command.to_string()

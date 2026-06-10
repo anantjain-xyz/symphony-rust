@@ -494,6 +494,7 @@ async fn dispatch_run(
             add_dirs: config.workflow.front_matter.claude.add_dirs.clone(),
             session_id: pre_session,
         },
+        env: agent_env(&config.env),
     };
     let driver_stop = stop.clone();
     let mut run_fut = Box::pin(driver.run(request, tx, driver_stop));
@@ -651,6 +652,16 @@ fn workspace_manager(config: &RuntimeConfig) -> WorkspaceManager {
 fn due_after(ms: u64) -> String {
     (chrono::Utc::now() + chrono::Duration::milliseconds(ms as i64))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Environment injected into agent processes. Agents inherit the app's env;
+/// this adds secrets that live outside it (the Linear key comes from the OS
+/// keychain) so workflows can call the Linear API directly.
+fn agent_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    env.get("LINEAR_API_KEY")
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| vec![("LINEAR_API_KEY".to_string(), key.clone())])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
