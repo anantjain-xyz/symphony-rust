@@ -620,6 +620,144 @@ td strong {
   }
 }
 
+.setup-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 18px;
+  overflow: hidden;
+}
+
+.setup-intro {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+}
+
+.setup-intro h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.setup-intro p {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  margin: 0;
+  max-width: 640px;
+}
+
+.setup-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.setup-step {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  padding: 13px 16px;
+}
+
+.setup-step-marker {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  display: flex;
+  flex: 0 0 22px;
+  font-size: 11px;
+  font-weight: 600;
+  height: 22px;
+  justify-content: center;
+  width: 22px;
+}
+
+.setup-step.done .setup-step-marker {
+  background: var(--success);
+  border-color: transparent;
+  color: var(--success-foreground);
+}
+
+.setup-step strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setup-step.done strong {
+  color: var(--muted-foreground);
+}
+
+.setup-actions {
+  display: flex;
+  padding: 13px 16px;
+}
+
+.run-meta {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+}
+
+.run-meta-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 10px;
+}
+
+.run-meta-row.muted {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.run-meta-path {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-error {
+  background: var(--destructive);
+  border-radius: 6px;
+  color: var(--destructive-foreground);
+  display: grid;
+  font-size: 12px;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.run-error strong {
+  font-weight: 600;
+}
+
+.row-error {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--destructive-foreground);
+  display: -webkit-box;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.clickable-row.selected {
+  background: var(--muted);
+}
+
+.clickable-row.selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--foreground);
+}
+
 .empty {
   color: var(--muted-foreground);
   display: grid;
