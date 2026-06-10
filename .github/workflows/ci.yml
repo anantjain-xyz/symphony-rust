@@ -5,9 +5,15 @@ on:
   push:
     branches: [main]
 
+# Cancel superseded runs on the same ref so rapid pushes don't stack up minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
-    runs-on: macos-latest
+    # Linux is billed at 1x; macOS is 10x and nothing here needs it (no bundle build).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -24,10 +30,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Cache the cargo registry + target dir so we don't recompile the world each run.
+      - uses: Swatinem/rust-cache@v2
+
       - run: pnpm install --frozen-lockfile
+
+      # Rust: pure crates only. Excluding symphony-desktop (the Tauri shell) avoids
+      # webkit2gtk system deps and keeps the job fast and apt-free.
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --exclude symphony-desktop --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude symphony-desktop
+
+      # Frontend
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
