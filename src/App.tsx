@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
+  AgentEventRow,
   AppSettings,
   IssueRow,
   Overview,
@@ -13,6 +14,7 @@ import type {
   WorkerStatus,
 } from "./bindings";
 import {
+  describeEvent,
   formatTokens,
   nullable,
   prettyPayload,
@@ -20,6 +22,7 @@ import {
   relativeTime,
   shortTime,
   statusSlug,
+  timeOnly,
 } from "./format";
 import symphonyIcon from "./assets/symphony-app-icon.png";
 import "./App.css";
@@ -842,24 +845,10 @@ function RunsView({
                   </div>
                 ) : null}
               </div>
-              {selected.events.length === 0 ? (
-                <Empty
-                  title="No events recorded"
-                  text="This run has no agent events yet."
-                />
-              ) : (
-                <div className="events">
-                  {selected.events.map((event) => (
-                    <article key={event.id}>
-                      <div>
-                        <strong>{event.kind}</strong>
-                        <time>{shortTime(event.created_at)}</time>
-                      </div>
-                      <pre>{prettyPayload(event.payload)}</pre>
-                    </article>
-                  ))}
-                </div>
-              )}
+              <EventStream
+                events={selected.events}
+                live={selected.run.status === "running"}
+              />
             </>
           )}
         </Panel>
@@ -1223,6 +1212,82 @@ function ExternalLink({
     >
       {children}
     </button>
+  );
+}
+
+function EventStream({
+  events,
+  live,
+}: {
+  events: AgentEventRow[];
+  live: boolean;
+}) {
+  // The worker writes a "humanized" twin alongside every raw event that has
+  // a summary; the summaries below cover the raw events, so skip the twins.
+  const visible = events.filter((event) => event.kind !== "humanized");
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [follow, setFollow] = useState(true);
+
+  useEffect(() => {
+    if (!follow) return;
+    const el = containerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [visible.length, follow]);
+
+  if (visible.length === 0) {
+    return (
+      <Empty title="No events recorded" text="This run has no agent events yet." />
+    );
+  }
+
+  return (
+    <div
+      className="events"
+      ref={containerRef}
+      onScroll={() => {
+        const el = containerRef.current;
+        if (!el) return;
+        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+      }}
+    >
+      {visible.map((event) => {
+        const { label, summary, tone } = describeEvent(event.kind, event.payload);
+        return (
+          <article key={event.id} className={tone === "error" ? "event-error" : undefined}>
+            <div className="event-line">
+              <span className="event-kind">{label}</span>
+              <span
+                className={
+                  event.kind === "tool_call" ? "event-summary mono" : "event-summary"
+                }
+              >
+                {summary || <em>no details</em>}
+              </span>
+              <time title={shortTime(event.created_at)}>
+                {timeOnly(event.created_at)}
+              </time>
+            </div>
+            <details>
+              <summary>payload</summary>
+              <pre>{prettyPayload(event.payload)}</pre>
+            </details>
+          </article>
+        );
+      })}
+      {!follow && live ? (
+        <button
+          type="button"
+          className="jump-latest"
+          onClick={() => {
+            const el = containerRef.current;
+            if (el) el.scrollTop = el.scrollHeight;
+            setFollow(true);
+          }}
+        >
+          Jump to latest ↓
+        </button>
+      ) : null}
+    </div>
   );
 }
 
