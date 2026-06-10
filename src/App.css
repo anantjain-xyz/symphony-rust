@@ -230,11 +230,10 @@ tr:focus-visible {
 }
 
 .brand-icon {
+  color: var(--foreground);
   display: block;
-  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.24));
-  height: 100%;
-  object-fit: contain;
-  width: 100%;
+  height: 26px;
+  width: 26px;
 }
 
 .brand h1 {
