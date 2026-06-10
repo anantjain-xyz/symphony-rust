@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  describeEvent,
   formatTokens,
   nullable,
   prettyPayload,
   priorityLabel,
   relativeTime,
   statusSlug,
+  timeOnly,
 } from "./format";
 
 describe("format helpers", () => {
@@ -54,5 +56,50 @@ describe("format helpers", () => {
   it("slugs issue states for badge classes", () => {
     expect(statusSlug("In Progress")).toBe("in-progress");
     expect(statusSlug("Done")).toBe("done");
+  });
+
+  it("passes invalid dates through timeOnly", () => {
+    expect(timeOnly("not a date")).toBe("not a date");
+    expect(timeOnly("2026-06-10T12:30:00Z")).toMatch(/\d/);
+  });
+
+  it("summarizes known agent events", () => {
+    expect(describeEvent("status", '{"message":"cloning repo"}')).toEqual({
+      label: "Status",
+      summary: "cloning repo",
+    });
+    expect(
+      describeEvent(
+        "tool_call",
+        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"exit 0"}',
+      ),
+    ).toEqual({ label: "Tool call", summary: "bash: exit 0" });
+    expect(
+      describeEvent("tool_call", '{"tool":"bash","args":{"command":"pnpm test"}}'),
+    ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
+    expect(
+      describeEvent("token_count", '{"input_tokens":184223,"output_tokens":9281}'),
+    ).toEqual({ label: "Tokens", summary: "184k in · 9.3k out" });
+    expect(
+      describeEvent("error", '{"class":"AgentTurnTimeout","message":"turn exceeded budget"}'),
+    ).toEqual({
+      label: "Error",
+      summary: "AgentTurnTimeout: turn exceeded budget",
+      tone: "error",
+    });
+    expect(
+      describeEvent("rate_limit", '{"source":"codex","remaining":12}'),
+    ).toEqual({ label: "Rate limit", summary: "codex — 12 remaining" });
+  });
+
+  it("falls back gracefully for unknown or malformed events", () => {
+    expect(describeEvent("status", "not json")).toEqual({
+      label: "Status",
+      summary: "not json",
+    });
+    expect(describeEvent("mystery.kind", '{"a":1}')).toEqual({
+      label: "mystery.kind",
+      summary: "",
+    });
   });
 });

@@ -813,27 +813,86 @@ td strong {
 .events {
   max-height: calc(100vh - 170px);
   overflow: auto;
+  position: relative;
 }
 
 .events article {
   border-bottom: 1px solid var(--border);
-  padding: 12px 15px;
+  padding: 10px 15px;
 }
 
-.events article > div {
+.events article:last-of-type {
+  border-bottom: 0;
+}
+
+.event-line {
+  align-items: baseline;
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 
-.events article strong {
-  font-size: 13px;
+.event-kind {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 10px;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  min-width: 64px;
+  text-transform: uppercase;
+}
+
+.event-summary {
+  font-size: 13px;
+  line-height: 1.45;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.event-summary.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.event-summary em {
+  color: var(--muted-foreground);
+}
+
+.event-error .event-summary {
+  color: var(--destructive-foreground);
 }
 
 .events time {
   color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.events details {
+  margin-top: 4px;
+}
+
+.events details summary {
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  width: fit-content;
+}
+
+.events details summary:hover {
+  color: var(--foreground);
+}
+
+.jump-latest {
+  bottom: 10px;
+  box-shadow: var(--shadow);
   font-size: 12px;
+  left: 50%;
+  min-height: 28px;
+  position: sticky;
+  transform: translateX(-50%);
 }
 
 pre {

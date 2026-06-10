@@ -41,6 +41,72 @@ export function statusSlug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
+export function timeOnly(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+}
+
+export type EventSummary = {
+  label: string;
+  summary: string;
+  tone?: "error";
+};
+
+export function describeEvent(kind: string, payload: string): EventSummary {
+  let data: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      data = parsed as Record<string, unknown>;
+    }
+  } catch {
+    data = null;
+  }
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  const count = (value: unknown) => (typeof value === "number" ? value : 0);
+
+  switch (kind) {
+    case "status":
+      return { label: "Status", summary: text(data?.message) ?? payload };
+    case "tool_call": {
+      const tool = text(data?.tool) ?? "tool";
+      const args = data?.args as Record<string, unknown> | undefined;
+      const detail = text(data?.result_summary) ?? text(args?.command) ?? "";
+      return { label: "Tool call", summary: detail ? `${tool}: ${detail}` : tool };
+    }
+    case "approval":
+      return { label: "Approval", summary: text(data?.reason) ?? payload };
+    case "token_count":
+      return {
+        label: "Tokens",
+        summary: data
+          ? `${formatTokens(count(data.input_tokens))} in · ${formatTokens(count(data.output_tokens))} out`
+          : payload,
+      };
+    case "error":
+      return {
+        label: "Error",
+        summary: data
+          ? `${text(data.class) ?? "Error"}: ${text(data.message) ?? ""}`
+          : payload,
+        tone: "error",
+      };
+    case "user_input":
+      return { label: "User input", summary: text(data?.text) ?? payload };
+    case "rate_limit":
+      return {
+        label: "Rate limit",
+        summary: data
+          ? `${text(data.source) ?? "provider"} — ${data.remaining ?? "unknown"} remaining`
+          : payload,
+      };
+    case "humanized":
+      return { label: "Summary", summary: text(data?.summary) ?? payload };
+    default:
+      return { label: kind, summary: "" };
+  }
+}
+
 export function prettyPayload(value: string) {
   try {
     return JSON.stringify(JSON.parse(value), null, 2);
