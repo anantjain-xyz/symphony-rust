@@ -283,6 +283,12 @@ function App() {
     setTrackerTest(null);
   }
 
+  async function resetWorkflow() {
+    if (!settings) return;
+    const source = await call(() => invoke<string>("get_default_workflow"));
+    setSettings({ ...settings, workflow_source: source });
+  }
+
   async function startWorker() {
     const status = await call(() => invoke<WorkerStatus>("start_worker"));
     setWorker(status);
@@ -483,6 +489,7 @@ function App() {
             onValidate={validate}
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
+            onResetWorkflow={resetWorkflow}
           />
         ) : null}
       </section>
@@ -957,6 +964,7 @@ function SettingsView({
   onValidate,
   onTestConnection,
   onRemoveKey,
+  onResetWorkflow,
 }: {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
@@ -973,6 +981,7 @@ function SettingsView({
   onValidate: () => void;
   onTestConnection: () => void;
   onRemoveKey: () => void;
+  onResetWorkflow: () => void;
 }) {
   return (
     <form
@@ -1195,6 +1204,18 @@ function SettingsView({
           onChange={(e) => setSettings({ ...settings, workflow_source: e.currentTarget.value })}
           spellCheck={false}
         />
+        <div className="section-row">
+          <button
+            type="button"
+            disabled={busy || !runtimeAvailable}
+            onClick={onResetWorkflow}
+          >
+            Reset to default
+          </button>
+          <small className="hint">
+            Replaces the editor with the bundled default workflow. Nothing changes until you save.
+          </small>
+        </div>
       </Panel>
 
       {validation && runtimeAvailable ? (

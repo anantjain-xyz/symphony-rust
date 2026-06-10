@@ -201,6 +201,11 @@ async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings
 }
 
 #[tauri::command]
+fn get_default_workflow() -> String {
+    default_workflow_source()
+}
+
+#[tauri::command]
 async fn get_overview(state: State<'_, AppState>) -> Result<Overview, String> {
     state.repo.overview().await.map_err(|err| err.to_string())
 }
@@ -310,6 +315,7 @@ pub fn run() {
             validate_settings,
             test_tracker_connection,
             remove_linear_api_key,
+            get_default_workflow,
             get_overview,
             list_runs,
             get_run_detail,
@@ -453,47 +459,62 @@ fn export_bindings() {
 }
 
 fn default_workflow_source() -> String {
-    r#"---
-tracker:
-  kind: linear
-  api_key: ${LINEAR_API_KEY}
-  workspace: ${SYMPHONY_LINEAR_WORKSPACE}
-  identifier_prefix: ${SYMPHONY_TRACKER_PREFIX}
-  project_id: ${SYMPHONY_TRACKER_PROJECT_ID}
-  active_states: [Todo, In Progress, Rework, Merging]
-  terminal_states: [Done, Canceled]
-polling:
-  interval_ms: 30000
-workspace:
-  root: ${TMPDIR}
-hooks:
-  after_create: |
-    git clone "$REPO_URL" .
-    ${SYMPHONY_INSTALL_CMD:-npm ci}
-  timeout_ms: 60000
-agent:
-  backend: ${SYMPHONY_AGENT_BACKEND}
-  max_concurrent_agents: 3
-  max_retry_backoff_ms: 300000
-codex:
-  command: codex
-  approval_policy: never
-  thread_sandbox: workspace-write
-  turn_sandbox_policy: inherit
-  turn_timeout_ms: 3600000
-  network_access: false
-claude:
-  command: claude
-  permission_mode: acceptEdits
-  turn_timeout_ms: 3600000
----
-You are working on Linear issue {{issue.identifier}}.
+    include_str!("../assets/default-workflow.md").to_string()
+}
 
-Title: {{issue.title}}
-State: {{issue.state}}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-Description:
-{{issue.description}}
-"#
-    .to_string()
+    fn settings_env() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("LINEAR_API_KEY".to_string(), "lin_api_test".to_string()),
+            ("TMPDIR".to_string(), "/tmp/workspaces".to_string()),
+        ])
+    }
+
+    #[test]
+    fn default_workflow_parses_with_minimal_env() {
+        let parsed = parse_workflow_source(&default_workflow_source(), &settings_env())
+            .expect("default workflow must parse");
+        assert_eq!(parsed.front_matter.tracker.kind, "linear");
+        assert_eq!(parsed.front_matter.tracker.api_key, "lin_api_test");
+        // Unset optional Settings vars interpolate to empty and are dropped.
+        assert_eq!(parsed.front_matter.tracker.identifier_prefix, None);
+        // Backend falls back to codex when Settings has not populated it.
+        assert_eq!(
+            parsed.front_matter.agent.backend,
+            symphony_core::AgentBackend::Codex
+        );
+        assert!(parsed.front_matter.codex.network_access);
+        assert!(!parsed.front_matter.claude.allowed_tools.is_empty());
+        // Hooks keep shell-style defaults for bash to expand at run time.
+        let after_create = parsed.front_matter.hooks.after_create.expect("hook");
+        assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
+        assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
+    }
+
+    #[test]
+    fn default_workflow_uses_supported_prompt_placeholders() {
+        let parsed = parse_workflow_source(&default_workflow_source(), &settings_env()).unwrap();
+        let unresolved = ["{{identifier}}", "{{title}}", "{{#", "{{/", "{{state}}"];
+        for token in unresolved {
+            assert!(
+                !parsed.prompt_template.contains(token),
+                "prompt template contains unsupported placeholder: {token}"
+            );
+        }
+        for token in [
+            "{{issue.identifier}}",
+            "{{issue.title}}",
+            "{{issue.state}}",
+            "{{issue.labels}}",
+            "{{issue.description}}",
+        ] {
+            assert!(
+                parsed.prompt_template.contains(token),
+                "prompt template is missing placeholder: {token}"
+            );
+        }
+    }
 }

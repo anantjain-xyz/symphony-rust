@@ -116,9 +116,19 @@ fn interpolate_value(value: &mut Value, env: &BTreeMap<String, String>) {
 }
 
 fn expand_string(input: &str, env: &BTreeMap<String, String>) -> String {
-    let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid interpolation regex");
+    // Supports ${VAR} and shell-style ${VAR:-default}. Like the shell, the
+    // default applies when the variable is unset *or* empty.
+    let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+        .expect("valid interpolation regex");
     re.replace_all(input, |caps: &regex::Captures<'_>| {
-        env.get(&caps[1]).cloned().unwrap_or_default()
+        let value = env.get(&caps[1]).cloned().unwrap_or_default();
+        if value.is_empty() {
+            caps.get(2)
+                .map(|default| default.as_str().to_string())
+                .unwrap_or_default()
+        } else {
+            value
+        }
     })
     .to_string()
 }
@@ -161,6 +171,24 @@ Hello {{issue.identifier}}
         assert_eq!(
             parsed.front_matter.hooks.after_create.as_deref(),
             Some("echo \"$REPO_URL ${LINEAR_API_KEY}\"")
+        );
+    }
+
+    #[test]
+    fn expands_shell_style_defaults_for_unset_and_empty_vars() {
+        let env = BTreeMap::from([
+            ("SET".to_string(), "value".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ]);
+        assert_eq!(expand_string("${SET:-fallback}", &env), "value");
+        assert_eq!(expand_string("${EMPTY:-fallback}", &env), "fallback");
+        assert_eq!(expand_string("${UNSET:-fallback}", &env), "fallback");
+        assert_eq!(expand_string("${UNSET:-}", &env), "");
+        assert_eq!(expand_string("${UNSET}", &env), "");
+        // Defaults may contain anything but a closing brace, e.g. paths.
+        assert_eq!(
+            expand_string("${UNSET:-npm ci --prefer-offline}", &env),
+            "npm ci --prefer-offline"
         );
     }
 }
