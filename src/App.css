@@ -577,15 +577,19 @@ td strong {
 }
 
 .badge {
+  background: var(--muted);
   border-radius: 999px;
+  color: var(--muted-foreground);
   display: inline-block;
   font-size: 12px;
   font-weight: 500;
   padding: 2px 9px;
+  white-space: nowrap;
 }
 
 .badge.running,
-.badge.success {
+.badge.success,
+.badge.done {
   background: var(--success);
   color: var(--success-foreground);
 }
@@ -596,10 +600,15 @@ td strong {
   color: var(--destructive-foreground);
 }
 
-.badge.pending,
-.badge.cancelled {
-  background: var(--muted);
-  color: var(--muted-foreground);
+.badge.in-progress,
+.badge.merging {
+  background: var(--info);
+  color: var(--info-foreground);
+}
+
+.badge.rework {
+  background: var(--warning);
+  color: var(--warning-foreground);
 }
 
 .pulse {
@@ -748,6 +757,25 @@ td strong {
   display: -webkit-box;
   overflow: hidden;
   word-break: break-word;
+}
+
+.row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.link-button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.link-button:hover:not(:disabled) {
+  color: var(--foreground);
 }
 
 .clickable-row.selected {
@@ -954,7 +982,8 @@ textarea {
   opacity: 0.85;
 }
 
-@media (max-width: 980px) {
+/* Below the desktop window minimum (980px), e.g. in a browser preview. */
+@media (max-width: 960px) {
   .topbar {
     align-items: flex-start;
     flex-wrap: wrap;

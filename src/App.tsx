@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   AppSettings,
   IssueRow,
@@ -10,7 +11,15 @@ import type {
   ValidationResult,
   WorkerStatus,
 } from "./bindings";
-import { nullable, prettyPayload, shortTime } from "./format";
+import {
+  formatTokens,
+  nullable,
+  prettyPayload,
+  priorityLabel,
+  relativeTime,
+  shortTime,
+  statusSlug,
+} from "./format";
 import symphonyIcon from "./assets/symphony-app-icon.png";
 import "./App.css";
 
@@ -171,6 +180,13 @@ function App() {
     [overview.active_runs],
   );
 
+  // Keep relative timestamps fresh while the dashboard is otherwise idle.
+  const [, tick] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => {
+    const id = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   async function call<T>(fn: () => Promise<T>) {
     if (!runtimeAvailable) {
       setError("Connect through the Symphony desktop app to run this action.");
@@ -272,13 +288,15 @@ function App() {
             title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
           >
-            <span aria-hidden="true">{theme === "dark" ? "☀" : "☾"}</span>
+            {theme === "dark" ? <SunIcon /> : <MoonIcon />}
           </button>
           <div className={`worker-pill ${worker.state}`} aria-live="polite">
             <span className={`status-dot ${worker.state}`} aria-hidden="true" />
             <div className="worker-status-copy">
               <strong>{worker.state}</strong>
-              <small>{worker.started_at ? shortTime(worker.started_at) : "not started"}</small>
+              <small title={worker.started_at ? shortTime(worker.started_at) : undefined}>
+                {worker.started_at ? `started ${relativeTime(worker.started_at)}` : "not started"}
+              </small>
             </div>
             {worker.state === "running" ? (
               <button
@@ -339,7 +357,11 @@ function App() {
           />
         ) : null}
         {view === "issues" ? (
-          <IssuesView issues={issues} onOpenSettings={() => setView("settings")} />
+          <IssuesView
+            issues={issues}
+            linearWorkspace={settings?.tracker_workspace ?? null}
+            onOpenSettings={() => setView("settings")}
+          />
         ) : null}
         {view === "settings" && settings ? (
           <SettingsView
@@ -389,8 +411,14 @@ function OverviewView({
         </div>
         <div className="kpis">
           <Kpi label="Active" value={overview.active_runs.length} />
-          <Kpi label="Retries" value={overview.retry_queue.length} />
-          <Kpi label="Failures" value={overview.recent_failures.length} />
+          <Kpi
+            label={overview.retry_queue.length === 1 ? "Retry" : "Retries"}
+            value={overview.retry_queue.length}
+          />
+          <Kpi
+            label={overview.recent_failures.length === 1 ? "Failure" : "Failures"}
+            value={overview.recent_failures.length}
+          />
         </div>
       </header>
 
@@ -399,10 +427,83 @@ function OverviewView({
       ) : null}
 
       <div className="status-strip">
-        <StatusItem label="Heartbeat" value={overview.worker_heartbeat ? shortTime(overview.worker_heartbeat.last_beat_at) : "No heartbeat"} />
+        <StatusItem
+          label="Heartbeat"
+          value={
+            overview.worker_heartbeat
+              ? relativeTime(overview.worker_heartbeat.last_beat_at)
+              : "No heartbeat"
+          }
+          title={
+            overview.worker_heartbeat
+              ? shortTime(overview.worker_heartbeat.last_beat_at)
+              : undefined
+          }
+        />
         <StatusItem label="Live sessions" value={overview.live_sessions.length} />
         <StatusItem label="Rate limits" value={overview.rate_limits.length ? "Active signals" : "Clear"} tone={overview.rate_limits.length ? "warning" : "ok"} />
       </div>
+
+      {overview.live_sessions.length > 0 ? (
+        <div className="grid">
+          <Panel title="Live sessions">
+            <table>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Tokens</th>
+                  <th>Started</th>
+                  <th>Last activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {overview.live_sessions.map((session) => {
+                  const run = overview.active_runs.find(
+                    (candidate) => candidate.id === session.run_id,
+                  );
+                  return (
+                    <tr
+                      key={session.run_id}
+                      className="clickable-row"
+                      tabIndex={0}
+                      role="button"
+                      aria-label={`Open run for ${run?.issue_identifier ?? session.session_id}`}
+                      onClick={() => onOpenRun(session.run_id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onOpenRun(session.run_id);
+                        }
+                      }}
+                    >
+                      <td>
+                        <strong>
+                          {run?.issue_identifier ?? session.session_id}
+                          <span className="pulse" />
+                        </strong>
+                        {run ? <small>{run.issue_title}</small> : null}
+                      </td>
+                      <td className="tnum">
+                        <strong>{formatTokens(session.total_tokens)}</strong>
+                        <small>
+                          {formatTokens(session.input_tokens)} in ·{" "}
+                          {formatTokens(session.output_tokens)} out
+                        </small>
+                      </td>
+                      <td className="tnum" title={shortTime(session.started_at)}>
+                        {relativeTime(session.started_at)}
+                      </td>
+                      <td className="tnum" title={shortTime(session.last_event_at)}>
+                        {relativeTime(session.last_event_at)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </Panel>
+        </div>
+      ) : null}
 
       <div className="grid two">
         <Panel title="Active runs">
@@ -443,7 +544,9 @@ function OverviewView({
                       <small>{retry.issue_title}</small>
                     </td>
                     <td>#{retry.run_number}</td>
-                    <td>{shortTime(retry.due_at)}</td>
+                    <td className="tnum" title={shortTime(retry.due_at)}>
+                      {relativeTime(retry.due_at)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -481,10 +584,17 @@ function OverviewView({
                   <tr key={limit.source}>
                     <td>
                       <strong>{limit.source}</strong>
-                      <small>updated {shortTime(limit.updated_at)}</small>
+                      <small title={shortTime(limit.updated_at)}>
+                        updated {relativeTime(limit.updated_at)}
+                      </small>
                     </td>
-                    <td>{limit.remaining ?? "unknown"}</td>
-                    <td>{limit.reset_at ? shortTime(limit.reset_at) : "no reset"}</td>
+                    <td className="tnum">{limit.remaining ?? "unknown"}</td>
+                    <td
+                      className="tnum"
+                      title={limit.reset_at ? shortTime(limit.reset_at) : undefined}
+                    >
+                      {limit.reset_at ? relativeTime(limit.reset_at) : "no reset"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -662,9 +772,11 @@ function RunsView({
 
 function IssuesView({
   issues,
+  linearWorkspace,
   onOpenSettings,
 }: {
   issues: IssueRow[];
+  linearWorkspace: string | null;
   onOpenSettings: () => void;
 }) {
   return (
@@ -672,14 +784,14 @@ function IssuesView({
       <header className="page-header">
         <div>
           <h2>Issues</h2>
-          <p>Normalized Linear cache stored locally in SQLite.</p>
+          <p>The Linear issues Symphony is watching, refreshed on every poll.</p>
         </div>
       </header>
-      <Panel title="Issue cache">
+      <Panel title="Watched issues">
         {issues.length === 0 ? (
           <Empty
-            title="No issues cached"
-            text="Configure Linear and validate settings to populate the local SQLite cache."
+            title="No issues yet"
+            text="Once the worker connects to Linear, issues in your active states will appear here."
             actionLabel="Open settings"
             onAction={onOpenSettings}
           />
@@ -691,6 +803,7 @@ function IssuesView({
                 <th>State</th>
                 <th>Priority</th>
                 <th>Last seen</th>
+                {linearWorkspace ? <th /> : null}
               </tr>
             </thead>
             <tbody>
@@ -700,9 +813,29 @@ function IssuesView({
                     <strong>{issue.identifier}</strong>
                     <small>{issue.title}</small>
                   </td>
-                  <td>{issue.state}</td>
-                  <td>{issue.priority}</td>
-                  <td>{shortTime(issue.last_seen_at)}</td>
+                  <td>
+                    <Badge status={issue.state} />
+                  </td>
+                  <td>{priorityLabel(issue.priority)}</td>
+                  <td className="tnum" title={shortTime(issue.last_seen_at)}>
+                    {relativeTime(issue.last_seen_at)}
+                  </td>
+                  {linearWorkspace ? (
+                    <td className="row-actions">
+                      <button
+                        type="button"
+                        className="link-button"
+                        aria-label={`Open ${issue.identifier} in Linear`}
+                        onClick={() =>
+                          openUrl(
+                            `https://linear.app/${linearWorkspace}/issue/${issue.identifier}`,
+                          ).catch(() => undefined)
+                        }
+                      >
+                        Open ↗
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -938,7 +1071,9 @@ function RunTable({
             </td>
             <td>#{run.run_number}</td>
             <td><Badge status={run.status} /></td>
-            <td>{shortTime(run.created_at)}</td>
+            <td className="tnum" title={shortTime(run.created_at)}>
+              {relativeTime(run.created_at)}
+            </td>
           </tr>
         ))}
       </tbody>
@@ -959,15 +1094,17 @@ function StatusItem({
   label,
   value,
   tone,
+  title,
 }: {
   label: string;
   value: React.ReactNode;
   tone?: "ok" | "warning";
+  title?: string;
 }) {
   return (
     <div className={`status-item ${tone ?? ""}`}>
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong title={title}>{value}</strong>
     </div>
   );
 }
@@ -1019,7 +1156,44 @@ function Empty({
 }
 
 function Badge({ status }: { status: string }) {
-  return <span className={`badge ${status}`}>{status}</span>;
+  return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
+}
+
+function SunIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
 }
 
 function label(view: View) {
