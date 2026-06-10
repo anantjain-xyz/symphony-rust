@@ -1016,10 +1016,35 @@ pre {
   font-weight: 500;
 }
 
+.settings-footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 12px;
+}
+
+.storage-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .storage-note {
   color: var(--muted-foreground);
   font-size: 12px;
   margin: 12px 2px 0;
+}
+
+.settings-footer .storage-note {
+  margin: 0;
+}
+
+.about-note {
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 22px 0 4px;
+  padding-top: 14px;
 }
 
 .storage-note code {

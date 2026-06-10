@@ -1,6 +1,7 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   AgentEventRow,
@@ -31,6 +32,7 @@ type View = "overview" | "runs" | "issues" | "settings";
 type Theme = "light" | "dark";
 
 const THEME_STORAGE_KEY = "symphony-theme";
+const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "light";
@@ -107,6 +109,12 @@ function App() {
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!runtimeAvailable) return;
+    getVersion().then(setAppVersion).catch(() => undefined);
+  }, [runtimeAvailable]);
 
   const selectedRunIdRef = useRef<string | null>(null);
 
@@ -471,6 +479,7 @@ function App() {
             savedFlash={savedFlash}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
+            appVersion={appVersion}
             onSave={saveSettings}
             onValidate={validate}
             onTestConnection={testConnection}
@@ -944,6 +953,7 @@ function SettingsView({
   savedFlash,
   busy,
   runtimeAvailable,
+  appVersion,
   onSave,
   onValidate,
   onTestConnection,
@@ -959,6 +969,7 @@ function SettingsView({
   savedFlash: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
+  appVersion: string | null;
   onSave: () => void;
   onValidate: () => void;
   onTestConnection: () => void;
@@ -1188,11 +1199,38 @@ function SettingsView({
       </Panel>
 
       {validation && runtimeAvailable ? (
-        <p className="storage-note">
-          Data directory <code>{validation.app_data_dir}</code> · Database{" "}
-          <code>{validation.database_path}</code>
-        </p>
+        <div className="settings-footer">
+          <div className="storage-actions">
+            <button
+              type="button"
+              onClick={() =>
+                revealItemInDir(validation.database_path).catch(() => undefined)
+              }
+            >
+              Reveal database
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                revealItemInDir(`${validation.app_data_dir}/logs`).catch(
+                  () => undefined,
+                )
+              }
+            >
+              Reveal logs
+            </button>
+          </div>
+          <p className="storage-note">
+            Data directory <code>{validation.app_data_dir}</code>
+          </p>
+        </div>
       ) : null}
+
+      <p className="about-note">
+        Symphony{appVersion ? ` v${appVersion}` : ""} ·{" "}
+        <ExternalLink href={GITHUB_URL}>GitHub</ExternalLink> ·{" "}
+        <ExternalLink href={`${GITHUB_URL}/issues`}>Report an issue</ExternalLink>
+      </p>
     </form>
   );
 }
