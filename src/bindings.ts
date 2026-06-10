@@ -9,6 +9,7 @@ export type AppSettings = {
   tracker_prefix: string | null;
   tracker_project_id: string | null;
   workspace_root: string | null;
+  install_cmd: string | null;
   agent_backend: AgentBackend;
   linear_api_key_set: boolean;
 };
@@ -16,6 +17,12 @@ export type AppSettings = {
 export type SaveSettingsRequest = {
   settings: AppSettings;
   linear_api_key: string | null;
+};
+
+export type TrackerTestResult = {
+  ok: boolean;
+  message: string;
+  active_issue_count: number | null;
 };
 
 export type ValidationResult = {

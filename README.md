@@ -93,7 +93,7 @@ Description:
 
 Notes:
 
-- `${VAR}` references are filled from the app's environment. Symphony injects `LINEAR_API_KEY` (from the keychain), `REPO_URL`, `SYMPHONY_LINEAR_WORKSPACE`, `SYMPHONY_TRACKER_PREFIX`, `SYMPHONY_TRACKER_PROJECT_ID`, and `SYMPHONY_AGENT_BACKEND` from your Settings. Unset variables become empty strings.
+- `${VAR}` references are filled from the app's environment. Symphony injects `LINEAR_API_KEY` (from the keychain), `REPO_URL`, `SYMPHONY_LINEAR_WORKSPACE`, `SYMPHONY_TRACKER_PREFIX`, `SYMPHONY_TRACKER_PROJECT_ID`, `SYMPHONY_INSTALL_CMD`, and `SYMPHONY_AGENT_BACKEND` from your Settings. Unset variables become empty strings.
 - **Hooks are the exception**: `hooks` values are *not* interpolated at parse time — they run as shell scripts with the same variables available in their environment, so `$REPO_URL` and `${SYMPHONY_INSTALL_CMD:-npm ci}` resolve at execution.
 - Available hooks: `after_create`, `before_run`, `after_run`, `before_remove`.
 - Prompt placeholders: `{{issue.id}}`, `{{issue.identifier}}`, `{{issue.title}}`, `{{issue.description}}`, `{{issue.state}}`, `{{issue.branch}}`.
