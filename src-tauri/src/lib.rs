@@ -274,14 +274,6 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
-#[tauri::command]
-async fn export_database(state: State<'_, AppState>, destination: String) -> Result<(), String> {
-    tokio::fs::copy(&state.database_path, destination)
-        .await
-        .map(|_| ())
-        .map_err(|err| err.to_string())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -325,8 +317,7 @@ pub fn run() {
             get_issue_detail,
             get_worker_status,
             start_worker,
-            stop_worker,
-            export_database
+            stop_worker
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -119,22 +119,11 @@ Notes:
 
 ```sh
 pnpm install
-cargo check --workspace   # Rust workspace
-pnpm typecheck            # TypeScript
-pnpm test                 # frontend unit tests
-cargo test --workspace    # Rust tests
 pnpm tauri dev            # run the app
+pnpm typecheck && pnpm test && cargo test --workspace
 ```
 
-TypeScript bindings in `src/bindings.ts` are regenerated from the Rust Specta types at dev startup.
-
-### Packaging
-
-```sh
-pnpm tauri build --debug
-```
-
-On macOS, the package script runs Tauri builds with `CI=true` so DMG creation uses Tauri's deterministic `--skip-jenkins` path instead of Finder AppleScript window decoration, which can time out in non-interactive shells.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including bindings regeneration and packaging.
 
 ## License
 
