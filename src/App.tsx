@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSettings,
   IssueRow,
@@ -82,36 +82,60 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function refresh() {
+  const selectedRunIdRef = useRef<string | null>(null);
+
+  // Dashboard data refreshes on worker events; settings load separately so
+  // in-progress edits are never overwritten by background activity.
+  async function refreshDashboard() {
     if (!runtimeAvailable) return;
-    const [nextSettings, nextOverview, nextRuns, nextIssues, nextWorker] =
+    const detailId = selectedRunIdRef.current;
+    const [nextOverview, nextRuns, nextIssues, nextWorker, nextDetail] =
       await Promise.all([
-        invoke<AppSettings>("load_settings"),
         invoke<Overview>("get_overview"),
         invoke<RunWithIssueRow[]>("list_runs"),
         invoke<IssueRow[]>("list_issues"),
         invoke<WorkerStatus>("get_worker_status"),
+        detailId
+          ? invoke<RunDetail | null>("get_run_detail", { id: detailId })
+          : Promise.resolve(null),
       ]);
-    setSettings(nextSettings);
     setOverview(nextOverview);
     setRuns(nextRuns);
     setIssues(nextIssues);
     setWorker(nextWorker);
+    if (detailId && detailId === selectedRunIdRef.current) {
+      setSelectedRun(nextDetail);
+      if (!nextDetail) selectedRunIdRef.current = null;
+    }
   }
 
   useEffect(() => {
     if (!runtimeAvailable) return;
 
-    refresh().catch((err) => setError(formatError(err)));
+    invoke<AppSettings>("load_settings")
+      .then(setSettings)
+      .catch((err) => setError(formatError(err)));
+    refreshDashboard().catch((err) => setError(formatError(err)));
+
+    // Agent events arrive in bursts; coalesce them into a single refresh.
+    let timer: number | null = null;
+    const scheduleRefresh = () => {
+      if (timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        refreshDashboard().catch(() => undefined);
+      }, 300);
+    };
     const unsubs = Promise.all([
-      listen("db_changed", () => refresh().catch(() => undefined)),
-      listen("agent_event", () => refresh().catch(() => undefined)),
-      listen("rate_limit_changed", () => refresh().catch(() => undefined)),
+      listen("db_changed", scheduleRefresh),
+      listen("agent_event", scheduleRefresh),
+      listen("rate_limit_changed", scheduleRefresh),
     ]).catch((err) => {
       setError(formatError(err));
       return [];
     });
     return () => {
+      if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
   }, [runtimeAvailable]);
@@ -200,9 +224,18 @@ function App() {
     const detail = await call(() =>
       invoke<RunDetail | null>("get_run_detail", { id }),
     );
+    selectedRunIdRef.current = detail?.run.id ?? null;
     setSelectedRun(detail);
     setView("runs");
   }
+
+  const setup = {
+    needed:
+      settings !== null &&
+      (!settings.linear_api_key_set || settings.repo_url.trim() === ""),
+    linearConnected: settings?.linear_api_key_set ?? false,
+    repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
+  };
 
   return (
     <main className="app">
@@ -280,14 +313,21 @@ function App() {
           />
         ) : null}
         {error ? <div className="banner error">{error}</div> : null}
-        {worker.last_error ? <div className="banner">{worker.last_error}</div> : null}
+        {worker.last_error ? (
+          <div className="banner error">
+            <strong>Worker stopped</strong>
+            <span>{friendlyError(worker.last_error)}</span>
+          </div>
+        ) : null}
 
         {view === "overview" ? (
           <OverviewView
             overview={overview}
             canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            setup={setup}
             onOpenRun={openRun}
             onStartWorker={startWorker}
+            onOpenSettings={() => setView("settings")}
           />
         ) : null}
         {view === "runs" ? (
@@ -319,16 +359,26 @@ function App() {
   );
 }
 
+type SetupState = {
+  needed: boolean;
+  linearConnected: boolean;
+  repoConfigured: boolean;
+};
+
 function OverviewView({
   overview,
   canStartWorker,
+  setup,
   onOpenRun,
   onStartWorker,
+  onOpenSettings,
 }: {
   overview: Overview;
   canStartWorker: boolean;
+  setup: SetupState;
   onOpenRun: (id: string) => void;
   onStartWorker: () => void;
+  onOpenSettings: () => void;
 }) {
   return (
     <>
@@ -344,6 +394,10 @@ function OverviewView({
         </div>
       </header>
 
+      {setup.needed ? (
+        <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
+      ) : null}
+
       <div className="status-strip">
         <StatusItem label="Heartbeat" value={overview.worker_heartbeat ? shortTime(overview.worker_heartbeat.last_beat_at) : "No heartbeat"} />
         <StatusItem label="Live sessions" value={overview.live_sessions.length} />
@@ -356,10 +410,14 @@ function OverviewView({
             runs={overview.active_runs}
             onOpenRun={onOpenRun}
             emptyTitle="No active runs"
-            emptyText="Start the worker when you are ready to dispatch agent work."
-            actionLabel="Start worker"
-            actionDisabled={!canStartWorker}
-            onAction={onStartWorker}
+            emptyText={
+              setup.needed
+                ? "Finish setup before starting the worker."
+                : "Start the worker when you are ready to dispatch agent work."
+            }
+            actionLabel={setup.needed ? "Open settings" : "Start worker"}
+            actionDisabled={setup.needed ? false : !canStartWorker}
+            onAction={setup.needed ? onOpenSettings : onStartWorker}
           />
         </Panel>
         <Panel title="Retry queue">
@@ -438,6 +496,76 @@ function OverviewView({
   );
 }
 
+function SetupChecklist({
+  setup,
+  onOpenSettings,
+}: {
+  setup: SetupState;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <section className="setup-panel">
+      <div className="setup-intro">
+        <h3>Welcome to Symphony</h3>
+        <p>
+          Symphony watches your Linear project and dispatches Codex or Claude
+          agents to work on issues in isolated workspaces. Finish setup to
+          start the worker.
+        </p>
+      </div>
+      <ol className="setup-steps">
+        <SetupStep
+          done={setup.linearConnected}
+          step={1}
+          title="Connect Linear"
+          text="Add your Linear API key so Symphony can read issues from your project."
+        />
+        <SetupStep
+          done={setup.repoConfigured}
+          step={2}
+          title="Add your repository"
+          text="Each run clones this repository into a fresh workspace."
+        />
+        <SetupStep
+          done={false}
+          step={3}
+          title="Start the worker"
+          text="Symphony polls Linear and dispatches an agent for each issue in an active state."
+        />
+      </ol>
+      <div className="setup-actions">
+        <button className="primary" type="button" onClick={onOpenSettings}>
+          Open settings
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SetupStep({
+  done,
+  step,
+  title,
+  text,
+}: {
+  done: boolean;
+  step: number;
+  title: string;
+  text: string;
+}) {
+  return (
+    <li className={done ? "setup-step done" : "setup-step"}>
+      <span className="setup-step-marker" aria-hidden="true">
+        {done ? "✓" : step}
+      </span>
+      <div>
+        <strong>{title}</strong>
+        <small>{text}</small>
+      </div>
+    </li>
+  );
+}
+
 function RunsView({
   runs,
   selected,
@@ -465,31 +593,66 @@ function RunsView({
             emptyTitle="No runs yet"
             emptyText="Runs will appear after the worker dispatches the first issue."
             activeRunIds={activeRunIds}
+            selectedRunId={selected?.run.id}
           />
         </Panel>
-        <Panel title={selected ? selected.run.issue_identifier : "Event stream"}>
+        <Panel
+          title={
+            selected
+              ? `${selected.run.issue_identifier} · Run #${selected.run.run_number}`
+              : "Event stream"
+          }
+        >
           {!selected ? (
             <Empty
               title="Select a run"
               text="Choose a run from the history table to inspect its event stream."
             />
-          ) : selected.events.length === 0 ? (
-            <Empty
-              title="No events recorded"
-              text="This run has no agent events yet."
-            />
           ) : (
-            <div className="events">
-              {selected.events.map((event) => (
-                <article key={event.id}>
-                  <div>
-                    <strong>{event.kind}</strong>
-                    <time>{shortTime(event.created_at)}</time>
+            <>
+              <div className="run-meta">
+                <div className="run-meta-row">
+                  <Badge status={selected.run.status} />
+                  <span>{selected.run.issue_title}</span>
+                </div>
+                <div className="run-meta-row muted">
+                  <span>Created {shortTime(selected.run.created_at)}</span>
+                  {selected.run.ended_at ? (
+                    <span>Ended {shortTime(selected.run.ended_at)}</span>
+                  ) : null}
+                </div>
+                <code
+                  className="run-meta-path"
+                  title={selected.run.workspace_path}
+                >
+                  {selected.run.workspace_path}
+                </code>
+                {selected.run.error_message ? (
+                  <div className="run-error">
+                    <strong>{selected.run.error_class ?? "Error"}</strong>
+                    <span>{selected.run.error_message}</span>
                   </div>
-                  <pre>{prettyPayload(event.payload)}</pre>
-                </article>
-              ))}
-            </div>
+                ) : null}
+              </div>
+              {selected.events.length === 0 ? (
+                <Empty
+                  title="No events recorded"
+                  text="This run has no agent events yet."
+                />
+              ) : (
+                <div className="events">
+                  {selected.events.map((event) => (
+                    <article key={event.id}>
+                      <div>
+                        <strong>{event.kind}</strong>
+                        <time>{shortTime(event.created_at)}</time>
+                      </div>
+                      <pre>{prettyPayload(event.payload)}</pre>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </Panel>
       </div>
@@ -702,28 +865,28 @@ function SettingsView({
 function RunTable({
   runs,
   onOpenRun,
-  empty,
   emptyTitle,
   emptyText,
   actionLabel,
   actionDisabled,
   onAction,
   activeRunIds,
+  selectedRunId,
 }: {
   runs: RunWithIssueRow[];
   onOpenRun: (id: string) => void;
-  empty?: string;
   emptyTitle?: string;
   emptyText?: string;
   actionLabel?: string;
   actionDisabled?: boolean;
   onAction?: () => void;
   activeRunIds?: Set<string>;
+  selectedRunId?: string;
 }) {
   if (runs.length === 0) {
     return (
       <Empty
-        title={emptyTitle ?? empty ?? "No runs"}
+        title={emptyTitle ?? "No runs"}
         text={emptyText}
         actionLabel={actionLabel}
         actionDisabled={actionDisabled}
@@ -745,10 +908,13 @@ function RunTable({
         {runs.map((run) => (
           <tr
             key={run.id}
-            className="clickable-row"
+            className={
+              run.id === selectedRunId ? "clickable-row selected" : "clickable-row"
+            }
             tabIndex={0}
             role="button"
             aria-label={`Open run ${run.issue_identifier} number ${run.run_number}`}
+            aria-current={run.id === selectedRunId ? "true" : undefined}
             onClick={() => onOpenRun(run.id)}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -763,6 +929,12 @@ function RunTable({
                 {activeRunIds?.has(run.id) ? <span className="pulse" /> : null}
               </strong>
               <small>{run.issue_title}</small>
+              {run.error_message ? (
+                <small className="row-error" title={run.error_message}>
+                  {run.error_class ? `${run.error_class}: ` : ""}
+                  {run.error_message}
+                </small>
+              ) : null}
             </td>
             <td>#{run.run_number}</td>
             <td><Badge status={run.status} /></td>
@@ -854,12 +1026,28 @@ function label(view: View) {
   return view[0].toUpperCase() + view.slice(1);
 }
 
+function friendlyError(message: string) {
+  if (
+    message.includes("Linear auth failed") ||
+    message.includes("Linear HTTP error 401")
+  ) {
+    return "Linear rejected the request. Add a valid API key under Settings → Linear, then start the worker again.";
+  }
+  if (
+    message.includes("front matter") ||
+    message.includes("tracker configuration")
+  ) {
+    return `The workflow needs attention: ${message}. Edit it under Settings → Workflow.`;
+  }
+  return message;
+}
+
 function formatError(err: unknown) {
   const message = String(err);
   if (message.includes("invoke") || message.includes("transformCallback")) {
     return "Unable to reach the Symphony desktop runtime. Open the Tauri app to use live worker actions.";
   }
-  return message;
+  return friendlyError(message);
 }
 
 export default App;
