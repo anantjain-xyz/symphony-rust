@@ -25,7 +25,6 @@ import {
   statusSlug,
   timeOnly,
 } from "./format";
-import symphonyIcon from "./assets/symphony-app-icon.png";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "settings";
@@ -351,7 +350,7 @@ function App() {
         <div className="topbar-primary">
           <div className="brand">
             <div className="brand-mark" aria-hidden="true">
-              <img className="brand-icon" src={symphonyIcon} alt="" />
+              <WaveMark />
             </div>
             <div>
               <h1>Symphony</h1>
@@ -1491,6 +1490,25 @@ function Empty({
 
 function Badge({ status }: { status: string }) {
   return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
+}
+
+function WaveMark() {
+  return (
+    <svg
+      className="brand-icon"
+      viewBox="0 0 100 100"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <rect x="4" y="36" width="8" height="28" rx="4" />
+      <rect x="18" y="25" width="8" height="50" rx="4" />
+      <rect x="32" y="12" width="8" height="76" rx="4" />
+      <rect x="46" y="28" width="8" height="44" rx="4" />
+      <rect x="60" y="4" width="8" height="92" rx="4" />
+      <rect x="74" y="20" width="8" height="60" rx="4" />
+      <rect x="88" y="34" width="8" height="32" rx="4" />
+    </svg>
+  );
 }
 
 function SunIcon() {
