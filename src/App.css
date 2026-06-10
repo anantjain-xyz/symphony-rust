@@ -425,6 +425,10 @@ small {
   gap: 10px;
 }
 
+.actions {
+  align-items: center;
+}
+
 .kpi {
   background: var(--card);
   border: 1px solid var(--border);

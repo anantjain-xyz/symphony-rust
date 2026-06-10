@@ -57,17 +57,28 @@ impl LinearTracker {
         self
     }
 
+    /// The Linear team key derived from the configured identifier prefix.
+    /// Accepts either form — `WAL` or `WAL-` — by trimming an optional
+    /// trailing hyphen.
     fn team_key_from_prefix(&self) -> Option<String> {
         self.config
             .identifier_prefix
             .as_ref()
-            .and_then(|prefix| prefix.strip_suffix('-'))
+            .map(|prefix| prefix.strip_suffix('-').unwrap_or(prefix))
+            .filter(|key| !key.is_empty())
             .map(ToOwned::to_owned)
     }
 
+    /// The full prefix used to match issue identifiers like `WAL-123`, always
+    /// normalized to include the trailing hyphen so a bare `WAL` doesn't also
+    /// match other teams such as `WALLET-`.
+    fn identifier_match_prefix(&self) -> Option<String> {
+        self.team_key_from_prefix().map(|key| format!("{key}-"))
+    }
+
     fn filter_by_prefix(&self, mut issues: Vec<Issue>) -> Vec<Issue> {
-        if let Some(prefix) = &self.config.identifier_prefix {
-            issues.retain(|issue| issue.identifier.starts_with(prefix));
+        if let Some(prefix) = self.identifier_match_prefix() {
+            issues.retain(|issue| issue.identifier.starts_with(&prefix));
         }
         issues
     }
@@ -146,7 +157,9 @@ impl LinearTracker {
         let response = self
             .client
             .post(&self.config.endpoint)
-            .bearer_auth(&self.config.api_key)
+            // Linear personal API keys are sent as the raw Authorization value,
+            // with no "Bearer " prefix (that prefix is only for OAuth tokens).
+            .header(reqwest::header::AUTHORIZATION, self.config.api_key.as_str())
             .timeout(Duration::from_millis(self.request_timeout_ms))
             .json(&req)
             .send()
@@ -234,8 +247,8 @@ impl TrackerClient for LinearTracker {
             }
         }
         let issue = normalize(node);
-        if let Some(prefix) = &self.config.identifier_prefix {
-            if !issue.identifier.starts_with(prefix) {
+        if let Some(prefix) = self.identifier_match_prefix() {
+            if !issue.identifier.starts_with(&prefix) {
                 return Ok(None);
             }
         }
@@ -562,5 +575,36 @@ mod tests {
     fn detects_github_pr_urls() {
         assert!(is_github_pr_url("https://github.com/a/b/pull/123"));
         assert!(!is_github_pr_url("https://github.com/a/b/issues/123"));
+    }
+
+    fn tracker_with_prefix(prefix: Option<&str>) -> LinearTracker {
+        LinearTracker::new(TrackerConfig {
+            identifier_prefix: prefix.map(ToOwned::to_owned),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn prefix_accepts_either_form() {
+        for raw in ["WAL", "WAL-"] {
+            let tracker = tracker_with_prefix(Some(raw));
+            assert_eq!(tracker.team_key_from_prefix().as_deref(), Some("WAL"));
+            assert_eq!(tracker.identifier_match_prefix().as_deref(), Some("WAL-"));
+        }
+
+        // The hyphenated match prefix guards against matching other teams.
+        let tracker = tracker_with_prefix(Some("WAL"));
+        let prefix = tracker.identifier_match_prefix().unwrap();
+        assert!("WAL-123".starts_with(&prefix));
+        assert!(!"WALLET-5".starts_with(&prefix));
+    }
+
+    #[test]
+    fn prefix_absent_or_empty_yields_no_filter() {
+        for raw in [None, Some(""), Some("-")] {
+            let tracker = tracker_with_prefix(raw);
+            assert_eq!(tracker.team_key_from_prefix(), None);
+            assert_eq!(tracker.identifier_match_prefix(), None);
+        }
     }
 }
