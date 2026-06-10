@@ -882,6 +882,103 @@ pre {
   grid-row: span 2;
 }
 
+.hint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.hint code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.inline-link {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: var(--foreground);
+  cursor: pointer;
+  display: inline;
+  font-size: inherit;
+  font-weight: 500;
+  min-height: 0;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.inline-link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.self-start {
+  justify-self: start;
+}
+
+.section-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.test-result {
+  font-size: 12px;
+}
+
+.test-result.ok {
+  color: var(--success-foreground);
+}
+
+.test-result.err {
+  color: var(--destructive-foreground);
+}
+
+.detect.ok {
+  color: var(--success-foreground);
+  font-weight: 500;
+}
+
+.detect.missing {
+  color: var(--warning-foreground);
+  font-weight: 500;
+}
+
+.save-status {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.save-status.ok {
+  color: var(--success-foreground);
+  font-weight: 500;
+}
+
+.storage-note {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 12px 2px 0;
+}
+
+.storage-note code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.worker-action.danger {
+  background: var(--destructive);
+  border-color: transparent;
+  color: var(--destructive-foreground);
+}
+
+.worker-action.danger:hover:not(:disabled) {
+  background: var(--destructive);
+  opacity: 0.85;
+}
+
 label {
   color: var(--muted-foreground);
   display: grid;

@@ -6,6 +6,7 @@ use symphony_storage::{
     open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RunWithIssueRow,
     StorageEvent,
 };
+use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{WorkerManager, WorkerStartConfig, WorkerStatus};
 use tauri::{Emitter, Manager, State};
 
@@ -20,6 +21,8 @@ pub struct AppSettings {
     pub tracker_prefix: Option<String>,
     pub tracker_project_id: Option<String>,
     pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub install_cmd: Option<String>,
     pub agent_backend: AgentBackend,
     pub linear_api_key_set: bool,
 }
@@ -33,6 +36,7 @@ impl Default for AppSettings {
             tracker_prefix: None,
             tracker_project_id: None,
             workspace_root: None,
+            install_cmd: None,
             agent_backend: AgentBackend::Codex,
             linear_api_key_set: false,
         }
@@ -53,6 +57,13 @@ pub struct ValidationResult {
     pub claude_found: bool,
     pub app_data_dir: String,
     pub database_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TrackerTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub active_issue_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -117,6 +128,76 @@ async fn validate_settings(
         app_data_dir: state.app_data_dir.display().to_string(),
         database_path: state.database_path.display().to_string(),
     })
+}
+
+#[tauri::command]
+async fn test_tracker_connection(
+    state: State<'_, AppState>,
+    request: SaveSettingsRequest,
+) -> Result<TrackerTestResult, String> {
+    let mut env = build_env(&state, &request.settings);
+    if let Some(key) = request
+        .linear_api_key
+        .as_ref()
+        .filter(|key| !key.trim().is_empty())
+    {
+        env.insert("LINEAR_API_KEY".to_string(), key.clone());
+    }
+
+    let workflow = match parse_workflow_source(&request.settings.workflow_source, &env) {
+        Ok(workflow) => workflow,
+        Err(err) => {
+            return Ok(TrackerTestResult {
+                ok: false,
+                message: format!("Workflow error: {err}"),
+                active_issue_count: None,
+            })
+        }
+    };
+    if workflow.front_matter.tracker.api_key.trim().is_empty() {
+        return Ok(TrackerTestResult {
+            ok: false,
+            message: "No Linear API key configured. Add one above, then test again.".to_string(),
+            active_issue_count: None,
+        });
+    }
+
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    if let Err(err) = tracker.preflight().await {
+        return Ok(TrackerTestResult {
+            ok: false,
+            message: err.to_string(),
+            active_issue_count: None,
+        });
+    }
+    match tracker.fetch_active().await {
+        Ok(issues) => Ok(TrackerTestResult {
+            ok: true,
+            message: match issues.len() {
+                0 => "Connected. No issues currently match your filters.".to_string(),
+                1 => "Connected. 1 issue matches your filters.".to_string(),
+                n => format!("Connected. {n} issues match your filters."),
+            },
+            active_issue_count: Some(issues.len() as u32),
+        }),
+        Err(err) => Ok(TrackerTestResult {
+            ok: false,
+            message: err.to_string(),
+            active_issue_count: None,
+        }),
+    }
+}
+
+#[tauri::command]
+async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    match keyring_entry() {
+        Ok(entry) => match entry.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+            Err(err) => return Err(err.to_string()),
+        },
+        Err(err) => return Err(err.to_string()),
+    }
+    load_settings_from_disk(&state).await
 }
 
 #[tauri::command]
@@ -235,6 +316,8 @@ pub fn run() {
             load_settings,
             save_settings,
             validate_settings,
+            test_tracker_connection,
+            remove_linear_api_key,
             get_overview,
             list_runs,
             get_run_detail,
@@ -310,6 +393,13 @@ fn build_env(state: &AppState, settings: &AppSettings) -> BTreeMap<String, Strin
             .clone()
             .unwrap_or_else(|| state.app_data_dir.join("workspaces").display().to_string()),
     );
+    if let Some(cmd) = settings
+        .install_cmd
+        .as_ref()
+        .filter(|cmd| !cmd.trim().is_empty())
+    {
+        env.insert("SYMPHONY_INSTALL_CMD".to_string(), cmd.clone());
+    }
     env
 }
 
@@ -345,6 +435,7 @@ fn export_bindings() {
             specta::ts::export::<AppSettings>(&conf),
             specta::ts::export::<SaveSettingsRequest>(&conf),
             specta::ts::export::<ValidationResult>(&conf),
+            specta::ts::export::<TrackerTestResult>(&conf),
             specta::ts::export::<Overview>(&conf),
             specta::ts::export::<RunWithIssueRow>(&conf),
             specta::ts::export::<RunDetail>(&conf),

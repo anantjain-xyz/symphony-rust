@@ -8,6 +8,7 @@ import type {
   Overview,
   RunDetail,
   RunWithIssueRow,
+  TrackerTestResult,
   ValidationResult,
   WorkerStatus,
 } from "./bindings";
@@ -66,9 +67,16 @@ const previewSettings: AppSettings = {
   tracker_prefix: null,
   tracker_project_id: null,
   workspace_root: null,
+  install_cmd: null,
   agent_backend: "codex",
   linear_api_key_set: false,
 };
+
+// linear_api_key_set is server-derived, not part of the editable form.
+function formSnapshot(settings: AppSettings) {
+  const { linear_api_key_set: _ignored, ...form } = settings;
+  return JSON.stringify(form);
+}
 
 function App() {
   const runtimeAvailable = isTauri();
@@ -90,6 +98,12 @@ function App() {
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const confirmStopTimer = useRef<number | null>(null);
+  const savedFlashTimer = useRef<number | null>(null);
 
   const selectedRunIdRef = useRef<string | null>(null);
 
@@ -122,7 +136,10 @@ function App() {
     if (!runtimeAvailable) return;
 
     invoke<AppSettings>("load_settings")
-      .then(setSettings)
+      .then((loaded) => {
+        setSettings(loaded);
+        setSavedSnapshot(formSnapshot(loaded));
+      })
       .catch((err) => setError(formatError(err)));
     refreshDashboard().catch((err) => setError(formatError(err)));
 
@@ -215,7 +232,13 @@ function App() {
       }),
     );
     setSettings(saved);
+    setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
+    setSavedFlash(true);
+    if (savedFlashTimer.current !== null) {
+      window.clearTimeout(savedFlashTimer.current);
+    }
+    savedFlashTimer.current = window.setTimeout(() => setSavedFlash(false), 2500);
   }
 
   async function validate() {
@@ -224,6 +247,30 @@ function App() {
       invoke<ValidationResult>("validate_settings", { settings }),
     );
     setValidation(result);
+  }
+
+  async function testConnection() {
+    if (!settings) return;
+    const result = await call(() =>
+      invoke<TrackerTestResult>("test_tracker_connection", {
+        request: {
+          settings,
+          linear_api_key: linearKey.trim() ? linearKey : null,
+        },
+      }),
+    );
+    setTrackerTest(result);
+  }
+
+  async function removeLinearKey() {
+    if (!settings) return;
+    const fromDisk = await call(() =>
+      invoke<AppSettings>("remove_linear_api_key"),
+    );
+    // Keep in-progress form edits; only the key flag changed.
+    setSettings({ ...settings, linear_api_key_set: fromDisk.linear_api_key_set });
+    setLinearKey("");
+    setTrackerTest(null);
   }
 
   async function startWorker() {
@@ -252,6 +299,40 @@ function App() {
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
   };
+
+  const dirty =
+    settings !== null &&
+    savedSnapshot !== null &&
+    (formSnapshot(settings) !== savedSnapshot || linearKey.trim() !== "");
+
+  // Revalidate when entering Settings (or once settings finish loading there),
+  // so CLI detection and workflow status are visible without a manual click.
+  useEffect(() => {
+    if (!runtimeAvailable || view !== "settings" || !settings) return;
+    invoke<ValidationResult>("validate_settings", { settings })
+      .then(setValidation)
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, runtimeAvailable, settings !== null]);
+
+  function requestStop() {
+    if (overview.active_runs.length > 0 && !confirmStop) {
+      setConfirmStop(true);
+      if (confirmStopTimer.current !== null) {
+        window.clearTimeout(confirmStopTimer.current);
+      }
+      confirmStopTimer.current = window.setTimeout(
+        () => setConfirmStop(false),
+        4000,
+      );
+      return;
+    }
+    if (confirmStopTimer.current !== null) {
+      window.clearTimeout(confirmStopTimer.current);
+    }
+    setConfirmStop(false);
+    stopWorker();
+  }
 
   return (
     <main className="app">
@@ -295,16 +376,28 @@ function App() {
             <div className="worker-status-copy">
               <strong>{worker.state}</strong>
               <small title={worker.started_at ? shortTime(worker.started_at) : undefined}>
-                {worker.started_at ? `started ${relativeTime(worker.started_at)}` : "not started"}
+                {confirmStop
+                  ? `interrupts ${overview.active_runs.length} ${overview.active_runs.length === 1 ? "run" : "runs"}`
+                  : worker.started_at
+                    ? `started ${relativeTime(worker.started_at)}`
+                    : "not started"}
               </small>
             </div>
             {worker.state === "running" ? (
               <button
-                className="icon-button worker-action"
+                className={
+                  confirmStop
+                    ? "icon-button worker-action danger"
+                    : "icon-button worker-action"
+                }
                 disabled={busy || !runtimeAvailable}
-                onClick={stopWorker}
-                title="Stop worker"
-                aria-label="Stop worker"
+                onClick={requestStop}
+                title={
+                  confirmStop
+                    ? `${overview.active_runs.length} active ${overview.active_runs.length === 1 ? "run" : "runs"} will be interrupted — click again to stop`
+                    : "Stop worker"
+                }
+                aria-label={confirmStop ? "Confirm stop worker" : "Stop worker"}
               >
                 <span aria-hidden="true">■</span>
               </button>
@@ -370,10 +463,15 @@ function App() {
             linearKey={linearKey}
             setLinearKey={setLinearKey}
             validation={validation}
+            trackerTest={trackerTest}
+            dirty={dirty}
+            savedFlash={savedFlash}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
             onSave={saveSettings}
             onValidate={validate}
+            onTestConnection={testConnection}
+            onRemoveKey={removeLinearKey}
           />
         ) : null}
       </section>
@@ -852,20 +950,30 @@ function SettingsView({
   linearKey,
   setLinearKey,
   validation,
+  trackerTest,
+  dirty,
+  savedFlash,
   busy,
   runtimeAvailable,
   onSave,
   onValidate,
+  onTestConnection,
+  onRemoveKey,
 }: {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
   linearKey: string;
   setLinearKey: (value: string) => void;
   validation: ValidationResult | null;
+  trackerTest: TrackerTestResult | null;
+  dirty: boolean;
+  savedFlash: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
   onSave: () => void;
   onValidate: () => void;
+  onTestConnection: () => void;
+  onRemoveKey: () => void;
 }) {
   return (
     <form
@@ -879,11 +987,17 @@ function SettingsView({
       <header className="page-header">
         <div>
           <h2>Settings</h2>
-          <p>First-run configuration, workflow source, and local paths.</p>
+          <p>Linear connection, repository, agent backend, and the workflow that drives runs.</p>
         </div>
         <div className="actions">
+          <span
+            className={savedFlash ? "save-status ok" : "save-status"}
+            aria-live="polite"
+          >
+            {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
+          </span>
           <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>Validate</button>
-          <button disabled={busy || !runtimeAvailable} className="primary" type="submit">Save</button>
+          <button disabled={busy || !runtimeAvailable || !dirty} className="primary" type="submit">Save</button>
         </div>
       </header>
 
@@ -905,6 +1019,39 @@ function SettingsView({
               onChange={(e) => setSettings({ ...settings, repo_url: e.currentTarget.value })}
               placeholder="git@github.com:org/repo.git"
             />
+            <small className="hint">
+              SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
+            </small>
+          </label>
+          <label>
+            Install command
+            <input
+              value={settings.install_cmd ?? ""}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) =>
+                setSettings({ ...settings, install_cmd: nullable(e.currentTarget.value) })
+              }
+              placeholder="npm ci"
+            />
+            <small className="hint">
+              Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
+            </small>
+          </label>
+          <label>
+            Workspace root
+            <input
+              value={settings.workspace_root ?? ""}
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) =>
+                setSettings({ ...settings, workspace_root: nullable(e.currentTarget.value) })
+              }
+              placeholder="App data directory"
+            />
+            <small className="hint">
+              Where per-run workspaces are created. Leave blank to use the app data directory.
+            </small>
           </label>
         </section>
 
@@ -920,7 +1067,24 @@ function SettingsView({
               onChange={(e) => setLinearKey(e.currentTarget.value)}
               placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
             />
+            <small className="hint">
+              Create a personal API key under{" "}
+              <ExternalLink href="https://linear.app/settings/account/security">
+                Linear security settings
+              </ExternalLink>
+              . It is stored in the OS keychain, never on disk.
+            </small>
           </label>
+          {settings.linear_api_key_set ? (
+            <button
+              type="button"
+              className="link-button self-start"
+              disabled={busy || !runtimeAvailable}
+              onClick={onRemoveKey}
+            >
+              Remove saved key
+            </button>
+          ) : null}
           <label>
             Workspace
             <input
@@ -930,7 +1094,11 @@ function SettingsView({
               onChange={(e) =>
                 setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
               }
+              placeholder="acme"
             />
+            <small className="hint">
+              Your workspace slug — the first path segment in linear.app URLs. Enables issue links.
+            </small>
           </label>
           <label>
             Project ID
@@ -942,9 +1110,12 @@ function SettingsView({
                 setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
               }
             />
+            <small className="hint">
+              Optional. Watch a single project — copy its ID from the project details panel.
+            </small>
           </label>
           <label>
-            Tracker prefix
+            Team prefix
             <input
               value={settings.tracker_prefix ?? ""}
               disabled={!runtimeAvailable}
@@ -952,8 +1123,29 @@ function SettingsView({
               onChange={(e) =>
                 setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
               }
+              placeholder="ENG"
             />
+            <small className="hint">
+              Optional. Watch only issues whose identifier starts with this team key.
+            </small>
           </label>
+          <div className="section-row">
+            <button
+              type="button"
+              disabled={busy || !runtimeAvailable}
+              onClick={onTestConnection}
+            >
+              Test connection
+            </button>
+            {trackerTest ? (
+              <small
+                className={trackerTest.ok ? "test-result ok" : "test-result err"}
+                role="status"
+              >
+                {trackerTest.message}
+              </small>
+            ) : null}
+          </div>
         </section>
 
         <section className="settings-section">
@@ -970,16 +1162,30 @@ function SettingsView({
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
             </select>
+            <small className="hint">
+              The CLI that works on issues. Must be installed and authenticated on this machine.
+            </small>
           </label>
+          {validation ? (
+            <small className="hint">
+              Codex CLI:{" "}
+              <span className={validation.codex_found ? "detect ok" : "detect missing"}>
+                {validation.codex_found ? "found" : "not found"}
+              </span>
+              {" · "}
+              Claude CLI:{" "}
+              <span className={validation.claude_found ? "detect ok" : "detect missing"}>
+                {validation.claude_found ? "found" : "not found"}
+              </span>
+            </small>
+          ) : null}
         </section>
       </div>
 
       {validation ? (
         <div className={validation.workflow_ok ? "banner ok validation" : "banner error validation"}>
-          <strong>Workflow {validation.workflow_ok ? "valid" : "needs attention"}</strong>
-          <span>{validation.workflow_ok ? validation.app_data_dir : validation.workflow_error}</span>
-          <span>Codex: {validation.codex_found ? "found" : "missing"}</span>
-          <span>Claude: {validation.claude_found ? "found" : "missing"}</span>
+          <strong>{validation.workflow_ok ? "Workflow valid" : "Workflow needs attention"}</strong>
+          {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
         </div>
       ) : null}
 
@@ -991,7 +1197,32 @@ function SettingsView({
           spellCheck={false}
         />
       </Panel>
+
+      {validation && runtimeAvailable ? (
+        <p className="storage-note">
+          Data directory <code>{validation.app_data_dir}</code> · Database{" "}
+          <code>{validation.database_path}</code>
+        </p>
+      ) : null}
     </form>
+  );
+}
+
+function ExternalLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="inline-link"
+      onClick={() => openUrl(href).catch(() => undefined)}
+    >
+      {children}
+    </button>
   );
 }
 
