@@ -941,7 +941,7 @@ function IssuesView({
                           ).catch(() => undefined)
                         }
                       >
-                        Open ↗
+                        Open in Linear ↗
                       </button>
                     </td>
                   ) : null}
