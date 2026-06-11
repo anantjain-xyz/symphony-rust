@@ -772,6 +772,33 @@ impl Repository {
         .await?)
     }
 
+    /// Ids of issues whose stored state matches one of the given names,
+    /// case-insensitively (states arrive lowercased from the tracker, but
+    /// callers pass the names as configured, e.g. "In Progress").
+    pub async fn issue_ids_in_states(
+        &self,
+        states: &[String],
+    ) -> Result<Vec<String>, StorageError> {
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (1..=states.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!("select id from issues where lower(state) in ({placeholders})");
+        let mut rows = sqlx::query_as::<_, (String,)>(&query);
+        for state in states {
+            rows = rows.bind(state.to_lowercase());
+        }
+        Ok(rows
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|r| r.0)
+            .collect())
+    }
+
     pub async fn get_issue(&self, id: &str) -> Result<Option<IssueRow>, StorageError> {
         Ok(
             sqlx::query_as::<_, IssueRow>("select * from issues where id = ?1")
@@ -884,6 +911,24 @@ mod tests {
             blockers: vec![],
             pr_urls: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn finds_issue_ids_by_state_names_case_insensitively() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let ids = repo
+            .issue_ids_in_states(&["Todo".to_string(), "In Progress".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(ids, vec!["lin-1".to_string()]);
+        let done = repo
+            .issue_ids_in_states(&["Done".to_string()])
+            .await
+            .unwrap();
+        assert!(done.is_empty());
+        let none = repo.issue_ids_in_states(&[]).await.unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

@@ -548,24 +548,6 @@ function OverviewView({
         <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
       ) : null}
 
-      <div className="status-strip">
-        <StatusItem
-          label="Heartbeat"
-          value={
-            overview.worker_heartbeat
-              ? relativeTime(overview.worker_heartbeat.last_beat_at)
-              : "No heartbeat"
-          }
-          title={
-            overview.worker_heartbeat
-              ? shortTime(overview.worker_heartbeat.last_beat_at)
-              : undefined
-          }
-        />
-        <StatusItem label="Live sessions" value={overview.live_sessions.length} />
-        <StatusItem label="Rate limits" value={overview.rate_limits.length ? "Active signals" : "Clear"} tone={overview.rate_limits.length ? "warning" : "ok"} />
-      </div>
-
       {overview.live_sessions.length > 0 ? (
         <div className="grid">
           <Panel title="Live sessions">
@@ -984,7 +966,7 @@ function IssuesView({
                           ).catch(() => undefined)
                         }
                       >
-                        Open ↗
+                        Open in Linear ↗
                       </button>
                     </td>
                   ) : null}
@@ -1490,25 +1472,6 @@ function Kpi({ label, value }: { label: string; value: number }) {
     <div className="kpi">
       <strong>{value}</strong>
       <span>{label}</span>
-    </div>
-  );
-}
-
-function StatusItem({
-  label,
-  value,
-  tone,
-  title,
-}: {
-  label: string;
-  value: React.ReactNode;
-  tone?: "ok" | "warning";
-  title?: string;
-}) {
-  return (
-    <div className={`status-item ${tone ?? ""}`}>
-      <span>{label}</span>
-      <strong title={title}>{value}</strong>
     </div>
   );
 }

@@ -260,6 +260,32 @@ async fn tick<T: TrackerClient>(
         }
     }
 
+    // An issue that leaves the active set (e.g. moved to Done in Linear) stops
+    // appearing in fetch_active, so its local row would otherwise stay frozen
+    // at the last active state. Refetch it by id and store whatever state it
+    // has now; once stored, it no longer matches active_states, so this costs
+    // one extra request per departed issue, not per tick.
+    for issue_id in repo
+        .issue_ids_in_states(&config.workflow.front_matter.tracker.active_states)
+        .await?
+    {
+        if active_ids.contains(&issue_id) {
+            continue;
+        }
+        match tracker.fetch_by_id(&issue_id).await {
+            Ok(Some(issue)) => repo.upsert_issues(&[issue]).await?,
+            Ok(None) => warn!(
+                issue_id = %issue_id,
+                "issue left the active set and is gone from the tracker; keeping last known state"
+            ),
+            Err(err) => warn!(
+                issue_id = %issue_id,
+                error = %err,
+                "failed to refresh issue that left the active set"
+            ),
+        }
+    }
+
     if !repo.active_rate_limits(&now_iso()).await?.is_empty() {
         return Ok(());
     }
@@ -670,6 +696,104 @@ fn agent_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symphony_tracker::StaticTracker;
+
+    fn runtime_config(root: &std::path::Path) -> RuntimeConfig {
+        let raw = format!(
+            r#"---
+tracker:
+  kind: linear
+  api_key: test-key
+  active_states: [Todo, In Progress]
+  terminal_states: [Done]
+workspace:
+  root: {root}
+---
+Prompt {{{{issue.identifier}}}}
+"#,
+            root = root.display()
+        );
+        RuntimeConfig {
+            workflow: parse_workflow_source(&raw, &BTreeMap::new()).unwrap(),
+            env: BTreeMap::new(),
+            app_data_dir: root.to_path_buf(),
+        }
+    }
+
+    fn issue(state: &str, blockers: Vec<String>) -> Issue {
+        Issue {
+            id: "lin-1".to_string(),
+            identifier: "SYM-1".to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: 1,
+            state: state.to_string(),
+            branch: None,
+            labels: vec![],
+            blockers,
+            pr_urls: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn refreshes_issue_that_left_the_active_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        // Blocked so the tick records the issue without dispatching a run.
+        let todo = issue("todo", vec!["SYM-0".to_string()]);
+        let tracker = StaticTracker {
+            active: vec![todo.clone()],
+            terminal: vec![],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        let row = repo.get_issue("lin-1").await.unwrap().unwrap();
+        assert_eq!(row.state, "todo");
+
+        let done = Issue {
+            state: "done".to_string(),
+            blockers: vec![],
+            ..todo
+        };
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![done],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        let row = repo.get_issue("lin-1").await.unwrap().unwrap();
+        assert_eq!(row.state, "done");
+    }
+
+    #[tokio::test]
+    async fn keeps_last_known_state_when_departed_issue_is_gone_from_tracker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        let todo = issue("todo", vec!["SYM-0".to_string()]);
+        let tracker = StaticTracker {
+            active: vec![todo],
+            terminal: vec![],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        let row = repo.get_issue("lin-1").await.unwrap().unwrap();
+        assert_eq!(row.state, "todo");
+    }
 
     #[test]
     fn tracker_auth_errors_are_not_reported_as_storage_errors() {
