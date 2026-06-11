@@ -479,24 +479,59 @@ fn install_run_request(config: &SkillsInstallConfig, workspace: &Path) -> AgentR
     }
 }
 
+/// Remove whatever exists at `path` — file, directory, or symlink — without
+/// following links. Missing paths are fine.
+async fn remove_existing(path: &Path) -> std::io::Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        // symlink_metadata never follows: is_dir() means a real directory.
+        Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(path).await,
+        Ok(_) => tokio::fs::remove_file(path).await,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Make `path` a real directory. A symlink or regular file the cloned repo
+/// tracks at this location is removed first — writes below it must not be
+/// able to escape the throwaway workspace through a hostile link.
+async fn ensure_real_dir(path: &Path) -> std::io::Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_dir() => return Ok(()),
+        Ok(_) => tokio::fs::remove_file(path).await?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    tokio::fs::create_dir(path).await
+}
+
+/// Make every level of `relative` under `workspace` a real directory.
+async fn ensure_real_dir_all(workspace: &Path, relative: &Path) -> std::io::Result<()> {
+    let mut current = workspace.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        ensure_real_dir(&current).await?;
+    }
+    Ok(())
+}
+
 async fn write_skills(workspace: &Path, skills: &[SkillFile]) -> std::io::Result<()> {
+    // The clone is untrusted input: any level of either skills path could be
+    // a symlink pointing outside the workspace, so each is normalized to a
+    // real directory before anything is written.
+    ensure_real_dir_all(workspace, Path::new(SKILLS_DIR)).await?;
+    ensure_real_dir_all(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
     for skill in skills {
         let dir = workspace.join(SKILLS_DIR).join(&skill.name);
-        tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("SKILL.md"), &skill.content).await?;
+        ensure_real_dir(&dir).await?;
+        let manifest = dir.join("SKILL.md");
+        remove_existing(&manifest).await?;
+        tokio::fs::write(&manifest, &skill.content).await?;
 
-        let link_dir = workspace.join(CLAUDE_SKILLS_DIR);
-        tokio::fs::create_dir_all(&link_dir).await?;
-        let link = link_dir.join(&skill.name);
+        let link = workspace.join(CLAUDE_SKILLS_DIR).join(&skill.name);
         // Replace whatever the repo previously tracked at the discovery path.
         // Keeping a stale entry would leave Claude Code pointing at the old
         // target even after the install PR merges.
-        match tokio::fs::symlink_metadata(&link).await {
-            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&link).await?,
-            Ok(_) => tokio::fs::remove_file(&link).await?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
+        remove_existing(&link).await?;
         #[cfg(unix)]
         {
             let target = PathBuf::from("../..").join(SKILLS_DIR).join(&skill.name);
@@ -763,6 +798,48 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_to_write_through_hostile_symlinks() {
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        // A malicious clone tracks `.agents` as a symlink escaping the
+        // workspace, and a manifest symlink pointing at a victim file.
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(".agents")).unwrap();
+        let victim = outside.path().join("victim.md");
+        std::fs::write(&victim, "untouched").unwrap();
+        let claude_dir = workspace.path().join(".claude/skills/commit");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let skills = vec![SkillFile {
+            name: "commit".to_string(),
+            content: "fresh".to_string(),
+        }];
+        write_skills(workspace.path(), &skills).await.unwrap();
+
+        // Nothing escaped: the outside dir holds only the victim file, and
+        // the skills landed inside the workspace in a real directory.
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
+        let agents = workspace.path().join(".agents");
+        assert!(!std::fs::symlink_metadata(&agents)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(agents.join("skills/commit/SKILL.md")).unwrap(),
+            "fresh"
+        );
+
+        // Second scenario: only the manifest itself is a hostile symlink.
+        let manifest = workspace.path().join(".agents/skills/commit/SKILL.md");
+        std::fs::remove_file(&manifest).unwrap();
+        std::os::unix::fs::symlink(&victim, &manifest).unwrap();
+        write_skills(workspace.path(), &skills).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "fresh");
     }
 
     #[tokio::test]

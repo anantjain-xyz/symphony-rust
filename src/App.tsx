@@ -396,15 +396,20 @@ function App() {
     setView("runs");
   }
 
-  // Skills hold the checklist open only when we positively know they are not
-  // installed; unknown/unavailable must not nag users we can't check.
+  // `blocked` covers the hard requirements without which runs cannot work;
+  // it gates the worker-start affordances and matches the boot auto-start
+  // condition. Skills are recommended only: when we positively know they are
+  // not installed they keep the checklist visible (`needed`) but never block
+  // the worker — and unknown/unavailable must not nag users we can't check.
+  const setupBlocked =
+    settings !== null &&
+    (!settings.linear_api_key_set || settings.repo_url.trim() === "");
   const setup = {
+    blocked: setupBlocked,
     needed:
-      settings !== null &&
-      (!settings.linear_api_key_set ||
-        settings.repo_url.trim() === "" ||
-        skillsStatus?.state === "missing" ||
-        skillsStatus?.state === "pr_open"),
+      setupBlocked ||
+      (settings !== null &&
+        (skillsStatus?.state === "missing" || skillsStatus?.state === "pr_open")),
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
     skills: skillsStatus,
@@ -594,6 +599,7 @@ function App() {
 }
 
 type SetupState = {
+  blocked: boolean;
   needed: boolean;
   linearConnected: boolean;
   repoConfigured: boolean;
@@ -725,13 +731,13 @@ function OverviewView({
             onOpenRun={onOpenRun}
             emptyTitle="No active runs"
             emptyText={
-              setup.needed
+              setup.blocked
                 ? "Finish setup before starting the worker."
                 : "Start the worker when you are ready to dispatch agent work."
             }
-            actionLabel={setup.needed ? "Open settings" : "Start worker"}
-            actionDisabled={setup.needed ? false : !canStartWorker}
-            onAction={setup.needed ? onOpenSettings : onStartWorker}
+            actionLabel={setup.blocked ? "Open settings" : "Start worker"}
+            actionDisabled={setup.blocked ? false : !canStartWorker}
+            onAction={setup.blocked ? onOpenSettings : onStartWorker}
           />
         </Panel>
         <Panel title="Retry queue">
@@ -831,9 +837,9 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          Symphony watches your Linear project and dispatches Codex or Claude
-          agents to work on issues in isolated workspaces. Finish setup to
-          start the worker.
+          {setup.blocked
+            ? "Symphony watches your Linear project and dispatches Codex or Claude agents to work on issues in isolated workspaces. Finish setup to start the worker."
+            : "Symphony is ready to run. One recommended step remains: install the agent skills so dispatched agents follow proven procedures in your repo."}
         </p>
       </div>
       <ol className="setup-steps">
