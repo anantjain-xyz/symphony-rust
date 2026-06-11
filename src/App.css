@@ -980,6 +980,10 @@ pre {
   gap: 10px;
 }
 
+.panel .section-row {
+  padding: 12px 15px;
+}
+
 .test-result {
   font-size: 12px;
 }
