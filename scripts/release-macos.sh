@@ -3,16 +3,17 @@ set -euo pipefail
 
 # Build, sign, and notarize the macOS release bundle.
 #
-# The signing identity is read from tauri.conf.json (bundle.macOS.signingIdentity)
-# and must be installed in the login keychain. Notarization credentials are read
-# from an env file kept outside the repo:
+# Signing and notarization credentials are read from an env file kept outside
+# the repo:
 #
 #   ~/.symphony-release.env   (override location with SYMPHONY_RELEASE_ENV)
 #
 # which must define:
-#   APPLE_API_ISSUER    App Store Connect issuer ID (UUID)
-#   APPLE_API_KEY       API key ID, e.g. L3CH8VM55U
-#   APPLE_API_KEY_PATH  absolute path to the AuthKey_<id>.p8 file
+#   APPLE_SIGNING_IDENTITY  e.g. "Developer ID Application: Jane Doe (TEAMID1234)",
+#                           installed in the login keychain; Tauri signs with it
+#   APPLE_API_ISSUER        App Store Connect issuer ID (UUID)
+#   APPLE_API_KEY           API key ID, e.g. L3CH8VM55U
+#   APPLE_API_KEY_PATH      absolute path to the AuthKey_<id>.p8 file
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${SYMPHONY_RELEASE_ENV:-$HOME/.symphony-release.env}"
@@ -26,7 +27,7 @@ set -a
 source "$ENV_FILE"
 set +a
 
-for var in APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
+for var in APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH; do
   value="${!var:-}"
   if [[ -z "$value" || "$value" == *"<"* ]]; then
     echo "error: $var is not filled in ($ENV_FILE)" >&2
@@ -39,9 +40,8 @@ if [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
   exit 1
 fi
 
-SIGNING_IDENTITY="$(jq -r '.bundle.macOS.signingIdentity' "$ROOT/src-tauri/tauri.conf.json")"
-if ! security find-identity -v -p codesigning | grep -qF "$SIGNING_IDENTITY"; then
-  echo "error: signing identity not in keychain: $SIGNING_IDENTITY" >&2
+if ! security find-identity -v -p codesigning | grep -qF "$APPLE_SIGNING_IDENTITY"; then
+  echo "error: signing identity not in keychain: $APPLE_SIGNING_IDENTITY" >&2
   exit 1
 fi
 
