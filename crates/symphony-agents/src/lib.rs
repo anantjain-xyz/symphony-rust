@@ -868,7 +868,10 @@ fn truncate(value: &str, max: usize) -> String {
 /// permissions to write to <path>, but you haven't granted it yet."
 fn denied_write_path(raw: &str) -> Option<&str> {
     let rest = raw.split("requested permissions to write to ").nth(1)?;
-    let path = rest.split(", but you haven't granted it yet").next()?.trim();
+    let path = rest
+        .split(", but you haven't granted it yet")
+        .next()?
+        .trim();
     (!path.is_empty()).then_some(path)
 }
 
@@ -965,7 +968,11 @@ mod tests {
     #[tokio::test]
     async fn accepts_matching_or_absent_init_permission_mode() {
         let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
-        assert!(stream.push(init_event("auto"), &tx).await.unwrap().is_none());
+        assert!(stream
+            .push(init_event("auto"), &tx)
+            .await
+            .unwrap()
+            .is_none());
         let no_mode = json!({ "type": "system", "subtype": "init", "session_id": "sess" });
         assert!(stream.push(no_mode, &tx).await.unwrap().is_none());
         assert!(!stream.abort);
