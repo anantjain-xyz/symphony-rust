@@ -636,6 +636,17 @@ function OverviewView({
   onOpenSettings: () => void;
   onOpenIssues: () => void;
 }) {
+  // A run gets a live_sessions row only while it is actively streaming tokens.
+  // Use that to pulse streaming rows and show their last-activity heartbeat in
+  // the Active runs table (the panel this data used to live in on its own).
+  const liveRunIds = new Set(
+    overview.live_sessions.map((session) => session.run_id),
+  );
+  const lastActivity = new Map<string, string>(
+    overview.live_sessions.map(
+      (session): [string, string] => [session.run_id, session.last_event_at],
+    ),
+  );
   return (
     <>
       <header className="page-header">
@@ -660,64 +671,13 @@ function OverviewView({
         <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
       ) : null}
 
-      {overview.live_sessions.length > 0 ? (
-        <div className="grid">
-          <Panel title="Live sessions">
-            <table>
-              <thead>
-                <tr>
-                  <th>Issue</th>
-                  <th>Started</th>
-                  <th>Last activity</th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.live_sessions.map((session) => {
-                  const run = overview.active_runs.find(
-                    (candidate) => candidate.id === session.run_id,
-                  );
-                  return (
-                    <tr
-                      key={session.run_id}
-                      className="clickable-row"
-                      tabIndex={0}
-                      role="button"
-                      aria-label={`Open run for ${run?.issue_identifier ?? session.session_id}`}
-                      onClick={() => onOpenRun(session.run_id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          onOpenRun(session.run_id);
-                        }
-                      }}
-                    >
-                      <td>
-                        <strong>
-                          {run?.issue_identifier ?? session.session_id}
-                          <span className="pulse" />
-                        </strong>
-                        {run ? <small>{run.issue_title}</small> : null}
-                      </td>
-                      <td className="tnum" title={shortTime(session.started_at)}>
-                        {relativeTime(session.started_at)}
-                      </td>
-                      <td className="tnum" title={shortTime(session.last_event_at)}>
-                        {relativeTime(session.last_event_at)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </Panel>
-        </div>
-      ) : null}
-
       <div className="grid two">
         <Panel title="Active runs">
           <RunTable
             runs={overview.active_runs}
             onOpenRun={onOpenRun}
+            activeRunIds={liveRunIds}
+            lastActivity={lastActivity}
             emptyTitle="No active runs"
             emptyText={
               setup.blocked
@@ -1890,6 +1850,7 @@ function RunTable({
   onAction,
   activeRunIds,
   selectedRunId,
+  lastActivity,
 }: {
   runs: RunWithIssueRow[];
   onOpenRun: (id: string) => void;
@@ -1900,6 +1861,7 @@ function RunTable({
   onAction?: () => void;
   activeRunIds?: Set<string>;
   selectedRunId?: string;
+  lastActivity?: Map<string, string>;
 }) {
   if (runs.length === 0) {
     return (
@@ -1920,6 +1882,7 @@ function RunTable({
           <th>Run</th>
           <th>Status</th>
           <th>Created</th>
+          {lastActivity ? <th>Last activity</th> : null}
         </tr>
       </thead>
       <tbody>
@@ -1959,6 +1922,20 @@ function RunTable({
             <td className="tnum" title={shortTime(run.created_at)}>
               {relativeTime(run.created_at)}
             </td>
+            {lastActivity ? (
+              <td
+                className="tnum"
+                title={
+                  lastActivity.has(run.id)
+                    ? shortTime(lastActivity.get(run.id)!)
+                    : undefined
+                }
+              >
+                {lastActivity.has(run.id)
+                  ? relativeTime(lastActivity.get(run.id)!)
+                  : "—"}
+              </td>
+            ) : null}
           </tr>
         ))}
       </tbody>
