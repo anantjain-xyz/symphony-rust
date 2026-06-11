@@ -1363,7 +1363,7 @@ function SettingsView({
             />
             <small className="hint">
               Optional. How the agent is launched — e.g. a wrapper like{" "}
-              <code>cbcode --agent {settings.agent_backend}</code>. Leave blank to run{" "}
+              <code>mycode --agent {settings.agent_backend}</code>. Leave blank to run{" "}
               <code>{settings.agent_backend}</code> directly.
             </small>
           </label>
