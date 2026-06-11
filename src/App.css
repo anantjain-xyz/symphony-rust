@@ -310,16 +310,19 @@ small {
   font-weight: 600;
 }
 
-.worker-pill {
+.worker-toggle {
   align-items: center;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: grid;
+  border-radius: 99px;
+  display: inline-flex;
+  flex: 0 0 auto;
   gap: 9px;
-  grid-template-columns: 12px minmax(76px, max-content) 32px;
-  min-height: 38px;
-  padding: 4px 5px 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 15px 0 13px;
 }
 
 .status-dot {
@@ -343,43 +346,33 @@ small {
   box-shadow: 0 0 0 4px hsl(240 4% 60% / 0.14);
 }
 
-.worker-status-copy {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.worker-status-copy strong {
-  color: var(--foreground);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.15;
-  text-transform: capitalize;
-}
-
-.worker-status-copy small {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.worker-toggle-label {
+  line-height: 1;
+  min-width: 54px;
+  text-align: left;
   white-space: nowrap;
 }
 
-.icon-button {
-  align-items: center;
-  display: flex;
-  justify-content: center;
-  padding: 0;
-  width: 34px;
+/* The running button reads as status at rest and as the action on intent. */
+.worker-toggle .worker-toggle-label.on-hover {
+  display: none;
 }
 
-.worker-action {
-  border-radius: 8px;
-  font-size: 13px;
-  height: 30px;
-  min-height: 30px;
-  width: 30px;
+.worker-toggle:hover:not(:disabled) .worker-toggle-label.rest,
+.worker-toggle:focus-visible:not(:disabled) .worker-toggle-label.rest {
+  display: none;
+}
+
+.worker-toggle:hover:not(:disabled) .worker-toggle-label.on-hover,
+.worker-toggle:focus-visible:not(:disabled) .worker-toggle-label.on-hover {
+  display: inline;
+}
+
+.worker-toggle.running:hover:not(:disabled),
+.worker-toggle.running:focus-visible:not(:disabled) {
+  background: var(--destructive);
+  border-color: var(--destructive);
+  color: var(--destructive-foreground);
 }
 
 .content {
@@ -1055,15 +1048,16 @@ pre {
   font-size: 11px;
 }
 
-.worker-action.danger {
+.worker-toggle.confirm,
+.worker-toggle.confirm:hover:not(:disabled) {
   background: var(--destructive);
-  border-color: transparent;
+  border-color: var(--destructive-foreground);
   color: var(--destructive-foreground);
 }
 
-.worker-action.danger:hover:not(:disabled) {
-  background: var(--destructive);
-  opacity: 0.85;
+.worker-toggle.confirm .status-dot {
+  background: currentColor;
+  box-shadow: none;
 }
 
 label {
@@ -1245,9 +1239,13 @@ textarea {
     padding: 0 6px;
   }
 
-  .worker-pill {
+  .worker-toggle {
     flex: 1 1 auto;
-    grid-template-columns: 12px minmax(0, 1fr) 32px;
+    justify-content: center;
+  }
+
+  .worker-toggle-label {
+    min-width: 0;
   }
 
   .content {
