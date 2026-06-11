@@ -4,9 +4,8 @@ use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
 use symphony_core::{
-    append_retry_context, parse_workflow_source, render_prompt, resolve_workspace_root,
-    AgentBackend, AgentOutcome, HookName, Issue, ParsedWorkflow, RetryContext, RunStatus,
-    TokenCountPayload,
+    append_retry_context, parse_workflow_source, render_prompt, AgentBackend, AgentOutcome,
+    HookName, Issue, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
 };
 use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
@@ -663,16 +662,11 @@ async fn fail(
 }
 
 fn workspace_manager(config: &RuntimeConfig) -> WorkspaceManager {
-    let mut env = config.env.clone();
-    env.entry("TMPDIR".to_string())
-        .or_insert_with(|| config.app_data_dir.display().to_string());
-    let root = resolve_workspace_root(&config.workflow.front_matter.workspace.root, &env);
-    let root = if root.trim().is_empty() {
-        config.app_data_dir.join("workspaces")
-    } else {
-        PathBuf::from(root)
-    };
-    WorkspaceManager::new(root)
+    WorkspaceManager::new(crate::resolve_workspace_root_dir(
+        &config.workflow.front_matter.workspace.root,
+        &config.env,
+        &config.app_data_dir,
+    ))
 }
 
 fn due_after(ms: u64) -> String {

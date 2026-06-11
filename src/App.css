@@ -1101,7 +1101,8 @@ pre {
   box-shadow: none;
 }
 
-label {
+label,
+.field-group {
   color: var(--muted-foreground);
   display: grid;
   font-size: 13px;

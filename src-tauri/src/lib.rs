@@ -7,7 +7,10 @@ use symphony_storage::{
     StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
-use symphony_worker::{WorkerManager, WorkerStartConfig, WorkerStatus};
+use symphony_worker::{
+    check_skills, resolve_workspace_root_dir, SkillFile, SkillsInstallConfig, SkillsInstallStatus,
+    SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig, WorkerStatus,
+};
 use tauri::{Emitter, Manager, State};
 
 mod path_env;
@@ -83,9 +86,32 @@ pub struct IssueDetail {
 struct AppState {
     repo: Repository,
     worker: WorkerManager,
+    skills_installer: SkillsInstaller,
     app_data_dir: PathBuf,
     settings_path: PathBuf,
     database_path: PathBuf,
+}
+
+/// The agent skills shipped with the app, installed into target repos under
+/// `.agents/skills/<name>/SKILL.md`. Source of truth: symphony-ts.
+fn bundled_skills() -> Vec<SkillFile> {
+    macro_rules! skill {
+        ($name:literal) => {
+            SkillFile {
+                name: $name.to_string(),
+                content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
+            }
+        };
+    }
+    vec![
+        skill!("commit"),
+        skill!("land"),
+        skill!("pr-feedback"),
+        skill!("pull"),
+        skill!("push"),
+        skill!("screenshot"),
+        skill!("workpad"),
+    ]
 }
 
 #[tauri::command]
@@ -281,6 +307,49 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
+#[tauri::command]
+async fn get_skills_status(state: State<'_, AppState>) -> Result<SkillsStatus, String> {
+    let settings = load_settings_from_disk(&state).await?;
+    let names: Vec<String> = bundled_skills()
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    Ok(check_skills(&settings.repo_url, &names).await)
+}
+
+#[tauri::command]
+async fn get_skills_install_status(
+    state: State<'_, AppState>,
+) -> Result<SkillsInstallStatus, String> {
+    Ok(state.skills_installer.status().await)
+}
+
+#[tauri::command]
+async fn install_skills(state: State<'_, AppState>) -> Result<SkillsInstallStatus, String> {
+    let settings = load_settings_from_disk(&state).await?;
+    if settings.repo_url.trim().is_empty() {
+        return Err("Add a repository URL under Settings → Repository first.".to_string());
+    }
+    let env = build_env(&state, &settings);
+    let workflow =
+        parse_workflow_source(&settings.workflow_source, &env).map_err(|err| err.to_string())?;
+    let workspace_root = resolve_workspace_root_dir(
+        &workflow.front_matter.workspace.root,
+        &env,
+        &state.app_data_dir,
+    );
+    state
+        .skills_installer
+        .start(SkillsInstallConfig {
+            repo_url: settings.repo_url.clone(),
+            workspace_root,
+            workflow,
+            skills: bundled_skills(),
+        })
+        .await
+        .map_err(|err| err.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // GUI launches inherit launchd's minimal PATH, which breaks hooks and
@@ -314,6 +383,7 @@ pub fn run() {
             let state = AppState {
                 repo,
                 worker,
+                skills_installer: SkillsInstaller::new(),
                 app_data_dir: app_dir.clone(),
                 settings_path: app_dir.join("settings.json"),
                 database_path: db_path,
@@ -337,7 +407,10 @@ pub fn run() {
             get_issue_detail,
             get_worker_status,
             start_worker,
-            stop_worker
+            stop_worker,
+            get_skills_status,
+            get_skills_install_status,
+            install_skills
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -455,6 +528,8 @@ fn export_bindings() {
             specta::ts::export::<AgentEventRow>(&conf),
             specta::ts::export::<WorkerStatus>(&conf),
             specta::ts::export::<StorageEvent>(&conf),
+            specta::ts::export::<SkillsStatus>(&conf),
+            specta::ts::export::<SkillsInstallStatus>(&conf),
         ]
         .into_iter()
         .filter_map(Result::ok)
@@ -506,6 +581,37 @@ mod tests {
         let after_create = parsed.front_matter.hooks.after_create.expect("hook");
         assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
         assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
+    }
+
+    #[test]
+    fn bundled_skills_match_their_frontmatter_names() {
+        let skills = bundled_skills();
+        assert_eq!(skills.len(), 7);
+        for skill in skills {
+            let name_line = format!("name: {}", skill.name);
+            assert!(
+                skill
+                    .content
+                    .lines()
+                    .take(5)
+                    .any(|line| line.trim() == name_line),
+                "skill {} frontmatter does not declare its directory name",
+                skill.name
+            );
+            assert!(skill.content.starts_with("---\n"));
+        }
+    }
+
+    #[test]
+    fn default_workflow_references_every_bundled_skill() {
+        let workflow = default_workflow_source();
+        for skill in bundled_skills() {
+            assert!(
+                workflow.contains(&format!("`{}`", skill.name)),
+                "default workflow never mentions the bundled skill {}",
+                skill.name
+            );
+        }
     }
 
     #[test]
