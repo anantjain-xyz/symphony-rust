@@ -66,14 +66,47 @@ pub async fn open_sqlite(path: impl AsRef<Path>) -> Result<SqlitePool, StorageEr
     Ok(pool)
 }
 
+pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("migrations/0001_init.sql")),
+    (
+        "0002_run_session_info",
+        include_str!("migrations/0002_run_session_info.sql"),
+    ),
+];
+
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
-    let sql = include_str!("migrations/0001_init.sql");
-    for statement in sql.split(';') {
-        let statement = statement.trim();
-        if statement.is_empty() {
+    // 0001 predates this table and stays idempotent, so databases created
+    // before migrations were versioned replay it harmlessly and catch up.
+    sqlx::query(
+        r#"
+        create table if not exists schema_migrations (
+          id text primary key,
+          applied_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    for (id, sql) in MIGRATIONS {
+        let applied: Option<(String,)> =
+            sqlx::query_as("select id from schema_migrations where id = ?1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        if applied.is_some() {
             continue;
         }
-        sqlx::query(statement).execute(pool).await?;
+        for statement in sql.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            sqlx::query(statement).execute(pool).await?;
+        }
+        sqlx::query("insert into schema_migrations (id) values (?1)")
+            .bind(id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }

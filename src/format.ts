@@ -46,6 +46,28 @@ export function timeOnly(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
 }
 
+export type SessionInfo = {
+  model: string | null;
+  permission_mode: string | null;
+  agent_version: string | null;
+  output_style: string | null;
+  fast_mode: string | null;
+  thinking_tokens: number | null;
+};
+
+export function parseSessionInfo(raw: string | null): SessionInfo | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as SessionInfo;
+  } catch {
+    return null;
+  }
+}
+
 export type EventSummary = {
   label: string;
   summary: string;

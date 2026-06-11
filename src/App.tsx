@@ -18,6 +18,7 @@ import {
   describeEvent,
   formatTokens,
   nullable,
+  parseSessionInfo,
   prettyPayload,
   priorityLabel,
   relativeTime,
@@ -797,6 +798,47 @@ function SetupStep({
   );
 }
 
+function SessionChips({ raw }: { raw: string | null }) {
+  const info = parseSessionInfo(raw);
+  if (!info) return null;
+  const chips: { label: string; title: string; mono?: boolean }[] = [];
+  if (info.model) {
+    chips.push({ label: info.model, title: "Model", mono: true });
+  }
+  if (info.permission_mode) {
+    chips.push({ label: info.permission_mode, title: "Permission mode" });
+  }
+  if (info.fast_mode === "on") {
+    chips.push({ label: "fast mode", title: "Fast mode enabled" });
+  }
+  if (info.output_style && info.output_style !== "default") {
+    chips.push({ label: `${info.output_style} style`, title: "Output style" });
+  }
+  if (info.thinking_tokens) {
+    chips.push({
+      label: `${formatTokens(info.thinking_tokens)} thinking`,
+      title: "Estimated thinking tokens",
+    });
+  }
+  if (info.agent_version) {
+    chips.push({ label: `Claude Code ${info.agent_version}`, title: "Agent version" });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="run-meta-row session-chips">
+      {chips.map((chip) => (
+        <span
+          key={chip.title}
+          className={chip.mono ? "session-chip mono" : "session-chip"}
+          title={chip.title}
+        >
+          {chip.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function RunsView({
   runs,
   selected,
@@ -854,6 +896,7 @@ function RunsView({
                     <span>Ended {shortTime(selected.run.ended_at)}</span>
                   ) : null}
                 </div>
+                <SessionChips raw={selected.run.session_info} />
                 <code
                   className="run-meta-path"
                   title={selected.run.workspace_path}

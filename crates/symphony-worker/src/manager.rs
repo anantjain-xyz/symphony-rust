@@ -503,6 +503,9 @@ async fn dispatch_run(
             maybe_event = rx.recv() => {
                 if let Some(event) = maybe_event {
                     repo.append_event(&run.id, event.kind.clone(), &event.payload).await?;
+                    if let Some(info) = &event.session_info {
+                        repo.set_run_session_info(&run.id, info).await?;
+                    }
                     if let Some(tokens) = &event.tokens {
                         repo.upsert_live_session(
                             &run.id,

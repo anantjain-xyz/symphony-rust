@@ -759,6 +759,23 @@ td strong {
   font-size: 12px;
 }
 
+.session-chips {
+  gap: 6px;
+}
+
+.session-chip {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.session-chip.mono {
+  font-family: var(--font-mono);
+}
+
 .run-meta-path {
   color: var(--muted-foreground);
   font-family: var(--font-mono);

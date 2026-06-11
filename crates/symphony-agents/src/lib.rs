@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 use symphony_core::{
     AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, MappedAgentEvent,
-    RateLimitPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
+    RateLimitPayload, SessionInfoPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload,
+    TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{
@@ -249,6 +250,7 @@ async fn map_codex_event(
                         humanized: Some(format!("bash: {summary}")),
                         tokens: None,
                         rate_limit: None,
+                        session_info: None,
                     },
                 )
                 .await;
@@ -422,6 +424,7 @@ struct ClaudeStreamState {
     pending_tools: HashMap<String, String>,
     completed: bool,
     last_assistant_text: String,
+    session_info: SessionInfoPayload,
 }
 
 impl ClaudeStreamState {
@@ -431,6 +434,7 @@ impl ClaudeStreamState {
             pending_tools: HashMap::new(),
             completed: false,
             last_assistant_text: String::new(),
+            session_info: SessionInfoPayload::default(),
         }
     }
 
@@ -443,16 +447,48 @@ impl ClaudeStreamState {
             return Ok(None);
         }
         match ev["type"].as_str().unwrap_or_default() {
-            "system" if ev["subtype"].as_str() == Some("init") => {
-                send_status(
-                    events,
-                    format!(
+            "system" => match ev["subtype"].as_str().unwrap_or_default() {
+                "init" => {
+                    let text = |key: &str| ev[key].as_str().map(ToOwned::to_owned);
+                    self.session_info = SessionInfoPayload {
+                        model: text("model"),
+                        permission_mode: text("permissionMode"),
+                        agent_version: text("claude_code_version"),
+                        output_style: text("output_style"),
+                        fast_mode: text("fast_mode_state"),
+                        thinking_tokens: None,
+                    };
+                    let mut message = format!(
                         "Claude session {} started",
                         ev["session_id"].as_str().unwrap_or(&self.session_id)
-                    ),
-                )
-                .await;
-            }
+                    );
+                    if let Some(model) = &self.session_info.model {
+                        message.push_str(&format!(" · {model}"));
+                    }
+                    if let Some(mode) = &self.session_info.permission_mode {
+                        message.push_str(&format!(" · {mode}"));
+                    }
+                    send_mapped(
+                        events,
+                        MappedAgentEvent {
+                            kind: AgentEventKind::Status,
+                            payload: json!({ "message": message }),
+                            humanized: Some(message),
+                            tokens: None,
+                            rate_limit: None,
+                            session_info: Some(self.session_info.clone()),
+                        },
+                    )
+                    .await;
+                }
+                "thinking_tokens" => {
+                    if let Some(estimate) = ev["estimated_tokens"].as_i64() {
+                        let prior = self.session_info.thinking_tokens.unwrap_or(0);
+                        self.session_info.thinking_tokens = Some(prior.max(estimate));
+                    }
+                }
+                _ => {}
+            },
             "assistant" => {
                 for block in ev["message"]["content"]
                     .as_array()
@@ -487,6 +523,7 @@ impl ClaudeStreamState {
                                     humanized: Some(format!("Calling {name}")),
                                     tokens: None,
                                     rate_limit: None,
+                                    session_info: None,
                                 },
                             )
                             .await;
@@ -539,6 +576,7 @@ impl ClaudeStreamState {
                             humanized: Some(summary.clone()),
                             tokens: None,
                             rate_limit: None,
+                            session_info: None,
                         },
                     )
                     .await;
@@ -553,6 +591,7 @@ impl ClaudeStreamState {
                                 humanized: Some("Approval requested".to_string()),
                                 tokens: None,
                                 rate_limit: None,
+                                session_info: None,
                             },
                         )
                         .await;
@@ -566,15 +605,24 @@ impl ClaudeStreamState {
                     + usage["cache_read_input_tokens"].as_i64().unwrap_or(0);
                 let output = usage["output_tokens"].as_i64().unwrap_or(0);
                 if input > 0 || output > 0 {
-                    send_token_count(
+                    let tokens = TokenCountPayload {
+                        input_tokens: input,
+                        output_tokens: output,
+                        total_tokens: input + output,
+                    };
+                    send_mapped(
                         events,
-                        TokenCountPayload {
-                            input_tokens: input,
-                            output_tokens: output,
-                            total_tokens: input + output,
+                        MappedAgentEvent {
+                            kind: AgentEventKind::TokenCount,
+                            payload: serde_json::to_value(&tokens)?,
+                            humanized: None,
+                            tokens: Some(tokens),
+                            rate_limit: None,
+                            session_info: (!self.session_info.is_empty())
+                                .then(|| self.session_info.clone()),
                         },
                     )
-                    .await?;
+                    .await;
                 }
                 self.completed = true;
                 if ev["subtype"].as_str() == Some("success") {
@@ -695,6 +743,7 @@ async fn send_status(events: &AgentEventSender, message: impl Into<String>) {
             humanized: Some(message),
             tokens: None,
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -713,6 +762,7 @@ async fn send_error(
             humanized: Some(format!("Error ({class}): {message}")),
             tokens: None,
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -731,6 +781,7 @@ async fn send_token_count(
             humanized: None,
             tokens: Some(tokens),
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -749,6 +800,7 @@ async fn send_rate_limit(
             humanized: None,
             tokens: None,
             rate_limit: Some(payload),
+            session_info: None,
         },
     )
     .await;
@@ -808,6 +860,62 @@ mod tests {
     #[test]
     fn shell_quote_handles_single_quotes() {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[tokio::test]
+    async fn captures_session_info_from_init_and_result() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut stream = ClaudeStreamState::new("sess-1".to_string());
+        stream
+            .push(
+                json!({
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "sess-1",
+                    "model": "claude-opus-4-8",
+                    "permissionMode": "acceptEdits",
+                    "claude_code_version": "2.1.172",
+                    "output_style": "default",
+                    "fast_mode_state": "off"
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let started = rx.recv().await.unwrap();
+        let info = started.session_info.expect("init carries session info");
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(info.permission_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(info.agent_version.as_deref(), Some("2.1.172"));
+        assert_eq!(info.thinking_tokens, None);
+
+        stream
+            .push(
+                json!({ "type": "system", "subtype": "thinking_tokens", "estimated_tokens": 42 }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let result = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "usage": { "input_tokens": 10, "output_tokens": 5 }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result event finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Success));
+        let tokens_event = rx.recv().await.unwrap();
+        assert_eq!(
+            tokens_event
+                .session_info
+                .and_then(|info| info.thinking_tokens),
+            Some(42)
+        );
     }
 
     #[test]
