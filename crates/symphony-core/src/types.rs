@@ -450,6 +450,26 @@ pub struct RateLimitPayload {
     pub reset_at: Option<String>,
 }
 
+/// Session-level metadata reported by the agent CLI once a run starts
+/// (Claude Code's `system/init` stream-json event). Every field is optional
+/// because older CLIs and the Codex backend report fewer of them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+pub struct SessionInfoPayload {
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+    pub agent_version: Option<String>,
+    pub output_style: Option<String>,
+    pub fast_mode: Option<String>,
+    /// Cumulative thinking-token estimate from `system/thinking_tokens` events.
+    pub thinking_tokens: Option<i64>,
+}
+
+impl SessionInfoPayload {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct MappedAgentEvent {
     pub kind: AgentEventKind,
@@ -457,6 +477,7 @@ pub struct MappedAgentEvent {
     pub humanized: Option<String>,
     pub tokens: Option<TokenCountPayload>,
     pub rate_limit: Option<RateLimitPayload>,
+    pub session_info: Option<SessionInfoPayload>,
 }
 
 pub fn tracker_project_url(tracker: &TrackerConfig) -> Option<String> {

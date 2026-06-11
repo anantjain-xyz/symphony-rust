@@ -51,6 +51,7 @@ export type RunWithIssueRow = {
   error_class: string | null;
   error_message: string | null;
   worker_pid: number | null;
+  session_info: string | null;
   created_at: string;
   issue_identifier: string;
   issue_title: string;

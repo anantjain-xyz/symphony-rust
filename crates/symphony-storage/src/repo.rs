@@ -4,7 +4,8 @@ use serde_json::Value;
 use specta::Type;
 use sqlx::{sqlite::SqliteQueryResult, FromRow, QueryBuilder, Sqlite, SqlitePool};
 use symphony_core::{
-    AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus, TokenCountPayload,
+    AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus,
+    SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
 
@@ -45,6 +46,8 @@ pub struct RunRow {
     pub error_class: Option<String>,
     pub error_message: Option<String>,
     pub worker_pid: Option<i64>,
+    /// JSON-encoded `SessionInfoPayload` reported by the agent CLI at startup.
+    pub session_info: Option<String>,
     pub created_at: String,
 }
 
@@ -60,6 +63,7 @@ pub struct RunWithIssueRow {
     pub error_class: Option<String>,
     pub error_message: Option<String>,
     pub worker_pid: Option<i64>,
+    pub session_info: Option<String>,
     pub created_at: String,
     pub issue_identifier: String,
     pub issue_title: String,
@@ -363,6 +367,20 @@ impl Repository {
     pub async fn set_worker_pid(&self, run_id: &str, pid: i64) -> Result<(), StorageError> {
         sqlx::query("update runs set worker_pid = ?1 where id = ?2")
             .bind(pid)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await?;
+        self.changed("runs", "update");
+        Ok(())
+    }
+
+    pub async fn set_run_session_info(
+        &self,
+        run_id: &str,
+        info: &SessionInfoPayload,
+    ) -> Result<(), StorageError> {
+        sqlx::query("update runs set session_info = ?1 where id = ?2")
+            .bind(serde_json::to_string(info)?)
             .bind(run_id)
             .execute(&self.pool)
             .await?;
@@ -921,6 +939,87 @@ mod tests {
         assert!(first.is_some());
         let duplicate = repo.try_reserve_run("lin-1", 1, "/tmp/ws").await.unwrap();
         assert!(duplicate.is_none());
+    }
+
+    #[tokio::test]
+    async fn stores_session_info_on_run() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.session_info, None);
+        let info = SessionInfoPayload {
+            model: Some("claude-opus-4-8".to_string()),
+            permission_mode: Some("acceptEdits".to_string()),
+            ..Default::default()
+        };
+        repo.set_run_session_info(&run.id, &info).await.unwrap();
+        let stored = repo
+            .get_run(&run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_info
+            .expect("session info should be stored");
+        let parsed: SessionInfoPayload = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed, info);
+    }
+
+    #[tokio::test]
+    async fn migrates_databases_created_before_versioning() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Replay 0001 by hand to simulate a database that predates the
+        // schema_migrations table, then migrate and migrate again.
+        for statement in crate::MIGRATIONS[0].1.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        migrate(&pool).await.unwrap();
+        migrate(&pool).await.unwrap();
+        sqlx::query("select session_info from runs limit 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_migrations_roll_back_atomically() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let broken: &[(&str, &str)] = &[(
+            "0001_probe",
+            "create table atomic_probe (id integer primary key); not valid sql;",
+        )];
+        assert!(crate::apply_migrations(&pool, broken).await.is_err());
+        let marker: Option<(String,)> =
+            sqlx::query_as("select id from schema_migrations where id = '0001_probe'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(marker.is_none(), "failed migration must not be recorded");
+        // The partial schema change rolled back, so a fixed migration with
+        // the same id applies cleanly instead of hitting "already exists".
+        let fixed: &[(&str, &str)] = &[(
+            "0001_probe",
+            "create table atomic_probe (id integer primary key);",
+        )];
+        crate::apply_migrations(&pool, fixed).await.unwrap();
+        sqlx::query("select id from atomic_probe")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
