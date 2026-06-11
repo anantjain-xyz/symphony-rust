@@ -26,6 +26,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub install_cmd: Option<String>,
     pub agent_backend: AgentBackend,
+    #[serde(default)]
+    pub codex_command: Option<String>,
+    #[serde(default)]
+    pub claude_command: Option<String>,
     pub linear_api_key_set: bool,
 }
 
@@ -40,6 +44,8 @@ impl Default for AppSettings {
             workspace_root: None,
             install_cmd: None,
             agent_backend: AgentBackend::Codex,
+            codex_command: None,
+            claude_command: None,
             linear_api_key_set: false,
         }
     }
@@ -57,6 +63,8 @@ pub struct ValidationResult {
     pub workflow_error: Option<String>,
     pub codex_found: bool,
     pub claude_found: bool,
+    pub codex_command: String,
+    pub claude_command: String,
     pub app_data_dir: String,
     pub database_path: String,
 }
@@ -122,14 +130,44 @@ async fn validate_settings(
 ) -> Result<ValidationResult, String> {
     let env = build_env(&state, &settings);
     let workflow_result = parse_workflow_source(&settings.workflow_source, &env);
+    // The workflow's `command:` fields are authoritative (Settings interpolate
+    // into them); when the workflow doesn't parse, mirror that fallback chain.
+    let (codex_command, claude_command) = match &workflow_result {
+        Ok(workflow) => (
+            workflow.front_matter.codex.command.clone(),
+            workflow.front_matter.claude.command.clone(),
+        ),
+        Err(_) => (
+            effective_command(settings.codex_command.as_deref(), "codex"),
+            effective_command(settings.claude_command.as_deref(), "claude"),
+        ),
+    };
     Ok(ValidationResult {
         workflow_ok: workflow_result.is_ok(),
         workflow_error: workflow_result.err().map(|err| err.to_string()),
-        codex_found: which::which("codex").is_ok(),
-        claude_found: which::which("claude").is_ok(),
+        codex_found: command_found(&codex_command),
+        claude_found: command_found(&claude_command),
+        codex_command,
+        claude_command,
         app_data_dir: state.app_data_dir.display().to_string(),
         database_path: state.database_path.display().to_string(),
     })
+}
+
+fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
+    match override_cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) {
+        Some(cmd) => cmd.to_string(),
+        None => default.to_string(),
+    }
+}
+
+// Launch commands may be wrappers with arguments (`cbcode --agent codex`);
+// only the first token names the executable to look up.
+fn command_found(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(|bin| which::which(bin).is_ok())
 }
 
 #[tauri::command]
@@ -398,6 +436,14 @@ fn build_env(state: &AppState, settings: &AppSettings) -> BTreeMap<String, Strin
         },
     );
     env.insert(
+        "SYMPHONY_CODEX_COMMAND".to_string(),
+        settings.codex_command.clone().unwrap_or_default(),
+    );
+    env.insert(
+        "SYMPHONY_CLAUDE_COMMAND".to_string(),
+        settings.claude_command.clone().unwrap_or_default(),
+    );
+    env.insert(
         "TMPDIR".to_string(),
         settings
             .workspace_root
@@ -502,10 +548,47 @@ mod tests {
         );
         assert!(parsed.front_matter.codex.network_access);
         assert!(!parsed.front_matter.claude.allowed_tools.is_empty());
+        // Launch commands fall back to the bare CLI names when Settings
+        // leaves them blank.
+        assert_eq!(parsed.front_matter.codex.command, "codex");
+        assert_eq!(parsed.front_matter.claude.command, "claude");
         // Hooks keep shell-style defaults for bash to expand at run time.
         let after_create = parsed.front_matter.hooks.after_create.expect("hook");
         assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
         assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
+    }
+
+    #[test]
+    fn default_workflow_honors_custom_launch_commands() {
+        let mut env = settings_env();
+        env.insert(
+            "SYMPHONY_CODEX_COMMAND".to_string(),
+            "cbcode --agent codex".to_string(),
+        );
+        env.insert(
+            "SYMPHONY_CLAUDE_COMMAND".to_string(),
+            "cbcode --agent claude".to_string(),
+        );
+        let parsed = parse_workflow_source(&default_workflow_source(), &env).unwrap();
+        assert_eq!(parsed.front_matter.codex.command, "cbcode --agent codex");
+        assert_eq!(parsed.front_matter.claude.command, "cbcode --agent claude");
+    }
+
+    #[test]
+    fn command_found_checks_first_token_only() {
+        assert!(command_found("sh -lc"));
+        assert!(!command_found("symphony-test-missing-binary --agent codex"));
+        assert!(!command_found(""));
+    }
+
+    #[test]
+    fn effective_command_falls_back_on_blank_overrides() {
+        assert_eq!(effective_command(None, "codex"), "codex");
+        assert_eq!(effective_command(Some("  "), "codex"), "codex");
+        assert_eq!(
+            effective_command(Some("cbcode --agent codex"), "codex"),
+            "cbcode --agent codex"
+        );
     }
 
     #[test]
