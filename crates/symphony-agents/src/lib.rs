@@ -728,10 +728,13 @@ impl ClaudeStreamState {
                 // reached|<epoch>"), an API limit as "API Error: 429 ...".
                 // Record the signal so the dashboard surfaces it and, when a
                 // reset time is known, the worker pauses dispatch until then.
-                let result_text = ev["result"].as_str().unwrap_or_default();
-                let limit_hit = [result_text, self.last_assistant_text.as_str()]
-                    .into_iter()
-                    .find_map(|text| detect_claude_rate_limit(text).map(|limit| (text, limit)));
+                let limit_hit = [
+                    ev["result"].as_str().unwrap_or_default(),
+                    ev["error"].as_str().unwrap_or_default(),
+                    self.last_assistant_text.as_str(),
+                ]
+                .into_iter()
+                .find_map(|text| detect_claude_rate_limit(text).map(|limit| (text, limit)));
                 if let Some((text, limit)) = limit_hit {
                     send_rate_limit(events, limit).await?;
                     return Ok(Some(AgentRunResult {
@@ -989,20 +992,33 @@ fn denied_write_path(raw: &str) -> Option<&str> {
     (!path.is_empty()).then_some(path)
 }
 
-/// Rate-limit hit in Claude's result or assistant text. Matches both the
-/// subscription usage-limit wordings and API 429 errors.
+/// Rate-limit hit in Claude's result, error, or assistant text. The CLI
+/// emits limit notices as standalone messages, so every match is anchored to
+/// the start of the text: a successful run whose final answer merely
+/// discusses rate limits (docs, code touching this very feature) must not be
+/// reclassified as a hit.
 fn detect_claude_rate_limit(text: &str) -> Option<RateLimitPayload> {
-    let lower = text.to_lowercase();
+    let lower = text.trim().to_lowercase();
     let hit = lower.starts_with("api error: 429")
-        || lower.contains("rate_limit_error")
-        || lower.contains("usage limit reached")
-        || lower.contains("hour limit reached")
-        || lower.contains("weekly limit reached");
+        || (lower.starts_with("api error:") && lower.contains("rate_limit_error"))
+        || lower.starts_with("claude ai usage limit reached")
+        || lower.starts_with("claude usage limit reached")
+        || lower.starts_with("you've reached your usage limit")
+        || lower.starts_with("weekly limit reached")
+        || hour_window_limit_notice(&lower);
     hit.then(|| RateLimitPayload {
         source: "claude".to_string(),
         remaining: None,
         reset_at: claude_limit_reset(text),
     })
+}
+
+/// The session-window notice leads with the window length:
+/// "5-hour limit reached ∙ resets 3am".
+fn hour_window_limit_notice(lower: &str) -> bool {
+    lower
+        .split_once("-hour limit reached")
+        .is_some_and(|(window, _)| !window.is_empty() && window.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Reset timestamp from the usage-limit message's trailing epoch
@@ -1132,6 +1148,43 @@ mod tests {
         assert_eq!(worded.reset_at, None);
 
         assert!(detect_claude_rate_limit("All tests passing").is_none());
+        // A successful run that merely talks about limits is not a hit.
+        assert!(detect_claude_rate_limit(
+            "I improved how the usage limit reached message is detected"
+        )
+        .is_none());
+        assert!(detect_claude_rate_limit(
+            "The mapper now classifies rate_limit_error responses as retryable"
+        )
+        .is_none());
+        assert!(detect_claude_rate_limit("After the 5-hour limit reached us we paused").is_none());
+    }
+
+    #[tokio::test]
+    async fn records_rate_limit_hit_from_result_error_field() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut stream = ClaudeStreamState::new(
+            "sess-rl-err".to_string(),
+            &ClaudePermissionMode::AcceptEdits,
+            PathBuf::from("/tmp/ws"),
+        );
+        let result = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "error": "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+                    "usage": {}
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result event finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.rate_limit.expect("payload").source, "claude");
     }
 
     #[tokio::test]
