@@ -156,9 +156,6 @@ function App() {
       const loaded = await invoke<AppSettings>("load_settings");
       setSettings(loaded);
       setSavedSnapshot(formSnapshot(loaded));
-      if (loaded.repo_url.trim() !== "") {
-        refreshSkillsStatus(loaded);
-      }
       await refreshDashboard();
       // The worker should be running whenever the app is open, so start it
       // on launch once setup is complete; the topbar toggle stops it.
@@ -328,6 +325,20 @@ function App() {
     setSkillsInstall(status);
   }
 
+  // Invalidate and re-check whenever the repo URL itself changes (including
+  // the initial settings load): a status fetched for the previous repo must
+  // never drive the install UI. Debounced so typing doesn't spam gh.
+  const repoUrl = settings === null ? null : settings.repo_url.trim();
+  useEffect(() => {
+    if (!runtimeAvailable || repoUrl === null) return;
+    setSkillsStatus(null);
+    setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
+    if (repoUrl === "") return;
+    const handle = window.setTimeout(() => refreshSkillsStatus(), 600);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoUrl, runtimeAvailable]);
+
   // While the install session runs, poll its progress; when it lands, re-check
   // the repo so the status flips to "PR open" with the link.
   useEffect(() => {
@@ -385,10 +396,15 @@ function App() {
     setView("runs");
   }
 
+  // Skills hold the checklist open only when we positively know they are not
+  // installed; unknown/unavailable must not nag users we can't check.
   const setup = {
     needed:
       settings !== null &&
-      (!settings.linear_api_key_set || settings.repo_url.trim() === ""),
+      (!settings.linear_api_key_set ||
+        settings.repo_url.trim() === "" ||
+        skillsStatus?.state === "missing" ||
+        skillsStatus?.state === "pr_open"),
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
     skills: skillsStatus,

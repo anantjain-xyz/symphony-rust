@@ -14,7 +14,10 @@ use std::{
     sync::Arc,
 };
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
-use symphony_core::{AgentBackend, AgentOutcome, ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy};
+use symphony_core::{
+    AgentBackend, AgentOutcome, ClaudePermissionMode, ParsedWorkflow, ThreadSandbox,
+    TurnSandboxPolicy,
+};
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -366,36 +369,7 @@ async fn run_install(
         .map_err(|err| format!("could not write skill files: {err}"))?;
 
     set_message(inner, "Agent is adapting the skills and opening a PR…").await;
-    let front = &config.workflow.front_matter;
-    let backend = front.agent.backend.clone();
-    let request = AgentRunRequest {
-        backend: backend.clone(),
-        command: match backend {
-            AgentBackend::Codex => front.codex.command.clone(),
-            AgentBackend::Claude => front.claude.command.clone(),
-        },
-        cwd: workspace.clone(),
-        prompt: install_prompt(&config.repo_url, &config.skills),
-        // The install session must edit the written skill files and reach
-        // GitHub to push and open the PR, so it overrides locked-down Codex
-        // worker settings (read-only or no-network sandboxes) that are valid
-        // for issue runs but would guarantee this run fails.
-        thread_sandbox: ThreadSandbox::WorkspaceWrite,
-        turn_sandbox_policy: TurnSandboxPolicy::WorkspaceWrite,
-        network_access: true,
-        turn_timeout_ms: match backend {
-            AgentBackend::Codex => front.codex.turn_timeout_ms,
-            AgentBackend::Claude => front.claude.turn_timeout_ms,
-        },
-        claude: ClaudeRunOptions {
-            permission_mode: front.claude.permission_mode.clone(),
-            allowed_tools: front.claude.allowed_tools.clone(),
-            disallowed_tools: front.claude.disallowed_tools.clone(),
-            add_dirs: front.claude.add_dirs.clone(),
-            session_id: None,
-        },
-        env: Vec::new(),
-    };
+    let request = install_run_request(&config, &workspace);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let driver = NativeAgentDriver;
@@ -429,6 +403,79 @@ async fn run_install(
         AgentOutcome::Failure => Err(result
             .error_message
             .unwrap_or_else(|| "agent reported failure".to_string())),
+    }
+}
+
+/// Tools the Claude install session needs regardless of how the user
+/// customized the workflow: git/gh for the branch + PR work (destructive git
+/// forms intentionally omitted, mirroring the default workflow) and the file
+/// tools for adapting validation gates — allow-listed explicitly because some
+/// claude CLI versions drop the startup permission mode and then deny writes.
+const INSTALL_ALLOWED_TOOLS: &[&str] = &[
+    "Edit",
+    "Write",
+    "Bash(gh *)",
+    "Bash(git status*)",
+    "Bash(git log*)",
+    "Bash(git diff*)",
+    "Bash(git show*)",
+    "Bash(git branch*)",
+    "Bash(git checkout*)",
+    "Bash(git switch*)",
+    "Bash(git add*)",
+    "Bash(git commit*)",
+    "Bash(git push)",
+    "Bash(git push origin*)",
+    "Bash(git pull*)",
+    "Bash(git fetch*)",
+    "Bash(git remote*)",
+    "Bash(git rev-parse*)",
+    "Bash(git ls-files*)",
+    "Bash(git config --get*)",
+    "Bash(which *)",
+];
+
+/// The install session must edit the written skill files and reach GitHub to
+/// push and open the PR, so it pins install-safe agent options instead of
+/// inheriting worker settings: locked-down sandboxes (Codex read-only /
+/// no-network) or restrictive Claude permission modes and tool lists are
+/// valid for issue runs but would guarantee this run fails. The user's
+/// allowed tools are merged in on top, never subtracted from.
+fn install_run_request(config: &SkillsInstallConfig, workspace: &Path) -> AgentRunRequest {
+    let front = &config.workflow.front_matter;
+    let backend = front.agent.backend.clone();
+    let mut allowed_tools: Vec<String> = INSTALL_ALLOWED_TOOLS
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for tool in &front.claude.allowed_tools {
+        if !allowed_tools.contains(tool) {
+            allowed_tools.push(tool.clone());
+        }
+    }
+    AgentRunRequest {
+        backend: backend.clone(),
+        command: match backend {
+            AgentBackend::Codex => front.codex.command.clone(),
+            AgentBackend::Claude => front.claude.command.clone(),
+        },
+        cwd: workspace.to_path_buf(),
+        prompt: install_prompt(&config.repo_url, &config.skills),
+        thread_sandbox: ThreadSandbox::WorkspaceWrite,
+        turn_sandbox_policy: TurnSandboxPolicy::WorkspaceWrite,
+        network_access: true,
+        turn_timeout_ms: match backend {
+            AgentBackend::Codex => front.codex.turn_timeout_ms,
+            AgentBackend::Claude => front.claude.turn_timeout_ms,
+        },
+        claude: ClaudeRunOptions {
+            permission_mode: ClaudePermissionMode::Auto,
+            allowed_tools,
+            disallowed_tools: Vec::new(),
+            add_dirs: front.claude.add_dirs.clone(),
+            session_id: None,
+        },
+        env: Vec::new(),
     }
 }
 
@@ -634,6 +681,61 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn install_run_overrides_locked_down_agent_settings() {
+        let workflow = symphony_core::parse_workflow_source(
+            concat!(
+                "---\n",
+                "tracker:\n",
+                "  kind: linear\n",
+                "  api_key: k\n",
+                "  active_states: [Todo]\n",
+                "  terminal_states: [Done]\n",
+                "codex:\n",
+                "  thread_sandbox: read-only\n",
+                "  turn_sandbox_policy: read-only\n",
+                "  network_access: false\n",
+                "claude:\n",
+                "  permission_mode: plan\n",
+                "  allowed_tools: [\"Bash(npm *)\"]\n",
+                "  disallowed_tools: [\"Bash(git push*)\"]\n",
+                "---\n",
+                "body"
+            ),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let config = SkillsInstallConfig {
+            repo_url: "git@github.com:acme/widgets.git".to_string(),
+            workspace_root: PathBuf::from("/tmp"),
+            workflow,
+            skills: Vec::new(),
+        };
+
+        let request = install_run_request(&config, Path::new("/tmp/ws"));
+
+        assert_eq!(request.thread_sandbox, ThreadSandbox::WorkspaceWrite);
+        assert_eq!(
+            request.turn_sandbox_policy,
+            TurnSandboxPolicy::WorkspaceWrite
+        );
+        assert!(request.network_access);
+        assert_eq!(request.claude.permission_mode, ClaudePermissionMode::Auto);
+        assert!(request.claude.disallowed_tools.is_empty());
+        for tool in ["Edit", "Write", "Bash(gh *)", "Bash(git push)"] {
+            assert!(
+                request.claude.allowed_tools.iter().any(|t| t == tool),
+                "install allowlist is missing {tool}"
+            );
+        }
+        // The user's own additions ride along rather than being dropped.
+        assert!(request
+            .claude
+            .allowed_tools
+            .iter()
+            .any(|t| t == "Bash(npm *)"));
     }
 
     #[tokio::test]
