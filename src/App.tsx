@@ -74,6 +74,8 @@ const previewSettings: AppSettings = {
   workspace_root: null,
   install_cmd: null,
   agent_backend: "codex",
+  codex_command: null,
+  claude_command: null,
   linear_api_key_set: false,
 };
 
@@ -1206,14 +1208,42 @@ function SettingsView({
               The CLI that works on issues. Must be installed and authenticated on this machine.
             </small>
           </label>
+          <label>
+            Launch command
+            <input
+              value={
+                (settings.agent_backend === "codex"
+                  ? settings.codex_command
+                  : settings.claude_command) ?? ""
+              }
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) => {
+                const value = nullable(e.currentTarget.value);
+                setSettings(
+                  settings.agent_backend === "codex"
+                    ? { ...settings, codex_command: value }
+                    : { ...settings, claude_command: value },
+                );
+              }}
+              placeholder={settings.agent_backend}
+            />
+            <small className="hint">
+              Optional. How the agent is launched — e.g. a wrapper like{" "}
+              <code>cbcode --agent {settings.agent_backend}</code>. Leave blank to run{" "}
+              <code>{settings.agent_backend}</code> directly.
+            </small>
+          </label>
           {validation ? (
             <small className="hint">
-              Codex CLI:{" "}
+              Codex CLI
+              {validation.codex_command === "codex" ? "" : ` (${validation.codex_command})`}:{" "}
               <span className={validation.codex_found ? "detect ok" : "detect missing"}>
                 {validation.codex_found ? "found" : "not found"}
               </span>
               {" · "}
-              Claude CLI:{" "}
+              Claude CLI
+              {validation.claude_command === "claude" ? "" : ` (${validation.claude_command})`}:{" "}
               <span className={validation.claude_found ? "detect ok" : "detect missing"}>
                 {validation.claude_found ? "found" : "not found"}
               </span>

@@ -73,12 +73,12 @@ agent:
   max_concurrent_agents: 3
   max_retry_backoff_ms: 300000
 codex:
-  command: codex
+  command: ${SYMPHONY_CODEX_COMMAND:-codex}   # launch command — wrappers OK
   approval_policy: never              # agents run unattended
   thread_sandbox: workspace-write
   network_access: false
 claude:
-  command: claude
+  command: ${SYMPHONY_CLAUDE_COMMAND:-claude} # launch command — wrappers OK
   permission_mode: acceptEdits
   turn_timeout_ms: 3600000
 ---
@@ -93,11 +93,12 @@ Description:
 
 Notes:
 
-- `${VAR}` references are filled from the app's environment. Symphony injects `LINEAR_API_KEY` (from the keychain), `REPO_URL`, `SYMPHONY_LINEAR_WORKSPACE`, `SYMPHONY_TRACKER_PREFIX`, `SYMPHONY_TRACKER_PROJECT_ID`, `SYMPHONY_INSTALL_CMD`, and `SYMPHONY_AGENT_BACKEND` from your Settings. Unset variables become empty strings.
+- `${VAR}` references are filled from the app's environment. Symphony injects `LINEAR_API_KEY` (from the keychain), `REPO_URL`, `SYMPHONY_LINEAR_WORKSPACE`, `SYMPHONY_TRACKER_PREFIX`, `SYMPHONY_TRACKER_PROJECT_ID`, `SYMPHONY_INSTALL_CMD`, `SYMPHONY_AGENT_BACKEND`, `SYMPHONY_CODEX_COMMAND`, and `SYMPHONY_CLAUDE_COMMAND` from your Settings. Unset variables become empty strings.
 - **Hooks are the exception**: `hooks` values are *not* interpolated at parse time — they run as shell scripts with the same variables available in their environment, so `$REPO_URL` and `${SYMPHONY_INSTALL_CMD:-npm ci}` resolve at execution.
 - Available hooks: `after_create`, `before_run`, `after_run`, `before_remove`.
 - Prompt placeholders: `{{issue.id}}`, `{{issue.identifier}}`, `{{issue.title}}`, `{{issue.description}}`, `{{issue.state}}`, `{{issue.branch}}`.
 - Retried runs automatically get a `## Retry context` section appended with the prior run's error and recent events.
+- The `codex.command` / `claude.command` launch commands come from the Settings "Launch command" field and may be wrappers with arguments (e.g. `cbcode --agent claude`); Symphony appends its own CLI flags after them.
 
 ## Data and security
 

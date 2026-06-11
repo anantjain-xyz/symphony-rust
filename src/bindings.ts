@@ -11,6 +11,8 @@ export type AppSettings = {
   workspace_root: string | null;
   install_cmd: string | null;
   agent_backend: AgentBackend;
+  codex_command: string | null;
+  claude_command: string | null;
   linear_api_key_set: boolean;
 };
 
@@ -30,6 +32,8 @@ export type ValidationResult = {
   workflow_error: string | null;
   codex_found: boolean;
   claude_found: boolean;
+  codex_command: string;
+  claude_command: string;
   app_data_dir: string;
   database_path: string;
 };
