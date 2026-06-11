@@ -555,10 +555,12 @@ function App() {
           <OverviewView
             overview={overview}
             canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            workerRunning={worker.state === "running"}
             setup={setup}
             onOpenRun={openRun}
             onStartWorker={startWorker}
             onOpenSettings={() => setView("settings")}
+            onOpenIssues={() => setView("issues")}
           />
         ) : null}
         {view === "runs" ? (
@@ -617,17 +619,21 @@ type SetupState = {
 function OverviewView({
   overview,
   canStartWorker,
+  workerRunning,
   setup,
   onOpenRun,
   onStartWorker,
   onOpenSettings,
+  onOpenIssues,
 }: {
   overview: Overview;
   canStartWorker: boolean;
+  workerRunning: boolean;
   setup: SetupState;
   onOpenRun: (id: string) => void;
   onStartWorker: () => void;
   onOpenSettings: () => void;
+  onOpenIssues: () => void;
 }) {
   return (
     <>
@@ -723,11 +729,25 @@ function OverviewView({
             emptyText={
               setup.blocked
                 ? "Finish setup before starting the worker."
-                : "Start the worker when you are ready to dispatch agent work."
+                : workerRunning
+                  ? "The worker is polling Linear. Move an issue to an active state (like Todo) to dispatch an agent."
+                  : "Start the worker when you are ready to dispatch agent work."
             }
-            actionLabel={setup.blocked ? "Open settings" : "Start worker"}
-            actionDisabled={setup.blocked ? false : !canStartWorker}
-            onAction={setup.blocked ? onOpenSettings : onStartWorker}
+            actionLabel={
+              setup.blocked
+                ? "Open settings"
+                : workerRunning
+                  ? "View issues"
+                  : "Start worker"
+            }
+            actionDisabled={setup.blocked || workerRunning ? false : !canStartWorker}
+            onAction={
+              setup.blocked
+                ? onOpenSettings
+                : workerRunning
+                  ? onOpenIssues
+                  : onStartWorker
+            }
           />
         </Panel>
         <Panel title="Retry queue">
