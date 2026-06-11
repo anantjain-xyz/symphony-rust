@@ -10,7 +10,7 @@ use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{WorkerManager, WorkerStartConfig, WorkerStatus};
 use tauri::{Emitter, Manager, State};
 
-const KEYRING_SERVICE: &str = "symphony-rust";
+const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

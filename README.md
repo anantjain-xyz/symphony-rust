@@ -102,7 +102,7 @@ Notes:
 ## Data and security
 
 - Your Linear API key lives in the **OS keychain**, not in any file.
-- Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/com.anant.symphony-rust` on macOS), alongside daily-rotated logs and per-run workspaces.
+- Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/xyz.anantjain.symphony` on macOS), alongside daily-rotated logs and per-run workspaces.
 - Agents run with the sandbox/permission settings you give them in the workflow file. The defaults (`approval_policy: never`, `permission_mode: acceptEdits`, no network for Codex) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
 
 ## Architecture

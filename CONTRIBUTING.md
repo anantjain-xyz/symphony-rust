@@ -31,7 +31,7 @@ pnpm test                 # frontend unit tests (vitest)
 
 ### App data during development
 
-The dev app uses the same OS keychain entry and app data directory as a packaged build (`~/Library/Application Support/com.anant.symphony-rust` on macOS). Settings → the storage footnote shows the exact paths, with buttons to reveal the database and logs.
+The dev app uses the same OS keychain entry and app data directory as a packaged build (`~/Library/Application Support/xyz.anantjain.symphony` on macOS). Settings → the storage footnote shows the exact paths, with buttons to reveal the database and logs.
 
 ## Packaging
 
