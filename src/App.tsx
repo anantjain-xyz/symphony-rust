@@ -1573,6 +1573,59 @@ function ExternalLink({
   );
 }
 
+function countMatches(text: string, needle: string) {
+  if (!needle) return 0;
+  const haystack = text.toLowerCase();
+  let count = 0;
+  let at = haystack.indexOf(needle);
+  while (at !== -1) {
+    count += 1;
+    at = haystack.indexOf(needle, at + needle.length);
+  }
+  return count;
+}
+
+function highlightMatches(
+  text: string,
+  needle: string,
+  firstIndex: number,
+  currentIndex: number,
+): React.ReactNode {
+  if (!needle) return text;
+  const haystack = text.toLowerCase();
+  let at = haystack.indexOf(needle);
+  if (at === -1) return text;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = firstIndex;
+  while (at !== -1) {
+    if (at > cursor) parts.push(text.slice(cursor, at));
+    parts.push(
+      <mark
+        key={matchIndex}
+        data-match-index={matchIndex}
+        className={matchIndex === currentIndex ? "search-hit current" : "search-hit"}
+      >
+        {text.slice(at, at + needle.length)}
+      </mark>,
+    );
+    matchIndex += 1;
+    cursor = at + needle.length;
+    at = haystack.indexOf(needle, cursor);
+  }
+  parts.push(text.slice(cursor));
+  return parts;
+}
+
+function scrollToMatch(container: HTMLElement | null, index: number) {
+  const mark = container?.querySelector(`mark[data-match-index="${index}"]`);
+  if (!(mark instanceof HTMLElement)) return;
+  // A match inside a collapsed payload is invisible until its details opens.
+  const details = mark.closest("details");
+  if (details && !details.open) details.open = true;
+  mark.scrollIntoView({ block: "center", inline: "nearest" });
+}
+
 function EventStream({
   events,
   live,
@@ -1582,15 +1635,113 @@ function EventStream({
 }) {
   // The worker writes a "humanized" twin alongside every raw event that has
   // a summary; the summaries below cover the raw events, so skip the twins.
-  const visible = events.filter((event) => event.kind !== "humanized");
+  const visible = useMemo(
+    () => events.filter((event) => event.kind !== "humanized"),
+    [events],
+  );
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const lastScrolledMatch = useRef("");
   const [follow, setFollow] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [current, setCurrent] = useState(0);
+
+  const described = useMemo(
+    () =>
+      visible.map((event) => ({
+        ...describeEvent(event.kind, event.payload),
+        pretty: prettyPayload(event.payload),
+      })),
+    [visible],
+  );
+
+  const needle = searchOpen ? query.toLowerCase() : "";
+
+  // Number every match across events so Enter/Shift+Enter can walk them in
+  // document order; each event records where its label/summary/payload start.
+  const { matchStarts, totalMatches } = useMemo(() => {
+    const matchStarts: { label: number; summary: number; payload: number }[] = [];
+    let totalMatches = 0;
+    for (const item of described) {
+      const label = totalMatches;
+      totalMatches += countMatches(item.label, needle);
+      const summary = totalMatches;
+      totalMatches += countMatches(item.summary, needle);
+      const payload = totalMatches;
+      totalMatches += countMatches(item.pretty, needle);
+      matchStarts.push({ label, summary, payload });
+    }
+    return { matchStarts, totalMatches };
+  }, [described, needle]);
+
+  useEffect(() => {
+    setCurrent(0);
+  }, [needle]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (current !== 0 && current >= totalMatches) setCurrent(0);
+  }, [current, totalMatches]);
 
   useEffect(() => {
     if (!follow) return;
     const el = containerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [visible.length, follow]);
+
+  // Keep the active match in view. Runs after every render but only acts when
+  // the (query, index) pair changed, so live events streaming in while the
+  // user reads a match don't re-yank the scroll position.
+  useEffect(() => {
+    if (!needle || totalMatches === 0) {
+      lastScrolledMatch.current = "";
+      return;
+    }
+    const key = `${needle} ${current}`;
+    if (lastScrolledMatch.current === key) return;
+    lastScrolledMatch.current = key;
+    scrollToMatch(containerRef.current, current);
+  });
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const findShortcut =
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "f";
+      if (findShortcut && visible.length > 0) {
+        event.preventDefault();
+        if (searchOpen) {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        } else {
+          setSearchOpen(true);
+        }
+      } else if (event.key === "Escape" && searchOpen) {
+        event.preventDefault();
+        setSearchOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [searchOpen, visible.length]);
+
+  const step = (dir: 1 | -1) => {
+    if (totalMatches === 0) return;
+    if (totalMatches === 1) {
+      // The index can't change, so re-center the only match directly.
+      scrollToMatch(containerRef.current, 0);
+      return;
+    }
+    setCurrent((prev) => (prev + dir + totalMatches) % totalMatches);
+  };
 
   if (visible.length === 0) {
     return (
@@ -1599,52 +1750,114 @@ function EventStream({
   }
 
   return (
-    <div
-      className="events"
-      ref={containerRef}
-      onScroll={() => {
-        const el = containerRef.current;
-        if (!el) return;
-        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
-      }}
-    >
-      {visible.map((event) => {
-        const { label, summary, tone } = describeEvent(event.kind, event.payload);
-        return (
-          <article key={event.id} className={tone === "error" ? "event-error" : undefined}>
-            <div className="event-line">
-              <span className="event-kind">{label}</span>
-              <span
-                className={
-                  event.kind === "tool_call" ? "event-summary mono" : "event-summary"
-                }
-              >
-                {summary || <em>no details</em>}
-              </span>
-              <time title={shortTime(event.created_at)}>
-                {timeOnly(event.created_at)}
-              </time>
-            </div>
-            <details>
-              <summary>payload</summary>
-              <pre>{prettyPayload(event.payload)}</pre>
-            </details>
-          </article>
-        );
-      })}
-      {!follow && live ? (
-        <button
-          type="button"
-          className="jump-latest"
-          onClick={() => {
-            const el = containerRef.current;
-            if (el) el.scrollTop = el.scrollHeight;
-            setFollow(true);
-          }}
-        >
-          Jump to latest ↓
-        </button>
+    <div className="events-wrap">
+      {searchOpen ? (
+        <div className="event-search">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={query}
+            placeholder="Search events…"
+            aria-label="Search run log"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                step(event.shiftKey ? -1 : 1);
+              }
+            }}
+          />
+          {needle ? (
+            <span className="event-search-count tnum">
+              {totalMatches === 0
+                ? "0/0"
+                : `${Math.min(current + 1, totalMatches)}/${totalMatches}`}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            title="Previous match (Shift+Enter)"
+            aria-label="Previous match"
+            disabled={totalMatches === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => step(-1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            title="Next match (Enter)"
+            aria-label="Next match"
+            disabled={totalMatches === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => step(1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            title="Close (Esc)"
+            aria-label="Close search"
+            onClick={() => setSearchOpen(false)}
+          >
+            ✕
+          </button>
+        </div>
       ) : null}
+      <div
+        className="events"
+        ref={containerRef}
+        onScroll={() => {
+          const el = containerRef.current;
+          if (!el) return;
+          setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+        }}
+      >
+        {visible.map((event, index) => {
+          const { label, summary, tone, pretty } = described[index];
+          const starts = matchStarts[index];
+          return (
+            <article key={event.id} className={tone === "error" ? "event-error" : undefined}>
+              <div className="event-line">
+                <span className="event-kind">
+                  {highlightMatches(label, needle, starts.label, current)}
+                </span>
+                <span
+                  className={
+                    event.kind === "tool_call" ? "event-summary mono" : "event-summary"
+                  }
+                >
+                  {summary ? (
+                    highlightMatches(summary, needle, starts.summary, current)
+                  ) : (
+                    <em>no details</em>
+                  )}
+                </span>
+                <time title={shortTime(event.created_at)}>
+                  {timeOnly(event.created_at)}
+                </time>
+              </div>
+              <details>
+                <summary>payload</summary>
+                <pre>{highlightMatches(pretty, needle, starts.payload, current)}</pre>
+              </details>
+            </article>
+          );
+        })}
+        {!follow && live ? (
+          <button
+            type="button"
+            className="jump-latest"
+            onClick={() => {
+              const el = containerRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              setFollow(true);
+            }}
+          >
+            Jump to latest ↓
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
