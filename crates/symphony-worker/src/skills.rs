@@ -428,14 +428,19 @@ async fn write_skills(workspace: &Path, skills: &[SkillFile]) -> std::io::Result
         let link_dir = workspace.join(CLAUDE_SKILLS_DIR);
         tokio::fs::create_dir_all(&link_dir).await?;
         let link = link_dir.join(&skill.name);
+        // Replace whatever the repo previously tracked at the discovery path.
+        // Keeping a stale entry would leave Claude Code pointing at the old
+        // target even after the install PR merges.
+        match tokio::fs::symlink_metadata(&link).await {
+            Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(&link).await?,
+            Ok(_) => tokio::fs::remove_file(&link).await?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
         #[cfg(unix)]
         {
             let target = PathBuf::from("../..").join(SKILLS_DIR).join(&skill.name);
-            match tokio::fs::symlink(&target, &link).await {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(err),
-            }
+            tokio::fs::symlink(&target, &link).await?;
         }
         #[cfg(not(unix))]
         {
@@ -610,6 +615,33 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
             "body"
+        );
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[tokio::test]
+    async fn replaces_stale_claude_discovery_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        // A previous partial install left a real directory (not a symlink)
+        // with outdated content at the discovery path.
+        let stale = temp.path().join(".claude/skills/commit");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "stale").unwrap();
+
+        let skills = vec![SkillFile {
+            name: "commit".to_string(),
+            content: "fresh".to_string(),
+        }];
+        write_skills(temp.path(), &skills).await.unwrap();
+
+        let link = temp.path().join(".claude/skills/commit");
+        assert_eq!(
+            std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
+            "fresh"
         );
         #[cfg(unix)]
         assert!(std::fs::symlink_metadata(&link)

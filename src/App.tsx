@@ -122,6 +122,7 @@ function App() {
 
   const selectedRunIdRef = useRef<string | null>(null);
   const autoStartDone = useRef(false);
+  const skillsCheckSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -296,17 +297,27 @@ function App() {
   function refreshSkillsStatus(forSettings?: AppSettings) {
     const target = forSettings ?? settings;
     if (!runtimeAvailable || !target) return;
+    // Overlapping checks (the auto-check on entering Settings plus a manual
+    // re-check after editing the repo URL) can resolve out of order; only the
+    // newest request may apply, or a slow response for the old repo would
+    // overwrite the status of the current one.
+    const seq = ++skillsCheckSeq.current;
     setSkillsChecking(true);
     invoke<SkillsStatus>("get_skills_status", { settings: target })
       .then((status) => {
+        if (seq !== skillsCheckSeq.current) return;
         setSkillsStatus(status);
         // A fresh check supersedes any finished install — without this, a
         // completed install for repo A keeps showing its PR after the user
         // switches the form to repo B.
         setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
       })
-      .catch(() => setSkillsStatus(null))
-      .finally(() => setSkillsChecking(false));
+      .catch(() => {
+        if (seq === skillsCheckSeq.current) setSkillsStatus(null);
+      })
+      .finally(() => {
+        if (seq === skillsCheckSeq.current) setSkillsChecking(false);
+      });
   }
 
   async function startSkillsInstall() {
@@ -1435,7 +1446,9 @@ function SkillsBlock({
   } else {
     detail = status?.detail ?? "Status not checked yet.";
     action = (
-      <button type="button" disabled={actionsDisabled} onClick={onRefresh}>
+      // Zero-arg wrapper: the handler takes optional settings, and React's
+      // mouse event must not be mistaken for them.
+      <button type="button" disabled={actionsDisabled} onClick={() => onRefresh()}>
         Check
       </button>
     );
