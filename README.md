@@ -37,6 +37,8 @@ pnpm install
 pnpm tauri dev      # or: pnpm tauri build
 ```
 
+See [Building](#building) for production bundles and signed releases.
+
 On first launch the Overview shows a setup checklist:
 
 1. **Connect Linear** — paste your API key in *Settings → Linear*. It is stored in the macOS keychain, never on disk.
@@ -116,15 +118,39 @@ Notes:
 - `crates/symphony-agents` — native Codex and Claude process drivers
 - `crates/symphony-worker` — recovery, polling loop, retries, hooks, workspace lifecycle
 
-## Development
+## Building
+
+Prerequisites: **Rust** (stable), **Node.js** ≥ 20 with **pnpm**, and on macOS the Xcode Command Line Tools (`xcode-select --install`).
 
 ```sh
 pnpm install
-pnpm tauri dev            # run the app
-pnpm typecheck && pnpm test && cargo test --workspace
+pnpm tauri dev            # run the app with hot reload
+pnpm tauri build          # production bundle: .app + .dmg
+pnpm typecheck && pnpm test && cargo test --workspace   # the checks CI runs
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including bindings regeneration and packaging.
+`pnpm tauri build` writes artifacts to `target/release/bundle/` (`macos/Symphony.app`, `dmg/*.dmg`); pass `--debug` for a faster unoptimized bundle. On macOS the `pnpm tauri` wrapper sets `CI=true` during builds so DMG creation uses Tauri's deterministic path instead of Finder AppleScript window decoration, which can time out in non-interactive shells (set `TAURI_BUNDLER_DMG_IGNORE_CI=true` to opt out).
+
+### Signed macOS release
+
+```sh
+pnpm release:mac
+```
+
+This builds, signs, notarizes, and staples the distributable DMG, then verifies the result with `spctl` and `stapler validate`. Signing and notarization credentials live in `~/.symphony-release.env` (override the location with `SYMPHONY_RELEASE_ENV`):
+
+```sh
+APPLE_SIGNING_IDENTITY=... # e.g. "Developer ID Application: Jane Doe (TEAMID1234)"
+APPLE_API_ISSUER=...       # App Store Connect issuer ID (UUID)
+APPLE_API_KEY=...          # API key ID
+APPLE_API_KEY_PATH=...     # absolute path to the AuthKey_<id>.p8 file
+```
+
+The Developer ID Application certificate named by `APPLE_SIGNING_IDENTITY` must be installed in the login keychain; the script validates it before building.
+
+The finished DMG lands in `target/release/bundle/dmg/`.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including TypeScript bindings regeneration.
 
 ## License
 

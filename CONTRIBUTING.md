@@ -41,6 +41,8 @@ pnpm tauri build --debug
 
 On macOS, the package script runs Tauri builds with `CI=true` so DMG creation uses Tauri's deterministic `--skip-jenkins` path instead of Finder AppleScript window decoration, which can time out in non-interactive shells.
 
+For signed, notarized release builds (`pnpm release:mac`), see [Building](README.md#building) in the README.
+
 ## Pull requests
 
 - Keep PRs focused; run the checks above before submitting.
