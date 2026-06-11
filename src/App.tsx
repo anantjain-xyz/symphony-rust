@@ -1703,7 +1703,7 @@ function EventStream({
       lastScrolledMatch.current = "";
       return;
     }
-    const key = `${needle} ${current}`;
+    const key = `${needle}\u0000${current}`;
     if (lastScrolledMatch.current === key) return;
     lastScrolledMatch.current = key;
     scrollToMatch(containerRef.current, current);
