@@ -767,7 +767,7 @@ function OverviewView({
       <div className="grid two">
         <Panel title="Recent failures">
           <RunTable
-            runs={overview.recent_failures}
+            runs={overview.recent_failures.slice(0, 5)}
             onOpenRun={onOpenRun}
             emptyTitle="No recent failures"
             emptyText="Worker failures will be collected here for triage."
