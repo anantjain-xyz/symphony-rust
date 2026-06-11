@@ -187,7 +187,7 @@ fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
     }
 }
 
-// Launch commands may be wrappers with arguments (`cbcode --agent codex`);
+// Launch commands may be wrappers with arguments (`mycode --agent codex`);
 // only the first token names the executable to look up.
 fn command_found(command: &str) -> bool {
     command
@@ -673,15 +673,15 @@ mod tests {
         let mut env = settings_env();
         env.insert(
             "SYMPHONY_CODEX_COMMAND".to_string(),
-            "cbcode --agent codex".to_string(),
+            "mycode --agent codex".to_string(),
         );
         env.insert(
             "SYMPHONY_CLAUDE_COMMAND".to_string(),
-            "cbcode --agent claude".to_string(),
+            "mycode --agent claude".to_string(),
         );
         let parsed = parse_workflow_source(&default_workflow_source(), &env).unwrap();
-        assert_eq!(parsed.front_matter.codex.command, "cbcode --agent codex");
-        assert_eq!(parsed.front_matter.claude.command, "cbcode --agent claude");
+        assert_eq!(parsed.front_matter.codex.command, "mycode --agent codex");
+        assert_eq!(parsed.front_matter.claude.command, "mycode --agent claude");
     }
 
     #[test]
@@ -696,8 +696,8 @@ mod tests {
         assert_eq!(effective_command(None, "codex"), "codex");
         assert_eq!(effective_command(Some("  "), "codex"), "codex");
         assert_eq!(
-            effective_command(Some("cbcode --agent codex"), "codex"),
-            "cbcode --agent codex"
+            effective_command(Some("mycode --agent codex"), "codex"),
+            "mycode --agent codex"
         );
     }
 
