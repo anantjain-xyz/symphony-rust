@@ -10,6 +10,8 @@ use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{WorkerManager, WorkerStartConfig, WorkerStatus};
 use tauri::{Emitter, Manager, State};
 
+mod path_env;
+
 const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
 
@@ -281,14 +283,26 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // GUI launches inherit launchd's minimal PATH, which breaks hooks and
+    // agent processes that need user-installed tools. Overlay the login-shell
+    // PATH before Tauri spawns threads that read the environment.
+    let path_fix = path_env::fix();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
             let _ = keyring::use_native_store(false);
             init_tracing(&app_dir);
+            match &path_fix {
+                Ok(path) => tracing::info!(target: "symphony", %path, "login-shell PATH overlaid"),
+                Err(error) => tracing::warn!(
+                    target: "symphony",
+                    %error,
+                    "login-shell PATH resolution failed; keeping inherited PATH"
+                ),
+            }
             let db_path = app_dir.join("symphony.sqlite");
             let (repo, bus) = tauri::async_runtime::block_on(async {
                 let bus = EventBus::default();
