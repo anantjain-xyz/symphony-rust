@@ -660,7 +660,6 @@ function OverviewView({
               <thead>
                 <tr>
                   <th>Issue</th>
-                  <th>Tokens</th>
                   <th>Started</th>
                   <th>Last activity</th>
                 </tr>
@@ -691,13 +690,6 @@ function OverviewView({
                           <span className="pulse" />
                         </strong>
                         {run ? <small>{run.issue_title}</small> : null}
-                      </td>
-                      <td className="tnum">
-                        <strong>{formatTokens(session.total_tokens)}</strong>
-                        <small>
-                          {formatTokens(session.input_tokens)} in ·{" "}
-                          {formatTokens(session.output_tokens)} out
-                        </small>
                       </td>
                       <td className="tnum" title={shortTime(session.started_at)}>
                         {relativeTime(session.started_at)}
