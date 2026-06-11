@@ -790,6 +790,14 @@ td strong {
   color: var(--foreground);
 }
 
+.link-button.outlined {
+  border-color: var(--border);
+}
+
+.link-button.outlined:hover:not(:disabled) {
+  background: var(--accent);
+}
+
 .clickable-row.selected {
   background: var(--muted);
 }

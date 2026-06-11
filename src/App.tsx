@@ -1271,7 +1271,7 @@ function SettingsView({
           {settings.linear_api_key_set ? (
             <button
               type="button"
-              className="link-button self-start"
+              className="link-button outlined self-start"
               disabled={busy || !runtimeAvailable}
               onClick={onRemoveKey}
             >
