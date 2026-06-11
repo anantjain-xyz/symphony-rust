@@ -14,7 +14,7 @@ use std::{
     sync::Arc,
 };
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
-use symphony_core::{AgentBackend, AgentOutcome, ParsedWorkflow};
+use symphony_core::{AgentBackend, AgentOutcome, ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy};
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex};
 use tokio_util::sync::CancellationToken;
@@ -304,11 +304,11 @@ impl SkillsInstaller {
             let mut guard = inner.lock().await;
             match result {
                 Ok(pr_url) => {
-                    info!(target: "symphony", pr_url = pr_url.as_deref(), "skills install completed");
+                    info!(target: "symphony", %pr_url, "skills install completed");
                     *guard = Some(SkillsInstallStatus {
                         state: SkillsInstallState::Completed,
                         message: None,
-                        pr_url,
+                        pr_url: Some(pr_url),
                         error: None,
                     });
                 }
@@ -339,7 +339,7 @@ async fn set_message(inner: &Arc<Mutex<Option<SkillsInstallStatus>>>, message: i
 async fn run_install(
     inner: &Arc<Mutex<Option<SkillsInstallStatus>>>,
     config: SkillsInstallConfig,
-) -> Result<Option<String>, String> {
+) -> Result<String, String> {
     let workspace = config.workspace_root.join(INSTALL_WORKSPACE_KEY);
     tokio::fs::remove_dir_all(&workspace).await.ok();
     tokio::fs::create_dir_all(&workspace)
@@ -376,9 +376,13 @@ async fn run_install(
         },
         cwd: workspace.clone(),
         prompt: install_prompt(&config.repo_url, &config.skills),
-        thread_sandbox: front.codex.thread_sandbox.clone(),
-        turn_sandbox_policy: front.codex.turn_sandbox_policy.clone(),
-        network_access: front.codex.network_access,
+        // The install session must edit the written skill files and reach
+        // GitHub to push and open the PR, so it overrides locked-down Codex
+        // worker settings (read-only or no-network sandboxes) that are valid
+        // for issue runs but would guarantee this run fails.
+        thread_sandbox: ThreadSandbox::WorkspaceWrite,
+        turn_sandbox_policy: TurnSandboxPolicy::WorkspaceWrite,
+        network_access: true,
         turn_timeout_ms: match backend {
             AgentBackend::Codex => front.codex.turn_timeout_ms,
             AgentBackend::Claude => front.claude.turn_timeout_ms,
@@ -411,7 +415,16 @@ async fn run_install(
 
     let result = result.map_err(|err| format!("agent run failed: {err}"))?;
     match result.outcome {
-        AgentOutcome::Success => Ok(find_pr_url(&workspace).await),
+        // An agent can exit "successfully" while merely summarizing why it
+        // could not push or open the PR — completion is only real if the PR
+        // exists.
+        AgentOutcome::Success => match find_pr_url(&workspace).await {
+            Some(url) => Ok(url),
+            None => Err(format!(
+                "the agent finished but no open PR exists for {INSTALL_BRANCH} — \
+                 check `gh auth status` and push access, then retry"
+            )),
+        },
         AgentOutcome::Cancelled => Err("install was cancelled".to_string()),
         AgentOutcome::Failure => Err(result
             .error_message
