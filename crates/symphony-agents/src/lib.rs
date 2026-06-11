@@ -538,9 +538,28 @@ impl ClaudeStreamState {
                     }
                 }
                 "thinking_tokens" => {
+                    let prior = self.session_info.thinking_tokens;
                     if let Some(estimate) = ev["estimated_tokens"].as_i64() {
-                        let prior = self.session_info.thinking_tokens.unwrap_or(0);
-                        self.session_info.thinking_tokens = Some(prior.max(estimate));
+                        self.session_info.thinking_tokens = Some(prior.unwrap_or(0).max(estimate));
+                    }
+                    // Persist each update as it happens: runs that time out,
+                    // get cancelled, or die without a usage-bearing result
+                    // event would otherwise lose the estimate. The null
+                    // payload marks this as metadata-only so the worker skips
+                    // the event log.
+                    if self.session_info.thinking_tokens != prior {
+                        send_mapped(
+                            events,
+                            MappedAgentEvent {
+                                kind: AgentEventKind::Status,
+                                payload: Value::Null,
+                                humanized: None,
+                                tokens: None,
+                                rate_limit: None,
+                                session_info: Some(self.session_info.clone()),
+                            },
+                        )
+                        .await;
                     }
                 }
                 _ => {}
@@ -996,6 +1015,14 @@ mod tests {
             )
             .await
             .unwrap();
+        // Thinking updates emit a metadata-only event right away, so the
+        // estimate survives runs that never reach a usage-bearing result.
+        let thinking = rx.recv().await.unwrap();
+        assert!(thinking.payload.is_null());
+        assert_eq!(
+            thinking.session_info.and_then(|info| info.thinking_tokens),
+            Some(42)
+        );
         let result = stream
             .push(
                 json!({

@@ -75,6 +75,13 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
 ];
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
+    apply_migrations(pool, MIGRATIONS).await
+}
+
+pub(crate) async fn apply_migrations(
+    pool: &SqlitePool,
+    migrations: &[(&str, &str)],
+) -> Result<(), StorageError> {
     // 0001 predates this table and stays idempotent, so databases created
     // before migrations were versioned replay it harmlessly and catch up.
     sqlx::query(
@@ -87,7 +94,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
     )
     .execute(pool)
     .await?;
-    for (id, sql) in MIGRATIONS {
+    for (id, sql) in migrations {
         let applied: Option<(String,)> =
             sqlx::query_as("select id from schema_migrations where id = ?1")
                 .bind(id)
@@ -96,17 +103,23 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
         if applied.is_some() {
             continue;
         }
+        // The statements and the marker commit together: an interrupted
+        // migration rolls back whole instead of leaving the schema changed
+        // with no marker, which would make every later startup retry the
+        // migration and fail (e.g. on a duplicate column).
+        let mut tx = pool.begin().await?;
         for statement in sql.split(';') {
             let statement = statement.trim();
             if statement.is_empty() {
                 continue;
             }
-            sqlx::query(statement).execute(pool).await?;
+            sqlx::query(statement).execute(&mut *tx).await?;
         }
         sqlx::query("insert into schema_migrations (id) values (?1)")
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
     }
     Ok(())
 }

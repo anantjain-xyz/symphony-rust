@@ -528,7 +528,12 @@ async fn dispatch_run(
         tokio::select! {
             maybe_event = rx.recv() => {
                 if let Some(event) = maybe_event {
-                    repo.append_event(&run.id, event.kind.clone(), &event.payload).await?;
+                    // A null payload marks a metadata-only event (e.g. a
+                    // thinking-token update): persist the side channels but
+                    // keep it out of the visible event log.
+                    if !event.payload.is_null() {
+                        repo.append_event(&run.id, event.kind.clone(), &event.payload).await?;
+                    }
                     if let Some(info) = &event.session_info {
                         repo.set_run_session_info(&run.id, info).await?;
                     }

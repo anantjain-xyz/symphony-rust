@@ -992,6 +992,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_migrations_roll_back_atomically() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let broken: &[(&str, &str)] = &[(
+            "0001_probe",
+            "create table atomic_probe (id integer primary key); not valid sql;",
+        )];
+        assert!(crate::apply_migrations(&pool, broken).await.is_err());
+        let marker: Option<(String,)> =
+            sqlx::query_as("select id from schema_migrations where id = '0001_probe'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(marker.is_none(), "failed migration must not be recorded");
+        // The partial schema change rolled back, so a fixed migration with
+        // the same id applies cleanly instead of hitting "already exists".
+        let fixed: &[(&str, &str)] = &[(
+            "0001_probe",
+            "create table atomic_probe (id integer primary key);",
+        )];
+        crate::apply_migrations(&pool, fixed).await.unwrap();
+        sqlx::query("select id from atomic_probe")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn enforces_one_running_run_per_issue() {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
