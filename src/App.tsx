@@ -156,7 +156,7 @@ function App() {
       setSettings(loaded);
       setSavedSnapshot(formSnapshot(loaded));
       if (loaded.repo_url.trim() !== "") {
-        refreshSkillsStatus();
+        refreshSkillsStatus(loaded);
       }
       await refreshDashboard();
       // The worker should be running whenever the app is open, so start it
@@ -261,7 +261,7 @@ function App() {
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
-    refreshSkillsStatus();
+    refreshSkillsStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
@@ -291,19 +291,28 @@ function App() {
   }
 
   // Skill detection talks to GitHub via `gh`, so it runs outside the global
-  // busy flag and never blocks the rest of the form.
-  function refreshSkillsStatus() {
-    if (!runtimeAvailable) return;
+  // busy flag and never blocks the rest of the form. It checks the settings
+  // as the user sees them (including unsaved edits), not the saved file.
+  function refreshSkillsStatus(forSettings?: AppSettings) {
+    const target = forSettings ?? settings;
+    if (!runtimeAvailable || !target) return;
     setSkillsChecking(true);
-    invoke<SkillsStatus>("get_skills_status")
-      .then(setSkillsStatus)
+    invoke<SkillsStatus>("get_skills_status", { settings: target })
+      .then((status) => {
+        setSkillsStatus(status);
+        // A fresh check supersedes any finished install — without this, a
+        // completed install for repo A keeps showing its PR after the user
+        // switches the form to repo B.
+        setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
+      })
       .catch(() => setSkillsStatus(null))
       .finally(() => setSkillsChecking(false));
   }
 
   async function startSkillsInstall() {
+    if (!settings) return;
     const status = await call(() =>
-      invoke<SkillsInstallStatus>("install_skills"),
+      invoke<SkillsInstallStatus>("install_skills", { settings }),
     );
     setSkillsInstall(status);
   }

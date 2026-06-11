@@ -307,9 +307,11 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
+// Both skills commands take the caller's settings (like validate_settings)
+// rather than reloading from disk, so unsaved form edits — a just-typed repo
+// URL in particular — are what gets checked and installed against.
 #[tauri::command]
-async fn get_skills_status(state: State<'_, AppState>) -> Result<SkillsStatus, String> {
-    let settings = load_settings_from_disk(&state).await?;
+async fn get_skills_status(settings: AppSettings) -> Result<SkillsStatus, String> {
     let names: Vec<String> = bundled_skills()
         .into_iter()
         .map(|skill| skill.name)
@@ -325,8 +327,10 @@ async fn get_skills_install_status(
 }
 
 #[tauri::command]
-async fn install_skills(state: State<'_, AppState>) -> Result<SkillsInstallStatus, String> {
-    let settings = load_settings_from_disk(&state).await?;
+async fn install_skills(
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<SkillsInstallStatus, String> {
     if settings.repo_url.trim().is_empty() {
         return Err("Add a repository URL under Settings → Repository first.".to_string());
     }

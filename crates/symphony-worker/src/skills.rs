@@ -95,6 +95,12 @@ pub fn parse_github_repo(url: &str) -> Option<String> {
 }
 
 /// Check the repo's default branch for the bundled skills without cloning.
+///
+/// One GraphQL call resolves `.agents/skills/` and each child's entries, so a
+/// skill only counts as present when `<name>/SKILL.md` actually exists — a
+/// directory listing alone would accept partial or corrupt installs. It also
+/// keeps "repo not accessible" (bad URL, missing gh auth) distinct from
+/// "skills missing": only the latter should offer the install PR.
 pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatus {
     if repo_url.trim().is_empty() {
         return SkillsStatus::unavailable("No repository configured.");
@@ -102,22 +108,28 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
     let Some(slug) = parse_github_repo(repo_url) else {
         return SkillsStatus::unavailable("Skill detection needs a github.com repository URL.");
     };
+    // parse_github_repo always yields owner/repo.
+    let (owner, name) = slug.split_once('/').unwrap_or((slug.as_str(), ""));
 
+    let query = format!(
+        r#"query {{ repository(owner: "{owner}", name: "{name}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#
+    );
     let listing = run_shell(
         None,
-        &format!(
-            "gh api {}/contents/{} --jq '.[].name'",
-            shell_quote(&format!("repos/{slug}")),
-            SKILLS_DIR
-        ),
+        &format!("gh api graphql -f query={}", shell_quote(&query)),
     )
     .await;
     let present: Vec<String> = match listing {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|line| line.trim().to_string())
-            .filter(|line| !line.is_empty())
-            .collect(),
+        Ok(output) if output.status.success() => {
+            match skills_with_manifest(&String::from_utf8_lossy(&output.stdout)) {
+                Ok(present) => present,
+                Err(err) => {
+                    return SkillsStatus::unavailable(format!(
+                        "Could not parse the GitHub response: {err}"
+                    ))
+                }
+            }
+        }
         Ok(output) => {
             if output.status.code() == Some(127) {
                 return SkillsStatus::unavailable(
@@ -125,14 +137,15 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
                 );
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("404") || stderr.contains("Not Found") {
-                Vec::new()
-            } else {
+            if stderr.contains("Could not resolve to a Repository") {
                 return SkillsStatus::unavailable(format!(
-                    "Could not check {slug}: {}",
-                    tail(&stderr, 200)
+                    "Could not access {slug}. Check the repo URL and `gh auth status`."
                 ));
             }
+            return SkillsStatus::unavailable(format!(
+                "Could not check {slug}: {}",
+                tail(&stderr, 200)
+            ));
         }
         Err(err) => return SkillsStatus::unavailable(format!("Could not run gh: {err}")),
     };
@@ -180,6 +193,32 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         pr_url: None,
         detail: None,
     }
+}
+
+/// Names of skill directories under `.agents/skills/` that contain a
+/// `SKILL.md` blob, from the GraphQL response of `check_skills`. A missing
+/// path resolves to `object: null`, which is simply "none present".
+fn skills_with_manifest(raw: &str) -> Result<Vec<String>, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let entries = value["data"]["repository"]["object"]["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Ok(entries
+        .iter()
+        .filter(|entry| {
+            entry["type"].as_str() == Some("tree")
+                && entry["object"]["entries"]
+                    .as_array()
+                    .is_some_and(|children| {
+                        children.iter().any(|child| {
+                            child["name"].as_str() == Some("SKILL.md")
+                                && child["type"].as_str() == Some("blob")
+                        })
+                    })
+        })
+        .filter_map(|entry| entry["name"].as_str().map(ToOwned::to_owned))
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -513,6 +552,28 @@ mod tests {
         ] {
             assert_eq!(parse_github_repo(url), None, "should reject {url}");
         }
+    }
+
+    #[test]
+    fn counts_only_skill_dirs_with_a_manifest() {
+        let raw = r#"{"data":{"repository":{"object":{"entries":[
+            {"name":"commit","type":"tree","object":{"entries":[{"name":"SKILL.md","type":"blob"}]}},
+            {"name":"push","type":"tree","object":{"entries":[{"name":"README.md","type":"blob"}]}},
+            {"name":"land","type":"blob","object":null},
+            {"name":"pull","type":"tree","object":{"entries":[]}}
+        ]}}}}"#;
+        assert_eq!(skills_with_manifest(raw).unwrap(), vec!["commit"]);
+    }
+
+    #[test]
+    fn missing_skills_path_means_nothing_present() {
+        for raw in [
+            r#"{"data":{"repository":{"object":null}}}"#,
+            r#"{"data":{"repository":null}}"#,
+        ] {
+            assert_eq!(skills_with_manifest(raw).unwrap(), Vec::<String>::new());
+        }
+        assert!(skills_with_manifest("not json").is_err());
     }
 
     #[test]
