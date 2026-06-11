@@ -44,6 +44,9 @@
 
   --neutral-dot: hsl(240 4% 60%);
 
+  --search-hit: hsl(50 100% 78%);
+  --search-hit-current: hsl(27 95% 64%);
+
   --radius: 0.5rem;
   --shadow-sm: 0 1px 2px hsl(240 6% 10% / 0.04);
   --shadow: 0 1px 3px hsl(240 6% 10% / 0.06), 0 1px 2px hsl(240 6% 10% / 0.04);
@@ -87,6 +90,9 @@
   --info-foreground: hsl(214 65% 74%);
 
   --neutral-dot: hsl(240 4% 50%);
+
+  --search-hit: hsl(45 65% 30%);
+  --search-hit-current: hsl(27 75% 45%);
 
   --shadow-sm: 0 1px 2px hsl(0 0% 0% / 0.3);
   --shadow: 0 1px 3px hsl(0 0% 0% / 0.4), 0 1px 2px hsl(0 0% 0% / 0.3);
@@ -890,6 +896,58 @@ td strong {
 
 .events details summary:hover {
   color: var(--foreground);
+}
+
+.events-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+
+.event-search {
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  position: absolute;
+  right: 14px;
+  top: 8px;
+  z-index: 2;
+}
+
+.event-search input {
+  font-size: 12px;
+  min-height: 26px;
+  padding: 4px 8px;
+  width: 170px;
+}
+
+.event-search-count {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.event-search button {
+  font-size: 12px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+mark.search-hit {
+  background: var(--search-hit);
+  border-radius: 2px;
+  color: inherit;
+}
+
+mark.search-hit.current {
+  background: var(--search-hit-current);
 }
 
 .jump-latest {
