@@ -116,6 +116,7 @@ function App() {
   }, [runtimeAvailable]);
 
   const selectedRunIdRef = useRef<string | null>(null);
+  const autoStartDone = useRef(false);
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -145,13 +146,21 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable) return;
 
-    invoke<AppSettings>("load_settings")
-      .then((loaded) => {
-        setSettings(loaded);
-        setSavedSnapshot(formSnapshot(loaded));
-      })
-      .catch((err) => setError(formatError(err)));
-    refreshDashboard().catch((err) => setError(formatError(err)));
+    const boot = async () => {
+      const loaded = await invoke<AppSettings>("load_settings");
+      setSettings(loaded);
+      setSavedSnapshot(formSnapshot(loaded));
+      await refreshDashboard();
+      // The worker should be running whenever the app is open, so start it
+      // on launch once setup is complete; the topbar toggle stops it.
+      if (autoStartDone.current) return;
+      autoStartDone.current = true;
+      if (!loaded.linear_api_key_set || loaded.repo_url.trim() === "") return;
+      const status = await invoke<WorkerStatus>("get_worker_status");
+      if (status.state !== "stopped" || status.last_error) return;
+      setWorker(await invoke<WorkerStatus>("start_worker"));
+    };
+    boot().catch((err) => setError(formatError(err)));
 
     // Agent events arrive in bursts; coalesce them into a single refresh.
     let timer: number | null = null;
@@ -350,6 +359,17 @@ function App() {
     stopWorker();
   }
 
+  const workerTitle =
+    worker.state === "running"
+      ? confirmStop
+        ? `${overview.active_runs.length} active ${overview.active_runs.length === 1 ? "run" : "runs"} will be interrupted — click again to stop`
+        : worker.started_at
+          ? `Running since ${shortTime(worker.started_at)} — click to stop`
+          : "Stop worker"
+      : worker.state === "stopping"
+        ? "Worker is stopping"
+        : "Start worker";
+
   return (
     <main className="app">
       <header className="topbar">
@@ -387,48 +407,31 @@ function App() {
           >
             {theme === "dark" ? <SunIcon /> : <MoonIcon />}
           </button>
-          <div className={`worker-pill ${worker.state}`} aria-live="polite">
+          <button
+            type="button"
+            className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
+            disabled={busy || !runtimeAvailable || worker.state === "stopping"}
+            onClick={worker.state === "running" ? requestStop : startWorker}
+            title={workerTitle}
+            aria-label={workerTitle}
+            aria-live="polite"
+          >
             <span className={`status-dot ${worker.state}`} aria-hidden="true" />
-            <div className="worker-status-copy">
-              <strong>{worker.state}</strong>
-              <small title={worker.started_at ? shortTime(worker.started_at) : undefined}>
-                {confirmStop
-                  ? `interrupts ${overview.active_runs.length} ${overview.active_runs.length === 1 ? "run" : "runs"}`
-                  : worker.started_at
-                    ? `started ${relativeTime(worker.started_at)}`
-                    : "not started"}
-              </small>
-            </div>
-            {worker.state === "running" ? (
-              <button
-                className={
-                  confirmStop
-                    ? "icon-button worker-action danger"
-                    : "icon-button worker-action"
-                }
-                disabled={busy || !runtimeAvailable}
-                onClick={requestStop}
-                title={
-                  confirmStop
-                    ? `${overview.active_runs.length} active ${overview.active_runs.length === 1 ? "run" : "runs"} will be interrupted — click again to stop`
-                    : "Stop worker"
-                }
-                aria-label={confirmStop ? "Confirm stop worker" : "Stop worker"}
-              >
-                <span aria-hidden="true">■</span>
-              </button>
+            {worker.state === "running" && !confirmStop ? (
+              <>
+                <span className="worker-toggle-label rest">Running</span>
+                <span className="worker-toggle-label on-hover">Stop</span>
+              </>
             ) : (
-              <button
-                className="icon-button worker-action"
-                disabled={busy || !runtimeAvailable || worker.state === "stopping"}
-                onClick={startWorker}
-                title={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
-                aria-label={worker.state === "stopping" ? "Worker is stopping" : "Start worker"}
-              >
-                <span aria-hidden="true">{worker.state === "stopping" ? "…" : "▶"}</span>
-              </button>
+              <span className="worker-toggle-label">
+                {worker.state === "running"
+                  ? `Stop ${overview.active_runs.length} ${overview.active_runs.length === 1 ? "run" : "runs"}?`
+                  : worker.state === "stopping"
+                    ? "Stopping…"
+                    : "Start"}
+              </span>
             )}
-          </div>
+          </button>
         </div>
       </header>
 
