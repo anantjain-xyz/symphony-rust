@@ -137,17 +137,16 @@ pnpm typecheck && pnpm test && cargo test --workspace   # the checks CI runs
 pnpm release:mac
 ```
 
-This builds, signs, notarizes, and staples the distributable DMG, then verifies the result with `spctl` and `stapler validate`. It requires:
+This builds, signs, notarizes, and staples the distributable DMG, then verifies the result with `spctl` and `stapler validate`. Signing and notarization credentials live in `~/.symphony-release.env` (override the location with `SYMPHONY_RELEASE_ENV`):
 
-- the Developer ID Application certificate named in `src-tauri/tauri.conf.json` (`bundle.macOS.signingIdentity`) installed in the login keychain
-- `jq` on the PATH
-- App Store Connect API credentials in `~/.symphony-release.env` (override the location with `SYMPHONY_RELEASE_ENV`):
+```sh
+APPLE_SIGNING_IDENTITY=... # e.g. "Developer ID Application: Jane Doe (TEAMID1234)"
+APPLE_API_ISSUER=...       # App Store Connect issuer ID (UUID)
+APPLE_API_KEY=...          # API key ID
+APPLE_API_KEY_PATH=...     # absolute path to the AuthKey_<id>.p8 file
+```
 
-  ```sh
-  APPLE_API_ISSUER=...       # issuer ID (UUID)
-  APPLE_API_KEY=...          # API key ID
-  APPLE_API_KEY_PATH=...     # absolute path to the AuthKey_<id>.p8 file
-  ```
+The Developer ID Application certificate named by `APPLE_SIGNING_IDENTITY` must be installed in the login keychain; the script validates it before building.
 
 The finished DMG lands in `target/release/bundle/dmg/`.
 
