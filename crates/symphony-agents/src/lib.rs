@@ -444,6 +444,9 @@ struct ClaudeStreamState {
     /// Ask the driver to kill the process: the session is unusable.
     abort: bool,
     denied_workspace_writes: Vec<String>,
+    /// A file-write tool completed at least once. A dropped mode denies every
+    /// write in the session, so any success means denials were policy.
+    any_write_succeeded: bool,
 }
 
 impl ClaudeStreamState {
@@ -464,6 +467,7 @@ impl ClaudeStreamState {
             cwd,
             abort: false,
             denied_workspace_writes: Vec::new(),
+            any_write_succeeded: false,
         }
     }
 
@@ -568,6 +572,14 @@ impl ClaudeStreamState {
                         .pending_tools
                         .remove(&id)
                         .unwrap_or_else(|| "tool".to_string());
+                    if !block["is_error"].as_bool().unwrap_or(false)
+                        && matches!(
+                            tool.as_str(),
+                            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+                        )
+                    {
+                        self.any_write_succeeded = true;
+                    }
                     let raw = extract_tool_result(block.get("content").unwrap_or(&Value::Null));
                     let summary = truncate(
                         &format!(
@@ -655,8 +667,10 @@ impl ClaudeStreamState {
                     }
                     // claude exits 0 even when every workspace write was
                     // permission-denied; an unattended run that could not
-                    // write has not done its job, so retry it.
-                    if !self.denied_workspace_writes.is_empty() {
+                    // write has not done its job, so retry it. A session
+                    // where any write completed was honoring the mode — its
+                    // denials were policy, not the dropped-mode bug.
+                    if !self.denied_workspace_writes.is_empty() && !self.any_write_succeeded {
                         let message = format!(
                             "{} workspace write(s) denied permission despite '{}' mode (first: {}); claude likely dropped the permission mode at startup",
                             self.denied_workspace_writes.len(),
@@ -1011,6 +1025,32 @@ mod tests {
             .error_message
             .unwrap()
             .contains("/ws/src/lib/site-config.ts"));
+    }
+
+    #[tokio::test]
+    async fn denials_alongside_successful_writes_are_policy() {
+        // Even when init doesn't report the mode, a session that completed
+        // any write was honoring it; the denial was an ask/deny rule or a
+        // protected file, not the dropped-mode bug.
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/.npmrc") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let successful_write = [
+            json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "id": "t2", "name": "Write", "input": {} }
+            ] } }),
+            json!({ "type": "user", "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t2", "is_error": false,
+                  "content": "File created successfully at: /ws/src/app.ts" }
+            ] } }),
+        ];
+        for ev in successful_write {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
     }
 
     #[tokio::test]
