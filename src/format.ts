@@ -1,3 +1,5 @@
+import type { RateLimitStateRow } from "./bindings";
+
 export function shortTime(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
@@ -22,6 +24,45 @@ export function relativeTime(value: string, now = Date.now()) {
   if (days < 7) return future ? `in ${days}d` : `${days}d ago`;
 
   return date.toLocaleDateString();
+}
+
+const RATE_LIMIT_PROVIDERS = [
+  { key: "claude", label: "Claude" },
+  { key: "codex", label: "Codex" },
+];
+
+export type ProviderRateLimit = {
+  id: string;
+  label: string;
+  limit: RateLimitStateRow | null;
+};
+
+// One display row per provider, even without signals; a provider with
+// several signal buckets (codex_primary, codex_secondary, ...) gets a row
+// per bucket. Sources from unknown providers are appended as-is.
+export function providerRateLimits(
+  limits: RateLimitStateRow[],
+): ProviderRateLimit[] {
+  const claimed = new Set<string>();
+  const rows = RATE_LIMIT_PROVIDERS.flatMap(({ key, label }): ProviderRateLimit[] => {
+    const matches = limits.filter(
+      (limit) => limit.source === key || limit.source.startsWith(`${key}_`),
+    );
+    matches.forEach((limit) => claimed.add(limit.source));
+    if (matches.length === 0) return [{ id: key, label, limit: null }];
+    return matches.map((limit) => ({
+      id: limit.source,
+      label:
+        limit.source === key
+          ? label
+          : `${label} · ${limit.source.slice(key.length + 1)}`,
+      limit,
+    }));
+  });
+  const extras = limits
+    .filter((limit) => !claimed.has(limit.source))
+    .map((limit) => ({ id: limit.source, label: limit.source, limit }));
+  return [...rows, ...extras];
 }
 
 export function formatTokens(count: number) {

@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
 use symphony_core::{
     append_retry_context, parse_workflow_source, render_prompt, AgentBackend, AgentOutcome,
-    HookName, Issue, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
+    HookName, Issue, MappedAgentEvent, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
 };
 use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
@@ -527,40 +527,19 @@ async fn dispatch_run(
         tokio::select! {
             maybe_event = rx.recv() => {
                 if let Some(event) = maybe_event {
-                    // A null payload marks a metadata-only event (e.g. a
-                    // thinking-token update): persist the side channels but
-                    // keep it out of the visible event log.
-                    if !event.payload.is_null() {
-                        repo.append_event(&run.id, event.kind.clone(), &event.payload).await?;
-                    }
-                    if let Some(info) = &event.session_info {
-                        repo.set_run_session_info(&run.id, info).await?;
-                    }
-                    if let Some(tokens) = &event.tokens {
-                        repo.upsert_live_session(
-                            &run.id,
-                            &format!("pending-{}", run.id),
-                            "",
-                            "",
-                            tokens,
-                        ).await?;
-                        repo.update_tokens(&run.id, tokens).await?;
-                    }
-                    if let Some(rate_limit) = &event.rate_limit {
-                        repo.upsert_rate_limit(rate_limit).await?;
-                    }
-                    if let Some(summary) = &event.humanized {
-                        repo.append_event(
-                            &run.id,
-                            symphony_core::AgentEventKind::Humanized,
-                            &serde_json::json!({ "summary": summary }),
-                        ).await?;
-                    }
+                    persist_run_event(&repo, &run.id, &event).await?;
                 }
             }
             result = &mut run_fut => break result,
         }
     };
+    // The select breaks the moment the driver completes, but events it sent
+    // just before returning (the final rate-limit signal, the closing token
+    // count) may still sit in the channel. The completed driver dropped its
+    // sender, so this drain terminates once the queue is empty.
+    while let Some(event) = rx.recv().await {
+        persist_run_event(&repo, &run.id, &event).await?;
+    }
 
     match result {
         Ok(result) => {
@@ -641,6 +620,40 @@ async fn dispatch_run(
         }
     }
     repo.delete_live_session(&run.id).await.ok();
+    Ok(())
+}
+
+async fn persist_run_event(
+    repo: &Repository,
+    run_id: &str,
+    event: &MappedAgentEvent,
+) -> Result<(), WorkerError> {
+    // A null payload marks a metadata-only event (e.g. a thinking-token
+    // update): persist the side channels but keep it out of the visible
+    // event log.
+    if !event.payload.is_null() {
+        repo.append_event(run_id, event.kind.clone(), &event.payload)
+            .await?;
+    }
+    if let Some(info) = &event.session_info {
+        repo.set_run_session_info(run_id, info).await?;
+    }
+    if let Some(tokens) = &event.tokens {
+        repo.upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
+            .await?;
+        repo.update_tokens(run_id, tokens).await?;
+    }
+    if let Some(rate_limit) = &event.rate_limit {
+        repo.upsert_rate_limit(rate_limit).await?;
+    }
+    if let Some(summary) = &event.humanized {
+        repo.append_event(
+            run_id,
+            symphony_core::AgentEventKind::Humanized,
+            &serde_json::json!({ "summary": summary }),
+        )
+        .await?;
+    }
     Ok(())
 }
 

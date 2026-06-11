@@ -422,13 +422,23 @@ impl Repository {
     }
 
     pub async fn upsert_rate_limit(&self, input: &RateLimitPayload) -> Result<(), StorageError> {
+        // Claude signals are hit events with partial info: a hit without a
+        // reset time (the newer limit wordings carry none) must not erase a
+        // reset learned from an earlier hit in the same window — clearing it
+        // would lift the dispatch pause early. Codex signals are per-turn
+        // snapshots, so they always overwrite, including clearing a reset
+        // the CLI no longer reports.
         sqlx::query(
             r#"
             insert into rate_limit_state (source, remaining, reset_at, updated_at)
             values (?1, ?2, ?3, ?4)
             on conflict(source) do update set
               remaining = excluded.remaining,
-              reset_at = excluded.reset_at,
+              reset_at = case
+                when excluded.source = 'claude'
+                  then coalesce(excluded.reset_at, rate_limit_state.reset_at)
+                else excluded.reset_at
+              end,
               updated_at = excluded.updated_at
             "#,
         )
@@ -929,6 +939,37 @@ mod tests {
         assert!(done.is_empty());
         let none = repo.issue_ids_in_states(&[]).await.unwrap();
         assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resetless_claude_hit_keeps_known_reset_but_codex_clears_it() {
+        let repo = repo().await;
+        for source in ["claude", "codex_primary"] {
+            repo.upsert_rate_limit(&RateLimitPayload {
+                source: source.to_string(),
+                remaining: None,
+                reset_at: Some("2099-01-01T00:00:00.000Z".to_string()),
+            })
+            .await
+            .unwrap();
+            repo.upsert_rate_limit(&RateLimitPayload {
+                source: source.to_string(),
+                remaining: None,
+                reset_at: None,
+            })
+            .await
+            .unwrap();
+        }
+        let active = repo
+            .active_rate_limits("2026-06-11T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].source, "claude");
+        assert_eq!(
+            active[0].reset_at.as_deref(),
+            Some("2099-01-01T00:00:00.000Z")
+        );
     }
 
     #[tokio::test]
