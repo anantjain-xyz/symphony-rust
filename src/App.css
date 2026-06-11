@@ -479,49 +479,6 @@ small {
   font-size: 12px;
 }
 
-.status-strip {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: grid;
-  gap: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 18px;
-  overflow: hidden;
-}
-
-.status-item {
-  display: grid;
-  gap: 4px;
-  padding: 12px 15px;
-}
-
-.status-item + .status-item {
-  border-left: 1px solid var(--border);
-}
-
-.status-item span {
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.status-item strong {
-  color: var(--foreground);
-  font-size: 14px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-item.ok strong {
-  color: var(--success-foreground);
-}
-
-.status-item.warning strong {
-  color: var(--warning-foreground);
-}
-
 .grid {
   display: grid;
   gap: 18px;
@@ -757,6 +714,23 @@ td strong {
 .run-meta-row.muted {
   color: var(--muted-foreground);
   font-size: 12px;
+}
+
+.session-chips {
+  gap: 6px;
+}
+
+.session-chip {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.session-chip.mono {
+  font-family: var(--font-mono);
 }
 
 .run-meta-path {
@@ -1321,15 +1295,6 @@ textarea {
   .kpi {
     min-width: 0;
     padding: 10px 12px;
-  }
-
-  .status-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .status-item + .status-item {
-    border-left: 0;
-    border-top: 1px solid var(--border);
   }
 
   th:nth-child(2),

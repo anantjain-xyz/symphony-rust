@@ -3,7 +3,8 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 use symphony_core::{
     AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, MappedAgentEvent,
-    RateLimitPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
+    RateLimitPayload, SessionInfoPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload,
+    TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{
@@ -249,6 +250,7 @@ async fn map_codex_event(
                         humanized: Some(format!("bash: {summary}")),
                         tokens: None,
                         rate_limit: None,
+                        session_info: None,
                     },
                 )
                 .await;
@@ -367,7 +369,11 @@ async fn run_claude(
     }
     let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
     let mut lines = BufReader::new(stdout).lines();
-    let mut stream = ClaudeStreamState::new(session_id.clone());
+    let mut stream = ClaudeStreamState::new(
+        session_id.clone(),
+        &request.claude.permission_mode,
+        request.cwd.clone(),
+    );
     let mut result: Option<AgentRunResult> = None;
 
     let run = async {
@@ -377,6 +383,11 @@ async fn run_claude(
             }
             let value: Value = serde_json::from_str(&line)?;
             if let Some(done) = stream.push(value, &events).await? {
+                if stream.abort {
+                    // Unusable session (e.g. dropped permission mode): stop
+                    // the process now; stdout closes and the loop drains out.
+                    kill_pid(pid).await;
+                }
                 result = Some(done);
             }
         }
@@ -422,15 +433,45 @@ struct ClaudeStreamState {
     pending_tools: HashMap<String, String>,
     completed: bool,
     last_assistant_text: String,
+    session_info: SessionInfoPayload,
+    expected_permission_mode: &'static str,
+    /// Whether the requested mode should auto-approve edits inside the
+    /// workspace (acceptEdits/auto/bypassPermissions). Denials there mean the
+    /// session is not honoring the mode and the run cannot do its job.
+    mode_auto_accepts_edits: bool,
+    /// The init event confirmed the session runs in the requested mode. Write
+    /// denials in a confirmed session are legitimate policy (repo ask/deny
+    /// rules, protected build-tool files), not the dropped-mode bug.
+    mode_confirmed: bool,
+    cwd: PathBuf,
+    /// Ask the driver to kill the process: the session is unusable.
+    abort: bool,
+    denied_workspace_writes: Vec<String>,
+    /// A file-write tool completed at least once. A dropped mode denies every
+    /// write in the session, so any success means denials were policy.
+    any_write_succeeded: bool,
 }
 
 impl ClaudeStreamState {
-    fn new(session_id: String) -> Self {
+    fn new(session_id: String, permission_mode: &ClaudePermissionMode, cwd: PathBuf) -> Self {
         Self {
             session_id,
             pending_tools: HashMap::new(),
             completed: false,
             last_assistant_text: String::new(),
+            session_info: SessionInfoPayload::default(),
+            expected_permission_mode: permission_mode_arg(permission_mode),
+            mode_auto_accepts_edits: matches!(
+                permission_mode,
+                ClaudePermissionMode::AcceptEdits
+                    | ClaudePermissionMode::Auto
+                    | ClaudePermissionMode::BypassPermissions
+            ),
+            mode_confirmed: false,
+            cwd,
+            abort: false,
+            denied_workspace_writes: Vec::new(),
+            any_write_succeeded: false,
         }
     }
 
@@ -443,16 +484,90 @@ impl ClaudeStreamState {
             return Ok(None);
         }
         match ev["type"].as_str().unwrap_or_default() {
-            "system" if ev["subtype"].as_str() == Some("init") => {
-                send_status(
-                    events,
-                    format!(
+            "system" => match ev["subtype"].as_str().unwrap_or_default() {
+                "init" => {
+                    let text = |key: &str| ev[key].as_str().map(ToOwned::to_owned);
+                    self.session_info = SessionInfoPayload {
+                        model: text("model"),
+                        permission_mode: text("permissionMode"),
+                        agent_version: text("claude_code_version"),
+                        output_style: text("output_style"),
+                        fast_mode: text("fast_mode_state"),
+                        thinking_tokens: None,
+                    };
+                    let mut message = format!(
                         "Claude session {} started",
                         ev["session_id"].as_str().unwrap_or(&self.session_id)
-                    ),
-                )
-                .await;
-            }
+                    );
+                    if let Some(model) = &self.session_info.model {
+                        message.push_str(&format!(" · {model}"));
+                    }
+                    if let Some(mode) = &self.session_info.permission_mode {
+                        message.push_str(&format!(" · {mode}"));
+                    }
+                    send_mapped(
+                        events,
+                        MappedAgentEvent {
+                            kind: AgentEventKind::Status,
+                            payload: json!({ "message": message }),
+                            humanized: Some(message),
+                            tokens: None,
+                            rate_limit: None,
+                            session_info: Some(self.session_info.clone()),
+                        },
+                    )
+                    .await;
+                    // claude 2.1.x has a startup race that silently ignores
+                    // --permission-mode; a headless session that comes up in the
+                    // wrong mode can never write, so kill it and let the worker
+                    // retry instead of burning a full doomed run.
+                    if let Some(actual) = ev["permissionMode"].as_str() {
+                        if actual != self.expected_permission_mode {
+                            let message = format!(
+                                "claude started in '{actual}' permission mode instead of the requested '{}'; aborting so the retry gets a working session",
+                                self.expected_permission_mode
+                            );
+                            send_error(events, "permission_mode_dropped", &message).await?;
+                            self.completed = true;
+                            self.abort = true;
+                            return Ok(Some(AgentRunResult {
+                                thread_id: self.session_id.clone(),
+                                turn_id: self.session_id.clone(),
+                                outcome: AgentOutcome::Failure,
+                                error_class: Some("permission_mode_dropped".to_string()),
+                                error_message: Some(message),
+                            }));
+                        }
+                        self.mode_confirmed = true;
+                    }
+                }
+                "thinking_tokens" => {
+                    let prior = self.session_info.thinking_tokens;
+                    if let Some(estimate) = ev["estimated_tokens"].as_i64() {
+                        self.session_info.thinking_tokens = Some(prior.unwrap_or(0).max(estimate));
+                    }
+                    // Persist each update as it happens: runs that time out,
+                    // get cancelled, or die without a usage-bearing result
+                    // event would otherwise lose the estimate. The null
+                    // payload marks this as metadata-only so the worker skips
+                    // the event log.
+                    if self.session_info.thinking_tokens != prior {
+                        send_mapped(
+                            events,
+                            MappedAgentEvent {
+                                kind: AgentEventKind::Status,
+                                payload: Value::Null,
+                                humanized: None,
+                                tokens: None,
+                                rate_limit: None,
+                                session_info: Some(self.session_info.clone()),
+                            },
+                        )
+                        .await;
+                    }
+                }
+                _ => {}
+            },
             "assistant" => {
                 for block in ev["message"]["content"]
                     .as_array()
@@ -487,6 +602,7 @@ impl ClaudeStreamState {
                                     humanized: Some(format!("Calling {name}")),
                                     tokens: None,
                                     rate_limit: None,
+                                    session_info: None,
                                 },
                             )
                             .await;
@@ -512,6 +628,14 @@ impl ClaudeStreamState {
                         .pending_tools
                         .remove(&id)
                         .unwrap_or_else(|| "tool".to_string());
+                    if !block["is_error"].as_bool().unwrap_or(false)
+                        && matches!(
+                            tool.as_str(),
+                            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+                        )
+                    {
+                        self.any_write_succeeded = true;
+                    }
                     let raw = extract_tool_result(block.get("content").unwrap_or(&Value::Null));
                     let summary = truncate(
                         &format!(
@@ -539,6 +663,7 @@ impl ClaudeStreamState {
                             humanized: Some(summary.clone()),
                             tokens: None,
                             rate_limit: None,
+                            session_info: None,
                         },
                     )
                     .await;
@@ -553,9 +678,20 @@ impl ClaudeStreamState {
                                 humanized: Some("Approval requested".to_string()),
                                 tokens: None,
                                 rate_limit: None,
+                                session_info: None,
                             },
                         )
                         .await;
+                        // Only armed while the session's mode is unverified
+                        // (init didn't report one): a confirmed session that
+                        // denies a write is enforcing legitimate policy.
+                        if self.mode_auto_accepts_edits && !self.mode_confirmed {
+                            if let Some(path) = denied_write_path(&raw) {
+                                if std::path::Path::new(path).starts_with(&self.cwd) {
+                                    self.denied_workspace_writes.push(path.to_string());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -566,15 +702,24 @@ impl ClaudeStreamState {
                     + usage["cache_read_input_tokens"].as_i64().unwrap_or(0);
                 let output = usage["output_tokens"].as_i64().unwrap_or(0);
                 if input > 0 || output > 0 {
-                    send_token_count(
+                    let tokens = TokenCountPayload {
+                        input_tokens: input,
+                        output_tokens: output,
+                        total_tokens: input + output,
+                    };
+                    send_mapped(
                         events,
-                        TokenCountPayload {
-                            input_tokens: input,
-                            output_tokens: output,
-                            total_tokens: input + output,
+                        MappedAgentEvent {
+                            kind: AgentEventKind::TokenCount,
+                            payload: serde_json::to_value(&tokens)?,
+                            humanized: None,
+                            tokens: Some(tokens),
+                            rate_limit: None,
+                            session_info: (!self.session_info.is_empty())
+                                .then(|| self.session_info.clone()),
                         },
                     )
-                    .await?;
+                    .await;
                 }
                 self.completed = true;
                 if ev["subtype"].as_str() == Some("success") {
@@ -585,6 +730,27 @@ impl ClaudeStreamState {
                             outcome: AgentOutcome::Failure,
                             error_class: Some(class.to_string()),
                             error_message: Some(truncate(&self.last_assistant_text, 1000)),
+                        }));
+                    }
+                    // claude exits 0 even when every workspace write was
+                    // permission-denied; an unattended run that could not
+                    // write has not done its job, so retry it. A session
+                    // where any write completed was honoring the mode — its
+                    // denials were policy, not the dropped-mode bug.
+                    if !self.denied_workspace_writes.is_empty() && !self.any_write_succeeded {
+                        let message = format!(
+                            "{} workspace write(s) denied permission despite '{}' mode (first: {}); claude likely dropped the permission mode at startup",
+                            self.denied_workspace_writes.len(),
+                            self.expected_permission_mode,
+                            self.denied_workspace_writes[0],
+                        );
+                        send_error(events, "write_permission_denied", &message).await?;
+                        return Ok(Some(AgentRunResult {
+                            thread_id: self.session_id.clone(),
+                            turn_id: self.session_id.clone(),
+                            outcome: AgentOutcome::Failure,
+                            error_class: Some("write_permission_denied".to_string()),
+                            error_message: Some(message),
                         }));
                     }
                     return Ok(Some(AgentRunResult {
@@ -695,6 +861,7 @@ async fn send_status(events: &AgentEventSender, message: impl Into<String>) {
             humanized: Some(message),
             tokens: None,
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -713,6 +880,7 @@ async fn send_error(
             humanized: Some(format!("Error ({class}): {message}")),
             tokens: None,
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -731,6 +899,7 @@ async fn send_token_count(
             humanized: None,
             tokens: Some(tokens),
             rate_limit: None,
+            session_info: None,
         },
     )
     .await;
@@ -749,6 +918,7 @@ async fn send_rate_limit(
             humanized: None,
             tokens: None,
             rate_limit: Some(payload),
+            session_info: None,
         },
     )
     .await;
@@ -788,6 +958,17 @@ fn truncate(value: &str, max: usize) -> String {
     }
 }
 
+/// Path from a headless write-permission denial: "Claude requested
+/// permissions to write to <path>, but you haven't granted it yet."
+fn denied_write_path(raw: &str) -> Option<&str> {
+    let rest = raw.split("requested permissions to write to ").nth(1)?;
+    let path = rest
+        .split(", but you haven't granted it yet")
+        .next()?
+        .trim();
+    (!path.is_empty()).then_some(path)
+}
+
 fn classify_api_error(text: &str) -> Option<&'static str> {
     if !text.starts_with("API Error:") {
         return None;
@@ -810,6 +991,74 @@ mod tests {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
+    #[tokio::test]
+    async fn captures_session_info_from_init_and_result() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut stream = ClaudeStreamState::new(
+            "sess-1".to_string(),
+            &ClaudePermissionMode::AcceptEdits,
+            PathBuf::from("/tmp/ws"),
+        );
+        stream
+            .push(
+                json!({
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "sess-1",
+                    "model": "claude-opus-4-8",
+                    "permissionMode": "acceptEdits",
+                    "claude_code_version": "2.1.172",
+                    "output_style": "default",
+                    "fast_mode_state": "off"
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let started = rx.recv().await.unwrap();
+        let info = started.session_info.expect("init carries session info");
+        assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(info.permission_mode.as_deref(), Some("acceptEdits"));
+        assert_eq!(info.agent_version.as_deref(), Some("2.1.172"));
+        assert_eq!(info.thinking_tokens, None);
+
+        stream
+            .push(
+                json!({ "type": "system", "subtype": "thinking_tokens", "estimated_tokens": 42 }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        // Thinking updates emit a metadata-only event right away, so the
+        // estimate survives runs that never reach a usage-bearing result.
+        let thinking = rx.recv().await.unwrap();
+        assert!(thinking.payload.is_null());
+        assert_eq!(
+            thinking.session_info.and_then(|info| info.thinking_tokens),
+            Some(42)
+        );
+        let result = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "usage": { "input_tokens": 10, "output_tokens": 5 }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result event finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Success));
+        let tokens_event = rx.recv().await.unwrap();
+        assert_eq!(
+            tokens_event
+                .session_info
+                .and_then(|info| info.thinking_tokens),
+            Some(42)
+        );
+    }
+
     #[test]
     fn classifies_claude_api_errors() {
         assert_eq!(
@@ -817,5 +1066,184 @@ mod tests {
             Some("api_overloaded")
         );
         assert_eq!(classify_api_error("hello"), None);
+    }
+
+    #[test]
+    fn parses_denied_write_paths() {
+        assert_eq!(
+            denied_write_path(
+                "Claude requested permissions to write to /ws/src/lib/site-config.ts, but you haven't granted it yet."
+            ),
+            Some("/ws/src/lib/site-config.ts")
+        );
+        assert_eq!(
+            denied_write_path(
+                "Claude requested permissions to use mcp__linear-server__save_comment, but you haven't granted it yet."
+            ),
+            None
+        );
+        assert_eq!(denied_write_path("Permission denied"), None);
+    }
+
+    fn claude_stream(mode: ClaudePermissionMode) -> (ClaudeStreamState, AgentEventSender) {
+        let (tx, mut rx) = mpsc::channel(64);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        (
+            ClaudeStreamState::new("sess".to_string(), &mode, PathBuf::from("/ws")),
+            tx,
+        )
+    }
+
+    fn init_event(mode: &str) -> Value {
+        json!({ "type": "system", "subtype": "init", "session_id": "sess", "permissionMode": mode })
+    }
+
+    /// Init from a CLI that doesn't report the effective permission mode, so
+    /// the session stays unverified and the write-denial net stays armed.
+    fn init_event_without_mode() -> Value {
+        json!({ "type": "system", "subtype": "init", "session_id": "sess" })
+    }
+
+    fn denied_write_events(path: &str) -> [Value; 2] {
+        [
+            json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "id": "t1", "name": "Edit", "input": {} }
+            ] } }),
+            json!({ "type": "user", "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                  "content": format!("Claude requested permissions to write to {path}, but you haven't granted it yet.") }
+            ] } }),
+        ]
+    }
+
+    fn success_result_event() -> Value {
+        json!({ "type": "result", "subtype": "success", "usage": {} })
+    }
+
+    #[tokio::test]
+    async fn fails_fast_when_claude_drops_the_permission_mode() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        let done = stream.push(init_event("default"), &tx).await.unwrap();
+        let result = done.expect("init mode mismatch should end the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(
+            result.error_class.as_deref(),
+            Some("permission_mode_dropped")
+        );
+        assert!(stream.abort);
+    }
+
+    #[tokio::test]
+    async fn accepts_matching_or_absent_init_permission_mode() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        assert!(stream
+            .push(init_event("auto"), &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let no_mode = json!({ "type": "system", "subtype": "init", "session_id": "sess" });
+        assert!(stream.push(no_mode, &tx).await.unwrap().is_none());
+        assert!(!stream.abort);
+    }
+
+    #[tokio::test]
+    async fn denied_workspace_write_fails_an_unverified_run() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/src/lib/site-config.ts") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        let result = done.expect("result event should end the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(
+            result.error_class.as_deref(),
+            Some("write_permission_denied")
+        );
+        assert!(result
+            .error_message
+            .unwrap()
+            .contains("/ws/src/lib/site-config.ts"));
+    }
+
+    #[tokio::test]
+    async fn denials_alongside_successful_writes_are_policy() {
+        // Even when init doesn't report the mode, a session that completed
+        // any write was honoring it; the denial was an ask/deny rule or a
+        // protected file, not the dropped-mode bug.
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/.npmrc") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let successful_write = [
+            json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "id": "t2", "name": "Write", "input": {} }
+            ] } }),
+            json!({ "type": "user", "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t2", "is_error": false,
+                  "content": "File created successfully at: /ws/src/app.ts" }
+            ] } }),
+        ];
+        for ev in successful_write {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn confirmed_mode_treats_denials_as_policy() {
+        // Repo ask/deny rules and protected build-tool files legitimately
+        // deny workspace writes even when the session mode is correct.
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event("auto"), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/.npmrc") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn denials_outside_the_workspace_do_not_fail_the_run() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        for ev in denied_write_events("/etc/hosts") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn tool_use_denials_do_not_fail_the_run() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        let events = [
+            json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "id": "t1", "name": "mcp__linear-server__save_comment", "input": {} }
+            ] } }),
+            json!({ "type": "user", "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                  "content": "Claude requested permissions to use mcp__linear-server__save_comment, but you haven't granted it yet." }
+            ] } }),
+        ];
+        for ev in events {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn default_mode_write_denials_are_expected() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Default);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/src/lib/site-config.ts") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
     }
 }

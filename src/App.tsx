@@ -20,6 +20,7 @@ import {
   describeEvent,
   formatTokens,
   nullable,
+  parseSessionInfo,
   prettyPayload,
   priorityLabel,
   relativeTime,
@@ -75,6 +76,8 @@ const previewSettings: AppSettings = {
   workspace_root: null,
   install_cmd: null,
   agent_backend: "codex",
+  codex_command: null,
+  claude_command: null,
   linear_api_key_set: false,
 };
 
@@ -645,24 +648,6 @@ function OverviewView({
         <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
       ) : null}
 
-      <div className="status-strip">
-        <StatusItem
-          label="Heartbeat"
-          value={
-            overview.worker_heartbeat
-              ? relativeTime(overview.worker_heartbeat.last_beat_at)
-              : "No heartbeat"
-          }
-          title={
-            overview.worker_heartbeat
-              ? shortTime(overview.worker_heartbeat.last_beat_at)
-              : undefined
-          }
-        />
-        <StatusItem label="Live sessions" value={overview.live_sessions.length} />
-        <StatusItem label="Rate limits" value={overview.rate_limits.length ? "Active signals" : "Clear"} tone={overview.rate_limits.length ? "warning" : "ok"} />
-      </div>
-
       {overview.live_sessions.length > 0 ? (
         <div className="grid">
           <Panel title="Live sessions">
@@ -905,6 +890,47 @@ function SetupStep({
   );
 }
 
+function SessionChips({ raw }: { raw: string | null }) {
+  const info = parseSessionInfo(raw);
+  if (!info) return null;
+  const chips: { label: string; title: string; mono?: boolean }[] = [];
+  if (info.model) {
+    chips.push({ label: info.model, title: "Model", mono: true });
+  }
+  if (info.permission_mode) {
+    chips.push({ label: info.permission_mode, title: "Permission mode" });
+  }
+  if (info.fast_mode === "on") {
+    chips.push({ label: "fast mode", title: "Fast mode enabled" });
+  }
+  if (info.output_style && info.output_style !== "default") {
+    chips.push({ label: `${info.output_style} style`, title: "Output style" });
+  }
+  if (info.thinking_tokens) {
+    chips.push({
+      label: `${formatTokens(info.thinking_tokens)} thinking`,
+      title: "Estimated thinking tokens",
+    });
+  }
+  if (info.agent_version) {
+    chips.push({ label: `Claude Code ${info.agent_version}`, title: "Agent version" });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="run-meta-row session-chips">
+      {chips.map((chip) => (
+        <span
+          key={chip.title}
+          className={chip.mono ? "session-chip mono" : "session-chip"}
+          title={chip.title}
+        >
+          {chip.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function RunsView({
   runs,
   selected,
@@ -962,6 +988,7 @@ function RunsView({
                     <span>Ended {shortTime(selected.run.ended_at)}</span>
                   ) : null}
                 </div>
+                <SessionChips raw={selected.run.session_info} />
                 <code
                   className="run-meta-path"
                   title={selected.run.workspace_path}
@@ -1309,14 +1336,42 @@ function SettingsView({
               The CLI that works on issues. Must be installed and authenticated on this machine.
             </small>
           </label>
+          <label>
+            Launch command
+            <input
+              value={
+                (settings.agent_backend === "codex"
+                  ? settings.codex_command
+                  : settings.claude_command) ?? ""
+              }
+              disabled={!runtimeAvailable}
+              autoComplete="off"
+              onChange={(e) => {
+                const value = nullable(e.currentTarget.value);
+                setSettings(
+                  settings.agent_backend === "codex"
+                    ? { ...settings, codex_command: value }
+                    : { ...settings, claude_command: value },
+                );
+              }}
+              placeholder={settings.agent_backend}
+            />
+            <small className="hint">
+              Optional. How the agent is launched — e.g. a wrapper like{" "}
+              <code>cbcode --agent {settings.agent_backend}</code>. Leave blank to run{" "}
+              <code>{settings.agent_backend}</code> directly.
+            </small>
+          </label>
           {validation ? (
             <small className="hint">
-              Codex CLI:{" "}
+              Codex CLI
+              {validation.codex_command === "codex" ? "" : ` (${validation.codex_command})`}:{" "}
               <span className={validation.codex_found ? "detect ok" : "detect missing"}>
                 {validation.codex_found ? "found" : "not found"}
               </span>
               {" · "}
-              Claude CLI:{" "}
+              Claude CLI
+              {validation.claude_command === "claude" ? "" : ` (${validation.claude_command})`}:{" "}
               <span className={validation.claude_found ? "detect ok" : "detect missing"}>
                 {validation.claude_found ? "found" : "not found"}
               </span>
@@ -1680,25 +1735,6 @@ function Kpi({ label, value }: { label: string; value: number }) {
     <div className="kpi">
       <strong>{value}</strong>
       <span>{label}</span>
-    </div>
-  );
-}
-
-function StatusItem({
-  label,
-  value,
-  tone,
-  title,
-}: {
-  label: string;
-  value: React.ReactNode;
-  tone?: "ok" | "warning";
-  title?: string;
-}) {
-  return (
-    <div className={`status-item ${tone ?? ""}`}>
-      <span>{label}</span>
-      <strong title={title}>{value}</strong>
     </div>
   );
 }

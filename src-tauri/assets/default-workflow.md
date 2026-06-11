@@ -43,7 +43,9 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  command: codex
+  # Launch command — populated from Settings. Supports wrappers like
+  # `cbcode --agent codex`; Symphony appends its CLI flags after it.
+  command: ${SYMPHONY_CODEX_COMMAND:-codex}
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy: inherit
@@ -52,7 +54,9 @@ codex:
   turn_timeout_ms: 3600000
 
 claude:
-  command: claude
+  # Launch command — populated from Settings. Supports wrappers like
+  # `cbcode --agent claude`; Symphony appends its CLI flags after it.
+  command: ${SYMPHONY_CLAUDE_COMMAND:-claude}
   # default | acceptEdits | auto | bypassPermissions | dontAsk | plan
   permission_mode: auto
   # Workflow-essential tools the agent needs in every target repo. The target

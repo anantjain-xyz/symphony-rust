@@ -3,6 +3,7 @@ import {
   describeEvent,
   formatTokens,
   nullable,
+  parseSessionInfo,
   prettyPayload,
   priorityLabel,
   relativeTime,
@@ -15,6 +16,19 @@ describe("format helpers", () => {
     expect(nullable("")).toBeNull();
     expect(nullable("   ")).toBeNull();
     expect(nullable("SYM-")).toBe("SYM-");
+  });
+
+  it("parses session info and rejects malformed values", () => {
+    const info = parseSessionInfo(
+      '{"model":"claude-opus-4-8","permission_mode":"acceptEdits","thinking_tokens":42}',
+    );
+    expect(info?.model).toBe("claude-opus-4-8");
+    expect(info?.permission_mode).toBe("acceptEdits");
+    expect(info?.thinking_tokens).toBe(42);
+    expect(parseSessionInfo(null)).toBeNull();
+    expect(parseSessionInfo("")).toBeNull();
+    expect(parseSessionInfo("not json")).toBeNull();
+    expect(parseSessionInfo("[1,2]")).toBeNull();
   });
 
   it("pretty prints JSON payloads", () => {
