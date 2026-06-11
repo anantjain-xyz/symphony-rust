@@ -436,6 +436,10 @@ struct ClaudeStreamState {
     /// workspace (acceptEdits/auto/bypassPermissions). Denials there mean the
     /// session is not honoring the mode and the run cannot do its job.
     mode_auto_accepts_edits: bool,
+    /// The init event confirmed the session runs in the requested mode. Write
+    /// denials in a confirmed session are legitimate policy (repo ask/deny
+    /// rules, protected build-tool files), not the dropped-mode bug.
+    mode_confirmed: bool,
     cwd: PathBuf,
     /// Ask the driver to kill the process: the session is unusable.
     abort: bool,
@@ -456,6 +460,7 @@ impl ClaudeStreamState {
                     | ClaudePermissionMode::Auto
                     | ClaudePermissionMode::BypassPermissions
             ),
+            mode_confirmed: false,
             cwd,
             abort: false,
             denied_workspace_writes: Vec::new(),
@@ -501,6 +506,7 @@ impl ClaudeStreamState {
                             error_message: Some(message),
                         }));
                     }
+                    self.mode_confirmed = true;
                 }
             }
             "assistant" => {
@@ -606,7 +612,10 @@ impl ClaudeStreamState {
                             },
                         )
                         .await;
-                        if self.mode_auto_accepts_edits {
+                        // Only armed while the session's mode is unverified
+                        // (init didn't report one): a confirmed session that
+                        // denies a write is enforcing legitimate policy.
+                        if self.mode_auto_accepts_edits && !self.mode_confirmed {
                             if let Some(path) = denied_write_path(&raw) {
                                 if std::path::Path::new(path).starts_with(&self.cwd) {
                                     self.denied_workspace_writes.push(path.to_string());
@@ -936,6 +945,12 @@ mod tests {
         json!({ "type": "system", "subtype": "init", "session_id": "sess", "permissionMode": mode })
     }
 
+    /// Init from a CLI that doesn't report the effective permission mode, so
+    /// the session stays unverified and the write-denial net stays armed.
+    fn init_event_without_mode() -> Value {
+        json!({ "type": "system", "subtype": "init", "session_id": "sess" })
+    }
+
     fn denied_write_events(path: &str) -> [Value; 2] {
         [
             json!({ "type": "assistant", "message": { "content": [
@@ -979,9 +994,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denied_workspace_write_fails_a_successful_run() {
+    async fn denied_workspace_write_fails_an_unverified_run() {
         let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
-        stream.push(init_event("auto"), &tx).await.unwrap();
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
         for ev in denied_write_events("/ws/src/lib/site-config.ts") {
             stream.push(ev, &tx).await.unwrap();
         }
@@ -999,9 +1014,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denials_outside_the_workspace_do_not_fail_the_run() {
+    async fn confirmed_mode_treats_denials_as_policy() {
+        // Repo ask/deny rules and protected build-tool files legitimately
+        // deny workspace writes even when the session mode is correct.
         let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
         stream.push(init_event("auto"), &tx).await.unwrap();
+        for ev in denied_write_events("/ws/.npmrc") {
+            stream.push(ev, &tx).await.unwrap();
+        }
+        let done = stream.push(success_result_event(), &tx).await.unwrap();
+        assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn denials_outside_the_workspace_do_not_fail_the_run() {
+        let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
         for ev in denied_write_events("/etc/hosts") {
             stream.push(ev, &tx).await.unwrap();
         }
@@ -1012,7 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn tool_use_denials_do_not_fail_the_run() {
         let (mut stream, tx) = claude_stream(ClaudePermissionMode::Auto);
-        stream.push(init_event("auto"), &tx).await.unwrap();
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
         let events = [
             json!({ "type": "assistant", "message": { "content": [
                 { "type": "tool_use", "id": "t1", "name": "mcp__linear-server__save_comment", "input": {} }
@@ -1032,7 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn default_mode_write_denials_are_expected() {
         let (mut stream, tx) = claude_stream(ClaudePermissionMode::Default);
-        stream.push(init_event("default"), &tx).await.unwrap();
+        stream.push(init_event_without_mode(), &tx).await.unwrap();
         for ev in denied_write_events("/ws/src/lib/site-config.ts") {
             stream.push(ev, &tx).await.unwrap();
         }
