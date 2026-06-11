@@ -334,6 +334,11 @@ function App() {
   const repoUrl = settings === null ? null : settings.repo_url.trim();
   useEffect(() => {
     if (!runtimeAvailable || repoUrl === null) return;
+    // Retire any in-flight check up front — its response is for the previous
+    // URL and must not repopulate the status cleared below while the
+    // debounced re-check (or nothing, for an empty URL) is pending.
+    skillsCheckSeq.current += 1;
+    setSkillsChecking(false);
     setSkillsStatus(null);
     setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
     if (repoUrl === "") return;
