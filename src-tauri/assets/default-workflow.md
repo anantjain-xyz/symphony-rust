@@ -44,7 +44,7 @@ agent:
 
 codex:
   # Launch command — populated from Settings. Supports wrappers like
-  # `cbcode --agent codex`; Symphony appends its CLI flags after it.
+  # `mycode --agent codex`; Symphony appends its CLI flags after it.
   command: ${SYMPHONY_CODEX_COMMAND:-codex}
   approval_policy: never
   thread_sandbox: workspace-write
@@ -55,7 +55,7 @@ codex:
 
 claude:
   # Launch command — populated from Settings. Supports wrappers like
-  # `cbcode --agent claude`; Symphony appends its CLI flags after it.
+  # `mycode --agent claude`; Symphony appends its CLI flags after it.
   command: ${SYMPHONY_CLAUDE_COMMAND:-claude}
   # default | acceptEdits | auto | bypassPermissions | dontAsk | plan
   permission_mode: auto

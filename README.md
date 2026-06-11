@@ -98,7 +98,7 @@ Notes:
 - Available hooks: `after_create`, `before_run`, `after_run`, `before_remove`.
 - Prompt placeholders: `{{issue.id}}`, `{{issue.identifier}}`, `{{issue.title}}`, `{{issue.description}}`, `{{issue.state}}`, `{{issue.branch}}`.
 - Retried runs automatically get a `## Retry context` section appended with the prior run's error and recent events.
-- The `codex.command` / `claude.command` launch commands come from the Settings "Launch command" field and may be wrappers with arguments (e.g. `cbcode --agent claude`); Symphony appends its own CLI flags after them.
+- The `codex.command` / `claude.command` launch commands come from the Settings "Launch command" field and may be wrappers with arguments (e.g. `mycode --agent claude`); Symphony appends its own CLI flags after them.
 
 ## Data and security
 
