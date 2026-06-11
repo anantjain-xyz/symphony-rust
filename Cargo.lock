@@ -5516,6 +5516,7 @@ name = "symphony-agents"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "serde",
  "serde_json",

@@ -23,6 +23,7 @@ import {
   parseSessionInfo,
   prettyPayload,
   priorityLabel,
+  providerRateLimits,
   relativeTime,
   shortTime,
   statusSlug,
@@ -774,41 +775,46 @@ function OverviewView({
           />
         </Panel>
         <Panel title="Rate limits">
-          {overview.rate_limits.length === 0 ? (
-            <Empty
-              title="No active rate-limit signals"
-              text="Provider limits are clear. New limits will show reset timing here."
-            />
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Source</th>
-                  <th>Remaining</th>
-                  <th>Reset</th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.rate_limits.map((limit) => (
-                  <tr key={limit.source}>
-                    <td>
-                      <strong>{limit.source}</strong>
-                      <small title={shortTime(limit.updated_at)}>
-                        updated {relativeTime(limit.updated_at)}
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Remaining</th>
+                <th>Reset</th>
+              </tr>
+            </thead>
+            <tbody>
+              {providerRateLimits(overview.rate_limits).map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <strong>{row.label}</strong>
+                    {row.limit ? (
+                      <small title={shortTime(row.limit.updated_at)}>
+                        signal {relativeTime(row.limit.updated_at)}
                       </small>
-                    </td>
-                    <td className="tnum">{limit.remaining ?? "unknown"}</td>
-                    <td
-                      className="tnum"
-                      title={limit.reset_at ? shortTime(limit.reset_at) : undefined}
-                    >
-                      {limit.reset_at ? relativeTime(limit.reset_at) : "no reset"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                    ) : (
+                      <small>no limits hit</small>
+                    )}
+                  </td>
+                  <td className="tnum">{row.limit?.remaining ?? "—"}</td>
+                  <td
+                    className="tnum"
+                    title={
+                      row.limit?.reset_at
+                        ? shortTime(row.limit.reset_at)
+                        : undefined
+                    }
+                  >
+                    {row.limit
+                      ? row.limit.reset_at
+                        ? `resets ${relativeTime(row.limit.reset_at)}`
+                        : "no reset reported"
+                      : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </Panel>
       </div>
     </>

@@ -6,6 +6,7 @@ import {
   parseSessionInfo,
   prettyPayload,
   priorityLabel,
+  providerRateLimits,
   relativeTime,
   statusSlug,
   timeOnly,
@@ -51,6 +52,39 @@ describe("format helpers", () => {
     const now = Date.UTC(2026, 5, 10, 12, 0, 0);
     const old = new Date(now - 30 * 86_400_000).toISOString();
     expect(relativeTime(old, now)).not.toContain("ago");
+  });
+
+  it("always lists a rate-limit row per provider", () => {
+    const rows = providerRateLimits([]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex"]);
+    expect(rows.every((row) => row.limit === null)).toBe(true);
+  });
+
+  it("groups rate-limit signals under their provider", () => {
+    const claude = {
+      source: "claude",
+      remaining: null,
+      reset_at: "2026-06-11T12:00:00Z",
+      updated_at: "2026-06-11T10:00:00Z",
+    };
+    const codexPrimary = {
+      source: "codex_primary",
+      remaining: 82,
+      reset_at: null,
+      updated_at: "2026-06-11T10:00:00Z",
+    };
+    const mystery = {
+      source: "gemini",
+      remaining: null,
+      reset_at: null,
+      updated_at: "2026-06-11T10:00:00Z",
+    };
+    const rows = providerRateLimits([claude, codexPrimary, mystery]);
+    expect(rows.map((row) => [row.label, row.limit])).toEqual([
+      ["Claude", claude],
+      ["Codex · primary", codexPrimary],
+      ["gemini", mystery],
+    ]);
   });
 
   it("abbreviates token counts", () => {

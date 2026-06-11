@@ -722,6 +722,26 @@ impl ClaudeStreamState {
                     .await;
                 }
                 self.completed = true;
+                // The CLI has no dedicated rate-limit event; a hit only shows
+                // up as message text — the subscription limit arrives with
+                // subtype "success" and exit 0 ("Claude AI usage limit
+                // reached|<epoch>"), an API limit as "API Error: 429 ...".
+                // Record the signal so the dashboard surfaces it and, when a
+                // reset time is known, the worker pauses dispatch until then.
+                let result_text = ev["result"].as_str().unwrap_or_default();
+                let limit_hit = [result_text, self.last_assistant_text.as_str()]
+                    .into_iter()
+                    .find_map(|text| detect_claude_rate_limit(text).map(|limit| (text, limit)));
+                if let Some((text, limit)) = limit_hit {
+                    send_rate_limit(events, limit).await?;
+                    return Ok(Some(AgentRunResult {
+                        thread_id: self.session_id.clone(),
+                        turn_id: self.session_id.clone(),
+                        outcome: AgentOutcome::Failure,
+                        error_class: Some("rate_limited".to_string()),
+                        error_message: Some(truncate(text, 1000)),
+                    }));
+                }
                 if ev["subtype"].as_str() == Some("success") {
                     if let Some(class) = classify_api_error(&self.last_assistant_text) {
                         return Ok(Some(AgentRunResult {
@@ -969,6 +989,32 @@ fn denied_write_path(raw: &str) -> Option<&str> {
     (!path.is_empty()).then_some(path)
 }
 
+/// Rate-limit hit in Claude's result or assistant text. Matches both the
+/// subscription usage-limit wordings and API 429 errors.
+fn detect_claude_rate_limit(text: &str) -> Option<RateLimitPayload> {
+    let lower = text.to_lowercase();
+    let hit = lower.starts_with("api error: 429")
+        || lower.contains("rate_limit_error")
+        || lower.contains("usage limit reached")
+        || lower.contains("hour limit reached")
+        || lower.contains("weekly limit reached");
+    hit.then(|| RateLimitPayload {
+        source: "claude".to_string(),
+        remaining: None,
+        reset_at: claude_limit_reset(text),
+    })
+}
+
+/// Reset timestamp from the usage-limit message's trailing epoch
+/// ("Claude AI usage limit reached|1750000000"). Newer wordings only give a
+/// fuzzy local time ("resets 3am"), which has no timezone to parse, so they
+/// yield no reset and the worker falls back to normal retry backoff.
+fn claude_limit_reset(text: &str) -> Option<String> {
+    let epoch: i64 = text.rsplit('|').next()?.trim().parse().ok()?;
+    let reset = chrono::DateTime::from_timestamp(epoch, 0)?;
+    Some(reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
 fn classify_api_error(text: &str) -> Option<&'static str> {
     if !text.starts_with("API Error:") {
         return None;
@@ -1066,6 +1112,57 @@ mod tests {
             Some("api_overloaded")
         );
         assert_eq!(classify_api_error("hello"), None);
+    }
+
+    #[test]
+    fn detects_claude_rate_limit_hits() {
+        let legacy = detect_claude_rate_limit("Claude AI usage limit reached|1750000000")
+            .expect("legacy usage-limit message");
+        assert_eq!(legacy.source, "claude");
+        assert_eq!(legacy.reset_at.as_deref(), Some("2025-06-15T15:06:40.000Z"));
+
+        let api = detect_claude_rate_limit(
+            r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#,
+        )
+        .expect("429 error");
+        assert_eq!(api.reset_at, None);
+
+        let worded = detect_claude_rate_limit("5-hour limit reached ∙ resets 3am")
+            .expect("wordy usage-limit message");
+        assert_eq!(worded.reset_at, None);
+
+        assert!(detect_claude_rate_limit("All tests passing").is_none());
+    }
+
+    #[tokio::test]
+    async fn records_rate_limit_hit_from_result_text() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut stream = ClaudeStreamState::new(
+            "sess-rl".to_string(),
+            &ClaudePermissionMode::AcceptEdits,
+            PathBuf::from("/tmp/ws"),
+        );
+        let result = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "Claude AI usage limit reached|1750000000",
+                    "usage": {}
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result event finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
+
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event.kind, AgentEventKind::RateLimit));
+        let limit = event.rate_limit.expect("rate-limit payload");
+        assert_eq!(limit.source, "claude");
+        assert_eq!(limit.reset_at.as_deref(), Some("2025-06-15T15:06:40.000Z"));
     }
 
     #[test]
