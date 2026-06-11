@@ -435,7 +435,9 @@ function App() {
         </div>
       </header>
 
-      <section className="content">
+      <section
+        className={view === "runs" ? "content content-viewport" : "content"}
+      >
         {!runtimeAvailable ? (
           <RuntimeBanner
             title="Desktop runtime unavailable"
@@ -816,14 +818,16 @@ function RunsView({
       </header>
       <div className="split">
         <Panel title="Run history">
-          <RunTable
-            runs={runs}
-            onOpenRun={onOpenRun}
-            emptyTitle="No runs yet"
-            emptyText="Runs will appear after the worker dispatches the first issue."
-            activeRunIds={activeRunIds}
-            selectedRunId={selected?.run.id}
-          />
+          <div className="panel-scroll">
+            <RunTable
+              runs={runs}
+              onOpenRun={onOpenRun}
+              emptyTitle="No runs yet"
+              emptyText="Runs will appear after the worker dispatches the first issue."
+              activeRunIds={activeRunIds}
+              selectedRunId={selected?.run.id}
+            />
+          </div>
         </Panel>
         <Panel
           title={

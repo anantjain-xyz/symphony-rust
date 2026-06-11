@@ -180,7 +180,9 @@ tr:focus-visible {
 }
 
 .app {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
 }
 
 .topbar {
@@ -188,13 +190,11 @@ tr:focus-visible {
   background: var(--background);
   border-bottom: 1px solid var(--border);
   display: flex;
+  flex: 0 0 auto;
   gap: 16px;
   justify-content: space-between;
   min-height: 64px;
   padding: 10px 28px;
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
 
 .topbar-primary {
@@ -376,9 +376,45 @@ small {
 }
 
 .content {
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
+  overflow-y: auto;
   padding: 28px;
   width: 100%;
+}
+
+/* Views that pin to the viewport (Runs): panes scroll internally instead of
+   growing the page. The outer scrollbar only appears if the window is too
+   short to fit the split's minimum height. */
+.content-viewport {
+  display: flex;
+  flex-direction: column;
+}
+
+.content-viewport .split {
+  flex: 1 1 auto;
+  min-height: 320px;
+}
+
+.content-viewport .panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.panel-scroll thead th {
+  background: var(--muted);
+  /* border-collapse borders don't travel with sticky cells */
+  box-shadow: inset 0 -1px 0 var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .page-header {
@@ -807,8 +843,9 @@ td strong {
 }
 
 .events {
-  max-height: calc(100vh - 170px);
-  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   position: relative;
 }
 
@@ -1198,6 +1235,20 @@ textarea {
   .split,
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* Stacked panes can't share the viewport; fall back to page scrolling. */
+  .content-viewport {
+    display: block;
+  }
+
+  .content-viewport .split {
+    min-height: 0;
+  }
+
+  .content-viewport .panel-scroll,
+  .content-viewport .events {
+    max-height: 60vh;
   }
 }
 
