@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use symphony_core::Issue;
 use thiserror::Error;
 
@@ -106,6 +109,26 @@ impl WorkspaceManager {
             return Err(WorkspaceError::EscapedRoot(key.to_string()));
         }
         Ok(resolved)
+    }
+}
+
+/// Resolve the directory per-issue workspaces (and the skills-install
+/// workspace) live in: the workflow's `workspace.root` with `TMPDIR`
+/// defaulted to the app data dir, falling back to `<app data dir>/workspaces`
+/// when the spec resolves empty.
+pub fn resolve_workspace_root_dir(
+    spec: &str,
+    env: &BTreeMap<String, String>,
+    app_data_dir: &Path,
+) -> PathBuf {
+    let mut env = env.clone();
+    env.entry("TMPDIR".to_string())
+        .or_insert_with(|| app_data_dir.display().to_string());
+    let root = symphony_core::resolve_workspace_root(spec, &env);
+    if root.trim().is_empty() {
+        app_data_dir.join("workspaces")
+    } else {
+        PathBuf::from(root)
     }
 }
 

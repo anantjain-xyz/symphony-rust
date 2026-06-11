@@ -131,6 +131,20 @@ export type AgentEventRow = {
   created_at: string;
 };
 
+export type SkillsStatus = {
+  state: "installed" | "pr_open" | "missing" | "unavailable";
+  missing: string[];
+  pr_url: string | null;
+  detail: string | null;
+};
+
+export type SkillsInstallStatus = {
+  state: "idle" | "running" | "completed" | "failed";
+  message: string | null;
+  pr_url: string | null;
+  error: string | null;
+};
+
 export type RunDetail = {
   run: RunWithIssueRow;
   events: AgentEventRow[];

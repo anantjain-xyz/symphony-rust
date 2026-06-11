@@ -10,6 +10,8 @@ import type {
   Overview,
   RunDetail,
   RunWithIssueRow,
+  SkillsInstallStatus,
+  SkillsStatus,
   TrackerTestResult,
   ValidationResult,
   WorkerStatus,
@@ -108,6 +110,9 @@ function App() {
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
+  const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
+  const [skillsChecking, setSkillsChecking] = useState(false);
+  const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
@@ -120,6 +125,7 @@ function App() {
 
   const selectedRunIdRef = useRef<string | null>(null);
   const autoStartDone = useRef(false);
+  const skillsCheckSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -256,6 +262,7 @@ function App() {
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
+    refreshSkillsStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
@@ -283,6 +290,83 @@ function App() {
     );
     setTrackerTest(result);
   }
+
+  // Skill detection talks to GitHub via `gh`, so it runs outside the global
+  // busy flag and never blocks the rest of the form. It checks the settings
+  // as the user sees them (including unsaved edits), not the saved file.
+  function refreshSkillsStatus(forSettings?: AppSettings) {
+    const target = forSettings ?? settings;
+    if (!runtimeAvailable || !target) return;
+    // Overlapping checks (the auto-check on entering Settings plus a manual
+    // re-check after editing the repo URL) can resolve out of order; only the
+    // newest request may apply, or a slow response for the old repo would
+    // overwrite the status of the current one.
+    const seq = ++skillsCheckSeq.current;
+    setSkillsChecking(true);
+    invoke<SkillsStatus>("get_skills_status", { settings: target })
+      .then((status) => {
+        if (seq !== skillsCheckSeq.current) return;
+        setSkillsStatus(status);
+        // A fresh check supersedes any finished install — without this, a
+        // completed install for repo A keeps showing its PR after the user
+        // switches the form to repo B.
+        setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
+      })
+      .catch(() => {
+        if (seq === skillsCheckSeq.current) setSkillsStatus(null);
+      })
+      .finally(() => {
+        if (seq === skillsCheckSeq.current) setSkillsChecking(false);
+      });
+  }
+
+  async function startSkillsInstall() {
+    if (!settings) return;
+    const status = await call(() =>
+      invoke<SkillsInstallStatus>("install_skills", { settings }),
+    );
+    setSkillsInstall(status);
+  }
+
+  // Invalidate and re-check whenever the repo URL itself changes (including
+  // the initial settings load): a status fetched for the previous repo must
+  // never drive the install UI. Debounced so typing doesn't spam gh.
+  const repoUrl = settings === null ? null : settings.repo_url.trim();
+  useEffect(() => {
+    if (!runtimeAvailable || repoUrl === null) return;
+    // Retire any in-flight check up front — its response is for the previous
+    // URL and must not repopulate the status cleared below while the
+    // debounced re-check (or nothing, for an empty URL) is pending.
+    skillsCheckSeq.current += 1;
+    setSkillsChecking(false);
+    setSkillsStatus(null);
+    setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
+    if (repoUrl === "") return;
+    const handle = window.setTimeout(() => refreshSkillsStatus(), 600);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoUrl, runtimeAvailable]);
+
+  // While the install session runs, poll its progress; when it lands, re-check
+  // the repo so the status flips to "PR open" with the link.
+  useEffect(() => {
+    if (!runtimeAvailable || skillsInstall?.state !== "running") return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      invoke<SkillsInstallStatus>("get_skills_install_status")
+        .then((status) => {
+          if (cancelled) return;
+          setSkillsInstall(status);
+          if (status.state === "completed") refreshSkillsStatus();
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeAvailable, skillsInstall?.state]);
 
   async function removeLinearKey() {
     if (!settings) return;
@@ -320,12 +404,23 @@ function App() {
     setView("runs");
   }
 
+  // `blocked` covers the hard requirements without which runs cannot work;
+  // it gates the worker-start affordances and matches the boot auto-start
+  // condition. Skills are recommended only: when we positively know they are
+  // not installed they keep the checklist visible (`needed`) but never block
+  // the worker — and unknown/unavailable must not nag users we can't check.
+  const setupBlocked =
+    settings !== null &&
+    (!settings.linear_api_key_set || settings.repo_url.trim() === "");
   const setup = {
+    blocked: setupBlocked,
     needed:
-      settings !== null &&
-      (!settings.linear_api_key_set || settings.repo_url.trim() === ""),
+      setupBlocked ||
+      (settings !== null &&
+        (skillsStatus?.state === "missing" || skillsStatus?.state === "pr_open")),
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
+    skills: skillsStatus,
   };
 
   const dirty =
@@ -340,6 +435,7 @@ function App() {
     invoke<ValidationResult>("validate_settings", { settings })
       .then(setValidation)
       .catch(() => undefined);
+    refreshSkillsStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
@@ -488,6 +584,9 @@ function App() {
             setLinearKey={setLinearKey}
             validation={validation}
             trackerTest={trackerTest}
+            skillsStatus={skillsStatus}
+            skillsChecking={skillsChecking}
+            skillsInstall={skillsInstall}
             dirty={dirty}
             savedFlash={savedFlash}
             busy={busy}
@@ -498,6 +597,8 @@ function App() {
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
             onResetWorkflow={resetWorkflow}
+            onRefreshSkills={refreshSkillsStatus}
+            onInstallSkills={startSkillsInstall}
           />
         ) : null}
       </section>
@@ -506,9 +607,11 @@ function App() {
 }
 
 type SetupState = {
+  blocked: boolean;
   needed: boolean;
   linearConnected: boolean;
   repoConfigured: boolean;
+  skills: SkillsStatus | null;
 };
 
 function OverviewView({
@@ -618,13 +721,13 @@ function OverviewView({
             onOpenRun={onOpenRun}
             emptyTitle="No active runs"
             emptyText={
-              setup.needed
+              setup.blocked
                 ? "Finish setup before starting the worker."
                 : "Start the worker when you are ready to dispatch agent work."
             }
-            actionLabel={setup.needed ? "Open settings" : "Start worker"}
-            actionDisabled={setup.needed ? false : !canStartWorker}
-            onAction={setup.needed ? onOpenSettings : onStartWorker}
+            actionLabel={setup.blocked ? "Open settings" : "Start worker"}
+            actionDisabled={setup.blocked ? false : !canStartWorker}
+            onAction={setup.blocked ? onOpenSettings : onStartWorker}
           />
         </Panel>
         <Panel title="Retry queue">
@@ -724,9 +827,9 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          Symphony watches your Linear project and dispatches Codex or Claude
-          agents to work on issues in isolated workspaces. Finish setup to
-          start the worker.
+          {setup.blocked
+            ? "Symphony watches your Linear project and dispatches Codex or Claude agents to work on issues in isolated workspaces. Finish setup to start the worker."
+            : "Symphony is ready to run. One recommended step remains: install the agent skills so dispatched agents follow proven procedures in your repo."}
         </p>
       </div>
       <ol className="setup-steps">
@@ -743,8 +846,18 @@ function SetupChecklist({
           text="Each run clones this repository into a fresh workspace."
         />
         <SetupStep
-          done={false}
+          done={setup.skills?.state === "installed"}
           step={3}
+          title="Install agent skills"
+          text={
+            setup.skills?.state === "pr_open"
+              ? "An install PR is open on your repository — merge it to finish this step."
+              : "Open a PR that adds Symphony's agent skills (workpad, commit, push, …) to your repo. Recommended — agents fall back to plain git and gh without them."
+          }
+        />
+        <SetupStep
+          done={false}
+          step={4}
           title="Start the worker"
           text="Symphony polls Linear and dispatches an agent for each issue in an active state."
         />
@@ -989,6 +1102,9 @@ function SettingsView({
   setLinearKey,
   validation,
   trackerTest,
+  skillsStatus,
+  skillsChecking,
+  skillsInstall,
   dirty,
   savedFlash,
   busy,
@@ -999,6 +1115,8 @@ function SettingsView({
   onTestConnection,
   onRemoveKey,
   onResetWorkflow,
+  onRefreshSkills,
+  onInstallSkills,
 }: {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
@@ -1006,6 +1124,9 @@ function SettingsView({
   setLinearKey: (value: string) => void;
   validation: ValidationResult | null;
   trackerTest: TrackerTestResult | null;
+  skillsStatus: SkillsStatus | null;
+  skillsChecking: boolean;
+  skillsInstall: SkillsInstallStatus | null;
   dirty: boolean;
   savedFlash: boolean;
   busy: boolean;
@@ -1016,6 +1137,8 @@ function SettingsView({
   onTestConnection: () => void;
   onRemoveKey: () => void;
   onResetWorkflow: () => void;
+  onRefreshSkills: () => void;
+  onInstallSkills: () => void;
 }) {
   return (
     <form
@@ -1095,6 +1218,16 @@ function SettingsView({
               Where per-run workspaces are created. Leave blank to use the app data directory.
             </small>
           </label>
+          <SkillsBlock
+            status={skillsStatus}
+            checking={skillsChecking}
+            install={skillsInstall}
+            busy={busy}
+            runtimeAvailable={runtimeAvailable}
+            repoConfigured={settings.repo_url.trim() !== ""}
+            onRefresh={onRefreshSkills}
+            onInstall={onInstallSkills}
+          />
         </section>
 
         <section className="settings-section">
@@ -1314,6 +1447,111 @@ function SettingsView({
         <ExternalLink href={`${GITHUB_URL}/issues`}>Report an issue</ExternalLink>
       </p>
     </form>
+  );
+}
+
+function SkillsBlock({
+  status,
+  checking,
+  install,
+  busy,
+  runtimeAvailable,
+  repoConfigured,
+  onRefresh,
+  onInstall,
+}: {
+  status: SkillsStatus | null;
+  checking: boolean;
+  install: SkillsInstallStatus | null;
+  busy: boolean;
+  runtimeAvailable: boolean;
+  repoConfigured: boolean;
+  onRefresh: () => void;
+  onInstall: () => void;
+}) {
+  const installing = install?.state === "running";
+  const actionsDisabled = busy || !runtimeAvailable || !repoConfigured;
+  // A just-finished install knows the PR URL before the next status check does.
+  const prUrl =
+    (install?.state === "completed" ? install.pr_url : null) ??
+    status?.pr_url ??
+    null;
+
+  let detail: React.ReactNode;
+  let action: React.ReactNode = null;
+  if (installing) {
+    detail = install?.message ?? "Installing…";
+    action = (
+      <button type="button" disabled>
+        Creating install PR…
+      </button>
+    );
+  } else if (install?.state === "failed") {
+    detail = (
+      <span className="test-result err">{install.error ?? "Install failed."}</span>
+    );
+    action = (
+      <button type="button" disabled={actionsDisabled} onClick={onInstall}>
+        Retry install PR
+      </button>
+    );
+  } else if (checking) {
+    detail = "Checking your repository…";
+  } else if (status?.state === "installed") {
+    detail = (
+      <span className="test-result ok">
+        Installed — agents will use the skills in this repo.
+      </span>
+    );
+  } else if (prUrl) {
+    detail = (
+      <span className="test-result ok">Install PR open — merge it to finish.</span>
+    );
+    action = (
+      <button
+        type="button"
+        className="link-button"
+        onClick={() => openUrl(prUrl).catch(() => undefined)}
+      >
+        View PR ↗
+      </button>
+    );
+  } else if (status?.state === "missing") {
+    detail = `Not installed — ${status.missing.length} of 7 skills missing.`;
+    action = (
+      <button type="button" disabled={actionsDisabled} onClick={onInstall}>
+        Create install PR
+      </button>
+    );
+  } else if (!repoConfigured) {
+    detail = "Add a repo URL above first.";
+  } else {
+    detail = status?.detail ?? "Status not checked yet.";
+    action = (
+      // Zero-arg wrapper: the handler takes optional settings, and React's
+      // mouse event must not be mistaken for them.
+      <button type="button" disabled={actionsDisabled} onClick={() => onRefresh()}>
+        Check
+      </button>
+    );
+  }
+
+  return (
+    <div className="field-group">
+      Agent skills
+      <div className="section-row">
+        {action}
+        <small className="test-result" role="status">
+          {detail}
+        </small>
+      </div>
+      <small className="hint">
+        Procedural guides (workpad, commit, push, …) that Symphony agents follow
+        in your repo. Installing starts an agent session that opens a PR adding
+        them under <code>.agents/skills/</code>, with validation commands
+        adapted to your toolchain.
+      </small>
+    </div>
   );
 }
 
