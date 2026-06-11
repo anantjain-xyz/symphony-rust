@@ -725,8 +725,12 @@ impl Repository {
     }
 
     pub async fn overview(&self) -> Result<Overview, StorageError> {
+        // Running runs are bounded by agent.max_concurrent_agents (no hard cap),
+        // and every live_session belongs to one of them — the Overview's
+        // last-activity column joins the two by run_id. Don't truncate, or a
+        // streaming run past an arbitrary limit would vanish from Overview.
         let active_runs = self
-            .runs_with_issue("where r.status = 'running'", 20)
+            .runs_with_issue("where r.status = 'running'", None)
             .await?;
         let retry_queue = sqlx::query_as::<_, RetryWithIssueRow>(
             r#"
@@ -742,7 +746,7 @@ impl Repository {
         let recent_failures = self
             .runs_with_issue(
                 "where r.status in ('failure', 'timeout') order by r.ended_at desc",
-                20,
+                Some(20),
             )
             .await?;
         let live_sessions = sqlx::query_as::<_, LiveSessionRow>("select * from live_sessions")
@@ -769,7 +773,7 @@ impl Repository {
     }
 
     pub async fn list_runs(&self, limit: i64) -> Result<Vec<RunWithIssueRow>, StorageError> {
-        self.runs_with_issue("order by r.created_at desc", limit)
+        self.runs_with_issue("order by r.created_at desc", Some(limit))
             .await
     }
 
@@ -855,7 +859,7 @@ impl Repository {
     async fn runs_with_issue(
         &self,
         clause: &str,
-        limit: i64,
+        limit: Option<i64>,
     ) -> Result<Vec<RunWithIssueRow>, StorageError> {
         let mut qb = QueryBuilder::<Sqlite>::new(
             r#"
@@ -866,8 +870,10 @@ impl Repository {
         );
         qb.push(" ");
         qb.push(clause);
-        qb.push(" limit ");
-        qb.push_bind(limit);
+        if let Some(limit) = limit {
+            qb.push(" limit ");
+            qb.push_bind(limit);
+        }
         Ok(qb
             .build_query_as::<RunWithIssueRow>()
             .fetch_all(&self.pool)
@@ -1080,5 +1086,62 @@ mod tests {
         repo.mark_running(&first.id).await.unwrap();
         let result = repo.mark_running(&second.id).await;
         assert!(matches!(result, Err(StorageError::AlreadyRunning(_))));
+    }
+
+    #[tokio::test]
+    async fn overview_keeps_all_running_runs_so_live_sessions_stay_visible() {
+        // The Overview's last-activity column joins live_sessions to active_runs
+        // by run_id, so every live session needs a matching active run. Running
+        // runs are bounded only by max_concurrent_agents (no hard cap), so the
+        // active_runs query must not truncate them. 25 exceeds the old limit of
+        // 20; the live session sits past that boundary.
+        let repo = repo().await;
+        let issues: Vec<Issue> = (0..25)
+            .map(|n| Issue {
+                id: format!("lin-{n}"),
+                identifier: format!("SYM-{n}"),
+                ..issue()
+            })
+            .collect();
+        repo.upsert_issues(&issues).await.unwrap();
+
+        let mut run_ids = Vec::new();
+        for n in 0..25 {
+            let run = repo
+                .try_reserve_run(&format!("lin-{n}"), 1, "/tmp/ws")
+                .await
+                .unwrap()
+                .unwrap();
+            repo.mark_running(&run.id).await.unwrap();
+            run_ids.push(run.id);
+        }
+
+        // Stream tokens on the 25th run — past the old cap.
+        repo.upsert_live_session(
+            &run_ids[24],
+            "sess",
+            "thread",
+            "turn",
+            &TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.active_runs.len(), 25);
+        for session in &overview.live_sessions {
+            assert!(
+                overview
+                    .active_runs
+                    .iter()
+                    .any(|run| run.id == session.run_id),
+                "live session {} missing from active_runs",
+                session.run_id
+            );
+        }
     }
 }
