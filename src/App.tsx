@@ -1367,22 +1367,19 @@ function SettingsView({
 
         <section className="settings-section">
           <h3>Agent</h3>
-          <label>
+          {/* Not a <label>: label activation would forward option clicks back
+              to the trigger button and reopen the popup right after selecting. */}
+          <div className="field-group">
             Backend
-            <select
+            <BackendSelect
               value={settings.agent_backend}
               disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({ ...settings, agent_backend: e.currentTarget.value as AppSettings["agent_backend"] })
-              }
-            >
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-            </select>
+              onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
+            />
             <small className="hint">
               The CLI that works on issues. Must be installed and authenticated on this machine.
             </small>
-          </label>
+          </div>
           <label>
             Launch command
             <input
@@ -1425,20 +1422,21 @@ function SettingsView({
             </small>
           ) : null}
           <label>
-            Turn timeout (ms)
+            Turn timeout (seconds)
             <input
               type="number"
-              min={1000}
-              value={settings.turn_timeout_ms}
+              min={1}
+              step="any"
+              value={settings.turn_timeout_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
                 const n = e.currentTarget.valueAsNumber;
                 if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, turn_timeout_ms: Math.trunc(n) });
+                  setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) });
               }}
             />
             <small className="hint">
-              Max time for one agent turn. 3600000 = 1 hour.
+              Max time for one agent turn. 3600 = 1 hour.
             </small>
           </label>
           {settings.agent_backend === "codex" ? (
@@ -1589,19 +1587,20 @@ function SettingsView({
         <section className="settings-section">
           <h3>Worker</h3>
           <label>
-            Polling interval (ms)
+            Polling interval (seconds)
             <input
               type="number"
-              min={1000}
-              value={settings.polling_interval_ms}
+              min={1}
+              step="any"
+              value={settings.polling_interval_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
                 const n = e.currentTarget.valueAsNumber;
                 if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, polling_interval_ms: Math.trunc(n) });
+                  setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) });
               }}
             />
-            <small className="hint">How often Linear is polled for issues. 30000 = 30s.</small>
+            <small className="hint">How often Linear is polled for issues.</small>
           </label>
           <label>
             Max concurrent agents
@@ -1619,36 +1618,38 @@ function SettingsView({
             <small className="hint">Issues worked on in parallel.</small>
           </label>
           <label>
-            Max retry backoff (ms)
+            Max retry backoff (seconds)
             <input
               type="number"
               min={0}
-              value={settings.max_retry_backoff_ms}
+              step="any"
+              value={settings.max_retry_backoff_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
                 const n = e.currentTarget.valueAsNumber;
                 if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, max_retry_backoff_ms: Math.trunc(n) });
+                  setSettings({ ...settings, max_retry_backoff_ms: Math.round(n * 1000) });
               }}
             />
             <small className="hint">
-              Cap on the delay between retries of a failed run. 300000 = 5 min.
+              Cap on the delay between retries of a failed run. 300 = 5 min.
             </small>
           </label>
           <label>
-            Hook timeout (ms)
+            Hook timeout (seconds)
             <input
               type="number"
-              min={1000}
-              value={settings.hook_timeout_ms}
+              min={1}
+              step="any"
+              value={settings.hook_timeout_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
                 const n = e.currentTarget.valueAsNumber;
                 if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, hook_timeout_ms: Math.trunc(n) });
+                  setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) });
               }}
             />
-            <small className="hint">Max time for each hook script. 60000 = 1 min.</small>
+            <small className="hint">Max time for each hook script.</small>
           </label>
           <details className="hooks-details">
             <summary>Hooks (advanced)</summary>
@@ -1842,6 +1843,157 @@ function ListInput({
       placeholder={placeholder}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
+  );
+}
+
+const BACKEND_OPTIONS: Array<{ value: AppSettings["agent_backend"]; label: string }> = [
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude Code" },
+];
+
+function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
+  if (backend === "claude") {
+    return (
+      <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          fill="#D97757"
+          d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.583.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.473.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.073zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997z"
+      />
+    </svg>
+  );
+}
+
+// Native <option> elements can't render icons, so the backend picker is a
+// custom trigger + listbox driven with the aria-activedescendant pattern.
+function BackendSelect({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: AppSettings["agent_backend"];
+  disabled: boolean;
+  onChange: (next: AppSettings["agent_backend"]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  const selected = BACKEND_OPTIONS.find((option) => option.value === value) ?? BACKEND_OPTIONS[0];
+
+  function openList() {
+    setActiveIndex(Math.max(0, BACKEND_OPTIONS.findIndex((option) => option.value === value)));
+    setOpen(true);
+  }
+
+  function commit(index: number) {
+    onChange(BACKEND_OPTIONS[index].value);
+    setOpen(false);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (!open) {
+      if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault();
+        openList();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((index) => Math.min(BACKEND_OPTIONS.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((index) => Math.max(0, index - 1));
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      commit(activeIndex);
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="icon-select" ref={rootRef}>
+      <button
+        type="button"
+        className="icon-select-trigger"
+        disabled={disabled}
+        role="combobox"
+        aria-label="Backend"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? "backend-listbox" : undefined}
+        aria-activedescendant={open ? `backend-option-${BACKEND_OPTIONS[activeIndex].value}` : undefined}
+        onClick={() => (open ? setOpen(false) : openList())}
+        onKeyDown={handleKeyDown}
+      >
+        <BackendIcon backend={selected.value} />
+        {selected.label}
+        <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+          <path
+            d="M4 6l4 4 4-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {open ? (
+        <ul className="icon-select-list" id="backend-listbox" role="listbox">
+          {BACKEND_OPTIONS.map((option, index) => (
+            <li
+              key={option.value}
+              id={`backend-option-${option.value}`}
+              role="option"
+              aria-selected={option.value === value}
+              className={index === activeIndex ? "icon-select-option active" : "icon-select-option"}
+              onPointerMove={() => setActiveIndex(index)}
+              onClick={() => commit(index)}
+            >
+              <span className="icon-select-check" aria-hidden="true">
+                {option.value === value ? (
+                  <svg viewBox="0 0 16 16" width="12" height="12">
+                    <path
+                      d="M3 8.5l3.5 3.5L13 4.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : null}
+              </span>
+              <BackendIcon backend={option.value} />
+              {option.label}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
