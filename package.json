@@ -10,7 +10,8 @@
     "test": "vitest run",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.mjs",
-    "release:mac": "bash scripts/release-macos.sh"
+    "release:mac": "bash scripts/release-macos.sh",
+    "release:publish": "bash scripts/publish-macos.sh"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

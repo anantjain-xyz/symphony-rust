@@ -2,6 +2,8 @@
 
 **An autonomous engineering team for your Linear project.** Symphony is a desktop app that watches your Linear board and dispatches coding agents — [Codex](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code) — to work on issues, each in its own freshly cloned workspace. You triage and review; Symphony orchestrates.
 
+**[⬇ Download for macOS](https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/Symphony.dmg)** (Apple Silicon, signed & notarized) · [![Latest release](https://img.shields.io/github/v/release/anantjain-xyz/symphony-rust)](https://github.com/anantjain-xyz/symphony-rust/releases/latest)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/overview-dark.png">
   <img alt="Symphony dashboard showing active agent runs, the retry queue, and provider rate limits" src="docs/overview-light.png">
@@ -28,7 +30,9 @@ Everything runs on your machine. The only network calls are to Linear's API and 
 
 ## Getting started
 
-Build and run from source (a packaged download is planned):
+**[Download Symphony.dmg](https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/Symphony.dmg)** — the latest signed and notarized build for macOS (Apple Silicon). Open it, drag **Symphony** to Applications, and launch.
+
+Or build and run from source:
 
 ```sh
 git clone https://github.com/anantjain-xyz/symphony-rust.git
@@ -120,6 +124,16 @@ APPLE_API_KEY_PATH=...     # absolute path to the AuthKey_<id>.p8 file
 The Developer ID Application certificate named by `APPLE_SIGNING_IDENTITY` must be installed in the login keychain; the script validates it before building.
 
 The finished DMG lands in `target/release/bundle/dmg/`.
+
+### Publishing a release
+
+```sh
+pnpm release:publish
+```
+
+This runs the signed build above, then tags `v<version>` (read from `src-tauri/tauri.conf.json`) and creates a GitHub release with the DMG attached under both its versioned name and the stable name `Symphony.dmg` — the file behind the download link at the top of this README, which always serves the newest release. Bump the version in `src-tauri/tauri.conf.json` (and keep `package.json` in sync) before publishing.
+
+The script refuses to run unless you're on a clean `main` checkout matching `origin/main`, and it needs an authenticated [GitHub CLI](https://cli.github.com) (`gh`) with push access.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including TypeScript bindings regeneration.
 
