@@ -317,12 +317,12 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         .as_object()
         .is_some_and(|obj| obj.contains_key("workflow_source"));
     if !is_legacy {
-        let settings = serde_json::from_value::<AppSettings>(value).map_err(|err| err.to_string())?;
+        let settings =
+            serde_json::from_value::<AppSettings>(value).map_err(|err| err.to_string())?;
         return Ok((settings, false));
     }
 
-    let legacy: LegacySettings =
-        serde_json::from_value(value).map_err(|err| err.to_string())?;
+    let legacy: LegacySettings = serde_json::from_value(value).map_err(|err| err.to_string())?;
     // Keep only the prompt body; customized front matter values are dropped
     // (the caller preserves the original file as settings.json.bak).
     let prompt_template = strip_front_matter(&legacy.workflow_source)
@@ -360,10 +360,7 @@ mod tests {
         assert_eq!(settings.terminal_states, ["Done", "Canceled"]);
         assert_eq!(settings.max_concurrent_agents, 3);
         assert!(settings.codex_network_access);
-        assert_eq!(
-            settings.claude_permission_mode,
-            ClaudePermissionMode::Auto
-        );
+        assert_eq!(settings.claude_permission_mode, ClaudePermissionMode::Auto);
         assert!(settings
             .claude_allowed_tools
             .iter()

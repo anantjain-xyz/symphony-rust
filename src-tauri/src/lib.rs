@@ -204,7 +204,9 @@ fn command_found(command: &str) -> bool {
 }
 
 #[tauri::command]
-async fn test_tracker_connection(request: SaveSettingsRequest) -> Result<TrackerTestResult, String> {
+async fn test_tracker_connection(
+    request: SaveSettingsRequest,
+) -> Result<TrackerTestResult, String> {
     // Prefer the unsaved form value so users can test a just-typed key.
     let api_key = request
         .linear_api_key
@@ -477,7 +479,8 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
                 tokio::fs::write(&backup, &raw)
                     .await
                     .map_err(|err| err.to_string())?;
-                let json = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+                let json =
+                    serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
                 tokio::fs::write(&state.settings_path, json)
                     .await
                     .map_err(|err| err.to_string())?;
@@ -632,7 +635,9 @@ mod tests {
 
     #[test]
     fn placeholder_scan_ignores_non_variable_braces() {
-        assert!(unknown_placeholders("code sample: {{\"key\": 1}} and {{ issue.title }}").is_empty());
+        assert!(
+            unknown_placeholders("code sample: {{\"key\": 1}} and {{ issue.title }}").is_empty()
+        );
         assert_eq!(unknown_placeholders("{{issue.nope}}"), vec!["issue.nope"]);
     }
 

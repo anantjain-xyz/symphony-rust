@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn strips_front_matter_to_prompt_body() {
         let raw = "---\ntracker:\n  api_key: x\n---\nHello {{issue.identifier}}\n";
-        assert_eq!(strip_front_matter(raw), Some("Hello {{issue.identifier}}\n"));
+        assert_eq!(
+            strip_front_matter(raw),
+            Some("Hello {{issue.identifier}}\n")
+        );
         assert_eq!(strip_front_matter("no front matter"), None);
     }
 }
