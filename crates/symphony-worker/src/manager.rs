@@ -782,7 +782,10 @@ mod tests {
             terminal: vec![],
         };
         tick(&repo, &tracker, &config, &stop).await.unwrap();
-        assert_eq!(repo.get_issue("lin-1").await.unwrap().unwrap().state, "todo");
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "todo"
+        );
 
         // Hop 1: issue moves to a state that is neither active nor terminal
         // (e.g. Linear's GitHub integration moves it to In Review on PR open).
@@ -811,7 +814,10 @@ mod tests {
             terminal: vec![done],
         };
         tick(&repo, &tracker, &config, &stop).await.unwrap();
-        assert_eq!(repo.get_issue("lin-1").await.unwrap().unwrap().state, "done");
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "done"
+        );
     }
 
     #[tokio::test]
