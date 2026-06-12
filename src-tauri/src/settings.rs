@@ -3,7 +3,8 @@ use specta::Type;
 use symphony_core::{
     build_parsed_workflow, strip_front_matter, AgentBackend, AgentConfig, ApprovalPolicy,
     ClaudeConfig, ClaudePermissionMode, CodexConfig, HooksConfig, ParsedWorkflow, PollingConfig,
-    ThreadSandbox, TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
+    RepoConfig, ThreadSandbox, TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter,
+    WorkspaceConfig,
 };
 
 /// Structured app settings — the single source of truth for worker, tracker,
@@ -13,11 +14,10 @@ use symphony_core::{
 pub struct AppSettings {
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
-    // Repository
+    // Repositories; each issue routes to one by repo:<name> label, project,
+    // team key, or the default flag (symphony_core::route_issue).
     #[serde(default)]
-    pub repo_url: String,
-    #[serde(default)]
-    pub install_cmd: Option<String>,
+    pub repos: Vec<RepoConfig>,
     #[serde(default)]
     pub workspace_root: Option<String>,
     // Linear / tracker
@@ -85,8 +85,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             prompt_template: default_prompt_template(),
-            repo_url: String::new(),
-            install_cmd: None,
+            repos: Vec::new(),
             workspace_root: None,
             tracker_workspace: None,
             tracker_prefix: None,
@@ -308,17 +307,33 @@ struct LegacySettings {
     claude_command: Option<String>,
 }
 
-/// Parse a settings.json payload, migrating the legacy `workflow_source`
-/// shape when present. Returns the settings and whether a migration happened
-/// (so the caller can back up and rewrite the file).
+/// Parse a settings.json payload, migrating older shapes when present: the
+/// legacy `workflow_source` blob, and the single-repo `repo_url`/`install_cmd`
+/// fields that predate the `repos` list. Returns the settings and whether a
+/// migration happened (so the caller can back up and rewrite the file).
 pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
     let is_legacy = value
         .as_object()
         .is_some_and(|obj| obj.contains_key("workflow_source"));
     if !is_legacy {
-        let settings =
+        let single_repo = value.as_object().filter(|obj| !obj.contains_key("repos")).map(|obj| {
+            (
+                obj.get("repo_url")
+                    .and_then(|url| url.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                obj.get("install_cmd")
+                    .and_then(|cmd| cmd.as_str())
+                    .map(str::to_string),
+            )
+        });
+        let mut settings =
             serde_json::from_value::<AppSettings>(value).map_err(|err| err.to_string())?;
+        if let Some((repo_url, install_cmd)) = single_repo {
+            settings.repos = repos_from_single(&repo_url, install_cmd);
+            return Ok((settings, true));
+        }
         return Ok((settings, false));
     }
 
@@ -332,18 +347,52 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         .unwrap_or_else(default_prompt_template);
     let settings = AppSettings {
         prompt_template,
-        repo_url: legacy.repo_url,
+        repos: repos_from_single(&legacy.repo_url, legacy.install_cmd),
         tracker_workspace: legacy.tracker_workspace,
         tracker_prefix: legacy.tracker_prefix,
         tracker_project_id: legacy.tracker_project_id,
         workspace_root: legacy.workspace_root,
-        install_cmd: legacy.install_cmd,
         agent_backend: legacy.agent_backend,
         codex_command: legacy.codex_command,
         claude_command: legacy.claude_command,
         ..AppSettings::default()
     };
     Ok((settings, true))
+}
+
+/// The repos list a pre-multi-repo config maps to: its one repo, as the
+/// default. An unset repo URL maps to "no repos configured".
+fn repos_from_single(repo_url: &str, install_cmd: Option<String>) -> Vec<RepoConfig> {
+    let url = repo_url.trim();
+    if url.is_empty() {
+        return Vec::new();
+    }
+    vec![RepoConfig {
+        name: repo_name_from_url(url),
+        url: url.to_string(),
+        install_cmd,
+        team_prefixes: Vec::new(),
+        project_ids: Vec::new(),
+        is_default: true,
+    }]
+}
+
+/// A routing-friendly name derived from a Git URL's last path segment, e.g.
+/// `git@github.com:acme/widgets.git` → `widgets`.
+fn repo_name_from_url(url: &str) -> String {
+    let name = url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.is_empty() {
+        "default".to_string()
+    } else {
+        name
+    }
 }
 
 #[cfg(test)]
@@ -398,7 +447,54 @@ mod tests {
         let raw = serde_json::to_string(&AppSettings::default()).unwrap();
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
-        assert_eq!(settings.repo_url, "");
+        assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn migrates_single_repo_settings_to_a_default_repos_entry() {
+        let raw = serde_json::json!({
+            "prompt_template": "My prompt {{issue.title}}",
+            "repo_url": "git@github.com:acme/Widgets.git",
+            "install_cmd": "pnpm install",
+            "agent_backend": "claude"
+        })
+        .to_string();
+        let (settings, migrated) = parse_settings(&raw).unwrap();
+        assert!(migrated);
+        assert_eq!(settings.prompt_template, "My prompt {{issue.title}}");
+        assert_eq!(settings.repos.len(), 1);
+        let repo = &settings.repos[0];
+        assert_eq!(repo.name, "widgets");
+        assert_eq!(repo.url, "git@github.com:acme/Widgets.git");
+        assert_eq!(repo.install_cmd.as_deref(), Some("pnpm install"));
+        assert!(repo.is_default);
+
+        // Re-parsing the migrated output is stable: no second migration.
+        let rewritten = serde_json::to_string(&settings).unwrap();
+        let (again, migrated_again) = parse_settings(&rewritten).unwrap();
+        assert!(!migrated_again);
+        assert_eq!(again.repos, settings.repos);
+    }
+
+    #[test]
+    fn migrates_empty_single_repo_settings_to_no_repos() {
+        let raw = serde_json::json!({ "repo_url": "", "install_cmd": "npm ci" }).to_string();
+        let (settings, migrated) = parse_settings(&raw).unwrap();
+        assert!(migrated);
+        assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn derives_repo_names_from_common_url_forms() {
+        for url in [
+            "git@github.com:acme/widgets.git",
+            "https://github.com/acme/widgets",
+            "https://github.com/acme/widgets.git/",
+            "ssh://git@github.com/acme/widgets",
+        ] {
+            assert_eq!(repo_name_from_url(url), "widgets", "failed for {url}");
+        }
+        assert_eq!(repo_name_from_url(""), "default");
     }
 
     #[test]
@@ -420,9 +516,12 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(migrated);
         assert_eq!(settings.prompt_template, "My custom prompt {{issue.title}}");
-        assert_eq!(settings.repo_url, "git@github.com:acme/widgets.git");
+        assert_eq!(settings.repos.len(), 1);
+        assert_eq!(settings.repos[0].name, "widgets");
+        assert_eq!(settings.repos[0].url, "git@github.com:acme/widgets.git");
+        assert_eq!(settings.repos[0].install_cmd.as_deref(), Some("pnpm install"));
+        assert!(settings.repos[0].is_default);
         assert_eq!(settings.tracker_workspace.as_deref(), Some("acme"));
-        assert_eq!(settings.install_cmd.as_deref(), Some("pnpm install"));
         assert_eq!(settings.agent_backend, AgentBackend::Claude);
         assert_eq!(
             settings.claude_command.as_deref(),

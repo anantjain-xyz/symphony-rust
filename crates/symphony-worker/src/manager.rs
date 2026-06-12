@@ -1,11 +1,11 @@
-use crate::{backoff_ms, run_hook, WorkspaceManager};
+use crate::{backoff_ms, run_hook, sanitize_key, WorkspaceManager};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
 use symphony_core::{
-    append_retry_context, render_prompt, AgentBackend, AgentOutcome, HookName, Issue,
-    MappedAgentEvent, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
+    append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
+    MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, RunStatus, TokenCountPayload,
 };
 use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
@@ -31,6 +31,8 @@ pub enum WorkerError {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct WorkerStartConfig {
     pub workflow: ParsedWorkflow,
+    /// Configured repositories; each issue is routed to one of them.
+    pub repos: Vec<RepoConfig>,
     pub env: BTreeMap<String, String>,
     pub app_data_dir: PathBuf,
 }
@@ -95,6 +97,7 @@ impl WorkerManager {
             let manager = self.clone();
             let runtime = RuntimeConfig {
                 workflow,
+                repos: config.repos,
                 env: config.env,
                 app_data_dir: config.app_data_dir,
             };
@@ -136,6 +139,7 @@ impl WorkerManager {
 #[derive(Debug, Clone)]
 struct RuntimeConfig {
     workflow: ParsedWorkflow,
+    repos: Vec<RepoConfig>,
     env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
 }
@@ -225,10 +229,11 @@ async fn recover<T: TrackerClient>(
     }
     repo.delete_orphaned_pending_sessions().await.ok();
     if let Ok(terminal) = tracker.fetch_terminal().await {
-        let workspaces = workspace_manager(config);
         for issue in terminal {
             if !repo.has_active_run(&issue.id).await.unwrap_or(true) {
-                let _ = workspaces.remove(&issue).await;
+                if let Some(repo_config) = route_issue(&config.repos, &issue) {
+                    let _ = workspace_manager(config, repo_config).remove(&issue).await;
+                }
             }
         }
     }
@@ -298,12 +303,27 @@ async fn tick<T: TrackerClient>(
         if repo.has_active_run(&issue.id).await? {
             continue;
         }
+        let Some(repo_config) = route_issue(&config.repos, &issue) else {
+            warn!(
+                issue = %issue.identifier,
+                "no repository matches this issue; skipping (mark a repo as default or add a repo:<name> label)"
+            );
+            continue;
+        };
         if repo.count_running().await?
             >= config.workflow.front_matter.agent.max_concurrent_agents as i64
         {
             break;
         }
-        reserve_and_dispatch(repo.clone(), config.clone(), issue, None, stop.clone()).await?;
+        reserve_and_dispatch(
+            repo.clone(),
+            config.clone(),
+            issue,
+            repo_config.clone(),
+            None,
+            stop.clone(),
+        )
+        .await?;
     }
 
     let due = repo.due_retries(&now_iso()).await?;
@@ -336,10 +356,20 @@ async fn tick<T: TrackerClient>(
             if !issue.blockers.is_empty() {
                 continue;
             }
+            // Unroutable issues stay queued, like blocked ones: routing rules
+            // only change with a worker restart, which re-enters this loop.
+            let Some(repo_config) = route_issue(&config.repos, &issue) else {
+                warn!(
+                    issue = %issue.identifier,
+                    "no repository matches this retry; keeping it queued"
+                );
+                continue;
+            };
             reserve_and_dispatch(
                 repo.clone(),
                 config.clone(),
                 issue,
+                repo_config.clone(),
                 Some(retry.run_number),
                 stop.clone(),
             )
@@ -355,10 +385,11 @@ async fn reserve_and_dispatch(
     repo: Repository,
     config: RuntimeConfig,
     issue: Issue,
+    repo_config: RepoConfig,
     run_number: Option<i64>,
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
-    let workspaces = workspace_manager(&config);
+    let workspaces = workspace_manager(&config, &repo_config);
     let workspace_path = workspaces
         .path_for(&issue.identifier)
         .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
@@ -367,13 +398,18 @@ async fn reserve_and_dispatch(
         None => repo.last_run_number(&issue.id).await? + 1,
     };
     let Some(run) = repo
-        .try_reserve_run(&issue.id, number, &workspace_path.display().to_string())
+        .try_reserve_run(
+            &issue.id,
+            number,
+            &workspace_path.display().to_string(),
+            Some(&repo_config.name),
+        )
         .await?
     else {
         return Ok(());
     };
     tokio::spawn(async move {
-        if let Err(err) = dispatch_run(repo, config, issue, run, stop).await {
+        if let Err(err) = dispatch_run(repo, config, issue, repo_config, run, stop).await {
             error!(error = %err, "dispatch failed");
         }
     });
@@ -384,14 +420,16 @@ async fn dispatch_run(
     repo: Repository,
     config: RuntimeConfig,
     issue: Issue,
+    repo_config: RepoConfig,
     run: RunRow,
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
-    let workspaces = workspace_manager(&config);
+    let workspaces = workspace_manager(&config, &repo_config);
     let workspace = workspaces
         .create_or_reuse(&issue)
         .await
         .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    let env = run_env(&config.env, &repo_config);
 
     if workspace.needs_init {
         if let Some(script) = &config.workflow.front_matter.hooks.after_create {
@@ -402,7 +440,7 @@ async fn dispatch_run(
                 &workspace.path,
                 run.run_number,
                 config.workflow.front_matter.hooks.timeout_ms,
-                &config.env,
+                &env,
             )
             .await;
             repo.record_hook(
@@ -458,7 +496,7 @@ async fn dispatch_run(
             &workspace.path,
             run.run_number,
             config.workflow.front_matter.hooks.timeout_ms,
-            &config.env,
+            &env,
         )
         .await;
         repo.record_hook(
@@ -471,7 +509,7 @@ async fn dispatch_run(
         .await?;
     }
 
-    let mut prompt = render_prompt(&config.workflow.prompt_template, &issue);
+    let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
     if let Some(prior) = repo.prior_run(&issue.id, &run.id).await? {
         let recent_events = repo
             .recent_events_for_issue(&issue.id, 10)
@@ -580,7 +618,7 @@ async fn dispatch_run(
                     &workspace.path,
                     run.run_number,
                     config.workflow.front_matter.hooks.timeout_ms,
-                    &config.env,
+                    &env,
                 )
                 .await;
                 repo.record_hook(
@@ -699,11 +737,33 @@ async fn fail(
     Ok(())
 }
 
-fn workspace_manager(config: &RuntimeConfig) -> WorkspaceManager {
-    WorkspaceManager::new(crate::resolve_workspace_root_dir(
+/// Per-issue workspaces are namespaced by repo (`<root>/<repo>/<issue>`), so
+/// a routing change can never point an issue's retries at a directory holding
+/// a clone of a different repository.
+fn workspace_manager(config: &RuntimeConfig, repo: &RepoConfig) -> WorkspaceManager {
+    let root = crate::resolve_workspace_root_dir(
         &config.workflow.front_matter.workspace.root,
         &config.app_data_dir,
-    ))
+    );
+    WorkspaceManager::new(root.join(sanitize_key(&repo.name)))
+}
+
+/// The hook environment for one run: the shared env plus the routed repo's
+/// coordinates. The default after_create hook consumes REPO_URL and
+/// SYMPHONY_INSTALL_CMD; REPO_NAME lets custom hooks branch per repo.
+fn run_env(base: &BTreeMap<String, String>, repo: &RepoConfig) -> BTreeMap<String, String> {
+    let mut env = base.clone();
+    env.insert("REPO_URL".to_string(), repo.url.clone());
+    env.insert("REPO_NAME".to_string(), repo.name.clone());
+    if let Some(cmd) = repo
+        .install_cmd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty())
+    {
+        env.insert("SYMPHONY_INSTALL_CMD".to_string(), cmd.to_string());
+    }
+    env
 }
 
 fn due_after(ms: u64) -> String {
@@ -744,6 +804,12 @@ mod tests {
                 front_matter,
                 "Prompt {{issue.identifier}}".to_string(),
             ),
+            repos: vec![RepoConfig {
+                name: "widgets".to_string(),
+                url: "git@github.com:acme/widgets.git".to_string(),
+                is_default: true,
+                ..RepoConfig::default()
+            }],
             env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
         }
@@ -761,6 +827,7 @@ mod tests {
             labels: vec![],
             blockers,
             pr_urls: vec![],
+            project_id: None,
         }
     }
 
@@ -879,6 +946,71 @@ mod tests {
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn skips_unroutable_issue_without_creating_a_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        // Two repos, neither default, no rule matching SYM-1: unroutable.
+        config.repos = vec![
+            RepoConfig {
+                name: "web".to_string(),
+                team_prefixes: vec!["WEB".to_string()],
+                ..RepoConfig::default()
+            },
+            RepoConfig {
+                name: "backend".to_string(),
+                team_prefixes: vec!["ENG".to_string()],
+                ..RepoConfig::default()
+            },
+        ];
+        let stop = CancellationToken::new();
+
+        let ready = issue("todo", vec![]);
+        let tracker = StaticTracker {
+            active: vec![ready],
+            terminal: vec![],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_env_overlays_the_routed_repo() {
+        let mut base = BTreeMap::new();
+        base.insert("PATH".to_string(), "/usr/bin".to_string());
+        let repo = RepoConfig {
+            name: "widgets".to_string(),
+            url: "git@github.com:acme/widgets.git".to_string(),
+            install_cmd: Some("pnpm install".to_string()),
+            ..RepoConfig::default()
+        };
+
+        let env = run_env(&base, &repo);
+
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            env.get("REPO_URL").map(String::as_str),
+            Some("git@github.com:acme/widgets.git")
+        );
+        assert_eq!(env.get("REPO_NAME").map(String::as_str), Some("widgets"));
+        assert_eq!(
+            env.get("SYMPHONY_INSTALL_CMD").map(String::as_str),
+            Some("pnpm install")
+        );
+
+        let no_install = RepoConfig {
+            install_cmd: Some("  ".to_string()),
+            ..repo
+        };
+        assert!(!run_env(&base, &no_install).contains_key("SYMPHONY_INSTALL_CMD"));
     }
 
     #[test]

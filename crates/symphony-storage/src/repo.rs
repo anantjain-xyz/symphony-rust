@@ -48,6 +48,8 @@ pub struct RunRow {
     pub worker_pid: Option<i64>,
     /// JSON-encoded `SessionInfoPayload` reported by the agent CLI at startup.
     pub session_info: Option<String>,
+    /// Configured repo the run was routed to; null on pre-multi-repo rows.
+    pub repo_name: Option<String>,
     pub created_at: String,
 }
 
@@ -64,6 +66,7 @@ pub struct RunWithIssueRow {
     pub error_message: Option<String>,
     pub worker_pid: Option<i64>,
     pub session_info: Option<String>,
+    pub repo_name: Option<String>,
     pub created_at: String,
     pub issue_identifier: String,
     pub issue_title: String,
@@ -241,18 +244,20 @@ impl Repository {
         issue_id: &str,
         run_number: i64,
         workspace_path: &str,
+        repo_name: Option<&str>,
     ) -> Result<Option<RunRow>, StorageError> {
         let id = Uuid::new_v4().to_string();
         let result = sqlx::query(
             r#"
-            insert or ignore into runs (id, issue_id, run_number, workspace_path, status)
-            values (?1, ?2, ?3, ?4, 'pending')
+            insert or ignore into runs (id, issue_id, run_number, workspace_path, status, repo_name)
+            values (?1, ?2, ?3, ?4, 'pending', ?5)
             "#,
         )
         .bind(&id)
         .bind(issue_id)
         .bind(run_number)
         .bind(workspace_path)
+        .bind(repo_name)
         .execute(&self.pool)
         .await?;
         if result.rows_affected() == 0 {
@@ -926,6 +931,7 @@ mod tests {
             labels: vec![],
             blockers: vec![],
             pr_urls: vec![],
+            project_id: None,
         }
     }
 
@@ -982,9 +988,18 @@ mod tests {
     async fn reserves_unique_run_numbers() {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
-        let first = repo.try_reserve_run("lin-1", 1, "/tmp/ws").await.unwrap();
-        assert!(first.is_some());
-        let duplicate = repo.try_reserve_run("lin-1", 1, "/tmp/ws").await.unwrap();
+        let first = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.expect("first reservation").repo_name.as_deref(),
+            Some("widgets")
+        );
+        let duplicate = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap();
         assert!(duplicate.is_none());
     }
 
@@ -993,7 +1008,7 @@ mod tests {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
         let run = repo
-            .try_reserve_run("lin-1", 1, "/tmp/ws")
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
             .await
             .unwrap()
             .unwrap();
@@ -1074,12 +1089,12 @@ mod tests {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
         let first = repo
-            .try_reserve_run("lin-1", 1, "/tmp/ws")
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
             .await
             .unwrap()
             .unwrap();
         let second = repo
-            .try_reserve_run("lin-1", 2, "/tmp/ws")
+            .try_reserve_run("lin-1", 2, "/tmp/ws", None)
             .await
             .unwrap()
             .unwrap();
@@ -1108,7 +1123,7 @@ mod tests {
         let mut run_ids = Vec::new();
         for n in 0..25 {
             let run = repo
-                .try_reserve_run(&format!("lin-{n}"), 1, "/tmp/ws")
+                .try_reserve_run(&format!("lin-{n}"), 1, "/tmp/ws", None)
                 .await
                 .unwrap()
                 .unwrap();

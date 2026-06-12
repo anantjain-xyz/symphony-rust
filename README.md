@@ -42,7 +42,7 @@ See [Building](#building) for production bundles and signed releases.
 On first launch the Overview shows a setup checklist:
 
 1. **Connect Linear** — paste your API key in *Settings → Linear*. It is stored in the macOS keychain, never on disk.
-2. **Add your repository** — the Git URL each run clones into its workspace.
+2. **Add your repositories** — one or more Git URLs; each run clones the repo its issue routes to.
 3. **Start the worker** — the ▶ button in the top bar. Symphony begins polling and dispatching.
 
 Optional Linear filters (workspace slug, project ID, identifier prefix like `ENG`) narrow which issues Symphony picks up. Use **Validate** in Settings to check your configuration and confirm the agent CLIs are discoverable before starting.
@@ -51,10 +51,10 @@ Optional Linear filters (workspace slug, project ID, identifier prefix like `ENG
 
 Symphony's behavior is configured entirely in *Settings* — no config file to edit:
 
-- **Repository** — the Git URL each run clones, the install command, and where per-run workspaces are created.
+- **Repositories** — the Git repos runs clone, each with its own install command, plus where per-run workspaces are created (one folder per repo, then per issue). With several repos configured, every issue routes to exactly one, first match wins: a `repo:<name>` label on the issue in Linear, then the repo claiming the issue's Linear project, then the repo claiming its team key (e.g. `ENG`), then the repo marked *default*. An issue whose `repo:` label matches no configured repo is skipped — an explicit label is never silently rerouted.
 - **Linear** — API key (keychain), optional workspace/project/team filters, and the workflow states that drive dispatch: issues in an *active state* (e.g. `Todo`, `In Progress`, `Rework`, `Merging`) get an agent; issues in a *terminal state* (e.g. `Done`, `Canceled`) are left alone.
 - **Agent** — which CLI runs issues (`codex` or `claude`), an optional launch command (wrappers with arguments like `mycode --agent claude` are fine; Symphony appends its own flags), the per-turn timeout, and the backend's sandbox/permission options: approval policy, thread sandbox, and network access for Codex; permission mode and allowed/disallowed tool rules for Claude Code.
-- **Worker** — polling interval, max concurrent agents, retry backoff cap, and the lifecycle hooks (under *Hooks (advanced)*): `after_create`, `before_run`, `after_run`, `before_remove`. Hooks are shell scripts that run in the workspace with `$REPO_URL`, `$ISSUE_ID`, `$ISSUE_IDENTIFIER`, `$ISSUE_TITLE`, `$ISSUE_STATE`, `$ISSUE_BRANCH`, `$RUN_NUMBER`, `$SYMPHONY_INSTALL_CMD`, and `$SYMPHONY_HOOK` in their environment.
+- **Worker** — polling interval, max concurrent agents, retry backoff cap, and the lifecycle hooks (under *Hooks (advanced)*): `after_create`, `before_run`, `after_run`, `before_remove`. Hooks are shell scripts that run in the workspace with `$REPO_URL`, `$REPO_NAME`, `$ISSUE_ID`, `$ISSUE_IDENTIFIER`, `$ISSUE_TITLE`, `$ISSUE_STATE`, `$ISSUE_BRANCH`, `$RUN_NUMBER`, `$SYMPHONY_INSTALL_CMD`, and `$SYMPHONY_HOOK` in their environment; the repo variables reflect the repo the issue routed to.
 
 The **prompt template** at the bottom of Settings is the instruction document sent to the agent for each issue. Placeholders in `{{...}}` form are rendered from the Linear issue when a run starts; the reference panel next to the editor lists them and inserts one at the cursor on click:
 
@@ -68,6 +68,8 @@ The **prompt template** at the bottom of Settings is the instruction document se
 | `{{issue.branch}}` | Git branch from Linear (may be empty) |
 | `{{issue.labels}}` | Labels, comma-separated |
 | `{{issue.blockers}}` | Blocking issue identifiers, one `- <id>` bullet per line |
+| `{{repo.name}}` | Name of the repo the issue routed to |
+| `{{repo.url}}` | Git URL of the routed repo |
 
 Retried runs automatically get a `## Retry context` section appended with the prior run's error and recent events.
 

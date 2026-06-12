@@ -8,6 +8,7 @@ import type {
   AppSettings,
   IssueRow,
   Overview,
+  RepoConfig,
   RunDetail,
   RunWithIssueRow,
   SkillsInstallStatus,
@@ -70,8 +71,16 @@ const emptyOverview: Overview = {
 const previewSettings: AppSettings = {
   prompt_template:
     "# Prompt preview\n\nConnect through the Tauri desktop runtime to load and edit the saved prompt template.",
-  repo_url: "",
-  install_cmd: null,
+  repos: [
+    {
+      name: "widgets",
+      url: "git@github.com:acme/widgets.git",
+      install_cmd: null,
+      team_prefixes: ["ENG"],
+      project_ids: [],
+      is_default: true,
+    },
+  ],
   workspace_root: null,
   tracker_workspace: null,
   tracker_prefix: null,
@@ -112,7 +121,23 @@ const PROMPT_VARIABLES: { name: string; description: string; example: string }[]
   { name: "issue.labels", description: "Labels, comma-separated", example: "bug, ui" },
   { name: "issue.blockers", description: "Blocking issues, one bullet per line", example: "- SYM-41" },
   { name: "issue.id", description: "Internal Linear ID", example: "" },
+  { name: "repo.name", description: "Name of the repo this issue routed to", example: "widgets" },
+  { name: "repo.url", description: "Git URL of the routed repo", example: "git@github.com:org/repo.git" },
 ];
+
+// Mirrors default_repo in symphony-core (crates/symphony-core/src/routing.rs):
+// the repo marked default, or the only one configured. Drives the skills
+// block and the setup gates.
+function defaultRepo(settings: AppSettings): RepoConfig | null {
+  return (
+    settings.repos.find((repo) => repo.is_default) ??
+    (settings.repos.length === 1 ? settings.repos[0] : null)
+  );
+}
+
+function anyRepoConfigured(settings: AppSettings): boolean {
+  return settings.repos.some((repo) => repo.url.trim() !== "");
+}
 
 // linear_api_key_set is server-derived, not part of the editable form.
 function formSnapshot(settings: AppSettings) {
@@ -197,7 +222,7 @@ function App() {
       // on launch once setup is complete; the topbar toggle stops it.
       if (autoStartDone.current) return;
       autoStartDone.current = true;
-      if (!loaded.linear_api_key_set || loaded.repo_url.trim() === "") return;
+      if (!loaded.linear_api_key_set || !anyRepoConfigured(loaded)) return;
       const status = await invoke<WorkerStatus>("get_worker_status");
       if (status.state !== "stopped" || status.last_error) return;
       setWorker(await invoke<WorkerStatus>("start_worker"));
@@ -361,10 +386,11 @@ function App() {
     setSkillsInstall(status);
   }
 
-  // Invalidate and re-check whenever the repo URL itself changes (including
+  // Invalidate and re-check whenever the default repo's URL changes (including
   // the initial settings load): a status fetched for the previous repo must
-  // never drive the install UI. Debounced so typing doesn't spam gh.
-  const repoUrl = settings === null ? null : settings.repo_url.trim();
+  // never drive the install UI. Debounced so typing doesn't spam gh. Skills
+  // are checked and installed against the default repo only for now.
+  const repoUrl = settings === null ? null : (defaultRepo(settings)?.url.trim() ?? "");
   useEffect(() => {
     if (!runtimeAvailable || repoUrl === null) return;
     // Retire any in-flight check up front — its response is for the previous
@@ -444,7 +470,7 @@ function App() {
   // the worker — and unknown/unavailable must not nag users we can't check.
   const setupBlocked =
     settings !== null &&
-    (!settings.linear_api_key_set || settings.repo_url.trim() === "");
+    (!settings.linear_api_key_set || !anyRepoConfigured(settings));
   const setup = {
     blocked: setupBlocked,
     needed:
@@ -452,7 +478,7 @@ function App() {
       (settings !== null &&
         (skillsStatus?.state === "missing" || skillsStatus?.state === "pr_open")),
     linearConnected: settings?.linear_api_key_set ?? false,
-    repoConfigured: (settings?.repo_url.trim() ?? "") !== "",
+    repoConfigured: settings !== null && anyRepoConfigured(settings),
     skills: skillsStatus,
   };
 
@@ -852,8 +878,8 @@ function SetupChecklist({
         <SetupStep
           done={setup.repoConfigured}
           step={2}
-          title="Add your repository"
-          text="Each run clones this repository into a fresh workspace."
+          title="Add your repositories"
+          text="Each run clones the repo its issue routes to into a fresh workspace."
         />
         <SetupStep
           done={setup.skills?.state === "installed"}
@@ -1151,6 +1177,34 @@ function SettingsView({
   onInstallSkills: () => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
+  const updateRepo = (index: number, patch: Partial<RepoConfig>) =>
+    setSettings({
+      ...settings,
+      repos: settings.repos.map((repo, i) => (i === index ? { ...repo, ...patch } : repo)),
+    });
+  const addRepo = () =>
+    setSettings({
+      ...settings,
+      repos: [
+        ...settings.repos,
+        {
+          name: "",
+          url: "",
+          install_cmd: null,
+          team_prefixes: [],
+          project_ids: [],
+          // The first repo is the natural fallback; later ones opt in.
+          is_default: settings.repos.length === 0,
+        },
+      ],
+    });
+  const removeRepo = (index: number) =>
+    setSettings({ ...settings, repos: settings.repos.filter((_, i) => i !== index) });
+  const setDefaultRepo = (index: number) =>
+    setSettings({
+      ...settings,
+      repos: settings.repos.map((repo, i) => ({ ...repo, is_default: i === index })),
+    });
   return (
     <form
       className="settings-form"
@@ -1185,35 +1239,116 @@ function SettingsView({
 
       <div className="settings-grid">
         <section className="settings-section">
-          <h3>Repository</h3>
-          <label>
-            Repo URL
-            <input
-              value={settings.repo_url}
-              disabled={!runtimeAvailable}
-              autoComplete="off"
-              onChange={(e) => setSettings({ ...settings, repo_url: e.currentTarget.value })}
-              placeholder="git@github.com:org/repo.git"
-            />
-            <small className="hint">
-              SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
-            </small>
-          </label>
-          <label>
-            Install command
-            <input
-              value={settings.install_cmd ?? ""}
-              disabled={!runtimeAvailable}
-              autoComplete="off"
-              onChange={(e) =>
-                setSettings({ ...settings, install_cmd: nullable(e.currentTarget.value) })
-              }
-              placeholder="npm ci"
-            />
-            <small className="hint">
-              Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
-            </small>
-          </label>
+          <h3>Repositories</h3>
+          <small className="hint">
+            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> label in
+            Linear wins, then the repo claiming the issue's project, then its team,
+            then the default.
+          </small>
+          {settings.repos.map((repo, index) => (
+            <fieldset className="repo-card" key={index}>
+              <div className="repo-card-head">
+                <strong>{repo.name.trim() || `Repository ${index + 1}`}</strong>
+                <div className="repo-card-actions">
+                  <label className="repo-default">
+                    <input
+                      type="radio"
+                      name="default-repo"
+                      checked={repo.is_default}
+                      disabled={!runtimeAvailable}
+                      onChange={() => setDefaultRepo(index)}
+                    />
+                    Default
+                  </label>
+                  <button
+                    type="button"
+                    className="link-button"
+                    disabled={!runtimeAvailable}
+                    onClick={() => removeRepo(index)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+              <label>
+                Name
+                <input
+                  value={repo.name}
+                  disabled={!runtimeAvailable}
+                  autoComplete="off"
+                  onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
+                  placeholder="widgets"
+                />
+                <small className="hint">
+                  Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear
+                  to send it here.
+                </small>
+              </label>
+              <label>
+                Repo URL
+                <input
+                  value={repo.url}
+                  disabled={!runtimeAvailable}
+                  autoComplete="off"
+                  onChange={(e) => updateRepo(index, { url: e.currentTarget.value })}
+                  placeholder="git@github.com:org/repo.git"
+                />
+                <small className="hint">
+                  SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
+                </small>
+              </label>
+              <label>
+                Install command
+                <input
+                  value={repo.install_cmd ?? ""}
+                  disabled={!runtimeAvailable}
+                  autoComplete="off"
+                  onChange={(e) =>
+                    updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="npm ci"
+                />
+                <small className="hint">
+                  Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
+                </small>
+              </label>
+              <label>
+                Linear teams
+                <ListInput
+                  value={repo.team_prefixes}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="ENG, WAL"
+                  onChange={(next) => updateRepo(index, { team_prefixes: next })}
+                />
+                <small className="hint">
+                  Optional. Issues from these team keys land here unless a label or
+                  project rule says otherwise.
+                </small>
+              </label>
+              <label>
+                Linear projects
+                <ListInput
+                  value={repo.project_ids}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="Project IDs"
+                  onChange={(next) => updateRepo(index, { project_ids: next })}
+                />
+                <small className="hint">
+                  Optional. Issues in these projects land here; beats the team rule.
+                </small>
+              </label>
+            </fieldset>
+          ))}
+          <button
+            type="button"
+            className="self-start"
+            disabled={!runtimeAvailable}
+            onClick={addRepo}
+          >
+            Add repository
+          </button>
           <label>
             Workspace root
             <input
@@ -1226,7 +1361,8 @@ function SettingsView({
               placeholder="App data directory"
             />
             <small className="hint">
-              Where per-run workspaces are created. Leave blank to use the app data directory.
+              Where per-run workspaces are created (one folder per repo, then per
+              issue). Leave blank to use the app data directory.
             </small>
           </label>
           <SkillsBlock
@@ -1235,7 +1371,7 @@ function SettingsView({
             install={skillsInstall}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
-            repoConfigured={settings.repo_url.trim() !== ""}
+            repoConfigured={(defaultRepo(settings)?.url.trim() ?? "") !== ""}
             onRefresh={onRefreshSkills}
             onInstall={onInstallSkills}
           />
@@ -1988,7 +2124,7 @@ function SkillsBlock({
       </button>
     );
   } else if (!repoConfigured) {
-    detail = "Add a repo URL above first.";
+    detail = "Add a repository above (and mark one as default) first.";
   } else {
     detail = status?.detail ?? "Status not checked yet.";
     action = (
@@ -2013,7 +2149,7 @@ function SkillsBlock({
         Procedural guides (workpad, commit, push, …) that Symphony agents follow
         in your repo. Installing starts an agent session that opens a PR adding
         them under <code>.agents/skills/</code>, with validation commands
-        adapted to your toolchain.
+        adapted to your toolchain. Checks and installs target the default repo.
       </small>
     </div>
   );
