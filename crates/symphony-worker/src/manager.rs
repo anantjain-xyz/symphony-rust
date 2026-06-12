@@ -260,10 +260,11 @@ async fn tick<T: TrackerClient>(
     // An issue that leaves the active set (e.g. moved to Done in Linear) stops
     // appearing in fetch_active, so its local row would otherwise stay frozen
     // at the last active state. Refetch it by id and store whatever state it
-    // has now; once stored, it no longer matches active_states, so this costs
-    // one extra request per departed issue, not per tick.
+    // has now. Issues can pass through intermediate states on the way out
+    // (Linear's GitHub integration moves them to In Review before Done), so
+    // keep refreshing every tick until the row reaches a terminal state.
     for issue_id in repo
-        .issue_ids_in_states(&config.workflow.front_matter.tracker.active_states)
+        .issue_ids_not_in_states(&config.workflow.front_matter.tracker.terminal_states)
         .await?
     {
         if active_ids.contains(&issue_id) {
@@ -762,6 +763,61 @@ mod tests {
             blockers,
             pr_urls: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn refreshes_issue_that_reaches_done_via_an_intermediate_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        // Blocked so the tick records the issue without dispatching a run.
+        let todo = issue("todo", vec!["SYM-0".to_string()]);
+        let tracker = StaticTracker {
+            active: vec![todo.clone()],
+            terminal: vec![],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "todo"
+        );
+
+        // Hop 1: issue moves to a state that is neither active nor terminal
+        // (e.g. Linear's GitHub integration moves it to In Review on PR open).
+        let in_review = Issue {
+            state: "in review".to_string(),
+            blockers: vec![],
+            ..todo
+        };
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![in_review.clone()],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "in review"
+        );
+
+        // Hop 2: issue reaches Done. The local row must follow.
+        let done = Issue {
+            state: "done".to_string(),
+            ..in_review
+        };
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![done],
+        };
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "done"
+        );
     }
 
     #[tokio::test]

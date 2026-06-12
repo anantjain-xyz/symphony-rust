@@ -786,21 +786,25 @@ impl Repository {
         .await?)
     }
 
-    /// Ids of issues whose stored state matches one of the given names,
+    /// Ids of issues whose stored state matches none of the given names,
     /// case-insensitively (states arrive lowercased from the tracker, but
-    /// callers pass the names as configured, e.g. "In Progress").
-    pub async fn issue_ids_in_states(
+    /// callers pass the names as configured, e.g. "Done"). An empty list
+    /// excludes nothing, so every issue id is returned.
+    pub async fn issue_ids_not_in_states(
         &self,
         states: &[String],
     ) -> Result<Vec<String>, StorageError> {
         if states.is_empty() {
-            return Ok(Vec::new());
+            let rows = sqlx::query_as::<_, (String,)>("select id from issues")
+                .fetch_all(&self.pool)
+                .await?;
+            return Ok(rows.into_iter().map(|r| r.0).collect());
         }
         let placeholders = (1..=states.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let query = format!("select id from issues where lower(state) in ({placeholders})");
+        let query = format!("select id from issues where lower(state) not in ({placeholders})");
         let mut rows = sqlx::query_as::<_, (String,)>(&query);
         for state in states {
             rows = rows.bind(state.to_lowercase());
@@ -930,21 +934,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_issue_ids_by_state_names_case_insensitively() {
+    async fn finds_issue_ids_outside_state_names_case_insensitively() {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
         let ids = repo
-            .issue_ids_in_states(&["Todo".to_string(), "In Progress".to_string()])
+            .issue_ids_not_in_states(&["Done".to_string(), "Canceled".to_string()])
             .await
             .unwrap();
         assert_eq!(ids, vec!["lin-1".to_string()]);
-        let done = repo
-            .issue_ids_in_states(&["Done".to_string()])
+        let excluded = repo
+            .issue_ids_not_in_states(&["TODO".to_string()])
             .await
             .unwrap();
-        assert!(done.is_empty());
-        let none = repo.issue_ids_in_states(&[]).await.unwrap();
-        assert!(none.is_empty());
+        assert!(excluded.is_empty());
+        let all = repo.issue_ids_not_in_states(&[]).await.unwrap();
+        assert_eq!(all, vec!["lin-1".to_string()]);
     }
 
     #[tokio::test]
