@@ -317,17 +317,20 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         .as_object()
         .is_some_and(|obj| obj.contains_key("workflow_source"));
     if !is_legacy {
-        let single_repo = value.as_object().filter(|obj| !obj.contains_key("repos")).map(|obj| {
-            (
-                obj.get("repo_url")
-                    .and_then(|url| url.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                obj.get("install_cmd")
-                    .and_then(|cmd| cmd.as_str())
-                    .map(str::to_string),
-            )
-        });
+        let single_repo = value
+            .as_object()
+            .filter(|obj| !obj.contains_key("repos"))
+            .map(|obj| {
+                (
+                    obj.get("repo_url")
+                        .and_then(|url| url.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    obj.get("install_cmd")
+                        .and_then(|cmd| cmd.as_str())
+                        .map(str::to_string),
+                )
+            });
         let mut settings =
             serde_json::from_value::<AppSettings>(value).map_err(|err| err.to_string())?;
         if let Some((repo_url, install_cmd)) = single_repo {
@@ -519,7 +522,10 @@ mod tests {
         assert_eq!(settings.repos.len(), 1);
         assert_eq!(settings.repos[0].name, "widgets");
         assert_eq!(settings.repos[0].url, "git@github.com:acme/widgets.git");
-        assert_eq!(settings.repos[0].install_cmd.as_deref(), Some("pnpm install"));
+        assert_eq!(
+            settings.repos[0].install_cmd.as_deref(),
+            Some("pnpm install")
+        );
         assert!(settings.repos[0].is_default);
         assert_eq!(settings.tracker_workspace.as_deref(), Some("acme"));
         assert_eq!(settings.agent_backend, AgentBackend::Claude);

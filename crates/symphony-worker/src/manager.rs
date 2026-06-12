@@ -425,6 +425,7 @@ async fn dispatch_run(
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
     let workspaces = workspace_manager(&config, &repo_config);
+    adopt_legacy_workspace(&repo, &config, &issue, &run, &workspaces).await;
     let workspace = workspaces
         .create_or_reuse(&issue)
         .await
@@ -574,7 +575,7 @@ async fn dispatch_run(
             add_dirs: config.workflow.front_matter.claude.add_dirs.clone(),
             session_id: pre_session,
         },
-        env: agent_env(&config.env),
+        env: agent_env(&env),
     };
     let driver_stop = stop.clone();
     let mut run_fut = Box::pin(driver.run(request, tx, driver_stop));
@@ -737,15 +738,76 @@ async fn fail(
     Ok(())
 }
 
+/// Workspaces created before multi-repo support lived at `<root>/<issue>`,
+/// without the repo segment. A retry queued across that upgrade expects the
+/// prior attempt's checkout (branch state, workpad, uncommitted work), so
+/// when the namespaced directory does not exist yet and the previous run was
+/// pre-multi-repo (no repo recorded) and left a ready workspace directly
+/// under the root, move it into the new namespace instead of letting
+/// `create_or_reuse` initialize a fresh clone. Strictly an upgrade path:
+/// directories under another repo's namespace are never adopted, since they
+/// hold a clone of a different repository. Best effort — on any mismatch or
+/// rename failure the run falls back to a fresh workspace.
+async fn adopt_legacy_workspace(
+    repo: &Repository,
+    config: &RuntimeConfig,
+    issue: &Issue,
+    run: &RunRow,
+    workspaces: &WorkspaceManager,
+) {
+    let Ok(new_path) = workspaces.path_for(&issue.identifier) else {
+        return;
+    };
+    if tokio::fs::metadata(&new_path).await.is_ok() {
+        return;
+    }
+    let Ok(Some(prior)) = repo.prior_run(&issue.id, &run.id).await else {
+        return;
+    };
+    if prior.repo_name.is_some() {
+        return;
+    }
+    let old_path = PathBuf::from(&prior.workspace_path);
+    if old_path.parent() != Some(workspace_root(config).as_path()) {
+        return;
+    }
+    if tokio::fs::metadata(old_path.join(crate::WORKSPACE_READY_SENTINEL))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if let Some(parent) = new_path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+    match tokio::fs::rename(&old_path, &new_path).await {
+        Ok(()) => tracing::info!(
+            issue = %issue.identifier,
+            from = %old_path.display(),
+            to = %new_path.display(),
+            "adopted pre-multi-repo workspace"
+        ),
+        Err(err) => warn!(
+            issue = %issue.identifier,
+            error = %err,
+            "could not adopt pre-multi-repo workspace; initializing a fresh one"
+        ),
+    }
+}
+
 /// Per-issue workspaces are namespaced by repo (`<root>/<repo>/<issue>`), so
 /// a routing change can never point an issue's retries at a directory holding
 /// a clone of a different repository.
 fn workspace_manager(config: &RuntimeConfig, repo: &RepoConfig) -> WorkspaceManager {
-    let root = crate::resolve_workspace_root_dir(
+    let root = workspace_root(config);
+    WorkspaceManager::new(root.join(sanitize_key(repo.name.trim())))
+}
+
+fn workspace_root(config: &RuntimeConfig) -> PathBuf {
+    crate::resolve_workspace_root_dir(
         &config.workflow.front_matter.workspace.root,
         &config.app_data_dir,
-    );
-    WorkspaceManager::new(root.join(sanitize_key(&repo.name)))
+    )
 }
 
 /// The hook environment for one run: the shared env plus the routed repo's
@@ -772,13 +834,25 @@ fn due_after(ms: u64) -> String {
 }
 
 /// Environment injected into agent processes. Agents inherit the app's env;
-/// this adds secrets that live outside it (the Linear key comes from the OS
-/// keychain) so workflows can call the Linear API directly.
+/// this adds what lives outside it: the Linear key (from the OS keychain) so
+/// workflows can call the Linear API directly, and the routed repo's
+/// coordinates so prompts, wrappers, and skills can branch on the repository
+/// the run is working in. Takes the per-run env (`run_env`), which carries
+/// both.
 fn agent_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    env.get("LINEAR_API_KEY")
-        .filter(|key| !key.trim().is_empty())
-        .map(|key| vec![("LINEAR_API_KEY".to_string(), key.clone())])
-        .unwrap_or_default()
+    [
+        "LINEAR_API_KEY",
+        "REPO_URL",
+        "REPO_NAME",
+        "SYMPHONY_INSTALL_CMD",
+    ]
+    .iter()
+    .filter_map(|key| {
+        env.get(*key)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (key.to_string(), value.clone()))
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -980,6 +1054,112 @@ mod tests {
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adopts_pre_multi_repo_workspace_for_queued_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+
+        // The pre-upgrade attempt: a ready workspace at <root>/<issue> and a
+        // failed run recorded without a repo.
+        let old_path = temp.path().join("SYM-1");
+        tokio::fs::create_dir_all(&old_path).await.unwrap();
+        tokio::fs::write(old_path.join(crate::WORKSPACE_READY_SENTINEL), "")
+            .await
+            .unwrap();
+        tokio::fs::write(old_path.join("marker.txt"), "prior attempt")
+            .await
+            .unwrap();
+        let prior = repo
+            .try_reserve_run("lin-1", 1, &old_path.display().to_string(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(&prior.id, RunStatus::Failure, Some("agent_failure"), None)
+            .await
+            .unwrap();
+
+        let repo_config = config.repos[0].clone();
+        let workspaces = workspace_manager(&config, &repo_config);
+        let new_path = workspaces.path_for("SYM-1").unwrap();
+        let retry = repo
+            .try_reserve_run(
+                "lin-1",
+                2,
+                &new_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        adopt_legacy_workspace(&repo, &config, &issue("todo", vec![]), &retry, &workspaces).await;
+
+        assert!(tokio::fs::metadata(&old_path).await.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(new_path.join("marker.txt"))
+                .await
+                .unwrap(),
+            "prior attempt"
+        );
+        // The adopted workspace is ready, so dispatch would reuse it as-is.
+        assert!(
+            tokio::fs::metadata(new_path.join(crate::WORKSPACE_READY_SENTINEL))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn never_adopts_a_workspace_from_another_repos_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+
+        // The prior run already belongs to a different repo's namespace —
+        // its directory holds a clone of that repo and must stay put.
+        let other_path = temp.path().join("other").join("SYM-1");
+        tokio::fs::create_dir_all(&other_path).await.unwrap();
+        tokio::fs::write(other_path.join(crate::WORKSPACE_READY_SENTINEL), "")
+            .await
+            .unwrap();
+        let prior = repo
+            .try_reserve_run("lin-1", 1, &other_path.display().to_string(), Some("other"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(&prior.id, RunStatus::Failure, Some("agent_failure"), None)
+            .await
+            .unwrap();
+
+        let repo_config = config.repos[0].clone();
+        let workspaces = workspace_manager(&config, &repo_config);
+        let new_path = workspaces.path_for("SYM-1").unwrap();
+        let retry = repo
+            .try_reserve_run(
+                "lin-1",
+                2,
+                &new_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        adopt_legacy_workspace(&repo, &config, &issue("todo", vec![]), &retry, &workspaces).await;
+
+        assert!(tokio::fs::metadata(&other_path).await.is_ok());
+        assert!(tokio::fs::metadata(&new_path).await.is_err());
     }
 
     #[test]

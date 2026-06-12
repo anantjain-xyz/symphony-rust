@@ -7,8 +7,9 @@ use symphony_storage::{
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
-    check_skills, resolve_workspace_root_dir, SkillFile, SkillsInstallConfig, SkillsInstallStatus,
-    SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig, WorkerStatus,
+    check_skills, resolve_workspace_root_dir, sanitize_key, SkillFile, SkillsInstallConfig,
+    SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig,
+    WorkerStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -173,7 +174,7 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
             "No repository configured — add one under Settings → Repositories.".to_string(),
         );
     }
-    let mut names = std::collections::HashSet::new();
+    let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     let mut prefixes: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     let mut projects: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for repo in repos {
@@ -186,8 +187,16 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
         if repo.url.trim().is_empty() {
             return Some(format!("Repository \"{name}\" has no Git URL."));
         }
-        if !names.insert(name.to_lowercase()) {
-            return Some(format!("Two repositories share the name \"{name}\"."));
+        // Uniqueness is checked on the sanitized form the worker uses as the
+        // workspace folder: distinct names like "api.v2" and "api_v2" map to
+        // the same directory and would silently share checkouts.
+        if let Some(other) = names.insert(sanitize_key(name).to_lowercase(), name) {
+            if other.eq_ignore_ascii_case(name) {
+                return Some(format!("Two repositories share the name \"{name}\"."));
+            }
+            return Some(format!(
+                "Repository names \"{other}\" and \"{name}\" collide — they map to the same workspace folder."
+            ));
         }
         for prefix in &repo.team_prefixes {
             let key = prefix.trim().trim_end_matches('-').to_uppercase();
@@ -730,7 +739,9 @@ mod tests {
             name: "  ".to_string(),
             ..repo("widgets")
         }];
-        assert!(validate_repos(&unnamed).expect("unnamed repo").contains("name"));
+        assert!(validate_repos(&unnamed)
+            .expect("unnamed repo")
+            .contains("name"));
 
         let no_url = vec![RepoConfig {
             url: String::new(),
@@ -744,6 +755,12 @@ mod tests {
         assert!(validate_repos(&duplicate_names)
             .expect("duplicate names")
             .contains("share the name"));
+
+        // Distinct names that sanitize to the same workspace folder.
+        let colliding_names = vec![repo("api.v2"), repo("api_v2")];
+        assert!(validate_repos(&colliding_names)
+            .expect("colliding workspace keys")
+            .contains("same workspace folder"));
 
         let mut eng_a = repo("a");
         eng_a.team_prefixes = vec!["ENG".to_string()];

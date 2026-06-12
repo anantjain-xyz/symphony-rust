@@ -18,11 +18,20 @@ pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a Rep
         .filter_map(|label| label_repo_name(label))
         .collect();
     if !labeled.is_empty() {
-        return labeled
-            .iter()
-            .find_map(|name| repos.iter().find(|repo| repo.name.eq_ignore_ascii_case(name)));
+        // Compare against the trimmed name — the same form validation accepts
+        // and the Settings UI advertises as the label to use.
+        return labeled.iter().find_map(|name| {
+            repos
+                .iter()
+                .find(|repo| repo.name.trim().eq_ignore_ascii_case(name))
+        });
     }
-    if let Some(project_id) = issue.project_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(project_id) = issue
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         if let Some(repo) = repos
             .iter()
             .find(|repo| repo.project_ids.iter().any(|id| id.trim() == project_id))
@@ -47,13 +56,10 @@ pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a Rep
 /// only configured repo. Also the target for repo-scoped actions taken
 /// outside any issue context (e.g. the skills install).
 pub fn default_repo(repos: &[RepoConfig]) -> Option<&RepoConfig> {
-    repos
-        .iter()
-        .find(|repo| repo.is_default)
-        .or_else(|| match repos {
-            [only] => Some(only),
-            _ => None,
-        })
+    match repos {
+        [only] => Some(only),
+        _ => repos.iter().find(|repo| repo.is_default),
+    }
 }
 
 /// The repo name carried by a `repo:<name>` label, if this is one.
@@ -109,10 +115,16 @@ mod tests {
 
     #[test]
     fn label_matching_is_case_insensitive_and_trims() {
-        let repos = vec![repo("Web-App")];
+        // The configured name carries accidental padding; the label still
+        // matches because both sides are trimmed.
+        let repos = vec![repo(" Web-App ")];
         for label in ["repo:web-app", "REPO:Web-App", "  repo: web-app  "] {
             let routed = route_issue(&repos, &issue("ENG-1", &[label], None));
-            assert_eq!(routed.map(|r| r.name.as_str()), Some("Web-App"), "label {label:?}");
+            assert_eq!(
+                routed.map(|r| r.name.as_str()),
+                Some(" Web-App "),
+                "label {label:?}"
+            );
         }
     }
 
