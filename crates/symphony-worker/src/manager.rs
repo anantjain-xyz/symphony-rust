@@ -580,11 +580,12 @@ async fn dispatch_run(
     };
     let driver_stop = stop.clone();
     let mut run_fut = Box::pin(driver.run(request, tx, driver_stop));
+    let provider = backend.as_source_str();
     let result = loop {
         tokio::select! {
             maybe_event = rx.recv() => {
                 if let Some(event) = maybe_event {
-                    persist_run_event(&repo, &run.id, &event).await?;
+                    persist_run_event(&repo, &run.id, provider, &event).await?;
                 }
             }
             result = &mut run_fut => break result,
@@ -595,7 +596,7 @@ async fn dispatch_run(
     // count) may still sit in the channel. The completed driver dropped its
     // sender, so this drain terminates once the queue is empty.
     while let Some(event) = rx.recv().await {
-        persist_run_event(&repo, &run.id, &event).await?;
+        persist_run_event(&repo, &run.id, provider, &event).await?;
     }
 
     match result {
@@ -683,6 +684,7 @@ async fn dispatch_run(
 async fn persist_run_event(
     repo: &Repository,
     run_id: &str,
+    provider: &str,
     event: &MappedAgentEvent,
 ) -> Result<(), WorkerError> {
     // A null payload marks a metadata-only event (e.g. a thinking-token
@@ -699,6 +701,7 @@ async fn persist_run_event(
         repo.upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
             .await?;
         repo.update_tokens(run_id, tokens).await?;
+        repo.record_token_usage(provider, tokens).await?;
     }
     if let Some(rate_limit) = &event.rate_limit {
         repo.upsert_rate_limit(rate_limit).await?;
