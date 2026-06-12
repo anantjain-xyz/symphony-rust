@@ -321,6 +321,11 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
     let settings = load_settings_from_disk(&state).await?;
+    // A worker started from invalid settings (e.g. no active states) would
+    // poll forever without dispatching anything — fail up front instead.
+    if let Some(error) = validate_workflow_settings(&settings) {
+        return Err(error);
+    }
     let api_key = linear_api_key();
     let workflow = workflow_from_settings(&settings, api_key.as_deref());
     let env = build_env(&settings);

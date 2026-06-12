@@ -2,8 +2,9 @@ use crate::types::Issue;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// Placeholders supported in prompt templates, in `{{var}}` (or `{{ var }}`)
-/// form. The Settings UI mirrors this list in its variable reference panel.
+/// Placeholders supported in prompt templates, in `{{var}}` form (whitespace
+/// inside the braces is ignored). The Settings UI mirrors this list in its
+/// variable reference panel.
 pub const PROMPT_VARIABLES: [&str; 8] = [
     "issue.id",
     "issue.identifier",
@@ -31,29 +32,47 @@ pub fn render_prompt(template: &str, issue: &Issue) -> String {
         .map(|blocker| format!("- {blocker}"))
         .collect::<Vec<_>>()
         .join("\n");
-    template
-        .replace("{{issue.id}}", &issue.id)
-        .replace("{{ issue.id }}", &issue.id)
-        .replace("{{issue.identifier}}", &issue.identifier)
-        .replace("{{ issue.identifier }}", &issue.identifier)
-        .replace("{{issue.title}}", &issue.title)
-        .replace("{{ issue.title }}", &issue.title)
-        .replace(
-            "{{issue.description}}",
-            issue.description.as_deref().unwrap_or(""),
-        )
-        .replace(
-            "{{ issue.description }}",
-            issue.description.as_deref().unwrap_or(""),
-        )
-        .replace("{{issue.state}}", &issue.state)
-        .replace("{{ issue.state }}", &issue.state)
-        .replace("{{issue.branch}}", issue.branch.as_deref().unwrap_or(""))
-        .replace("{{ issue.branch }}", issue.branch.as_deref().unwrap_or(""))
-        .replace("{{issue.labels}}", &labels)
-        .replace("{{ issue.labels }}", &labels)
-        .replace("{{issue.blockers}}", &blockers)
-        .replace("{{ issue.blockers }}", &blockers)
+    // Same order as PROMPT_VARIABLES, so the two cannot drift apart.
+    let values: [&str; 8] = [
+        &issue.id,
+        &issue.identifier,
+        &issue.title,
+        issue.description.as_deref().unwrap_or(""),
+        &issue.state,
+        issue.branch.as_deref().unwrap_or(""),
+        &labels,
+        &blockers,
+    ];
+    let value_for = |name: &str| {
+        PROMPT_VARIABLES
+            .iter()
+            .position(|variable| *variable == name)
+            .map(|index| values[index])
+    };
+
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let Some(end) = rest[start + 2..].find("}}") else {
+            break;
+        };
+        match value_for(rest[start + 2..start + 2 + end].trim()) {
+            Some(value) => {
+                out.push_str(&rest[..start]);
+                out.push_str(value);
+                rest = &rest[start + 2 + end + 2..];
+            }
+            None => {
+                // Not a known variable (e.g. literal braces in prose) — keep
+                // it verbatim and continue past the opening braces, since the
+                // matching "}}" may belong to a later placeholder.
+                out.push_str(&rest[..start + 2]);
+                rest = &rest[start + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub fn append_retry_context(prompt: &str, ctx: &RetryContext) -> String {
@@ -98,6 +117,32 @@ mod tests {
         assert_eq!(
             render_prompt("Work on {{issue.identifier}}: {{ issue.title }}", &issue),
             "Work on SYM-1: Port it"
+        );
+    }
+
+    #[test]
+    fn renders_any_whitespace_inside_braces_and_keeps_unknown_tokens() {
+        let issue = Issue {
+            id: "lin-1".to_string(),
+            identifier: "SYM-1".to_string(),
+            title: "Port it".to_string(),
+            description: None,
+            priority: 1,
+            state: "todo".to_string(),
+            branch: None,
+            labels: vec![],
+            blockers: vec![],
+            pr_urls: vec![],
+        };
+        assert_eq!(
+            render_prompt("{{  issue.title  }} / {{ issue.identifier}}", &issue),
+            "Port it / SYM-1"
+        );
+        // Unknown tokens and literal braces pass through; later placeholders
+        // on the same line still render.
+        assert_eq!(
+            render_prompt("{{issue.nope}} {{\"k\": 1}} {{issue.state}}", &issue),
+            "{{issue.nope}} {{\"k\": 1}} todo"
         );
     }
 
