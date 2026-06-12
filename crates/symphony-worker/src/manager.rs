@@ -317,6 +317,11 @@ async fn tick<T: TrackerClient>(
             break;
         }
         if let Some(issue) = tracker.fetch_by_id(&retry.issue_id).await? {
+            // The issue may have become blocked since the failed run; keep the
+            // retry queued so it dispatches once the blocker clears.
+            if !issue.blockers.is_empty() {
+                continue;
+            }
             reserve_and_dispatch(
                 repo.clone(),
                 config.clone(),
@@ -803,6 +808,35 @@ mod tests {
         tick(&repo, &tracker, &config, &stop).await.unwrap();
         let row = repo.get_issue("lin-1").await.unwrap().unwrap();
         assert_eq!(row.state, "todo");
+    }
+
+    #[tokio::test]
+    async fn keeps_due_retry_queued_while_issue_is_blocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        let blocked = issue("todo", vec!["SYM-0".to_string()]);
+        let tracker = StaticTracker {
+            active: vec![blocked.clone()],
+            terminal: vec![],
+        };
+        repo.upsert_issues(&[blocked]).await.unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
     }
 
     #[test]
