@@ -196,6 +196,7 @@ export type SkillsStatus = {
 
 export type SkillsInstallStatus = {
   state: "idle" | "running" | "completed" | "failed";
+  repo_url: string | null;
   message: string | null;
   pr_url: string | null;
   error: string | null;

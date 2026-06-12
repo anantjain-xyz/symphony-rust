@@ -412,20 +412,18 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
-// Both skills commands take the caller's settings (like validate_settings)
-// rather than reloading from disk, so unsaved form edits — a just-typed repo
-// URL in particular — are what gets checked and installed against. They
-// operate on the default repo for now; per-repo skills management is a
-// follow-up once the Settings UI can display one status per repo.
+// Both skills commands take the repo URL straight from the caller's form
+// (and install_skills the caller's settings, like validate_settings) rather
+// than reloading from disk, so unsaved edits — a just-typed repo URL in
+// particular — are what gets checked and installed against. Each configured
+// repo is checked and installed individually; the UI shows one status per
+// repo card.
 #[tauri::command]
-async fn get_skills_status(settings: AppSettings) -> Result<SkillsStatus, String> {
+async fn get_skills_status(repo_url: String) -> Result<SkillsStatus, String> {
     let names: Vec<String> = bundled_skills()
         .into_iter()
         .map(|skill| skill.name)
         .collect();
-    let repo_url = symphony_core::default_repo(&settings.repos)
-        .map(|repo| repo.url.clone())
-        .unwrap_or_default();
     Ok(check_skills(&repo_url, &names).await)
 }
 
@@ -440,10 +438,9 @@ async fn get_skills_install_status(
 async fn install_skills(
     state: State<'_, AppState>,
     settings: AppSettings,
+    repo_url: String,
 ) -> Result<SkillsInstallStatus, String> {
-    let repo_url = symphony_core::default_repo(&settings.repos)
-        .map(|repo| repo.url.trim().to_string())
-        .unwrap_or_default();
+    let repo_url = repo_url.trim().to_string();
     if repo_url.is_empty() {
         return Err("Add a repository URL under Settings → Repositories first.".to_string());
     }
