@@ -125,18 +125,16 @@ const PROMPT_VARIABLES: { name: string; description: string; example: string }[]
   { name: "repo.url", description: "Git URL of the routed repo", example: "git@github.com:org/repo.git" },
 ];
 
-// Mirrors default_repo in symphony-core (crates/symphony-core/src/routing.rs):
-// the repo marked default, or the only one configured. Drives the skills
-// block and the setup gates.
-function defaultRepo(settings: AppSettings): RepoConfig | null {
-  return (
-    settings.repos.find((repo) => repo.is_default) ??
-    (settings.repos.length === 1 ? settings.repos[0] : null)
-  );
-}
-
 function anyRepoConfigured(settings: AppSettings): boolean {
   return settings.repos.some((repo) => repo.url.trim() !== "");
+}
+
+// Unique trimmed URLs of the configured repos — the key space for per-repo
+// skills statuses (two cards with the same URL share one status).
+function configuredRepoUrls(settings: AppSettings): string[] {
+  return Array.from(
+    new Set(settings.repos.map((repo) => repo.url.trim()).filter((url) => url !== "")),
+  );
 }
 
 // linear_api_key_set is server-derived, not part of the editable form.
@@ -168,8 +166,8 @@ function App() {
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
-  const [skillsStatus, setSkillsStatus] = useState<SkillsStatus | null>(null);
-  const [skillsChecking, setSkillsChecking] = useState(false);
+  const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>({});
+  const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
@@ -183,7 +181,6 @@ function App() {
 
   const selectedRunIdRef = useRef<string | null>(null);
   const autoStartDone = useRef(false);
-  const skillsCheckSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -283,6 +280,16 @@ function App() {
     [overview.active_runs],
   );
 
+  // Repo badges and the runs filter only earn their space when runs can
+  // actually differ by repo: several repos configured, or history spanning
+  // more than one (e.g. after a repo was removed).
+  const multiRepo = useMemo(
+    () =>
+      (settings?.repos.length ?? 0) > 1 ||
+      new Set(runs.map((run) => run.repo_name).filter(Boolean)).size > 1,
+    [settings, runs],
+  );
+
   // Keep relative timestamps fresh while the dashboard is otherwise idle.
   const [, tick] = useReducer((x: number) => x + 1, 0);
   useEffect(() => {
@@ -350,64 +357,68 @@ function App() {
   }
 
   // Skill detection talks to GitHub via `gh`, so it runs outside the global
-  // busy flag and never blocks the rest of the form. It checks the settings
-  // as the user sees them (including unsaved edits), not the saved file.
-  function refreshSkillsStatus(forSettings?: AppSettings) {
-    const target = forSettings ?? settings;
-    if (!runtimeAvailable || !target) return;
-    // Overlapping checks (the auto-check on entering Settings plus a manual
-    // re-check after editing the repo URL) can resolve out of order; only the
-    // newest request may apply, or a slow response for the old repo would
-    // overwrite the status of the current one.
-    const seq = ++skillsCheckSeq.current;
-    setSkillsChecking(true);
-    invoke<SkillsStatus>("get_skills_status", { settings: target })
+  // busy flag and never blocks the rest of the form. It checks the URL as the
+  // user sees it (including unsaved edits), not the saved file. Statuses are
+  // keyed by the trimmed URL — a response always describes the URL it was
+  // asked about, so out-of-order responses cannot mislabel another repo's
+  // status, and editing one card never disturbs the others.
+  function checkRepoSkills(url: string) {
+    const repoUrl = url.trim();
+    if (!runtimeAvailable || repoUrl === "") return;
+    setSkillsChecking((prev) => ({ ...prev, [repoUrl]: true }));
+    invoke<SkillsStatus>("get_skills_status", { repoUrl })
       .then((status) => {
-        if (seq !== skillsCheckSeq.current) return;
-        setSkillsStatus(status);
-        // A fresh check supersedes any finished install — without this, a
-        // completed install for repo A keeps showing its PR after the user
-        // switches the form to repo B.
-        setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
+        setSkillsStatuses((prev) => ({ ...prev, [repoUrl]: status }));
+        // A fresh check supersedes a finished install for the same repo —
+        // without this, a completed install keeps showing its PR forever.
+        setSkillsInstall((prev) =>
+          prev?.state !== "running" && prev?.repo_url === repoUrl ? null : prev,
+        );
       })
       .catch(() => {
-        if (seq === skillsCheckSeq.current) setSkillsStatus(null);
+        setSkillsStatuses((prev) => {
+          const next = { ...prev };
+          delete next[repoUrl];
+          return next;
+        });
       })
       .finally(() => {
-        if (seq === skillsCheckSeq.current) setSkillsChecking(false);
+        setSkillsChecking((prev) => ({ ...prev, [repoUrl]: false }));
       });
   }
 
-  async function startSkillsInstall() {
+  function refreshSkillsStatus(forSettings?: AppSettings) {
+    const target = forSettings ?? settings;
+    if (!target) return;
+    for (const url of configuredRepoUrls(target)) checkRepoSkills(url);
+  }
+
+  async function startSkillsInstall(url: string) {
     if (!settings) return;
     const status = await call(() =>
-      invoke<SkillsInstallStatus>("install_skills", { settings }),
+      invoke<SkillsInstallStatus>("install_skills", {
+        settings,
+        repoUrl: url.trim(),
+      }),
     );
     setSkillsInstall(status);
   }
 
-  // Invalidate and re-check whenever the default repo's URL changes (including
-  // the initial settings load): a status fetched for the previous repo must
-  // never drive the install UI. Debounced so typing doesn't spam gh. Skills
-  // are checked and installed against the default repo only for now.
-  const repoUrl = settings === null ? null : (defaultRepo(settings)?.url.trim() ?? "");
+  // Check every configured URL once edits settle (covers the initial settings
+  // load, a newly added card, and an edited URL). Debounced so typing doesn't
+  // spam gh; URLs that drop out of the config simply leave unused cache keys.
+  const repoUrlsKey = settings === null ? null : configuredRepoUrls(settings).join("\n");
   useEffect(() => {
-    if (!runtimeAvailable || repoUrl === null) return;
-    // Retire any in-flight check up front — its response is for the previous
-    // URL and must not repopulate the status cleared below while the
-    // debounced re-check (or nothing, for an empty URL) is pending.
-    skillsCheckSeq.current += 1;
-    setSkillsChecking(false);
-    setSkillsStatus(null);
-    setSkillsInstall((prev) => (prev?.state === "running" ? prev : null));
-    if (repoUrl === "") return;
-    const handle = window.setTimeout(() => refreshSkillsStatus(), 600);
+    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
+    const handle = window.setTimeout(() => {
+      for (const url of repoUrlsKey.split("\n")) checkRepoSkills(url);
+    }, 600);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrl, runtimeAvailable]);
+  }, [repoUrlsKey, runtimeAvailable]);
 
   // While the install session runs, poll its progress; when it lands, re-check
-  // the repo so the status flips to "PR open" with the link.
+  // its repo so that card's status flips to "PR open" with the link.
   useEffect(() => {
     if (!runtimeAvailable || skillsInstall?.state !== "running") return;
     let cancelled = false;
@@ -416,7 +427,9 @@ function App() {
         .then((status) => {
           if (cancelled) return;
           setSkillsInstall(status);
-          if (status.state === "completed") refreshSkillsStatus();
+          if (status.state === "completed" && status.repo_url) {
+            checkRepoSkills(status.repo_url);
+          }
         })
         .catch(() => undefined);
     }, 2000);
@@ -471,15 +484,26 @@ function App() {
   const setupBlocked =
     settings !== null &&
     (!settings.linear_api_key_set || !anyRepoConfigured(settings));
+  // Worst skills state across the configured repos: one repo missing skills
+  // keeps the checklist visible, and the step counts as done only when every
+  // repo reports installed. Unknown/unavailable repos stay neutral.
+  const skillsAggregate = (() => {
+    if (settings === null) return null;
+    const states = configuredRepoUrls(settings).map((url) => skillsStatuses[url]?.state);
+    if (states.some((state) => state === "missing")) return "missing" as const;
+    if (states.some((state) => state === "pr_open")) return "pr_open" as const;
+    if (states.length > 0 && states.every((state) => state === "installed")) {
+      return "installed" as const;
+    }
+    return null;
+  })();
   const setup = {
     blocked: setupBlocked,
     needed:
-      setupBlocked ||
-      (settings !== null &&
-        (skillsStatus?.state === "missing" || skillsStatus?.state === "pr_open")),
+      setupBlocked || skillsAggregate === "missing" || skillsAggregate === "pr_open",
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: settings !== null && anyRepoConfigured(settings),
-    skills: skillsStatus,
+    skillsState: skillsAggregate,
   };
 
   const dirty =
@@ -616,6 +640,7 @@ function App() {
             canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
             workerRunning={worker.state === "running"}
             setup={setup}
+            multiRepo={multiRepo}
             onOpenRun={openRun}
             onStartWorker={startWorker}
             onOpenSettings={() => setView("settings")}
@@ -627,6 +652,7 @@ function App() {
             runs={runs}
             selected={selectedRun}
             activeRunIds={activeRunIds}
+            multiRepo={multiRepo}
             onOpenRun={openRun}
           />
         ) : null}
@@ -645,7 +671,7 @@ function App() {
             setLinearKey={setLinearKey}
             validation={validation}
             trackerTest={trackerTest}
-            skillsStatus={skillsStatus}
+            skillsStatuses={skillsStatuses}
             skillsChecking={skillsChecking}
             skillsInstall={skillsInstall}
             dirty={dirty}
@@ -658,7 +684,7 @@ function App() {
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
             onResetPrompt={resetPrompt}
-            onRefreshSkills={refreshSkillsStatus}
+            onRefreshSkills={checkRepoSkills}
             onInstallSkills={startSkillsInstall}
           />
         ) : null}
@@ -672,7 +698,7 @@ type SetupState = {
   needed: boolean;
   linearConnected: boolean;
   repoConfigured: boolean;
-  skills: SkillsStatus | null;
+  skillsState: "installed" | "pr_open" | "missing" | null;
 };
 
 function OverviewView({
@@ -680,6 +706,7 @@ function OverviewView({
   canStartWorker,
   workerRunning,
   setup,
+  multiRepo,
   onOpenRun,
   onStartWorker,
   onOpenSettings,
@@ -689,6 +716,7 @@ function OverviewView({
   canStartWorker: boolean;
   workerRunning: boolean;
   setup: SetupState;
+  multiRepo: boolean;
   onOpenRun: (id: string) => void;
   onStartWorker: () => void;
   onOpenSettings: () => void;
@@ -736,6 +764,7 @@ function OverviewView({
             onOpenRun={onOpenRun}
             activeRunIds={liveRunIds}
             lastActivity={lastActivity}
+            showRepo={multiRepo}
             emptyTitle="No active runs"
             emptyText={
               setup.blocked
@@ -800,6 +829,7 @@ function OverviewView({
           <RunTable
             runs={overview.recent_failures.slice(0, 5)}
             onOpenRun={onOpenRun}
+            showRepo={multiRepo}
             emptyTitle="No recent failures"
             emptyText="Worker failures will be collected here for triage."
           />
@@ -882,13 +912,13 @@ function SetupChecklist({
           text="Each run clones the repo its issue routes to into a fresh workspace."
         />
         <SetupStep
-          done={setup.skills?.state === "installed"}
+          done={setup.skillsState === "installed"}
           step={3}
           title="Install agent skills"
           text={
-            setup.skills?.state === "pr_open"
-              ? "An install PR is open on your repository — merge it to finish this step."
-              : "Open a PR that adds Symphony's agent skills (workpad, commit, push, …) to your repo. Recommended — agents fall back to plain git and gh without them."
+            setup.skillsState === "pr_open"
+              ? "An install PR is open — merge it to finish this step."
+              : "Open a PR that adds Symphony's agent skills (workpad, commit, push, …) to each repo. Recommended — agents fall back to plain git and gh without them."
           }
         />
         <SetupStep
@@ -976,13 +1006,23 @@ function RunsView({
   runs,
   selected,
   activeRunIds,
+  multiRepo,
   onOpenRun,
 }: {
   runs: RunWithIssueRow[];
   selected: RunDetail | null;
   activeRunIds: Set<string>;
+  multiRepo: boolean;
   onOpenRun: (id: string) => void;
 }) {
+  const [repoFilter, setRepoFilter] = useState("");
+  // Repos that actually appear in the loaded history; a filter for a repo
+  // with no runs would only ever show an empty table.
+  const repoOptions = Array.from(
+    new Set(runs.map((run) => run.repo_name).filter((name): name is string => !!name)),
+  ).sort();
+  const visibleRuns =
+    repoFilter === "" ? runs : runs.filter((run) => run.repo_name === repoFilter);
   return (
     <>
       <header className="page-header">
@@ -990,17 +1030,39 @@ function RunsView({
           <h2>Runs</h2>
           <p>Dispatch history and live agent event stream.</p>
         </div>
+        {multiRepo && repoOptions.length > 0 ? (
+          <div className="actions">
+            <select
+              className="repo-filter"
+              value={repoFilter}
+              aria-label="Filter runs by repository"
+              onChange={(e) => setRepoFilter(e.currentTarget.value)}
+            >
+              <option value="">All repos</option>
+              {repoOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
       </header>
       <div className="split">
         <Panel title="Run history">
           <div className="panel-scroll">
             <RunTable
-              runs={runs}
+              runs={visibleRuns}
               onOpenRun={onOpenRun}
-              emptyTitle="No runs yet"
-              emptyText="Runs will appear after the worker dispatches the first issue."
+              emptyTitle={repoFilter === "" ? "No runs yet" : "No runs for this repo"}
+              emptyText={
+                repoFilter === ""
+                  ? "Runs will appear after the worker dispatches the first issue."
+                  : `No loaded runs were dispatched to ${repoFilter}.`
+              }
               activeRunIds={activeRunIds}
               selectedRunId={selected?.run.id}
+              showRepo={multiRepo}
             />
           </div>
         </Panel>
@@ -1021,6 +1083,9 @@ function RunsView({
               <div className="run-meta">
                 <div className="run-meta-row">
                   <Badge status={selected.run.status} />
+                  {selected.run.repo_name ? (
+                    <span className="repo-badge">{selected.run.repo_name}</span>
+                  ) : null}
                   <span>{selected.run.issue_title}</span>
                 </div>
                 <div className="run-meta-row muted">
@@ -1138,7 +1203,7 @@ function SettingsView({
   setLinearKey,
   validation,
   trackerTest,
-  skillsStatus,
+  skillsStatuses,
   skillsChecking,
   skillsInstall,
   dirty,
@@ -1160,8 +1225,8 @@ function SettingsView({
   setLinearKey: (value: string) => void;
   validation: ValidationResult | null;
   trackerTest: TrackerTestResult | null;
-  skillsStatus: SkillsStatus | null;
-  skillsChecking: boolean;
+  skillsStatuses: Record<string, SkillsStatus>;
+  skillsChecking: Record<string, boolean>;
   skillsInstall: SkillsInstallStatus | null;
   dirty: boolean;
   savedFlash: boolean;
@@ -1173,8 +1238,8 @@ function SettingsView({
   onTestConnection: () => void;
   onRemoveKey: () => void;
   onResetPrompt: () => void;
-  onRefreshSkills: () => void;
-  onInstallSkills: () => void;
+  onRefreshSkills: (repoUrl: string) => void;
+  onInstallSkills: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
   const updateRepo = (index: number, patch: Partial<RepoConfig>) =>
@@ -1339,6 +1404,19 @@ function SettingsView({
                   Optional. Issues in these projects land here; beats the team rule.
                 </small>
               </label>
+              <SkillsBlock
+                status={skillsStatuses[repo.url.trim()] ?? null}
+                checking={skillsChecking[repo.url.trim()] ?? false}
+                install={
+                  skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
+                }
+                installRunning={skillsInstall?.state === "running"}
+                busy={busy}
+                runtimeAvailable={runtimeAvailable}
+                repoConfigured={repo.url.trim() !== ""}
+                onRefresh={() => onRefreshSkills(repo.url)}
+                onInstall={() => onInstallSkills(repo.url)}
+              />
             </fieldset>
           ))}
           <button
@@ -1365,16 +1443,13 @@ function SettingsView({
               issue). Leave blank to use the app data directory.
             </small>
           </label>
-          <SkillsBlock
-            status={skillsStatus}
-            checking={skillsChecking}
-            install={skillsInstall}
-            busy={busy}
-            runtimeAvailable={runtimeAvailable}
-            repoConfigured={(defaultRepo(settings)?.url.trim() ?? "") !== ""}
-            onRefresh={onRefreshSkills}
-            onInstall={onInstallSkills}
-          />
+          <small className="hint">
+            Agent skills are procedural guides (workpad, commit, push, …) that
+            Symphony agents follow. Each card above shows whether its repo has
+            them; installing starts an agent session that opens a PR adding them
+            under <code>.agents/skills/</code>, with validation commands adapted
+            to that repo's toolchain.
+          </small>
         </section>
 
         <section className="settings-section">
@@ -2206,15 +2281,19 @@ function SkillsBlock({
   status,
   checking,
   install,
+  installRunning,
   busy,
   runtimeAvailable,
   repoConfigured,
   onRefresh,
   onInstall,
 }: {
+  /// Status and install are this card's repo only; installRunning is true
+  /// while ANY repo's install session runs (the installer is one-at-a-time).
   status: SkillsStatus | null;
   checking: boolean;
   install: SkillsInstallStatus | null;
+  installRunning: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
   repoConfigured: boolean;
@@ -2222,7 +2301,7 @@ function SkillsBlock({
   onInstall: () => void;
 }) {
   const installing = install?.state === "running";
-  const actionsDisabled = busy || !runtimeAvailable || !repoConfigured;
+  const actionsDisabled = busy || installRunning || !runtimeAvailable || !repoConfigured;
   // A just-finished install knows the PR URL before the next status check does.
   const prUrl =
     (install?.state === "completed" ? install.pr_url : null) ??
@@ -2276,13 +2355,11 @@ function SkillsBlock({
       </button>
     );
   } else if (!repoConfigured) {
-    detail = "Add a repository above (and mark one as default) first.";
+    detail = "Add this repo's URL first.";
   } else {
     detail = status?.detail ?? "Status not checked yet.";
     action = (
-      // Zero-arg wrapper: the handler takes optional settings, and React's
-      // mouse event must not be mistaken for them.
-      <button type="button" disabled={actionsDisabled} onClick={() => onRefresh()}>
+      <button type="button" disabled={actionsDisabled} onClick={onRefresh}>
         Check
       </button>
     );
@@ -2297,12 +2374,6 @@ function SkillsBlock({
           {detail}
         </small>
       </div>
-      <small className="hint">
-        Procedural guides (workpad, commit, push, …) that Symphony agents follow
-        in your repo. Installing starts an agent session that opens a PR adding
-        them under <code>.agents/skills/</code>, with validation commands
-        adapted to your toolchain. Checks and installs target the default repo.
-      </small>
     </div>
   );
 }
@@ -2625,6 +2696,7 @@ function RunTable({
   activeRunIds,
   selectedRunId,
   lastActivity,
+  showRepo,
 }: {
   runs: RunWithIssueRow[];
   onOpenRun: (id: string) => void;
@@ -2636,6 +2708,7 @@ function RunTable({
   activeRunIds?: Set<string>;
   selectedRunId?: string;
   lastActivity?: Map<string, string>;
+  showRepo?: boolean;
 }) {
   if (runs.length === 0) {
     return (
@@ -2681,6 +2754,9 @@ function RunTable({
             <td>
               <strong>
                 {run.issue_identifier}
+                {showRepo && run.repo_name ? (
+                  <span className="repo-badge">{run.repo_name}</span>
+                ) : null}
                 {activeRunIds?.has(run.id) ? <span className="pulse" /> : null}
               </strong>
               <small>{run.issue_title}</small>

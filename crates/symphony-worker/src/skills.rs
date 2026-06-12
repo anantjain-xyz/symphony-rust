@@ -236,6 +236,9 @@ pub enum SkillsInstallState {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SkillsInstallStatus {
     pub state: SkillsInstallState,
+    /// Repository this install run targets; lets the UI attribute a running
+    /// or finished install to one of several configured repos.
+    pub repo_url: Option<String>,
     /// Latest progress message while running.
     pub message: Option<String>,
     pub pr_url: Option<String>,
@@ -246,6 +249,7 @@ impl SkillsInstallStatus {
     fn idle() -> Self {
         Self {
             state: SkillsInstallState::Idle,
+            repo_url: None,
             message: None,
             pr_url: None,
             error: None,
@@ -296,12 +300,14 @@ impl SkillsInstaller {
             }
             *inner = Some(SkillsInstallStatus {
                 state: SkillsInstallState::Running,
+                repo_url: Some(config.repo_url.clone()),
                 message: Some("Preparing workspace…".to_string()),
                 pr_url: None,
                 error: None,
             });
         }
         let inner = self.inner.clone();
+        let repo_url = config.repo_url.clone();
         tokio::spawn(async move {
             let result = run_install(&inner, config).await;
             let mut guard = inner.lock().await;
@@ -310,6 +316,7 @@ impl SkillsInstaller {
                     info!(target: "symphony", %pr_url, "skills install completed");
                     *guard = Some(SkillsInstallStatus {
                         state: SkillsInstallState::Completed,
+                        repo_url: Some(repo_url),
                         message: None,
                         pr_url: Some(pr_url),
                         error: None,
@@ -319,6 +326,7 @@ impl SkillsInstaller {
                     error!(target: "symphony", %message, "skills install failed");
                     *guard = Some(SkillsInstallStatus {
                         state: SkillsInstallState::Failed,
+                        repo_url: Some(repo_url),
                         message: None,
                         pr_url: None,
                         error: Some(message),
@@ -853,6 +861,7 @@ mod tests {
             let mut guard = installer.inner.lock().await;
             *guard = Some(SkillsInstallStatus {
                 state: SkillsInstallState::Running,
+                repo_url: None,
                 message: None,
                 pr_url: None,
                 error: None,
