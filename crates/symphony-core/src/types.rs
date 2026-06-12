@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -149,14 +148,9 @@ pub enum AgentOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct TrackerConfig {
-    #[serde(default = "default_tracker_kind")]
-    pub kind: String,
     #[serde(default = "default_tracker_endpoint")]
     pub endpoint: String,
     pub api_key: String,
-    pub workspace: Option<String>,
-    pub project_slug: Option<String>,
-    pub project_url: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub identifier_prefix: Option<String>,
@@ -166,22 +160,14 @@ pub struct TrackerConfig {
 impl Default for TrackerConfig {
     fn default() -> Self {
         Self {
-            kind: default_tracker_kind(),
             endpoint: default_tracker_endpoint(),
             api_key: String::new(),
-            workspace: None,
-            project_slug: None,
-            project_url: None,
             active_states: Vec::new(),
             terminal_states: Vec::new(),
             identifier_prefix: None,
             project_id: None,
         }
     }
-}
-
-fn default_tracker_kind() -> String {
-    "linear".to_string()
 }
 
 fn default_tracker_endpoint() -> String {
@@ -248,8 +234,6 @@ pub struct AgentConfig {
     pub max_concurrent_agents: usize,
     #[serde(default = "default_max_retry_backoff_ms")]
     pub max_retry_backoff_ms: u64,
-    #[serde(default)]
-    pub max_concurrent_agents_by_state: BTreeMap<String, usize>,
 }
 
 impl Default for AgentConfig {
@@ -258,7 +242,6 @@ impl Default for AgentConfig {
             backend: AgentBackend::Codex,
             max_concurrent_agents: default_max_concurrent_agents(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
-            max_concurrent_agents_by_state: BTreeMap::new(),
         }
     }
 }
@@ -341,7 +324,7 @@ fn default_claude_command() -> String {
     "claude".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct WorkflowFrontMatter {
     pub tracker: TrackerConfig,
     #[serde(default)]
@@ -478,20 +461,4 @@ pub struct MappedAgentEvent {
     pub tokens: Option<TokenCountPayload>,
     pub rate_limit: Option<RateLimitPayload>,
     pub session_info: Option<SessionInfoPayload>,
-}
-
-pub fn tracker_project_url(tracker: &TrackerConfig) -> Option<String> {
-    tracker.project_url.clone().or_else(|| {
-        tracker
-            .project_slug
-            .as_ref()
-            .map(|slug| format!("https://linear.app/project/{slug}"))
-    })
-}
-
-pub fn linear_issue_url(tracker: &TrackerConfig, identifier: &str) -> Option<String> {
-    tracker
-        .workspace
-        .as_ref()
-        .map(|workspace| format!("https://linear.app/{workspace}/issue/{identifier}"))
 }

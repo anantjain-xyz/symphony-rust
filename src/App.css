@@ -1010,10 +1010,6 @@ pre {
   margin: 0 0 2px;
 }
 
-.settings-section:nth-child(2) {
-  grid-row: span 2;
-}
-
 .hint {
   color: var(--muted-foreground);
   font-size: 12px;
@@ -1174,7 +1170,8 @@ textarea:disabled {
   color: var(--muted-foreground);
 }
 
-textarea {
+/* The full-bleed editor inside the Prompt panel. */
+.prompt-editor textarea {
   border-radius: 0;
   border-left: 0;
   border-right: 0;
@@ -1183,6 +1180,96 @@ textarea {
   font-size: 12px;
   min-height: 440px;
   resize: vertical;
+}
+
+.prompt-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.var-reference {
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.var-reference h4 {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.var-list {
+  display: grid;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.var-button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+  justify-content: start;
+  justify-items: start;
+  min-height: 0;
+  padding: 6px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.var-button:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+.var-button code {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Smaller in-form code editors (hooks, tool lists). */
+textarea.mono-input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  resize: vertical;
+}
+
+.checkbox-row {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.checkbox-row input[type="checkbox"] {
+  min-height: 0;
+  width: auto;
+}
+
+.checkbox-row .hint {
+  flex-basis: 100%;
+}
+
+.hooks-details {
+  display: grid;
+  gap: 12px;
+}
+
+.hooks-details summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .banner {
@@ -1278,8 +1365,13 @@ textarea {
 
   .grid.two,
   .split,
-  .settings-grid {
+  .settings-grid,
+  .prompt-editor {
     grid-template-columns: 1fr;
+  }
+
+  .var-reference {
+    border-left: 0;
   }
 
   /* Stacked panes can't share the viewport; fall back to page scrolling. */

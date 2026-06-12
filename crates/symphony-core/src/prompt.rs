@@ -2,6 +2,19 @@ use crate::types::Issue;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// Placeholders supported in prompt templates, in `{{var}}` (or `{{ var }}`)
+/// form. The Settings UI mirrors this list in its variable reference panel.
+pub const PROMPT_VARIABLES: [&str; 8] = [
+    "issue.id",
+    "issue.identifier",
+    "issue.title",
+    "issue.description",
+    "issue.state",
+    "issue.branch",
+    "issue.labels",
+    "issue.blockers",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct RetryContext {
     pub run_number: i64,
