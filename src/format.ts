@@ -1,4 +1,4 @@
-import type { RateLimitStateRow } from "./bindings";
+import type { RateLimitStateRow, TokenUsageRow } from "./bindings";
 
 export function shortTime(value: string) {
   const date = new Date(value);
@@ -26,7 +26,7 @@ export function relativeTime(value: string, now = Date.now()) {
   return date.toLocaleDateString();
 }
 
-const RATE_LIMIT_PROVIDERS = [
+const PROVIDERS = [
   { key: "claude", label: "Claude" },
   { key: "codex", label: "Codex" },
 ];
@@ -44,7 +44,7 @@ export function providerRateLimits(
   limits: RateLimitStateRow[],
 ): ProviderRateLimit[] {
   const claimed = new Set<string>();
-  const rows = RATE_LIMIT_PROVIDERS.flatMap(({ key, label }): ProviderRateLimit[] => {
+  const rows = PROVIDERS.flatMap(({ key, label }): ProviderRateLimit[] => {
     const matches = limits.filter(
       (limit) => limit.source === key || limit.source.startsWith(`${key}_`),
     );
@@ -63,6 +63,27 @@ export function providerRateLimits(
     .filter((limit) => !claimed.has(limit.source))
     .map((limit) => ({ id: limit.source, label: limit.source, limit }));
   return [...rows, ...extras];
+}
+
+export type ProviderTokenUsage = {
+  id: string;
+  label: string;
+  usage: TokenUsageRow | null;
+};
+
+// One display row per provider, even before any usage is recorded; sources
+// from unknown providers are appended as-is.
+export function providerTokenUsage(rows: TokenUsageRow[]): ProviderTokenUsage[] {
+  const claimed = new Set<string>();
+  const known = PROVIDERS.map(({ key, label }): ProviderTokenUsage => {
+    const usage = rows.find((row) => row.source === key) ?? null;
+    if (usage) claimed.add(usage.source);
+    return { id: key, label, usage };
+  });
+  const extras = rows
+    .filter((row) => !claimed.has(row.source))
+    .map((row) => ({ id: row.source, label: row.source, usage: row }));
+  return [...known, ...extras];
 }
 
 export function formatTokens(count: number) {

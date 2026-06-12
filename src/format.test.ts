@@ -7,6 +7,7 @@ import {
   prettyPayload,
   priorityLabel,
   providerRateLimits,
+  providerTokenUsage,
   relativeTime,
   statusSlug,
   timeOnly,
@@ -83,6 +84,30 @@ describe("format helpers", () => {
     expect(rows.map((row) => [row.label, row.limit])).toEqual([
       ["Claude", claude],
       ["Codex · primary", codexPrimary],
+      ["gemini", mystery],
+    ]);
+  });
+
+  it("always lists a token-usage row per provider", () => {
+    const rows = providerTokenUsage([]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex"]);
+    expect(rows.every((row) => row.usage === null)).toBe(true);
+  });
+
+  it("matches token usage to its provider and appends unknown sources", () => {
+    const codex = {
+      source: "codex",
+      input_tokens: 1_000,
+      output_tokens: 100,
+      total_tokens: 1_100,
+      run_count: 2,
+      updated_at: "2026-06-11T10:00:00Z",
+    };
+    const mystery = { ...codex, source: "gemini" };
+    const rows = providerTokenUsage([codex, mystery]);
+    expect(rows.map((row) => [row.label, row.usage])).toEqual([
+      ["Claude", null],
+      ["Codex", codex],
       ["gemini", mystery],
     ]);
   });

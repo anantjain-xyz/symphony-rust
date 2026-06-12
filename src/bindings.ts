@@ -136,6 +136,15 @@ export type WorkerHeartbeatRow = {
   worker_pid: number | null;
 };
 
+export type TokenUsageRow = {
+  source: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  run_count: number;
+  updated_at: string;
+};
+
 export type Overview = {
   active_runs: RunWithIssueRow[];
   retry_queue: RetryWithIssueRow[];
@@ -143,6 +152,7 @@ export type Overview = {
   live_sessions: LiveSessionRow[];
   worker_heartbeat: WorkerHeartbeatRow | null;
   rate_limits: RateLimitStateRow[];
+  token_usage: TokenUsageRow[];
 };
 
 export type IssueRow = {

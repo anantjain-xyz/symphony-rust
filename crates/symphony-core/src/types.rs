@@ -10,6 +10,17 @@ pub enum AgentBackend {
     Claude,
 }
 
+impl AgentBackend {
+    /// The provider key stored in source-keyed tables (`rate_limit_state`
+    /// uses it as a prefix, `token_usage` as the whole key).
+    pub fn as_source_str(&self) -> &'static str {
+        match self {
+            AgentBackend::Codex => "codex",
+            AgentBackend::Claude => "claude",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     #[serde(rename = "never")]

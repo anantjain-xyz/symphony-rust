@@ -123,6 +123,16 @@ pub struct RateLimitStateRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct TokenUsageRow {
+    pub source: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub run_count: i64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkerHeartbeatRow {
     pub id: String,
     pub started_at: String,
@@ -138,6 +148,7 @@ pub struct Overview {
     pub live_sessions: Vec<LiveSessionRow>,
     pub worker_heartbeat: Option<WorkerHeartbeatRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
+    pub token_usage: Vec<TokenUsageRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -455,6 +466,37 @@ impl Repository {
         Ok(())
     }
 
+    /// Accumulate a run's final token counts into the per-provider totals.
+    /// Both backends report usage exactly once per run (Codex at
+    /// `turn.completed`, Claude at `result`), so each call also counts a run.
+    pub async fn record_token_usage(
+        &self,
+        source: &str,
+        tokens: &TokenCountPayload,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            insert into token_usage (source, input_tokens, output_tokens, total_tokens, run_count, updated_at)
+            values (?1, ?2, ?3, ?4, 1, ?5)
+            on conflict(source) do update set
+              input_tokens = input_tokens + excluded.input_tokens,
+              output_tokens = output_tokens + excluded.output_tokens,
+              total_tokens = total_tokens + excluded.total_tokens,
+              run_count = run_count + 1,
+              updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(source)
+        .bind(tokens.input_tokens)
+        .bind(tokens.output_tokens)
+        .bind(tokens.total_tokens)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        self.changed("token_usage", "upsert");
+        Ok(())
+    }
+
     pub async fn active_rate_limits(
         &self,
         now: &str,
@@ -762,6 +804,10 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
+        let token_usage =
+            sqlx::query_as::<_, TokenUsageRow>("select * from token_usage order by source")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(Overview {
             active_runs,
             retry_queue,
@@ -769,6 +815,7 @@ impl Repository {
             live_sessions,
             worker_heartbeat,
             rate_limits,
+            token_usage,
         })
     }
 
@@ -1017,6 +1064,54 @@ mod tests {
             .expect("session info should be stored");
         let parsed: SessionInfoPayload = serde_json::from_str(&stored).unwrap();
         assert_eq!(parsed, info);
+    }
+
+    #[tokio::test]
+    async fn accumulates_token_usage_per_provider() {
+        let repo = repo().await;
+        repo.record_token_usage(
+            "claude",
+            &TokenCountPayload {
+                input_tokens: 100,
+                output_tokens: 10,
+                total_tokens: 110,
+            },
+        )
+        .await
+        .unwrap();
+        repo.record_token_usage(
+            "claude",
+            &TokenCountPayload {
+                input_tokens: 200,
+                output_tokens: 20,
+                total_tokens: 220,
+            },
+        )
+        .await
+        .unwrap();
+        repo.record_token_usage(
+            "codex",
+            &TokenCountPayload {
+                input_tokens: 50,
+                output_tokens: 5,
+                total_tokens: 55,
+            },
+        )
+        .await
+        .unwrap();
+
+        let usage = repo.overview().await.unwrap().token_usage;
+        assert_eq!(usage.len(), 2);
+        let claude = &usage[0];
+        assert_eq!(claude.source, "claude");
+        assert_eq!(claude.input_tokens, 300);
+        assert_eq!(claude.output_tokens, 30);
+        assert_eq!(claude.total_tokens, 330);
+        assert_eq!(claude.run_count, 2);
+        let codex = &usage[1];
+        assert_eq!(codex.source, "codex");
+        assert_eq!(codex.total_tokens, 55);
+        assert_eq!(codex.run_count, 1);
     }
 
     #[tokio::test]

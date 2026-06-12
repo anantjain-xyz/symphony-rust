@@ -24,6 +24,7 @@ import {
   prettyPayload,
   priorityLabel,
   providerRateLimits,
+  providerTokenUsage,
   relativeTime,
   shortTime,
   statusSlug,
@@ -65,6 +66,7 @@ const emptyOverview: Overview = {
   live_sessions: [],
   worker_heartbeat: null,
   rate_limits: [],
+  token_usage: [],
 };
 
 const previewSettings: AppSettings = {
@@ -684,7 +686,7 @@ function OverviewView({
       <header className="page-header">
         <div>
           <h2>Overview</h2>
-          <p>Local worker state, retries, failures, and provider limits.</p>
+          <p>Local worker state, retries, failures, and provider limits and usage.</p>
         </div>
         <div className="kpis">
           <Kpi label="Active" value={overview.active_runs.length} />
@@ -703,7 +705,7 @@ function OverviewView({
         <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
       ) : null}
 
-      <div className="grid two">
+      <div className="grid">
         <Panel title="Active runs">
           <RunTable
             runs={overview.active_runs}
@@ -733,6 +735,17 @@ function OverviewView({
                   ? onOpenIssues
                   : onStartWorker
             }
+          />
+        </Panel>
+      </div>
+
+      <div className="grid two">
+        <Panel title="Recent failures">
+          <RunTable
+            runs={overview.recent_failures.slice(0, 5)}
+            onOpenRun={onOpenRun}
+            emptyTitle="No recent failures"
+            emptyText="Worker failures will be collected here for triage."
           />
         </Panel>
         <Panel title="Retry queue">
@@ -770,14 +783,6 @@ function OverviewView({
       </div>
 
       <div className="grid two">
-        <Panel title="Recent failures">
-          <RunTable
-            runs={overview.recent_failures.slice(0, 5)}
-            onOpenRun={onOpenRun}
-            emptyTitle="No recent failures"
-            emptyText="Worker failures will be collected here for triage."
-          />
-        </Panel>
         <Panel title="Rate limits">
           <table>
             <thead>
@@ -814,6 +819,45 @@ function OverviewView({
                         ? `resets ${relativeTime(row.limit.reset_at)}`
                         : "no reset reported"
                       : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+        <Panel title="Token usage">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Input</th>
+                <th>Output</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {providerTokenUsage(overview.token_usage).map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <strong>{row.label}</strong>
+                    {row.usage ? (
+                      <small title={shortTime(row.usage.updated_at)}>
+                        {row.usage.run_count}{" "}
+                        {row.usage.run_count === 1 ? "run" : "runs"} · last{" "}
+                        {relativeTime(row.usage.updated_at)}
+                      </small>
+                    ) : (
+                      <small>no usage yet</small>
+                    )}
+                  </td>
+                  <td className="tnum">
+                    {row.usage ? formatTokens(row.usage.input_tokens) : "—"}
+                  </td>
+                  <td className="tnum">
+                    {row.usage ? formatTokens(row.usage.output_tokens) : "—"}
+                  </td>
+                  <td className="tnum">
+                    {row.usage ? formatTokens(row.usage.total_tokens) : "—"}
                   </td>
                 </tr>
               ))}
