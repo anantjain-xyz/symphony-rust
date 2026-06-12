@@ -469,6 +469,7 @@ fn normalize(node: LinearIssueNode) -> Issue {
             .unwrap_or_default(),
         blockers,
         pr_urls,
+        project_id: node.project.map(|project| project.id),
     }
 }
 

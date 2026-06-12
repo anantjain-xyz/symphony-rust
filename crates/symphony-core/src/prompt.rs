@@ -1,11 +1,11 @@
-use crate::types::Issue;
+use crate::types::{Issue, RepoConfig};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
 /// Placeholders supported in prompt templates, in `{{var}}` form (whitespace
 /// inside the braces is ignored). The Settings UI mirrors this list in its
 /// variable reference panel.
-pub const PROMPT_VARIABLES: [&str; 8] = [
+pub const PROMPT_VARIABLES: [&str; 10] = [
     "issue.id",
     "issue.identifier",
     "issue.title",
@@ -14,6 +14,8 @@ pub const PROMPT_VARIABLES: [&str; 8] = [
     "issue.branch",
     "issue.labels",
     "issue.blockers",
+    "repo.name",
+    "repo.url",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -24,7 +26,7 @@ pub struct RetryContext {
     pub recent_events: Vec<String>,
 }
 
-pub fn render_prompt(template: &str, issue: &Issue) -> String {
+pub fn render_prompt(template: &str, issue: &Issue, repo: Option<&RepoConfig>) -> String {
     let labels = issue.labels.join(", ");
     let blockers = issue
         .blockers
@@ -33,7 +35,7 @@ pub fn render_prompt(template: &str, issue: &Issue) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     // Same order as PROMPT_VARIABLES, so the two cannot drift apart.
-    let values: [&str; 8] = [
+    let values: [&str; 10] = [
         &issue.id,
         &issue.identifier,
         &issue.title,
@@ -42,6 +44,8 @@ pub fn render_prompt(template: &str, issue: &Issue) -> String {
         issue.branch.as_deref().unwrap_or(""),
         &labels,
         &blockers,
+        repo.map(|repo| repo.name.as_str()).unwrap_or(""),
+        repo.map(|repo| repo.url.as_str()).unwrap_or(""),
     ];
     let value_for = |name: &str| {
         PROMPT_VARIABLES
@@ -100,29 +104,8 @@ pub fn append_retry_context(prompt: &str, ctx: &RetryContext) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn renders_basic_issue_fields() {
-        let issue = Issue {
-            id: "lin-1".to_string(),
-            identifier: "SYM-1".to_string(),
-            title: "Port it".to_string(),
-            description: Some("Details".to_string()),
-            priority: 1,
-            state: "todo".to_string(),
-            branch: None,
-            labels: vec![],
-            blockers: vec![],
-            pr_urls: vec![],
-        };
-        assert_eq!(
-            render_prompt("Work on {{issue.identifier}}: {{ issue.title }}", &issue),
-            "Work on SYM-1: Port it"
-        );
-    }
-
-    #[test]
-    fn renders_any_whitespace_inside_braces_and_keeps_unknown_tokens() {
-        let issue = Issue {
+    fn issue() -> Issue {
+        Issue {
             id: "lin-1".to_string(),
             identifier: "SYM-1".to_string(),
             title: "Port it".to_string(),
@@ -133,15 +116,54 @@ mod tests {
             labels: vec![],
             blockers: vec![],
             pr_urls: vec![],
+            project_id: None,
+        }
+    }
+
+    #[test]
+    fn renders_basic_issue_fields() {
+        let issue = Issue {
+            description: Some("Details".to_string()),
+            ..issue()
         };
         assert_eq!(
-            render_prompt("{{  issue.title  }} / {{ issue.identifier}}", &issue),
+            render_prompt(
+                "Work on {{issue.identifier}}: {{ issue.title }}",
+                &issue,
+                None
+            ),
+            "Work on SYM-1: Port it"
+        );
+    }
+
+    #[test]
+    fn renders_repo_fields_when_routed_and_empty_otherwise() {
+        let repo = RepoConfig {
+            name: "widgets".to_string(),
+            url: "git@github.com:acme/widgets.git".to_string(),
+            ..RepoConfig::default()
+        };
+        assert_eq!(
+            render_prompt("{{repo.name}} at {{ repo.url }}", &issue(), Some(&repo)),
+            "widgets at git@github.com:acme/widgets.git"
+        );
+        assert_eq!(
+            render_prompt("[{{repo.name}}][{{repo.url}}]", &issue(), None),
+            "[][]"
+        );
+    }
+
+    #[test]
+    fn renders_any_whitespace_inside_braces_and_keeps_unknown_tokens() {
+        let issue = issue();
+        assert_eq!(
+            render_prompt("{{  issue.title  }} / {{ issue.identifier}}", &issue, None),
             "Port it / SYM-1"
         );
         // Unknown tokens and literal braces pass through; later placeholders
         // on the same line still render.
         assert_eq!(
-            render_prompt("{{issue.nope}} {{\"k\": 1}} {{issue.state}}", &issue),
+            render_prompt("{{issue.nope}} {{\"k\": 1}} {{issue.state}}", &issue, None),
             "{{issue.nope}} {{\"k\": 1}} todo"
         );
     }
@@ -149,39 +171,24 @@ mod tests {
     #[test]
     fn renders_labels_and_blockers_as_lists() {
         let issue = Issue {
-            id: "lin-1".to_string(),
-            identifier: "SYM-1".to_string(),
-            title: "Port it".to_string(),
-            description: None,
-            priority: 1,
-            state: "todo".to_string(),
-            branch: None,
             labels: vec!["bug".to_string(), "ui".to_string()],
             blockers: vec!["SYM-2".to_string()],
-            pr_urls: vec![],
+            ..issue()
         };
         assert_eq!(
-            render_prompt("Labels: {{issue.labels}}\n{{ issue.blockers }}", &issue),
+            render_prompt(
+                "Labels: {{issue.labels}}\n{{ issue.blockers }}",
+                &issue,
+                None
+            ),
             "Labels: bug, ui\n- SYM-2"
         );
     }
 
     #[test]
     fn renders_empty_labels_and_blockers_as_empty_strings() {
-        let issue = Issue {
-            id: "lin-1".to_string(),
-            identifier: "SYM-1".to_string(),
-            title: "Port it".to_string(),
-            description: None,
-            priority: 1,
-            state: "todo".to_string(),
-            branch: None,
-            labels: vec![],
-            blockers: vec![],
-            pr_urls: vec![],
-        };
         assert_eq!(
-            render_prompt("[{{issue.labels}}][{{issue.blockers}}]", &issue),
+            render_prompt("[{{issue.labels}}][{{issue.blockers}}]", &issue(), None),
             "[][]"
         );
     }

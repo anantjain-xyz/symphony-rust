@@ -7,8 +7,9 @@ use symphony_storage::{
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
-    check_skills, resolve_workspace_root_dir, SkillFile, SkillsInstallConfig, SkillsInstallStatus,
-    SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig, WorkerStatus,
+    check_skills, resolve_workspace_root_dir, sanitize_key, SkillFile, SkillsInstallConfig,
+    SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig,
+    WorkerStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -146,6 +147,9 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
             "Active states is empty — the worker would never pick up an issue. Add at least one Linear state under Settings → Linear.".to_string(),
         );
     }
+    if let Some(error) = validate_repos(&settings.repos) {
+        return Some(error);
+    }
     if settings.prompt_template.trim().is_empty() {
         return Some("The prompt template is empty.".to_string());
     }
@@ -157,6 +161,68 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
             unknown.join(", "),
             symphony_core::PROMPT_VARIABLES.join(", ")
         ));
+    }
+    None
+}
+
+/// The repos list must route unambiguously: names are the `repo:<name>`
+/// routing keys (and workspace namespaces), so they have to exist and be
+/// unique, and no team or project may be claimed as the default of two repos.
+fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
+    if repos.is_empty() {
+        return Some(
+            "No repository configured — add one under Settings → Repositories.".to_string(),
+        );
+    }
+    let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    let mut prefixes: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    let mut projects: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for repo in repos {
+        let name = repo.name.trim();
+        if name.is_empty() {
+            return Some(
+                "Every repository needs a name — it is the key issues route by (repo:<name> labels) and the workspace folder.".to_string(),
+            );
+        }
+        if repo.url.trim().is_empty() {
+            return Some(format!("Repository \"{name}\" has no Git URL."));
+        }
+        // Uniqueness is checked on the sanitized form the worker uses as the
+        // workspace folder: distinct names like "api.v2" and "api_v2" map to
+        // the same directory and would silently share checkouts.
+        if let Some(other) = names.insert(sanitize_key(name).to_lowercase(), name) {
+            if other.eq_ignore_ascii_case(name) {
+                return Some(format!("Two repositories share the name \"{name}\"."));
+            }
+            return Some(format!(
+                "Repository names \"{other}\" and \"{name}\" collide — they map to the same workspace folder."
+            ));
+        }
+        for prefix in &repo.team_prefixes {
+            let key = prefix.trim().trim_end_matches('-').to_uppercase();
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(other) = prefixes.insert(key.clone(), name) {
+                return Some(format!(
+                    "Team prefix \"{key}\" is claimed by both \"{other}\" and \"{name}\"."
+                ));
+            }
+        }
+        for project in &repo.project_ids {
+            let key = project.trim().to_string();
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(other) = projects.insert(key.clone(), name) {
+                return Some(format!(
+                    "Project \"{key}\" is claimed by both \"{other}\" and \"{name}\"."
+                ));
+            }
+        }
+    }
+    if repos.iter().filter(|repo| repo.is_default).count() > 1 {
+        return Some("Only one repository can be marked as the default.".to_string());
     }
     None
 }
@@ -328,11 +394,12 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
     }
     let api_key = linear_api_key();
     let workflow = workflow_from_settings(&settings, api_key.as_deref());
-    let env = build_env(&settings);
+    let env = build_env();
     state
         .worker
         .start(WorkerStartConfig {
             workflow,
+            repos: settings.repos.clone(),
             env,
             app_data_dir: state.app_data_dir.clone(),
         })
@@ -347,14 +414,19 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
 
 // Both skills commands take the caller's settings (like validate_settings)
 // rather than reloading from disk, so unsaved form edits — a just-typed repo
-// URL in particular — are what gets checked and installed against.
+// URL in particular — are what gets checked and installed against. They
+// operate on the default repo for now; per-repo skills management is a
+// follow-up once the Settings UI can display one status per repo.
 #[tauri::command]
 async fn get_skills_status(settings: AppSettings) -> Result<SkillsStatus, String> {
     let names: Vec<String> = bundled_skills()
         .into_iter()
         .map(|skill| skill.name)
         .collect();
-    Ok(check_skills(&settings.repo_url, &names).await)
+    let repo_url = symphony_core::default_repo(&settings.repos)
+        .map(|repo| repo.url.clone())
+        .unwrap_or_default();
+    Ok(check_skills(&repo_url, &names).await)
 }
 
 #[tauri::command]
@@ -369,8 +441,11 @@ async fn install_skills(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<SkillsInstallStatus, String> {
-    if settings.repo_url.trim().is_empty() {
-        return Err("Add a repository URL under Settings → Repository first.".to_string());
+    let repo_url = symphony_core::default_repo(&settings.repos)
+        .map(|repo| repo.url.trim().to_string())
+        .unwrap_or_default();
+    if repo_url.is_empty() {
+        return Err("Add a repository URL under Settings → Repositories first.".to_string());
     }
     let api_key = linear_api_key();
     let workflow = workflow_from_settings(&settings, api_key.as_deref());
@@ -379,7 +454,7 @@ async fn install_skills(
     state
         .skills_installer
         .start(SkillsInstallConfig {
-            repo_url: settings.repo_url.clone(),
+            repo_url,
             workspace_root,
             workflow,
             skills: bundled_skills(),
@@ -506,19 +581,13 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
 
 /// Environment for hooks and agents (the structured settings feed the
 /// workflow config directly; this only carries what shell scripts and agent
-/// processes need at execution time).
-fn build_env(settings: &AppSettings) -> BTreeMap<String, String> {
+/// processes need at execution time). Repo-specific variables — REPO_URL,
+/// REPO_NAME, SYMPHONY_INSTALL_CMD — are overlaid per run by the worker once
+/// the issue is routed.
+fn build_env() -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
     if let Some(key) = linear_api_key() {
         env.insert("LINEAR_API_KEY".to_string(), key);
-    }
-    env.insert("REPO_URL".to_string(), settings.repo_url.clone());
-    if let Some(cmd) = settings
-        .install_cmd
-        .as_ref()
-        .filter(|cmd| !cmd.trim().is_empty())
-    {
-        env.insert("SYMPHONY_INSTALL_CMD".to_string(), cmd.clone());
     }
     env
 }
@@ -557,6 +626,7 @@ fn export_bindings() {
             specta::ts::export::<symphony_core::ThreadSandbox>(&conf),
             specta::ts::export::<symphony_core::TurnSandboxPolicy>(&conf),
             specta::ts::export::<symphony_core::ClaudePermissionMode>(&conf),
+            specta::ts::export::<symphony_core::RepoConfig>(&conf),
             specta::ts::export::<AppSettings>(&conf),
             specta::ts::export::<SaveSettingsRequest>(&conf),
             specta::ts::export::<ValidationResult>(&conf),
@@ -591,10 +661,30 @@ fn export_bindings() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symphony_core::RepoConfig;
+
+    fn repo(name: &str) -> RepoConfig {
+        RepoConfig {
+            name: name.to_string(),
+            url: format!("git@github.com:acme/{name}.git"),
+            ..RepoConfig::default()
+        }
+    }
+
+    /// Default settings plus the one thing defaults cannot ship: a repo.
+    fn configured_settings() -> AppSettings {
+        AppSettings {
+            repos: vec![RepoConfig {
+                is_default: true,
+                ..repo("widgets")
+            }],
+            ..AppSettings::default()
+        }
+    }
 
     #[test]
     fn default_settings_build_a_usable_workflow() {
-        let settings = AppSettings::default();
+        let settings = configured_settings();
         let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
         assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
         assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
@@ -619,7 +709,7 @@ mod tests {
     fn validation_flags_empty_states_and_unknown_placeholders() {
         let no_states = AppSettings {
             active_states: Vec::new(),
-            ..AppSettings::default()
+            ..configured_settings()
         };
         assert!(validate_workflow_settings(&no_states)
             .expect("empty active states must fail validation")
@@ -627,7 +717,7 @@ mod tests {
 
         let bad_prompt = AppSettings {
             prompt_template: "Fix {{issue.foo}} and {{issue.title}}".to_string(),
-            ..AppSettings::default()
+            ..configured_settings()
         };
         let error = validate_workflow_settings(&bad_prompt).expect("unknown placeholder");
         assert!(error.contains("issue.foo"), "unexpected error: {error}");
@@ -636,6 +726,80 @@ mod tests {
             unknown_placeholders(&bad_prompt.prompt_template),
             vec!["issue.foo"]
         );
+    }
+
+    #[test]
+    fn validation_requires_a_routable_repos_list() {
+        // No repos at all: the worker could never dispatch anything.
+        assert!(validate_workflow_settings(&AppSettings::default())
+            .expect("empty repos must fail validation")
+            .contains("No repository configured"));
+
+        let unnamed = vec![RepoConfig {
+            name: "  ".to_string(),
+            ..repo("widgets")
+        }];
+        assert!(validate_repos(&unnamed)
+            .expect("unnamed repo")
+            .contains("name"));
+
+        let no_url = vec![RepoConfig {
+            url: String::new(),
+            ..repo("widgets")
+        }];
+        assert!(validate_repos(&no_url)
+            .expect("missing url")
+            .contains("\"widgets\" has no Git URL"));
+
+        let duplicate_names = vec![repo("widgets"), repo("Widgets")];
+        assert!(validate_repos(&duplicate_names)
+            .expect("duplicate names")
+            .contains("share the name"));
+
+        // Distinct names that sanitize to the same workspace folder.
+        let colliding_names = vec![repo("api.v2"), repo("api_v2")];
+        assert!(validate_repos(&colliding_names)
+            .expect("colliding workspace keys")
+            .contains("same workspace folder"));
+
+        let mut eng_a = repo("a");
+        eng_a.team_prefixes = vec!["ENG".to_string()];
+        let mut eng_b = repo("b");
+        eng_b.team_prefixes = vec!["eng-".to_string()];
+        assert!(validate_repos(&[eng_a, eng_b])
+            .expect("overlapping prefixes")
+            .contains("Team prefix \"ENG\""));
+
+        let mut proj_a = repo("a");
+        proj_a.project_ids = vec!["proj-1".to_string()];
+        let mut proj_b = repo("b");
+        proj_b.project_ids = vec![" proj-1 ".to_string()];
+        assert!(validate_repos(&[proj_a, proj_b])
+            .expect("overlapping projects")
+            .contains("Project \"proj-1\""));
+
+        let two_defaults = vec![
+            RepoConfig {
+                is_default: true,
+                ..repo("a")
+            },
+            RepoConfig {
+                is_default: true,
+                ..repo("b")
+            },
+        ];
+        assert!(validate_repos(&two_defaults)
+            .expect("two defaults")
+            .contains("default"));
+
+        // A clean multi-repo config passes.
+        let mut web = repo("web");
+        web.team_prefixes = vec!["WEB".to_string()];
+        let backend = RepoConfig {
+            is_default: true,
+            ..repo("backend")
+        };
+        assert!(validate_repos(&[web, backend]).is_none());
     }
 
     #[test]

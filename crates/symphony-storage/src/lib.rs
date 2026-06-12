@@ -72,6 +72,10 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
         "0002_run_session_info",
         include_str!("migrations/0002_run_session_info.sql"),
     ),
+    (
+        "0003_run_repo_name",
+        include_str!("migrations/0003_run_repo_name.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
