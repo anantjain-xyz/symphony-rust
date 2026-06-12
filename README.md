@@ -45,74 +45,43 @@ On first launch the Overview shows a setup checklist:
 2. **Add your repository** — the Git URL each run clones into its workspace.
 3. **Start the worker** — the ▶ button in the top bar. Symphony begins polling and dispatching.
 
-Optional Linear filters (workspace slug, project ID, identifier prefix like `ENG`) narrow which issues Symphony picks up. Use **Validate** in Settings to check your workflow file and confirm the agent CLIs are discoverable before starting.
+Optional Linear filters (workspace slug, project ID, identifier prefix like `ENG`) narrow which issues Symphony picks up. Use **Validate** in Settings to check your configuration and confirm the agent CLIs are discoverable before starting.
 
-## The workflow file
+## Settings and the prompt template
 
-Symphony's behavior is defined by a single document you can edit in *Settings → Workflow*: YAML front matter for configuration, followed by the prompt template sent to the agent.
+Symphony's behavior is configured entirely in *Settings* — no config file to edit:
 
-```yaml
----
-tracker:
-  kind: linear
-  api_key: ${LINEAR_API_KEY}          # ${VARS} are interpolated from the app environment
-  workspace: ${SYMPHONY_LINEAR_WORKSPACE}
-  identifier_prefix: ${SYMPHONY_TRACKER_PREFIX}
-  project_id: ${SYMPHONY_TRACKER_PROJECT_ID}
-  active_states: [Todo, In Progress, Rework, Merging]   # issues here get an agent
-  terminal_states: [Done, Canceled]                     # issues here are left alone
-polling:
-  interval_ms: 30000
-workspace:
-  root: ${TMPDIR}                     # where per-run workspaces are created
-hooks:
-  after_create: |                     # runs in the fresh workspace before the agent starts
-    git clone "$REPO_URL" .
-    ${SYMPHONY_INSTALL_CMD:-npm ci}
-  timeout_ms: 60000
-agent:
-  backend: ${SYMPHONY_AGENT_BACKEND}  # codex | claude
-  max_concurrent_agents: 3
-  max_retry_backoff_ms: 300000
-codex:
-  command: ${SYMPHONY_CODEX_COMMAND:-codex}   # launch command — wrappers OK
-  approval_policy: never              # agents run unattended
-  thread_sandbox: workspace-write
-  network_access: false
-claude:
-  command: ${SYMPHONY_CLAUDE_COMMAND:-claude} # launch command — wrappers OK
-  permission_mode: acceptEdits
-  turn_timeout_ms: 3600000
----
-You are working on Linear issue {{issue.identifier}}.
+- **Repository** — the Git URL each run clones, the install command, and where per-run workspaces are created.
+- **Linear** — API key (keychain), optional workspace/project/team filters, and the workflow states that drive dispatch: issues in an *active state* (e.g. `Todo`, `In Progress`, `Rework`, `Merging`) get an agent; issues in a *terminal state* (e.g. `Done`, `Canceled`) are left alone.
+- **Agent** — which CLI runs issues (`codex` or `claude`), an optional launch command (wrappers with arguments like `mycode --agent claude` are fine; Symphony appends its own flags), the per-turn timeout, and the backend's sandbox/permission options: approval policy, thread sandbox, and network access for Codex; permission mode and allowed/disallowed tool rules for Claude Code.
+- **Worker** — polling interval, max concurrent agents, retry backoff cap, and the lifecycle hooks (under *Hooks (advanced)*): `after_create`, `before_run`, `after_run`, `before_remove`. Hooks are shell scripts that run in the workspace with `$REPO_URL`, `$ISSUE_ID`, `$ISSUE_IDENTIFIER`, `$ISSUE_TITLE`, `$ISSUE_STATE`, `$ISSUE_BRANCH`, `$RUN_NUMBER`, `$SYMPHONY_INSTALL_CMD`, and `$SYMPHONY_HOOK` in their environment.
 
-Title: {{issue.title}}
-State: {{issue.state}}
+The **prompt template** at the bottom of Settings is the instruction document sent to the agent for each issue. Placeholders in `{{...}}` form are rendered from the Linear issue when a run starts; the reference panel next to the editor lists them and inserts one at the cursor on click:
 
-Description:
-{{issue.description}}
-```
+| Placeholder | Renders as |
+|---|---|
+| `{{issue.id}}` | Internal Linear ID |
+| `{{issue.identifier}}` | Issue key, e.g. `SYM-42` |
+| `{{issue.title}}` | Issue title |
+| `{{issue.description}}` | Full issue body (empty if none) |
+| `{{issue.state}}` | Current Linear state |
+| `{{issue.branch}}` | Git branch from Linear (may be empty) |
+| `{{issue.labels}}` | Labels, comma-separated |
+| `{{issue.blockers}}` | Blocking issue identifiers, one `- <id>` bullet per line |
 
-Notes:
-
-- `${VAR}` references are filled from the app's environment. Symphony injects `LINEAR_API_KEY` (from the keychain), `REPO_URL`, `SYMPHONY_LINEAR_WORKSPACE`, `SYMPHONY_TRACKER_PREFIX`, `SYMPHONY_TRACKER_PROJECT_ID`, `SYMPHONY_INSTALL_CMD`, `SYMPHONY_AGENT_BACKEND`, `SYMPHONY_CODEX_COMMAND`, and `SYMPHONY_CLAUDE_COMMAND` from your Settings. Unset variables become empty strings.
-- **Hooks are the exception**: `hooks` values are *not* interpolated at parse time — they run as shell scripts with the same variables available in their environment, so `$REPO_URL` and `${SYMPHONY_INSTALL_CMD:-npm ci}` resolve at execution.
-- Available hooks: `after_create`, `before_run`, `after_run`, `before_remove`.
-- Prompt placeholders: `{{issue.id}}`, `{{issue.identifier}}`, `{{issue.title}}`, `{{issue.description}}`, `{{issue.state}}`, `{{issue.branch}}`.
-- Retried runs automatically get a `## Retry context` section appended with the prior run's error and recent events.
-- The `codex.command` / `claude.command` launch commands come from the Settings "Launch command" field and may be wrappers with arguments (e.g. `mycode --agent claude`); Symphony appends its own CLI flags after them.
+Retried runs automatically get a `## Retry context` section appended with the prior run's error and recent events.
 
 ## Data and security
 
 - Your Linear API key lives in the **OS keychain**, not in any file.
 - Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/xyz.anantjain.symphony` on macOS), alongside daily-rotated logs and per-run workspaces.
-- Agents run with the sandbox/permission settings you give them in the workflow file. The defaults (`approval_policy: never`, `permission_mode: acceptEdits`, no network for Codex) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
+- Agents run with the sandbox/permission settings you give them under *Settings → Agent*. The defaults (`approval_policy: never`, `permission_mode: auto`, network access on for Codex) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
 
 ## Architecture
 
 - `src-tauri/` — Tauri desktop shell, commands, keychain-backed settings, event forwarding
 - `src/` — React dashboard (Overview, Runs, Issues, Settings)
-- `crates/symphony-core` — domain types, workflow parsing, prompt rendering
+- `crates/symphony-core` — domain types, workflow config, prompt rendering
 - `crates/symphony-storage` — SQLite schema, repository, broadcast event bus
 - `crates/symphony-tracker` — Linear GraphQL client and issue normalization
 - `crates/symphony-agents` — native Codex and Claude process drivers

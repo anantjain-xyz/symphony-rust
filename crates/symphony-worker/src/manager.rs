@@ -4,8 +4,8 @@ use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
 use symphony_core::{
-    append_retry_context, parse_workflow_source, render_prompt, AgentBackend, AgentOutcome,
-    HookName, Issue, MappedAgentEvent, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
+    append_retry_context, render_prompt, AgentBackend, AgentOutcome, HookName, Issue,
+    MappedAgentEvent, ParsedWorkflow, RetryContext, RunStatus, TokenCountPayload,
 };
 use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
@@ -22,8 +22,6 @@ use uuid::Uuid;
 pub enum WorkerError {
     #[error("worker is already running")]
     AlreadyRunning,
-    #[error("workflow error: {0}")]
-    Workflow(#[from] symphony_core::WorkflowError),
     #[error("tracker error: {0}")]
     Tracker(#[from] TrackerError),
     #[error("storage error: {0}")]
@@ -32,7 +30,7 @@ pub enum WorkerError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct WorkerStartConfig {
-    pub workflow_source: String,
+    pub workflow: ParsedWorkflow,
     pub env: BTreeMap<String, String>,
     pub app_data_dir: PathBuf,
 }
@@ -86,7 +84,7 @@ impl WorkerManager {
     }
 
     pub async fn start(&self, config: WorkerStartConfig) -> Result<WorkerStatus, WorkerError> {
-        let workflow = parse_workflow_source(&config.workflow_source, &config.env)?;
+        let workflow = config.workflow;
         {
             let mut inner = self.inner.lock().await;
             if inner.status.state == WorkerState::Running {
@@ -685,7 +683,6 @@ async fn fail(
 fn workspace_manager(config: &RuntimeConfig) -> WorkspaceManager {
     WorkspaceManager::new(crate::resolve_workspace_root_dir(
         &config.workflow.front_matter.workspace.root,
-        &config.env,
         &config.app_data_dir,
     ))
 }
@@ -711,22 +708,23 @@ mod tests {
     use symphony_tracker::StaticTracker;
 
     fn runtime_config(root: &std::path::Path) -> RuntimeConfig {
-        let raw = format!(
-            r#"---
-tracker:
-  kind: linear
-  api_key: test-key
-  active_states: [Todo, In Progress]
-  terminal_states: [Done]
-workspace:
-  root: {root}
----
-Prompt {{{{issue.identifier}}}}
-"#,
-            root = root.display()
-        );
+        let front_matter = symphony_core::WorkflowFrontMatter {
+            tracker: symphony_core::TrackerConfig {
+                api_key: "test-key".to_string(),
+                active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                ..Default::default()
+            },
+            workspace: symphony_core::WorkspaceConfig {
+                root: root.display().to_string(),
+            },
+            ..Default::default()
+        };
         RuntimeConfig {
-            workflow: parse_workflow_source(&raw, &BTreeMap::new()).unwrap(),
+            workflow: symphony_core::build_parsed_workflow(
+                front_matter,
+                "Prompt {{issue.identifier}}".to_string(),
+            ),
             env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
         }

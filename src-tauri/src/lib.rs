@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf};
-use symphony_core::{parse_workflow_source, AgentBackend};
 use symphony_storage::{
     open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RunWithIssueRow,
     StorageEvent,
@@ -14,45 +13,13 @@ use symphony_worker::{
 use tauri::{Emitter, Manager, State};
 
 mod path_env;
+mod settings;
+
+pub use settings::AppSettings;
+use settings::{default_prompt_template, parse_settings, workflow_from_settings};
 
 const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct AppSettings {
-    pub workflow_source: String,
-    pub repo_url: String,
-    pub tracker_workspace: Option<String>,
-    pub tracker_prefix: Option<String>,
-    pub tracker_project_id: Option<String>,
-    pub workspace_root: Option<String>,
-    #[serde(default)]
-    pub install_cmd: Option<String>,
-    pub agent_backend: AgentBackend,
-    #[serde(default)]
-    pub codex_command: Option<String>,
-    #[serde(default)]
-    pub claude_command: Option<String>,
-    pub linear_api_key_set: bool,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            workflow_source: default_workflow_source(),
-            repo_url: String::new(),
-            tracker_workspace: None,
-            tracker_prefix: None,
-            tracker_project_id: None,
-            workspace_root: None,
-            install_cmd: None,
-            agent_backend: AgentBackend::Codex,
-            codex_command: None,
-            claude_command: None,
-            linear_api_key_set: false,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SaveSettingsRequest {
@@ -154,23 +121,12 @@ async fn validate_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
-    let env = build_env(&state, &settings);
-    let workflow_result = parse_workflow_source(&settings.workflow_source, &env);
-    // The workflow's `command:` fields are authoritative (Settings interpolate
-    // into them); when the workflow doesn't parse, mirror that fallback chain.
-    let (codex_command, claude_command) = match &workflow_result {
-        Ok(workflow) => (
-            workflow.front_matter.codex.command.clone(),
-            workflow.front_matter.claude.command.clone(),
-        ),
-        Err(_) => (
-            effective_command(settings.codex_command.as_deref(), "codex"),
-            effective_command(settings.claude_command.as_deref(), "claude"),
-        ),
-    };
+    let workflow_error = validate_workflow_settings(&settings);
+    let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
+    let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
     Ok(ValidationResult {
-        workflow_ok: workflow_result.is_ok(),
-        workflow_error: workflow_result.err().map(|err| err.to_string()),
+        workflow_ok: workflow_error.is_none(),
+        workflow_error,
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
         codex_command,
@@ -178,6 +134,57 @@ async fn validate_settings(
         app_data_dir: state.app_data_dir.display().to_string(),
         database_path: state.database_path.display().to_string(),
     })
+}
+
+fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
+    if settings
+        .active_states
+        .iter()
+        .all(|state| state.trim().is_empty())
+    {
+        return Some(
+            "Active states is empty — the worker would never pick up an issue. Add at least one Linear state under Settings → Linear.".to_string(),
+        );
+    }
+    if settings.prompt_template.trim().is_empty() {
+        return Some("The prompt template is empty.".to_string());
+    }
+    let unknown = unknown_placeholders(&settings.prompt_template);
+    if !unknown.is_empty() {
+        return Some(format!(
+            "Unknown prompt placeholder{}: {}. Supported: {}.",
+            if unknown.len() == 1 { "" } else { "s" },
+            unknown.join(", "),
+            symphony_core::PROMPT_VARIABLES.join(", ")
+        ));
+    }
+    None
+}
+
+/// Scan `{{...}}` placeholders in the prompt and report any that
+/// `render_prompt` would leave unresolved.
+fn unknown_placeholders(prompt: &str) -> Vec<String> {
+    let mut unknown = Vec::new();
+    let mut rest = prompt;
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("}}") else { break };
+        let name = rest[..end].trim();
+        // Only flag plausible variable names; literal braces in prose (e.g.
+        // JSON examples) are not placeholders.
+        let looks_like_var = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_');
+        if looks_like_var
+            && !symphony_core::PROMPT_VARIABLES.contains(&name)
+            && !unknown.iter().any(|seen| seen == name)
+        {
+            unknown.push(name.to_string());
+        }
+        rest = &rest[end + 2..];
+    }
+    unknown
 }
 
 fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
@@ -198,36 +205,22 @@ fn command_found(command: &str) -> bool {
 
 #[tauri::command]
 async fn test_tracker_connection(
-    state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<TrackerTestResult, String> {
-    let mut env = build_env(&state, &request.settings);
-    if let Some(key) = request
+    // Prefer the unsaved form value so users can test a just-typed key.
+    let api_key = request
         .linear_api_key
-        .as_ref()
         .filter(|key| !key.trim().is_empty())
-    {
-        env.insert("LINEAR_API_KEY".to_string(), key.clone());
-    }
-
-    let workflow = match parse_workflow_source(&request.settings.workflow_source, &env) {
-        Ok(workflow) => workflow,
-        Err(err) => {
-            return Ok(TrackerTestResult {
-                ok: false,
-                message: format!("Workflow error: {err}"),
-                active_issue_count: None,
-            })
-        }
-    };
-    if workflow.front_matter.tracker.api_key.trim().is_empty() {
+        .or_else(linear_api_key);
+    let Some(api_key) = api_key else {
         return Ok(TrackerTestResult {
             ok: false,
             message: "No Linear API key configured. Add one above, then test again.".to_string(),
             active_issue_count: None,
         });
-    }
+    };
 
+    let workflow = workflow_from_settings(&request.settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     if let Err(err) = tracker.preflight().await {
         return Ok(TrackerTestResult {
@@ -267,8 +260,8 @@ async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings
 }
 
 #[tauri::command]
-fn get_default_workflow() -> String {
-    default_workflow_source()
+fn get_default_prompt() -> String {
+    default_prompt_template()
 }
 
 #[tauri::command]
@@ -328,11 +321,18 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
     let settings = load_settings_from_disk(&state).await?;
-    let env = build_env(&state, &settings);
+    // A worker started from invalid settings (e.g. no active states) would
+    // poll forever without dispatching anything — fail up front instead.
+    if let Some(error) = validate_workflow_settings(&settings) {
+        return Err(error);
+    }
+    let api_key = linear_api_key();
+    let workflow = workflow_from_settings(&settings, api_key.as_deref());
+    let env = build_env(&settings);
     state
         .worker
         .start(WorkerStartConfig {
-            workflow_source: settings.workflow_source,
+            workflow,
             env,
             app_data_dir: state.app_data_dir.clone(),
         })
@@ -372,14 +372,10 @@ async fn install_skills(
     if settings.repo_url.trim().is_empty() {
         return Err("Add a repository URL under Settings → Repository first.".to_string());
     }
-    let env = build_env(&state, &settings);
-    let workflow =
-        parse_workflow_source(&settings.workflow_source, &env).map_err(|err| err.to_string())?;
-    let workspace_root = resolve_workspace_root_dir(
-        &workflow.front_matter.workspace.root,
-        &env,
-        &state.app_data_dir,
-    );
+    let api_key = linear_api_key();
+    let workflow = workflow_from_settings(&settings, api_key.as_deref());
+    let workspace_root =
+        resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
     state
         .skills_installer
         .start(SkillsInstallConfig {
@@ -441,7 +437,7 @@ pub fn run() {
             validate_settings,
             test_tracker_connection,
             remove_linear_api_key,
-            get_default_workflow,
+            get_default_prompt,
             get_overview,
             list_runs,
             get_run_detail,
@@ -479,7 +475,28 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
 
 async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String> {
     let mut settings = match tokio::fs::read_to_string(&state.settings_path).await {
-        Ok(raw) => serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())?,
+        Ok(raw) => {
+            let (settings, migrated) = parse_settings(&raw)?;
+            if migrated {
+                // The legacy workflow's customized front matter is discarded;
+                // keep the original file around in case the user needs it.
+                let backup = state.settings_path.with_extension("json.bak");
+                tokio::fs::write(&backup, &raw)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let json =
+                    serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+                tokio::fs::write(&state.settings_path, json)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                tracing::info!(
+                    target: "symphony",
+                    backup = %backup.display(),
+                    "migrated legacy workflow settings to structured settings"
+                );
+            }
+            settings
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
         Err(err) => return Err(err.to_string()),
     };
@@ -487,46 +504,15 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
     Ok(settings)
 }
 
-fn build_env(state: &AppState, settings: &AppSettings) -> BTreeMap<String, String> {
+/// Environment for hooks and agents (the structured settings feed the
+/// workflow config directly; this only carries what shell scripts and agent
+/// processes need at execution time).
+fn build_env(settings: &AppSettings) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
     if let Some(key) = linear_api_key() {
         env.insert("LINEAR_API_KEY".to_string(), key);
     }
     env.insert("REPO_URL".to_string(), settings.repo_url.clone());
-    env.insert(
-        "SYMPHONY_LINEAR_WORKSPACE".to_string(),
-        settings.tracker_workspace.clone().unwrap_or_default(),
-    );
-    env.insert(
-        "SYMPHONY_TRACKER_PREFIX".to_string(),
-        settings.tracker_prefix.clone().unwrap_or_default(),
-    );
-    env.insert(
-        "SYMPHONY_TRACKER_PROJECT_ID".to_string(),
-        settings.tracker_project_id.clone().unwrap_or_default(),
-    );
-    env.insert(
-        "SYMPHONY_AGENT_BACKEND".to_string(),
-        match settings.agent_backend {
-            AgentBackend::Codex => "codex".to_string(),
-            AgentBackend::Claude => "claude".to_string(),
-        },
-    );
-    env.insert(
-        "SYMPHONY_CODEX_COMMAND".to_string(),
-        settings.codex_command.clone().unwrap_or_default(),
-    );
-    env.insert(
-        "SYMPHONY_CLAUDE_COMMAND".to_string(),
-        settings.claude_command.clone().unwrap_or_default(),
-    );
-    env.insert(
-        "TMPDIR".to_string(),
-        settings
-            .workspace_root
-            .clone()
-            .unwrap_or_else(|| state.app_data_dir.join("workspaces").display().to_string()),
-    );
     if let Some(cmd) = settings
         .install_cmd
         .as_ref()
@@ -566,6 +552,11 @@ fn export_bindings() {
         let conf = specta::ts::ExportConfiguration::default()
             .bigint(specta::ts::BigIntExportBehavior::Number);
         let exports = [
+            specta::ts::export::<symphony_core::AgentBackend>(&conf),
+            specta::ts::export::<symphony_core::ApprovalPolicy>(&conf),
+            specta::ts::export::<symphony_core::ThreadSandbox>(&conf),
+            specta::ts::export::<symphony_core::TurnSandboxPolicy>(&conf),
+            specta::ts::export::<symphony_core::ClaudePermissionMode>(&conf),
             specta::ts::export::<AppSettings>(&conf),
             specta::ts::export::<SaveSettingsRequest>(&conf),
             specta::ts::export::<ValidationResult>(&conf),
@@ -597,44 +588,62 @@ fn export_bindings() {
     }
 }
 
-fn default_workflow_source() -> String {
-    include_str!("../assets/default-workflow.md").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn settings_env() -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("LINEAR_API_KEY".to_string(), "lin_api_test".to_string()),
-            ("TMPDIR".to_string(), "/tmp/workspaces".to_string()),
-        ])
+    #[test]
+    fn default_settings_build_a_usable_workflow() {
+        let settings = AppSettings::default();
+        let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
+        assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
+        assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
+        assert_eq!(
+            workflow.front_matter.agent.backend,
+            symphony_core::AgentBackend::Codex
+        );
+        assert!(workflow.front_matter.codex.network_access);
+        assert!(!workflow.front_matter.claude.allowed_tools.is_empty());
+        // Launch commands fall back to the bare CLI names when Settings
+        // leaves them blank.
+        assert_eq!(workflow.front_matter.codex.command, "codex");
+        assert_eq!(workflow.front_matter.claude.command, "claude");
+        // Hooks keep shell-style defaults for bash to expand at run time.
+        let after_create = workflow.front_matter.hooks.after_create.expect("hook");
+        assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
+        assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
+        assert!(validate_workflow_settings(&settings).is_none());
     }
 
     #[test]
-    fn default_workflow_parses_with_minimal_env() {
-        let parsed = parse_workflow_source(&default_workflow_source(), &settings_env())
-            .expect("default workflow must parse");
-        assert_eq!(parsed.front_matter.tracker.kind, "linear");
-        assert_eq!(parsed.front_matter.tracker.api_key, "lin_api_test");
-        // Unset optional Settings vars interpolate to empty and are dropped.
-        assert_eq!(parsed.front_matter.tracker.identifier_prefix, None);
-        // Backend falls back to codex when Settings has not populated it.
+    fn validation_flags_empty_states_and_unknown_placeholders() {
+        let no_states = AppSettings {
+            active_states: Vec::new(),
+            ..AppSettings::default()
+        };
+        assert!(validate_workflow_settings(&no_states)
+            .expect("empty active states must fail validation")
+            .contains("Active states"));
+
+        let bad_prompt = AppSettings {
+            prompt_template: "Fix {{issue.foo}} and {{issue.title}}".to_string(),
+            ..AppSettings::default()
+        };
+        let error = validate_workflow_settings(&bad_prompt).expect("unknown placeholder");
+        assert!(error.contains("issue.foo"), "unexpected error: {error}");
+        // Known placeholders are not flagged.
         assert_eq!(
-            parsed.front_matter.agent.backend,
-            symphony_core::AgentBackend::Codex
+            unknown_placeholders(&bad_prompt.prompt_template),
+            vec!["issue.foo"]
         );
-        assert!(parsed.front_matter.codex.network_access);
-        assert!(!parsed.front_matter.claude.allowed_tools.is_empty());
-        // Launch commands fall back to the bare CLI names when Settings
-        // leaves them blank.
-        assert_eq!(parsed.front_matter.codex.command, "codex");
-        assert_eq!(parsed.front_matter.claude.command, "claude");
-        // Hooks keep shell-style defaults for bash to expand at run time.
-        let after_create = parsed.front_matter.hooks.after_create.expect("hook");
-        assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
-        assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
+    }
+
+    #[test]
+    fn placeholder_scan_ignores_non_variable_braces() {
+        assert!(
+            unknown_placeholders("code sample: {{\"key\": 1}} and {{ issue.title }}").is_empty()
+        );
+        assert_eq!(unknown_placeholders("{{issue.nope}}"), vec!["issue.nope"]);
     }
 
     #[test]
@@ -657,31 +666,15 @@ mod tests {
     }
 
     #[test]
-    fn default_workflow_references_every_bundled_skill() {
-        let workflow = default_workflow_source();
+    fn default_prompt_references_every_bundled_skill() {
+        let prompt = default_prompt_template();
         for skill in bundled_skills() {
             assert!(
-                workflow.contains(&format!("`{}`", skill.name)),
-                "default workflow never mentions the bundled skill {}",
+                prompt.contains(&format!("`{}`", skill.name)),
+                "default prompt never mentions the bundled skill {}",
                 skill.name
             );
         }
-    }
-
-    #[test]
-    fn default_workflow_honors_custom_launch_commands() {
-        let mut env = settings_env();
-        env.insert(
-            "SYMPHONY_CODEX_COMMAND".to_string(),
-            "mycode --agent codex".to_string(),
-        );
-        env.insert(
-            "SYMPHONY_CLAUDE_COMMAND".to_string(),
-            "mycode --agent claude".to_string(),
-        );
-        let parsed = parse_workflow_source(&default_workflow_source(), &env).unwrap();
-        assert_eq!(parsed.front_matter.codex.command, "mycode --agent codex");
-        assert_eq!(parsed.front_matter.claude.command, "mycode --agent claude");
     }
 
     #[test]
@@ -702,15 +695,13 @@ mod tests {
     }
 
     #[test]
-    fn default_workflow_uses_supported_prompt_placeholders() {
-        let parsed = parse_workflow_source(&default_workflow_source(), &settings_env()).unwrap();
-        let unresolved = ["{{identifier}}", "{{title}}", "{{#", "{{/", "{{state}}"];
-        for token in unresolved {
-            assert!(
-                !parsed.prompt_template.contains(token),
-                "prompt template contains unsupported placeholder: {token}"
-            );
-        }
+    fn default_prompt_uses_supported_placeholders() {
+        let prompt = default_prompt_template();
+        assert!(
+            unknown_placeholders(&prompt).is_empty(),
+            "default prompt contains unsupported placeholders: {:?}",
+            unknown_placeholders(&prompt)
+        );
         for token in [
             "{{issue.identifier}}",
             "{{issue.title}}",
@@ -719,7 +710,7 @@ mod tests {
             "{{issue.description}}",
         ] {
             assert!(
-                parsed.prompt_template.contains(token),
+                prompt.contains(token),
                 "prompt template is missing placeholder: {token}"
             );
         }

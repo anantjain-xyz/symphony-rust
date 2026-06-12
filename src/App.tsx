@@ -68,19 +68,51 @@ const emptyOverview: Overview = {
 };
 
 const previewSettings: AppSettings = {
-  workflow_source:
-    "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved workflow.",
+  prompt_template:
+    "# Prompt preview\n\nConnect through the Tauri desktop runtime to load and edit the saved prompt template.",
   repo_url: "",
+  install_cmd: null,
+  workspace_root: null,
   tracker_workspace: null,
   tracker_prefix: null,
   tracker_project_id: null,
-  workspace_root: null,
-  install_cmd: null,
+  active_states: ["Todo", "In Progress", "Rework", "Merging"],
+  terminal_states: ["Done", "Canceled"],
+  polling_interval_ms: 30000,
+  max_concurrent_agents: 3,
+  max_retry_backoff_ms: 300000,
+  hook_after_create:
+    'git clone "$REPO_URL" .\ngit checkout -B "${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"\neval "${SYMPHONY_INSTALL_CMD:-npm ci}"\n',
+  hook_before_run: null,
+  hook_after_run: null,
+  hook_before_remove: null,
+  hook_timeout_ms: 60000,
   agent_backend: "codex",
   codex_command: null,
   claude_command: null,
+  turn_timeout_ms: 3600000,
+  codex_approval_policy: "never",
+  codex_thread_sandbox: "workspace-write",
+  codex_turn_sandbox_policy: "inherit",
+  codex_network_access: true,
+  claude_permission_mode: "auto",
+  claude_allowed_tools: ["Bash(gh *)", "Bash(git status*)", "Bash(curl *)"],
+  claude_disallowed_tools: [],
+  claude_add_dirs: [],
   linear_api_key_set: false,
 };
+
+// Mirrors PROMPT_VARIABLES in symphony-core (crates/symphony-core/src/prompt.rs).
+const PROMPT_VARIABLES: { name: string; description: string; example: string }[] = [
+  { name: "issue.identifier", description: "Issue key", example: "SYM-42" },
+  { name: "issue.title", description: "Issue title", example: "Add user login" },
+  { name: "issue.description", description: "Full issue body; empty if none", example: "" },
+  { name: "issue.state", description: "Current Linear state", example: "Todo" },
+  { name: "issue.branch", description: "Git branch from Linear; may be empty", example: "symphony/SYM-42" },
+  { name: "issue.labels", description: "Labels, comma-separated", example: "bug, ui" },
+  { name: "issue.blockers", description: "Blocking issues, one bullet per line", example: "- SYM-41" },
+  { name: "issue.id", description: "Internal Linear ID", example: "" },
+];
 
 // linear_api_key_set is server-derived, not part of the editable form.
 function formSnapshot(settings: AppSettings) {
@@ -380,10 +412,10 @@ function App() {
     setTrackerTest(null);
   }
 
-  async function resetWorkflow() {
+  async function resetPrompt() {
     if (!settings) return;
-    const source = await call(() => invoke<string>("get_default_workflow"));
-    setSettings({ ...settings, workflow_source: source });
+    const prompt = await call(() => invoke<string>("get_default_prompt"));
+    setSettings({ ...settings, prompt_template: prompt });
   }
 
   async function startWorker() {
@@ -599,7 +631,7 @@ function App() {
             onValidate={validate}
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
-            onResetWorkflow={resetWorkflow}
+            onResetPrompt={resetPrompt}
             onRefreshSkills={refreshSkillsStatus}
             onInstallSkills={startSkillsInstall}
           />
@@ -1092,7 +1124,7 @@ function SettingsView({
   onValidate,
   onTestConnection,
   onRemoveKey,
-  onResetWorkflow,
+  onResetPrompt,
   onRefreshSkills,
   onInstallSkills,
 }: {
@@ -1114,10 +1146,11 @@ function SettingsView({
   onValidate: () => void;
   onTestConnection: () => void;
   onRemoveKey: () => void;
-  onResetWorkflow: () => void;
+  onResetPrompt: () => void;
   onRefreshSkills: () => void;
   onInstallSkills: () => void;
 }) {
+  const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
   return (
     <form
       className="settings-form"
@@ -1130,7 +1163,7 @@ function SettingsView({
       <header className="page-header">
         <div>
           <h2>Settings</h2>
-          <p>Linear connection, repository, agent backend, and the workflow that drives runs.</p>
+          <p>Linear connection, repository, agent backend, and the prompt that drives runs.</p>
         </div>
         <div className="actions">
           <span
@@ -1282,6 +1315,37 @@ function SettingsView({
               Optional. Watch only issues whose identifier starts with this team key.
             </small>
           </label>
+          <label>
+            Active states
+            <ListInput
+              value={settings.active_states}
+              disabled={!runtimeAvailable}
+              separator="comma"
+              placeholder="Todo, In Progress, Rework, Merging"
+              onChange={(next) => setSettings({ ...settings, active_states: next })}
+            />
+            <small className="hint">
+              Comma-separated Linear states the worker picks issues up from.
+            </small>
+            {activeStatesEmpty ? (
+              <small className="test-result err">
+                Required — without at least one state the worker never runs.
+              </small>
+            ) : null}
+          </label>
+          <label>
+            Terminal states
+            <ListInput
+              value={settings.terminal_states}
+              disabled={!runtimeAvailable}
+              separator="comma"
+              placeholder="Done, Canceled"
+              onChange={(next) => setSettings({ ...settings, terminal_states: next })}
+            />
+            <small className="hint">
+              States that mean an issue is finished; its workspace can be cleaned up.
+            </small>
+          </label>
           <div className="section-row">
             <button
               type="button"
@@ -1360,33 +1424,322 @@ function SettingsView({
               </span>
             </small>
           ) : null}
+          <label>
+            Turn timeout (ms)
+            <input
+              type="number"
+              min={1000}
+              value={settings.turn_timeout_ms}
+              disabled={!runtimeAvailable}
+              onChange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n) && n >= 0)
+                  setSettings({ ...settings, turn_timeout_ms: Math.trunc(n) });
+              }}
+            />
+            <small className="hint">
+              Max time for one agent turn. 3600000 = 1 hour.
+            </small>
+          </label>
+          {settings.agent_backend === "codex" ? (
+            <>
+              <label>
+                Approval policy
+                <select
+                  value={settings.codex_approval_policy}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      codex_approval_policy: e.currentTarget
+                        .value as AppSettings["codex_approval_policy"],
+                    })
+                  }
+                >
+                  <option value="never">Never (unattended)</option>
+                  <option value="on-request">On request</option>
+                  <option value="on-failure">On failure</option>
+                  <option value="always">Always</option>
+                </select>
+                <small className="hint">
+                  When Codex pauses for approval. Runs are unattended — keep <code>Never</code>.
+                </small>
+              </label>
+              <label>
+                Thread sandbox
+                <select
+                  value={settings.codex_thread_sandbox}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      codex_thread_sandbox: e.currentTarget
+                        .value as AppSettings["codex_thread_sandbox"],
+                    })
+                  }
+                >
+                  <option value="workspace-write">Workspace write</option>
+                  <option value="read-only">Read only</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+              <label>
+                Turn sandbox policy
+                <select
+                  value={settings.codex_turn_sandbox_policy}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      codex_turn_sandbox_policy: e.currentTarget
+                        .value as AppSettings["codex_turn_sandbox_policy"],
+                    })
+                  }
+                >
+                  <option value="inherit">Inherit</option>
+                  <option value="workspace-write">Workspace write</option>
+                  <option value="read-only">Read only</option>
+                  <option value="danger-full-access">Danger: full access</option>
+                </select>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.codex_network_access}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, codex_network_access: e.currentTarget.checked })
+                  }
+                />
+                Network access
+                <small className="hint">
+                  Runs push branches and call GitHub/Linear — keep this on.
+                </small>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Permission mode
+                <select
+                  value={settings.claude_permission_mode}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      claude_permission_mode: e.currentTarget
+                        .value as AppSettings["claude_permission_mode"],
+                    })
+                  }
+                >
+                  <option value="auto">Auto</option>
+                  <option value="acceptEdits">Accept edits</option>
+                  <option value="default">Default</option>
+                  <option value="dontAsk">Don't ask</option>
+                  <option value="bypassPermissions">Bypass permissions</option>
+                  <option value="plan">Plan</option>
+                </select>
+                <small className="hint">
+                  How Claude Code handles tool permissions during unattended runs.
+                </small>
+              </label>
+              <label>
+                Allowed tools
+                <ListInput
+                  value={settings.claude_allowed_tools}
+                  disabled={!runtimeAvailable}
+                  separator="newline"
+                  rows={8}
+                  placeholder={"Bash(gh *)\nBash(git status*)"}
+                  onChange={(next) => setSettings({ ...settings, claude_allowed_tools: next })}
+                />
+                <small className="hint">
+                  One rule per line. The target repo's <code>.claude/settings.json</code> can add
+                  repo-specific extras on top.
+                </small>
+              </label>
+              <label>
+                Disallowed tools
+                <ListInput
+                  value={settings.claude_disallowed_tools}
+                  disabled={!runtimeAvailable}
+                  separator="newline"
+                  rows={3}
+                  onChange={(next) => setSettings({ ...settings, claude_disallowed_tools: next })}
+                />
+                <small className="hint">One rule per line. Takes precedence over allowed tools.</small>
+              </label>
+              <label>
+                Additional directories
+                <ListInput
+                  value={settings.claude_add_dirs}
+                  disabled={!runtimeAvailable}
+                  separator="newline"
+                  rows={2}
+                  onChange={(next) => setSettings({ ...settings, claude_add_dirs: next })}
+                />
+                <small className="hint">
+                  One path per line, made available to the agent beyond the workspace.
+                </small>
+              </label>
+            </>
+          )}
+        </section>
+
+        <section className="settings-section">
+          <h3>Worker</h3>
+          <label>
+            Polling interval (ms)
+            <input
+              type="number"
+              min={1000}
+              value={settings.polling_interval_ms}
+              disabled={!runtimeAvailable}
+              onChange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n) && n >= 0)
+                  setSettings({ ...settings, polling_interval_ms: Math.trunc(n) });
+              }}
+            />
+            <small className="hint">How often Linear is polled for issues. 30000 = 30s.</small>
+          </label>
+          <label>
+            Max concurrent agents
+            <input
+              type="number"
+              min={1}
+              value={settings.max_concurrent_agents}
+              disabled={!runtimeAvailable}
+              onChange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n) && n >= 1)
+                  setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) });
+              }}
+            />
+            <small className="hint">Issues worked on in parallel.</small>
+          </label>
+          <label>
+            Max retry backoff (ms)
+            <input
+              type="number"
+              min={0}
+              value={settings.max_retry_backoff_ms}
+              disabled={!runtimeAvailable}
+              onChange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n) && n >= 0)
+                  setSettings({ ...settings, max_retry_backoff_ms: Math.trunc(n) });
+              }}
+            />
+            <small className="hint">
+              Cap on the delay between retries of a failed run. 300000 = 5 min.
+            </small>
+          </label>
+          <label>
+            Hook timeout (ms)
+            <input
+              type="number"
+              min={1000}
+              value={settings.hook_timeout_ms}
+              disabled={!runtimeAvailable}
+              onChange={(e) => {
+                const n = e.currentTarget.valueAsNumber;
+                if (Number.isFinite(n) && n >= 0)
+                  setSettings({ ...settings, hook_timeout_ms: Math.trunc(n) });
+              }}
+            />
+            <small className="hint">Max time for each hook script. 60000 = 1 min.</small>
+          </label>
+          <details className="hooks-details">
+            <summary>Hooks (advanced)</summary>
+            <small className="hint">
+              Shell scripts run at workspace lifecycle points. They receive{" "}
+              <code>$REPO_URL</code>, <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>,{" "}
+              <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as{" "}
+              <code>$SYMPHONY_HOOK</code>.
+            </small>
+            <label>
+              After create
+              <textarea
+                className="mono-input"
+                rows={4}
+                value={settings.hook_after_create ?? ""}
+                disabled={!runtimeAvailable}
+                spellCheck={false}
+                onChange={(e) =>
+                  setSettings({ ...settings, hook_after_create: nullable(e.currentTarget.value) })
+                }
+              />
+              <small className="hint">
+                Runs once per fresh workspace — clone, branch, install.
+              </small>
+            </label>
+            <label>
+              Before run
+              <textarea
+                className="mono-input"
+                rows={2}
+                value={settings.hook_before_run ?? ""}
+                disabled={!runtimeAvailable}
+                spellCheck={false}
+                onChange={(e) =>
+                  setSettings({ ...settings, hook_before_run: nullable(e.currentTarget.value) })
+                }
+              />
+            </label>
+            <label>
+              After run
+              <textarea
+                className="mono-input"
+                rows={2}
+                value={settings.hook_after_run ?? ""}
+                disabled={!runtimeAvailable}
+                spellCheck={false}
+                onChange={(e) =>
+                  setSettings({ ...settings, hook_after_run: nullable(e.currentTarget.value) })
+                }
+              />
+            </label>
+            <label>
+              Before remove
+              <textarea
+                className="mono-input"
+                rows={2}
+                value={settings.hook_before_remove ?? ""}
+                disabled={!runtimeAvailable}
+                spellCheck={false}
+                onChange={(e) =>
+                  setSettings({ ...settings, hook_before_remove: nullable(e.currentTarget.value) })
+                }
+              />
+            </label>
+          </details>
         </section>
       </div>
 
       {validation ? (
         <div className={validation.workflow_ok ? "banner ok validation" : "banner error validation"}>
-          <strong>{validation.workflow_ok ? "Workflow valid" : "Workflow needs attention"}</strong>
+          <strong>{validation.workflow_ok ? "Settings valid" : "Settings need attention"}</strong>
           {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
         </div>
       ) : null}
 
-      <Panel title="Workflow">
-        <textarea
-          value={settings.workflow_source}
+      <Panel title="Prompt template">
+        <PromptEditor
+          value={settings.prompt_template}
           disabled={!runtimeAvailable}
-          onChange={(e) => setSettings({ ...settings, workflow_source: e.currentTarget.value })}
-          spellCheck={false}
+          onChange={(next) => setSettings({ ...settings, prompt_template: next })}
         />
         <div className="section-row">
           <button
             type="button"
             disabled={busy || !runtimeAvailable}
-            onClick={onResetWorkflow}
+            onClick={onResetPrompt}
           >
             Reset to default
           </button>
           <small className="hint">
-            Replaces the editor with the bundled default workflow. Nothing changes until you save.
+            Replaces the editor with the bundled default prompt. Nothing changes until you save.
           </small>
         </div>
       </Panel>
@@ -1425,6 +1778,139 @@ function SettingsView({
         <ExternalLink href={`${GITHUB_URL}/issues`}>Report an issue</ExternalLink>
       </p>
     </form>
+  );
+}
+
+// List fields keep a local text draft: round-tripping every keystroke through
+// join(parse(...)) would eat separators as the user types them.
+function ListInput({
+  value,
+  onChange,
+  disabled,
+  separator,
+  placeholder,
+  rows,
+}: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  disabled: boolean;
+  separator: "comma" | "newline";
+  placeholder?: string;
+  rows?: number;
+}) {
+  const join = (items: string[]) =>
+    separator === "comma" ? items.join(", ") : items.join("\n");
+  const parse = (text: string) =>
+    text
+      .split(separator === "comma" ? "," : "\n")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  const joined = join(value);
+  const [draft, setDraft] = useState(joined);
+  const lastEmitted = useRef(joined);
+  useEffect(() => {
+    // Re-seed only on external changes (settings load, reset to defaults).
+    if (joined !== lastEmitted.current) {
+      setDraft(joined);
+      lastEmitted.current = joined;
+    }
+  }, [joined]);
+  function handleChange(text: string) {
+    setDraft(text);
+    const next = parse(text);
+    lastEmitted.current = join(next);
+    onChange(next);
+  }
+  if (separator === "newline") {
+    return (
+      <textarea
+        className="mono-input"
+        value={draft}
+        disabled={disabled}
+        rows={rows ?? 6}
+        spellCheck={false}
+        placeholder={placeholder}
+        onChange={(e) => handleChange(e.currentTarget.value)}
+      />
+    );
+  }
+  return (
+    <input
+      value={draft}
+      disabled={disabled}
+      autoComplete="off"
+      placeholder={placeholder}
+      onChange={(e) => handleChange(e.currentTarget.value)}
+    />
+  );
+}
+
+function PromptEditor({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (next: string) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  function insertVariable(name: string) {
+    const token = `{{${name}}}`;
+    const el = ref.current;
+    const start = el?.selectionStart ?? value.length;
+    const end = el?.selectionEnd ?? start;
+    onChange(value.slice(0, start) + token + value.slice(end));
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(start + token.length, start + token.length);
+    });
+  }
+
+  return (
+    <div className="prompt-editor">
+      <textarea
+        ref={ref}
+        value={value}
+        disabled={disabled}
+        spellCheck={false}
+        onChange={(e) => onChange(e.currentTarget.value)}
+      />
+      <aside className="var-reference">
+        <h4>Variables</h4>
+        <p className="hint">
+          Filled in from the Linear issue when a run starts. Click to insert at the cursor.
+        </p>
+        <ul className="var-list">
+          {PROMPT_VARIABLES.map((variable) => (
+            <li key={variable.name}>
+              <button
+                type="button"
+                className="var-button"
+                disabled={disabled}
+                onClick={() => insertVariable(variable.name)}
+              >
+                <code>{`{{${variable.name}}}`}</code>
+                <small className="hint">
+                  {variable.description}
+                  {variable.example ? (
+                    <>
+                      {" — e.g. "}
+                      <code>{variable.example}</code>
+                    </>
+                  ) : null}
+                </small>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <p className="hint">
+          On retries, Symphony appends a <code>## Retry context</code> section with the prior
+          run's error automatically.
+        </p>
+      </aside>
+    </div>
   );
 }
 

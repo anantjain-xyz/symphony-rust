@@ -720,28 +720,30 @@ mod tests {
 
     #[test]
     fn install_run_overrides_locked_down_agent_settings() {
-        let workflow = symphony_core::parse_workflow_source(
-            concat!(
-                "---\n",
-                "tracker:\n",
-                "  kind: linear\n",
-                "  api_key: k\n",
-                "  active_states: [Todo]\n",
-                "  terminal_states: [Done]\n",
-                "codex:\n",
-                "  thread_sandbox: read-only\n",
-                "  turn_sandbox_policy: read-only\n",
-                "  network_access: false\n",
-                "claude:\n",
-                "  permission_mode: plan\n",
-                "  allowed_tools: [\"Bash(npm *)\"]\n",
-                "  disallowed_tools: [\"Bash(git push*)\"]\n",
-                "---\n",
-                "body"
-            ),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+        let workflow = symphony_core::build_parsed_workflow(
+            symphony_core::WorkflowFrontMatter {
+                tracker: symphony_core::TrackerConfig {
+                    api_key: "k".to_string(),
+                    active_states: vec!["Todo".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                    ..Default::default()
+                },
+                codex: symphony_core::CodexConfig {
+                    thread_sandbox: ThreadSandbox::ReadOnly,
+                    turn_sandbox_policy: TurnSandboxPolicy::ReadOnly,
+                    network_access: false,
+                    ..Default::default()
+                },
+                claude: symphony_core::ClaudeConfig {
+                    permission_mode: ClaudePermissionMode::Plan,
+                    allowed_tools: vec!["Bash(npm *)".to_string()],
+                    disallowed_tools: vec!["Bash(git push*)".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "body".to_string(),
+        );
         let config = SkillsInstallConfig {
             repo_url: "git@github.com:acme/widgets.git".to_string(),
             workspace_root: PathBuf::from("/tmp"),
@@ -859,11 +861,18 @@ mod tests {
         let config = SkillsInstallConfig {
             repo_url: "git@github.com:acme/widgets.git".to_string(),
             workspace_root: PathBuf::from("/tmp"),
-            workflow: symphony_core::parse_workflow_source(
-                "---\ntracker:\n  kind: linear\n  api_key: k\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nbody",
-                &std::collections::BTreeMap::new(),
-            )
-            .unwrap(),
+            workflow: symphony_core::build_parsed_workflow(
+                symphony_core::WorkflowFrontMatter {
+                    tracker: symphony_core::TrackerConfig {
+                        api_key: "k".to_string(),
+                        active_states: vec!["Todo".to_string()],
+                        terminal_states: vec!["Done".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "body".to_string(),
+            ),
             skills: Vec::new(),
         };
         assert!(matches!(

@@ -2,17 +2,54 @@
 
 export type AgentBackend = "codex" | "claude";
 
+export type ApprovalPolicy = "never" | "on-request" | "on-failure" | "always";
+
+export type ThreadSandbox = "none" | "workspace-write" | "read-only";
+
+export type TurnSandboxPolicy =
+  | "inherit"
+  | "workspace-write"
+  | "read-only"
+  | "danger-full-access";
+
+export type ClaudePermissionMode =
+  | "default"
+  | "acceptEdits"
+  | "auto"
+  | "bypassPermissions"
+  | "dontAsk"
+  | "plan";
+
 export type AppSettings = {
-  workflow_source: string;
+  prompt_template: string;
   repo_url: string;
+  install_cmd: string | null;
+  workspace_root: string | null;
   tracker_workspace: string | null;
   tracker_prefix: string | null;
   tracker_project_id: string | null;
-  workspace_root: string | null;
-  install_cmd: string | null;
+  active_states: string[];
+  terminal_states: string[];
+  polling_interval_ms: number;
+  max_concurrent_agents: number;
+  max_retry_backoff_ms: number;
+  hook_after_create: string | null;
+  hook_before_run: string | null;
+  hook_after_run: string | null;
+  hook_before_remove: string | null;
+  hook_timeout_ms: number;
   agent_backend: AgentBackend;
   codex_command: string | null;
   claude_command: string | null;
+  turn_timeout_ms: number;
+  codex_approval_policy: ApprovalPolicy;
+  codex_thread_sandbox: ThreadSandbox;
+  codex_turn_sandbox_policy: TurnSandboxPolicy;
+  codex_network_access: boolean;
+  claude_permission_mode: ClaudePermissionMode;
+  claude_allowed_tools: string[];
+  claude_disallowed_tools: string[];
+  claude_add_dirs: string[];
   linear_api_key_set: boolean;
 };
 
