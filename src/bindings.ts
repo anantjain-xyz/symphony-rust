@@ -20,10 +20,18 @@ export type ClaudePermissionMode =
   | "dontAsk"
   | "plan";
 
+export type RepoConfig = {
+  name: string;
+  url: string;
+  install_cmd: string | null;
+  team_prefixes: string[];
+  project_ids: string[];
+  is_default: boolean;
+};
+
 export type AppSettings = {
   prompt_template: string;
-  repo_url: string;
-  install_cmd: string | null;
+  repos: RepoConfig[];
   workspace_root: string | null;
   tracker_workspace: string | null;
   tracker_prefix: string | null;
@@ -93,6 +101,7 @@ export type RunWithIssueRow = {
   error_message: string | null;
   worker_pid: number | null;
   session_info: string | null;
+  repo_name: string | null;
   created_at: string;
   issue_identifier: string;
   issue_title: string;

@@ -73,8 +73,12 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0002_run_session_info.sql"),
     ),
     (
-        "0003_token_usage",
-        include_str!("migrations/0003_token_usage.sql"),
+        "0003_run_repo_name",
+        include_str!("migrations/0003_run_repo_name.sql"),
+    ),
+    (
+        "0004_token_usage",
+        include_str!("migrations/0004_token_usage.sql"),
     ),
 ];
 

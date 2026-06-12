@@ -582,11 +582,15 @@ td strong {
   white-space: nowrap;
 }
 
-.badge.running,
 .badge.success,
 .badge.done {
   background: var(--success);
   color: var(--success-foreground);
+}
+
+.badge.running {
+  background: var(--warning);
+  color: var(--warning-foreground);
 }
 
 .badge.failure,
@@ -608,7 +612,7 @@ td strong {
 
 .pulse {
   animation: pulse 1.3s infinite;
-  background: var(--success-solid);
+  background: var(--warning-solid);
   border-radius: 999px;
   height: 8px;
   width: 8px;
@@ -1045,6 +1049,49 @@ pre {
 
 .self-start {
   justify-self: start;
+}
+
+.repo-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 12px;
+}
+
+.repo-card-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.repo-card-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.repo-card-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.repo-default {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-direction: row;
+  font-size: 12px;
+  gap: 5px;
+}
+
+.repo-default input[type="radio"] {
+  accent-color: var(--foreground);
+  margin: 0;
+  min-height: 0;
+  width: auto;
 }
 
 .section-row {

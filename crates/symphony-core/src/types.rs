@@ -371,6 +371,32 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub blockers: Vec<String>,
     pub pr_urls: Vec<String>,
+    /// Linear project the issue belongs to; drives project → repo routing.
+    /// Default so issue snapshots stored before this field deserialize.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// One repository Symphony can dispatch runs into. `name` doubles as the
+/// routing key (`repo:<name>` labels in Linear) and the workspace namespace,
+/// so it must be unique across the configured repos.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+pub struct RepoConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub install_cmd: Option<String>,
+    /// Linear team keys (e.g. "ENG") this repo is the default for.
+    #[serde(default)]
+    pub team_prefixes: Vec<String>,
+    /// Linear project IDs this repo is the default for.
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+    /// Fallback when no label, project, or team rule matches an issue.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

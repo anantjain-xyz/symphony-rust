@@ -1,0 +1,182 @@
+use crate::types::{Issue, RepoConfig};
+
+/// Resolve which configured repository an issue's runs should clone.
+///
+/// Precedence, first match wins:
+/// 1. An explicit `repo:<name>` label on the issue. If the issue carries such
+///    a label but it names no configured repo, the issue is unroutable — the
+///    user stated an intent we cannot honor, and silently falling through to
+///    a team or project default could dispatch an agent at the wrong codebase.
+/// 2. The repo claiming the issue's Linear project in `project_ids`.
+/// 3. The repo claiming the issue's team key (identifier prefix, e.g. the
+///    `ENG` in `ENG-42`) in `team_prefixes`.
+/// 4. The repo marked `is_default`, or the only repo when exactly one exists.
+pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a RepoConfig> {
+    let labeled: Vec<&str> = issue
+        .labels
+        .iter()
+        .filter_map(|label| label_repo_name(label))
+        .collect();
+    if !labeled.is_empty() {
+        // Compare against the trimmed name — the same form validation accepts
+        // and the Settings UI advertises as the label to use.
+        return labeled.iter().find_map(|name| {
+            repos
+                .iter()
+                .find(|repo| repo.name.trim().eq_ignore_ascii_case(name))
+        });
+    }
+    if let Some(project_id) = issue
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        if let Some(repo) = repos
+            .iter()
+            .find(|repo| repo.project_ids.iter().any(|id| id.trim() == project_id))
+        {
+            return Some(repo);
+        }
+    }
+    if let Some((team_key, _)) = issue.identifier.split_once('-') {
+        if let Some(repo) = repos.iter().find(|repo| {
+            repo.team_prefixes.iter().any(|prefix| {
+                let prefix = prefix.trim().trim_end_matches('-');
+                !prefix.is_empty() && prefix.eq_ignore_ascii_case(team_key)
+            })
+        }) {
+            return Some(repo);
+        }
+    }
+    default_repo(repos)
+}
+
+/// The repo non-routed work falls back to: the one marked default, or the
+/// only configured repo. Also the target for repo-scoped actions taken
+/// outside any issue context (e.g. the skills install).
+pub fn default_repo(repos: &[RepoConfig]) -> Option<&RepoConfig> {
+    match repos {
+        [only] => Some(only),
+        _ => repos.iter().find(|repo| repo.is_default),
+    }
+}
+
+/// The repo name carried by a `repo:<name>` label, if this is one.
+fn label_repo_name(label: &str) -> Option<&str> {
+    let trimmed = label.trim();
+    let prefix = trimmed.get(..5)?;
+    if !prefix.eq_ignore_ascii_case("repo:") {
+        return None;
+    }
+    Some(trimmed[5..].trim()).filter(|name| !name.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str) -> RepoConfig {
+        RepoConfig {
+            name: name.to_string(),
+            url: format!("git@github.com:acme/{name}.git"),
+            ..RepoConfig::default()
+        }
+    }
+
+    fn issue(identifier: &str, labels: &[&str], project_id: Option<&str>) -> Issue {
+        Issue {
+            id: "lin-1".to_string(),
+            identifier: identifier.to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: 1,
+            state: "todo".to_string(),
+            branch: None,
+            labels: labels.iter().map(ToString::to_string).collect(),
+            blockers: vec![],
+            pr_urls: vec![],
+            project_id: project_id.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn label_beats_project_and_team_defaults() {
+        let mut by_team = repo("backend");
+        by_team.team_prefixes = vec!["ENG".to_string()];
+        let mut by_project = repo("mobile");
+        by_project.project_ids = vec!["proj-1".to_string()];
+        let labeled = repo("web");
+        let repos = vec![by_team, by_project, labeled];
+
+        let routed = route_issue(&repos, &issue("ENG-42", &["repo:web"], Some("proj-1")));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("web"));
+    }
+
+    #[test]
+    fn label_matching_is_case_insensitive_and_trims() {
+        // The configured name carries accidental padding; the label still
+        // matches because both sides are trimmed.
+        let repos = vec![repo(" Web-App ")];
+        for label in ["repo:web-app", "REPO:Web-App", "  repo: web-app  "] {
+            let routed = route_issue(&repos, &issue("ENG-1", &[label], None));
+            assert_eq!(
+                routed.map(|r| r.name.as_str()),
+                Some(" Web-App "),
+                "label {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unmatched_repo_label_is_unroutable_even_with_a_default() {
+        let mut fallback = repo("backend");
+        fallback.is_default = true;
+        let repos = vec![fallback];
+        assert!(route_issue(&repos, &issue("ENG-1", &["repo:gone"], None)).is_none());
+        // Non-repo labels do not trigger the explicit-label path.
+        assert!(route_issue(&repos, &issue("ENG-1", &["bug", "repository"], None)).is_some());
+    }
+
+    #[test]
+    fn project_beats_team_default() {
+        let mut by_team = repo("backend");
+        by_team.team_prefixes = vec!["ENG".to_string()];
+        let mut by_project = repo("mobile");
+        by_project.project_ids = vec!["proj-1".to_string()];
+        let repos = vec![by_team, by_project];
+
+        let routed = route_issue(&repos, &issue("ENG-42", &[], Some("proj-1")));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("mobile"));
+        let routed = route_issue(&repos, &issue("ENG-42", &[], Some("proj-other")));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("backend"));
+    }
+
+    #[test]
+    fn team_prefix_accepts_either_form_and_ignores_case() {
+        let mut by_team = repo("backend");
+        by_team.team_prefixes = vec!["eng-".to_string()];
+        let repos = vec![by_team, repo("other")];
+        let routed = route_issue(&repos, &issue("ENG-42", &[], None));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("backend"));
+        // A bare prefix never matches a longer team key.
+        assert!(route_issue(&repos, &issue("ENGINE-42", &[], None)).is_none());
+    }
+
+    #[test]
+    fn falls_back_to_default_then_to_an_only_repo() {
+        let mut fallback = repo("backend");
+        fallback.is_default = true;
+        let repos = vec![repo("web"), fallback];
+        let routed = route_issue(&repos, &issue("OPS-1", &[], None));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("backend"));
+
+        let only = vec![repo("web")];
+        let routed = route_issue(&only, &issue("OPS-1", &[], None));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("web"));
+
+        let two_no_default = vec![repo("web"), repo("backend")];
+        assert!(route_issue(&two_no_default, &issue("OPS-1", &[], None)).is_none());
+        assert!(route_issue(&[], &issue("OPS-1", &[], None)).is_none());
+    }
+}
