@@ -181,6 +181,7 @@ function App() {
 
   const selectedRunIdRef = useRef<string | null>(null);
   const autoStartDone = useRef(false);
+  const skillsCheckSeq = useRef<Record<string, number>>({});
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -361,13 +362,19 @@ function App() {
   // user sees it (including unsaved edits), not the saved file. Statuses are
   // keyed by the trimmed URL — a response always describes the URL it was
   // asked about, so out-of-order responses cannot mislabel another repo's
-  // status, and editing one card never disturbs the others.
+  // status — and a per-URL sequence guards overlapping checks for the SAME
+  // repo: only the newest one may apply, or a slow pre-install check could
+  // overwrite the post-install refresh that already saw the PR (and a stale
+  // failure could delete a good status from the catch path).
   function checkRepoSkills(url: string) {
     const repoUrl = url.trim();
     if (!runtimeAvailable || repoUrl === "") return;
+    const seq = (skillsCheckSeq.current[repoUrl] ?? 0) + 1;
+    skillsCheckSeq.current[repoUrl] = seq;
     setSkillsChecking((prev) => ({ ...prev, [repoUrl]: true }));
     invoke<SkillsStatus>("get_skills_status", { repoUrl })
       .then((status) => {
+        if (skillsCheckSeq.current[repoUrl] !== seq) return;
         setSkillsStatuses((prev) => ({ ...prev, [repoUrl]: status }));
         // A fresh check supersedes a finished install for the same repo —
         // without this, a completed install keeps showing its PR forever.
@@ -376,6 +383,7 @@ function App() {
         );
       })
       .catch(() => {
+        if (skillsCheckSeq.current[repoUrl] !== seq) return;
         setSkillsStatuses((prev) => {
           const next = { ...prev };
           delete next[repoUrl];
@@ -383,6 +391,7 @@ function App() {
         });
       })
       .finally(() => {
+        if (skillsCheckSeq.current[repoUrl] !== seq) return;
         setSkillsChecking((prev) => ({ ...prev, [repoUrl]: false }));
       });
   }
