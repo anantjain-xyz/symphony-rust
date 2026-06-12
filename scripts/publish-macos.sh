@@ -30,10 +30,21 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo "error: working tree is not clean" >&2
   exit 1
 fi
-git fetch origin main
+git fetch origin main --tags
 if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
   echo "error: HEAD does not match origin/main — push or pull first" >&2
   exit 1
+fi
+COMMIT="$(git rev-parse HEAD)"
+
+# gh release create reuses an existing tag instead of tagging the verified
+# commit, so a stale v<version> tag (failed publish, manual push) must not
+# slip through unless it already points at HEAD.
+if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+  if [[ "$(git rev-parse "refs/tags/$TAG^{commit}")" != "$COMMIT" ]]; then
+    echo "error: tag $TAG already exists and does not point at HEAD — bump the version or delete the tag" >&2
+    exit 1
+  fi
 fi
 
 if gh release view "$TAG" >/dev/null 2>&1; then
@@ -57,7 +68,10 @@ cp "$DMG" "$STAGE/Symphony.dmg"
 
 echo
 echo "── creating GitHub release $TAG ──"
+# --target pins the tag to the commit that was actually built, in case main
+# moves on the remote while the signed build runs.
 gh release create "$TAG" \
+  --target "$COMMIT" \
   --title "Symphony $TAG" \
   --generate-notes \
   "$DMG" "$STAGE/Symphony.dmg"
