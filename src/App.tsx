@@ -1367,7 +1367,9 @@ function SettingsView({
 
         <section className="settings-section">
           <h3>Agent</h3>
-          <label>
+          {/* Not a <label>: label activation would forward option clicks back
+              to the trigger button and reopen the popup right after selecting. */}
+          <div className="field-group">
             Backend
             <BackendSelect
               value={settings.agent_backend}
@@ -1377,7 +1379,7 @@ function SettingsView({
             <small className="hint">
               The CLI that works on issues. Must be installed and authenticated on this machine.
             </small>
-          </label>
+          </div>
           <label>
             Launch command
             <input
@@ -1424,6 +1426,7 @@ function SettingsView({
             <input
               type="number"
               min={1}
+              step="any"
               value={settings.turn_timeout_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -1588,6 +1591,7 @@ function SettingsView({
             <input
               type="number"
               min={1}
+              step="any"
               value={settings.polling_interval_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -1618,6 +1622,7 @@ function SettingsView({
             <input
               type="number"
               min={0}
+              step="any"
               value={settings.max_retry_backoff_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -1635,6 +1640,7 @@ function SettingsView({
             <input
               type="number"
               min={1}
+              step="any"
               value={settings.hook_timeout_ms / 1000}
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -1933,6 +1939,8 @@ function BackendSelect({
         type="button"
         className="icon-select-trigger"
         disabled={disabled}
+        role="combobox"
+        aria-label="Backend"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? "backend-listbox" : undefined}
