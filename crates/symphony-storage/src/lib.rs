@@ -76,6 +76,10 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
         "0003_run_repo_name",
         include_str!("migrations/0003_run_repo_name.sql"),
     ),
+    (
+        "0004_token_usage",
+        include_str!("migrations/0004_token_usage.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
