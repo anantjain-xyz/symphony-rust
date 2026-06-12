@@ -1,8 +1,8 @@
 # Symphony
 
-**An autonomous engineering team for your Linear project.** Symphony is a desktop app that watches your Linear board and dispatches coding agents — [Codex](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code) — to work on issues, each in its own freshly cloned workspace. You triage and review; Symphony orchestrates.
+**An autonomous engineering team for your Linear project.** Symphony is a desktop app that watches your Linear board and dispatches coding agents — [Codex](https://github.com/openai/codex) or [Claude Code](https://claude.com/claude-code) — to work on issues, each in its own freshly cloned workspace. You triage and review; Symphony orchestrates. Based on the [spec](https://github.com/openai/symphony/blob/main/SPEC.md) from OpenAI.
 
-**[⬇ Download for macOS](https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/Symphony.dmg)** (Apple Silicon, signed & notarized) · [![Latest release](https://img.shields.io/github/v/release/anantjain-xyz/symphony-rust)](https://github.com/anantjain-xyz/symphony-rust/releases/latest)
+**[⬇ Download for macOS](https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/Symphony.dmg)** (Apple Silicon) · [![Latest release](https://img.shields.io/github/v/release/anantjain-xyz/symphony-rust)](https://github.com/anantjain-xyz/symphony-rust/releases/latest)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/overview-dark.png">
@@ -14,7 +14,7 @@
 1. **Poll** — a local worker polls Linear for issues in the states you mark as active (e.g. `Todo`, `In Progress`, `Rework`).
 2. **Prepare** — for each issue, Symphony creates an isolated workspace and runs your `after_create` hook (typically `git clone` + dependency install).
 3. **Dispatch** — it renders your prompt template with the issue's identifier, title, state, and description, then drives a Codex or Claude Code session natively over their structured event streams.
-4. **Track** — every agent event, token count, retry, failure, and provider rate-limit signal is recorded in a local SQLite database and streamed live to the dashboard.
+4. **Track** — agent events, token counts, retries, failures, and provider rate-limit signals are recorded in a local SQLite database and streamed live to the dashboard.
 5. **Retry** — failed runs are retried with exponential backoff, and the retry prompt includes the previous run's error context.
 
 Everything runs on your machine. The only network calls are to Linear's API and whatever your agents and hooks do.
@@ -79,7 +79,7 @@ Retried runs automatically get a `## Retry context` section appended with the pr
 
 ## Data and security
 
-- Your Linear API key lives in the **OS keychain**, not in any file.
+- Your Linear API key lives in the **OS keychain**, not in a file.
 - Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/xyz.anantjain.symphony` on macOS), alongside daily-rotated logs and per-run workspaces.
 - Agents run with the sandbox/permission settings you give them under *Settings → Agent*. The defaults (`approval_policy: never`, `permission_mode: auto`, network access on for Codex) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
 
