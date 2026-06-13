@@ -981,10 +981,12 @@ fn extract_tool_result(content: &Value) -> String {
 }
 
 fn truncate(value: &str, max: usize) -> String {
-    if value.len() <= max {
-        value.to_string()
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
     } else {
-        format!("{}...", &value[..max])
+        value.to_string()
     }
 }
 
@@ -1135,6 +1137,14 @@ mod tests {
             Some("api_overloaded")
         );
         assert_eq!(classify_api_error("hello"), None);
+    }
+
+    #[test]
+    fn truncates_on_char_boundaries() {
+        let value = format!("{}étail", "a".repeat(999));
+
+        assert_eq!(truncate(&value, 1000), format!("{}é...", "a".repeat(999)));
+        assert_eq!(truncate("shorté", 1000), "shorté");
     }
 
     #[test]

@@ -419,19 +419,52 @@ async fn reserve_and_dispatch(
     let recovery_issue_id = issue.id.clone();
     let retry_backoff_cap = config.workflow.front_matter.agent.max_retry_backoff_ms;
     tokio::spawn(async move {
-        if let Err(err) = dispatch_run(repo, config, issue, repo_config, run, stop).await {
+        let result = tokio::spawn(dispatch_run(repo, config, issue, repo_config, run, stop)).await;
+        handle_dispatch_result(
+            result,
+            &recovery_repo,
+            &recovery_issue_id,
+            &recovery_run,
+            retry_backoff_cap,
+        )
+        .await;
+    });
+    Ok(())
+}
+
+async fn handle_dispatch_result(
+    result: Result<Result<(), WorkerError>, tokio::task::JoinError>,
+    repo: &Repository,
+    issue_id: &str,
+    run: &RunRow,
+    retry_backoff_cap: u64,
+) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let message = err.to_string();
             error!(error = %err, "dispatch failed");
             recover_stranded_run(
-                &recovery_repo,
-                &recovery_issue_id,
-                &recovery_run,
+                repo,
+                issue_id,
+                run,
                 retry_backoff_cap,
-                &err,
+                "dispatch_error",
+                &message,
             )
             .await;
         }
-    });
-    Ok(())
+        Err(err) => {
+            let class = if err.is_panic() {
+                "dispatch_panic"
+            } else {
+                "dispatch_cancelled"
+            };
+            let message = format!("dispatch task ended without cleanup: {err}");
+            error!(error = %err, "dispatch task ended without cleanup");
+            recover_stranded_run(repo, issue_id, run, retry_backoff_cap, class, &message).await;
+        }
+    }
 }
 
 /// Mark a run that fell out of `dispatch_run` via an unhandled error as failed
@@ -449,7 +482,8 @@ async fn recover_stranded_run(
     issue_id: &str,
     run: &RunRow,
     retry_backoff_cap: u64,
-    err: &WorkerError,
+    class: &str,
+    message: &str,
 ) {
     // dispatch_run's normal end-of-run delete_live_session is skipped when it
     // returns early via `?`, so clean it up here regardless of the run's
@@ -470,14 +504,8 @@ async fn recover_stranded_run(
             return;
         }
     }
-    let message = err.to_string();
     if let Err(finish_err) = repo
-        .finish_run(
-            &run.id,
-            RunStatus::Failure,
-            Some("dispatch_error"),
-            Some(&message),
-        )
+        .finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
         .await
     {
         error!(
@@ -493,8 +521,8 @@ async fn recover_stranded_run(
             issue_id,
             run.run_number + 1,
             &due,
-            Some("dispatch_error"),
-            Some(&message),
+            Some(class),
+            Some(message),
         )
         .await
     {
@@ -1031,12 +1059,29 @@ mod tests {
         .await
         .unwrap();
 
-        recover_stranded_run(&repo, "lin-1", &run, 60_000, &WorkerError::AlreadyRunning).await;
+        recover_stranded_run(
+            &repo,
+            "lin-1",
+            &run,
+            60_000,
+            "dispatch_error",
+            &WorkerError::AlreadyRunning.to_string(),
+        )
+        .await;
 
         // The row is now terminal and a retry is queued, freeing its slot.
         assert_eq!(
             repo.get_run(&run.id).await.unwrap().unwrap().status,
             "failure"
+        );
+        assert_eq!(
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .error_class
+                .as_deref(),
+            Some("dispatch_error")
         );
         assert!(repo
             .all_retry_issue_ids()
@@ -1044,6 +1089,58 @@ mod tests {
             .unwrap()
             .contains(&"lin-1".to_string()));
         // The live session is cleaned up so the failed run stops showing as live.
+        assert!(repo.overview().await.unwrap().live_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rescues_a_run_stranded_by_a_dispatch_panic() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        repo.upsert_live_session(
+            &run.id,
+            "sess-sess",
+            "sess",
+            "sess",
+            &symphony_core::TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = tokio::spawn(async {
+            panic!("event mapper panic");
+            #[allow(unreachable_code)]
+            Ok::<(), WorkerError>(())
+        })
+        .await;
+        handle_dispatch_result(result, &repo, "lin-1", &run, 60_000).await;
+
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "failure");
+        assert_eq!(row.error_class.as_deref(), Some("dispatch_panic"));
+        assert!(row
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("event mapper panic")));
+        assert!(repo
+            .all_retry_issue_ids()
+            .await
+            .unwrap()
+            .contains(&"lin-1".to_string()));
         assert!(repo.overview().await.unwrap().live_sessions.is_empty());
     }
 
@@ -1067,7 +1164,15 @@ mod tests {
             .await
             .unwrap();
 
-        recover_stranded_run(&repo, "lin-1", &run, 60_000, &WorkerError::AlreadyRunning).await;
+        recover_stranded_run(
+            &repo,
+            "lin-1",
+            &run,
+            60_000,
+            "dispatch_error",
+            &WorkerError::AlreadyRunning.to_string(),
+        )
+        .await;
 
         // The success stands: no spurious failure overwrite, no retry queued.
         assert_eq!(
