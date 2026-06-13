@@ -1394,6 +1394,7 @@ function SettingsView({
                   value={repo.name}
                   disabled={!runtimeAvailable}
                   autoComplete="off"
+                  autoCapitalize="none"
                   onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
                   placeholder="widgets"
                 />
