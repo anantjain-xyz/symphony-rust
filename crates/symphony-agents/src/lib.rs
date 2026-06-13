@@ -826,6 +826,13 @@ fn spawn_shell_command(
     cmd.arg("-lc")
         .arg(full)
         .current_dir(cwd)
+        // Tokio does not kill a child when its future is dropped. Without this,
+        // a caller that abandons the run future (e.g. dispatch_run returning
+        // early on a transient DB error) would leave the agent CLI alive,
+        // still mutating the workspace, while a retry is scheduled against the
+        // same checkout. kill_on_drop SIGKILLs it on drop; the cancel/timeout
+        // paths still SIGTERM first for a graceful stop.
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

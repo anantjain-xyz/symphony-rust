@@ -451,6 +451,13 @@ async fn recover_stranded_run(
     retry_backoff_cap: u64,
     err: &WorkerError,
 ) {
+    // dispatch_run's normal end-of-run delete_live_session is skipped when it
+    // returns early via `?`, so clean it up here regardless of the run's
+    // status: overview() surfaces every live_sessions row and the restart
+    // cleanup only prunes `pending-*` ones, so a leftover would keep a failed
+    // run showing as live indefinitely.
+    repo.delete_live_session(&run.id).await.ok();
+
     match repo.get_run(&run.id).await {
         Ok(Some(current)) if matches!(current.status.as_str(), "pending" | "running") => {}
         Ok(_) => return,
@@ -1008,6 +1015,21 @@ mod tests {
             .unwrap()
             .unwrap();
         repo.mark_running(&run.id).await.unwrap();
+        // A live session like the Claude pre-session dispatch_run creates; its
+        // normal cleanup is skipped on the error path.
+        repo.upsert_live_session(
+            &run.id,
+            "sess-sess",
+            "sess",
+            "sess",
+            &symphony_core::TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
 
         recover_stranded_run(&repo, "lin-1", &run, 60_000, &WorkerError::AlreadyRunning).await;
 
@@ -1021,6 +1043,8 @@ mod tests {
             .await
             .unwrap()
             .contains(&"lin-1".to_string()));
+        // The live session is cleaned up so the failed run stops showing as live.
+        assert!(repo.overview().await.unwrap().live_sessions.is_empty());
     }
 
     #[tokio::test]
