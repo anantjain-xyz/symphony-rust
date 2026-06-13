@@ -1,5 +1,5 @@
 ---
-name: push
+name: symphony-push
 description: Push the current branch to origin and ensure a PR exists for it (creating or updating one), with the symphony label applied. Use when the workflow says "push" or "open a PR".
 ---
 
@@ -8,7 +8,7 @@ description: Push the current branch to origin and ensure a PR exists for it (cr
 ## Preconditions
 
 - `gh auth status` succeeds.
-- Working tree is committed (use the `commit` skill first).
+- Working tree is committed (use the `symphony-commit` skill first).
 - Validation gate has been run for the latest commit (`pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`).
 
 ## Steps
@@ -18,7 +18,7 @@ description: Push the current branch to origin and ensure a PR exists for it (cr
    ```sh
    git push -u origin HEAD
    ```
-3. If the push is rejected as non-fast-forward, run the `pull` skill to merge `origin/main`, re-run validation, then push again. Use `--force-with-lease` only when you knowingly rewrote history; never use `--force`.
+3. If the push is rejected as non-fast-forward, run the `symphony-pull` skill to merge `origin/main`, re-run validation, then push again. Use `--force-with-lease` only when you knowingly rewrote history; never use `--force`.
 4. Ensure a PR exists for the branch:
    ```sh
    pr_state=$(gh pr view --json state -q .state 2>/dev/null || true)

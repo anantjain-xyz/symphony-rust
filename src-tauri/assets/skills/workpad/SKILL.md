@@ -1,5 +1,5 @@
 ---
-name: workpad
+name: symphony-workpad
 description: Manage the single Symphony Workpad comment on a Linear issue — find or bootstrap, update in place, or reset (Rework). Use whenever the workflow needs to read or write the workpad. Includes the GraphQL `commentUpdate` workaround for the known Linear MCP `save_comment` duplication bug.
 ---
 
@@ -38,7 +38,7 @@ When the issue moves to `Rework`, overwrite the existing workpad's body in place
 
 - Capture every checkbox the workflow requires (env stamp, plan, acceptance, validation, notes).
 - If the issue body has `Validation`, `Test Plan`, or `Testing` sections, copy them verbatim into Acceptance / Validation as required checkboxes — no optional downgrade.
-- For user-facing changes, add a UI walkthrough criterion. Screenshots themselves go in the PR description via the `screenshot` skill, not in the workpad.
+- For user-facing changes, add a UI walkthrough criterion. Screenshots themselves go in the PR description via the `symphony-screenshot` skill, not in the workpad.
 
 ## Linking artifacts
 
@@ -51,7 +51,7 @@ When the issue moves to `Rework`, overwrite the existing workpad's body in place
     }
   }
   ```
-- Screenshots → use the `screenshot` skill to embed in the PR description; do not paste them into the workpad.
+- Screenshots → use the `symphony-screenshot` skill to embed in the PR description; do not paste them into the workpad.
 
 ## Don't
 

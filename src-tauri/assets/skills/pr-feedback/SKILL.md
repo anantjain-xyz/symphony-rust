@@ -1,5 +1,5 @@
 ---
-name: pr-feedback
+name: symphony-pr-feedback
 description: Sweep the PR for actionable reviewer feedback (top-level comments, inline review comments, review states) and resolve every item before moving to In Review. Use after every push that might have triggered review, and as the gate before transitioning the issue to In Review.
 ---
 

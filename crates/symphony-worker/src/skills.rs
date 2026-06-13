@@ -587,7 +587,7 @@ This workspace is a fresh clone of {repo_url}. The skill files have already been
 
 Do the following, in order:
 
-1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `pull` and `push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
+1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
 2. Create a branch named `{branch}`, stage only the new skill files and symlinks, and commit with the message "Add Symphony agent skills".
 3. Push the branch to origin and open a pull request titled "Install Symphony agent skills". In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
@@ -688,16 +688,16 @@ mod tests {
     fn install_prompt_names_every_skill_and_the_branch() {
         let skills = vec![
             SkillFile {
-                name: "workpad".to_string(),
-                content: "---\nname: workpad\n---".to_string(),
+                name: "symphony-workpad".to_string(),
+                content: "---\nname: symphony-workpad\n---".to_string(),
             },
             SkillFile {
-                name: "push".to_string(),
-                content: "---\nname: push\n---".to_string(),
+                name: "symphony-push".to_string(),
+                content: "---\nname: symphony-push\n---".to_string(),
             },
         ];
         let prompt = install_prompt("git@github.com:acme/widgets.git", &skills);
-        assert!(prompt.contains("workpad, push"));
+        assert!(prompt.contains("symphony-workpad, symphony-push"));
         assert!(prompt.contains(INSTALL_BRANCH));
         assert!(prompt.contains(SKILLS_DIR));
         assert!(prompt.contains("never use --no-verify"));

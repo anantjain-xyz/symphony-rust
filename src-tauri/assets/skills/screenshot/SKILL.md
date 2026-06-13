@@ -1,5 +1,5 @@
 ---
-name: screenshot
+name: symphony-screenshot
 description: Capture Playwright screenshots of a user-facing change and embed them in the GitHub PR description via a temporary commit + force-push. Use whenever the workflow asks for proof-of-testing screenshots on a user-facing change.
 ---
 
@@ -10,7 +10,7 @@ The PR description is the home for proof-of-testing screenshots. They are hosted
 ## Preconditions
 
 - Playwright MCP available (`mcp__plugin_playwright_playwright__browser_navigate`, `..._take_screenshot`).
-- A PR exists for the current branch (use the `push` skill first if not).
+- A PR exists for the current branch (use the `symphony-push` skill first if not).
 - `gh auth status` succeeds against the repo's host.
 
 ## Steps
