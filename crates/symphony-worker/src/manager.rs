@@ -409,12 +409,101 @@ async fn reserve_and_dispatch(
     else {
         return Ok(());
     };
+    // Capture what we need to rescue the run if dispatch_run returns early via
+    // `?`. Without this, any error after the run is reserved (e.g. a transient
+    // event-persist failure mid-stream) abandons the row in a non-terminal
+    // state forever: nothing finishes it, no retry is scheduled, and it keeps
+    // occupying a max_concurrent_agents slot until the worker restarts.
+    let recovery_repo = repo.clone();
+    let recovery_run = run.clone();
+    let recovery_issue_id = issue.id.clone();
+    let retry_backoff_cap = config.workflow.front_matter.agent.max_retry_backoff_ms;
     tokio::spawn(async move {
         if let Err(err) = dispatch_run(repo, config, issue, repo_config, run, stop).await {
             error!(error = %err, "dispatch failed");
+            recover_stranded_run(
+                &recovery_repo,
+                &recovery_issue_id,
+                &recovery_run,
+                retry_backoff_cap,
+                &err,
+            )
+            .await;
         }
     });
     Ok(())
+}
+
+/// Mark a run that fell out of `dispatch_run` via an unhandled error as failed
+/// and queue a retry — the safety net for the reserve → running → finish path.
+///
+/// `dispatch_run` may have already reached a terminal state before the error
+/// escaped (e.g. `fail()` finished the run but its retry insert then errored),
+/// so only rescue rows still stuck `pending`/`running`. That keeps this
+/// idempotent: we never re-stamp `ended_at` or double-queue a retry for a run
+/// that already finished. Every step is best-effort — we are already on the
+/// error path and cannot propagate — and anything we cannot fix here is still
+/// caught by the worker-restart `recover()` sweep.
+async fn recover_stranded_run(
+    repo: &Repository,
+    issue_id: &str,
+    run: &RunRow,
+    retry_backoff_cap: u64,
+    err: &WorkerError,
+) {
+    // dispatch_run's normal end-of-run delete_live_session is skipped when it
+    // returns early via `?`, so clean it up here regardless of the run's
+    // status: overview() surfaces every live_sessions row and the restart
+    // cleanup only prunes `pending-*` ones, so a leftover would keep a failed
+    // run showing as live indefinitely.
+    repo.delete_live_session(&run.id).await.ok();
+
+    match repo.get_run(&run.id).await {
+        Ok(Some(current)) if matches!(current.status.as_str(), "pending" | "running") => {}
+        Ok(_) => return,
+        Err(read_err) => {
+            error!(
+                error = %read_err,
+                run_id = %run.id,
+                "could not read stranded run status; leaving it for worker-restart recovery"
+            );
+            return;
+        }
+    }
+    let message = err.to_string();
+    if let Err(finish_err) = repo
+        .finish_run(
+            &run.id,
+            RunStatus::Failure,
+            Some("dispatch_error"),
+            Some(&message),
+        )
+        .await
+    {
+        error!(
+            error = %finish_err,
+            run_id = %run.id,
+            "could not finish stranded run; leaving it for worker-restart recovery"
+        );
+        return;
+    }
+    let due = due_after(backoff_ms(run.run_number, retry_backoff_cap));
+    if let Err(retry_err) = repo
+        .schedule_retry(
+            issue_id,
+            run.run_number + 1,
+            &due,
+            Some("dispatch_error"),
+            Some(&message),
+        )
+        .await
+    {
+        error!(
+            error = %retry_err,
+            run_id = %run.id,
+            "finished stranded run but could not schedule its retry"
+        );
+    }
 }
 
 async fn dispatch_run(
@@ -907,6 +996,85 @@ mod tests {
             pr_urls: vec![],
             project_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn rescues_a_run_stranded_by_a_dispatch_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+
+        // A run reserved and marked running, then abandoned mid-flight: exactly
+        // the state a dispatch_run early-return via `?` leaves behind.
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        // A live session like the Claude pre-session dispatch_run creates; its
+        // normal cleanup is skipped on the error path.
+        repo.upsert_live_session(
+            &run.id,
+            "sess-sess",
+            "sess",
+            "sess",
+            &symphony_core::TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        recover_stranded_run(&repo, "lin-1", &run, 60_000, &WorkerError::AlreadyRunning).await;
+
+        // The row is now terminal and a retry is queued, freeing its slot.
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "failure"
+        );
+        assert!(repo
+            .all_retry_issue_ids()
+            .await
+            .unwrap()
+            .contains(&"lin-1".to_string()));
+        // The live session is cleaned up so the failed run stops showing as live.
+        assert!(repo.overview().await.unwrap().live_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn leaves_an_already_finished_run_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        // dispatch_run finished the run cleanly, then errored on a later step.
+        repo.finish_run(&run.id, RunStatus::Success, None, None)
+            .await
+            .unwrap();
+
+        recover_stranded_run(&repo, "lin-1", &run, 60_000, &WorkerError::AlreadyRunning).await;
+
+        // The success stands: no spurious failure overwrite, no retry queued.
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "success"
+        );
+        assert!(repo.all_retry_issue_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
