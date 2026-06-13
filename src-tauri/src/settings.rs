@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::BTreeMap;
 use symphony_core::{
     build_parsed_workflow, strip_front_matter, AgentBackend, AgentConfig, ApprovalPolicy,
     ClaudeConfig, ClaudePermissionMode, CodexConfig, HooksConfig, ParsedWorkflow, PollingConfig,
@@ -58,6 +59,8 @@ pub struct AppSettings {
     pub claude_command: Option<String>,
     #[serde(default = "default_turn_timeout_ms")]
     pub turn_timeout_ms: u64,
+    #[serde(default)]
+    pub session_env: BTreeMap<String, String>,
     // Codex options
     #[serde(default)]
     pub codex_approval_policy: ApprovalPolicy,
@@ -104,6 +107,7 @@ impl Default for AppSettings {
             codex_command: None,
             claude_command: None,
             turn_timeout_ms: default_turn_timeout_ms(),
+            session_env: BTreeMap::new(),
             codex_approval_policy: ApprovalPolicy::Never,
             codex_thread_sandbox: ThreadSandbox::WorkspaceWrite,
             codex_turn_sandbox_policy: TurnSandboxPolicy::Inherit,
@@ -411,6 +415,7 @@ mod tests {
         );
         assert_eq!(settings.terminal_states, ["Done", "Canceled"]);
         assert_eq!(settings.max_concurrent_agents, 3);
+        assert!(settings.session_env.is_empty());
         assert!(settings.codex_network_access);
         assert_eq!(settings.claude_permission_mode, ClaudePermissionMode::Auto);
         assert!(settings

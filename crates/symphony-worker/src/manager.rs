@@ -34,6 +34,8 @@ pub struct WorkerStartConfig {
     /// Configured repositories; each issue is routed to one of them.
     pub repos: Vec<RepoConfig>,
     pub env: BTreeMap<String, String>,
+    /// User-configured variables explicitly injected into each agent session.
+    pub session_env: BTreeMap<String, String>,
     pub app_data_dir: PathBuf,
 }
 
@@ -99,6 +101,7 @@ impl WorkerManager {
                 workflow,
                 repos: config.repos,
                 env: config.env,
+                session_env: config.session_env,
                 app_data_dir: config.app_data_dir,
             };
             let stop_for_task = stop.clone();
@@ -141,6 +144,7 @@ struct RuntimeConfig {
     workflow: ParsedWorkflow,
     repos: Vec<RepoConfig>,
     env: BTreeMap<String, String>,
+    session_env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
 }
 
@@ -693,7 +697,7 @@ async fn dispatch_run(
             add_dirs: config.workflow.front_matter.claude.add_dirs.clone(),
             session_id: pre_session,
         },
-        env: agent_env(&env),
+        env: agent_env(&env, &config.session_env),
     };
     let driver_stop = stop.clone();
     let mut run_fut = Box::pin(driver.run(request, tx, driver_stop));
@@ -955,13 +959,14 @@ fn due_after(ms: u64) -> String {
 }
 
 /// Environment injected into agent processes. Agents inherit the app's env;
-/// this adds what lives outside it: the Linear key (from the OS keychain) so
-/// workflows can call the Linear API directly, and the routed repo's
-/// coordinates so prompts, wrappers, and skills can branch on the repository
-/// the run is working in. Takes the per-run env (`run_env`), which carries
-/// both.
-fn agent_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
-    [
+/// this adds what lives outside it: the Linear key (from the OS keychain),
+/// the routed repo's coordinates, and custom session env from settings.
+/// Takes the per-run env (`run_env`), which carries the runtime values.
+fn agent_env(
+    env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut injected = [
         "LINEAR_API_KEY",
         "REPO_URL",
         "REPO_NAME",
@@ -973,7 +978,13 @@ fn agent_env(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
             .filter(|value| !value.trim().is_empty())
             .map(|value| (key.to_string(), value.clone()))
     })
-    .collect()
+    .collect::<BTreeMap<_, _>>();
+    injected.extend(
+        session_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    injected.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -1006,6 +1017,7 @@ mod tests {
                 ..RepoConfig::default()
             }],
             env: BTreeMap::new(),
+            session_env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
         }
     }
@@ -1523,6 +1535,39 @@ mod tests {
             ..repo
         };
         assert!(!run_env(&base, &no_install).contains_key("SYMPHONY_INSTALL_CMD"));
+    }
+
+    #[test]
+    fn agent_env_injects_runtime_and_custom_session_vars() {
+        let run = BTreeMap::from([
+            ("LINEAR_API_KEY".to_string(), "lin_key".to_string()),
+            (
+                "REPO_URL".to_string(),
+                "git@github.com:acme/widgets.git".to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+        let custom = BTreeMap::from([
+            ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+            ("REPO_URL".to_string(), "override".to_string()),
+            ("EMPTY_ALLOWED".to_string(), "".to_string()),
+        ]);
+
+        let env = agent_env(&run, &custom)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            env.get("LINEAR_API_KEY").map(String::as_str),
+            Some("lin_key")
+        );
+        assert_eq!(
+            env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+        assert_eq!(env.get("EMPTY_ALLOWED").map(String::as_str), Some(""));
+        assert_eq!(env.get("REPO_URL").map(String::as_str), Some("override"));
+        assert!(!env.contains_key("PATH"));
     }
 
     #[test]
