@@ -1,5 +1,5 @@
 ---
-name: land
+name: symphony-land
 description: Squash-merge the issue's PR once it's approved and green. Use only when the issue is in the `Merging` state — Symphony's status router gates entry.
 ---
 
@@ -20,8 +20,8 @@ If the PR is already `MERGED` when entering this skill, skip the merge: record t
    gh pr view --json number,state,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup
    ```
    Required: `state=OPEN`, `reviewDecision=APPROVED` (or no required reviewers).
-2. Sync first — run the `pull` skill to merge `origin/main`. Conflicts must be resolved in code; never leave a `DIRTY`/`CONFLICTING` PR. Re-run validation after the merge.
-3. Push the merge result with the `push` skill.
+2. Sync first — run the `symphony-pull` skill to merge `origin/main`. Conflicts must be resolved in code; never leave a `DIRTY`/`CONFLICTING` PR. Re-run validation after the merge.
+3. Push the merge result with the `symphony-push` skill.
 4. **Wait for CI to be green.** Don't rely on `gh pr merge --auto` — it only blocks on checks that branch protection marks as required, and many repos either configure no required checks or only a subset. Poll `gh pr checks` explicitly so the gate works the same whether the repo enforces checks at the GitHub level or not — every 30s, up to 30 minutes, before merging:
    ```sh
    for _ in $(seq 1 60); do

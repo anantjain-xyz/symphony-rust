@@ -1,5 +1,5 @@
 ---
-name: pull
+name: symphony-pull
 description: Sync the current branch with origin/main via merge (not rebase) and resolve any conflicts. Use whenever Symphony's workflow says "merge origin/main into the branch" — at Step 1 setup, before push, and as part of the Land procedure.
 ---
 
@@ -13,7 +13,7 @@ description: Sync the current branch with origin/main via merge (not rebase) and
 
 ## Steps
 
-1. Working tree must be clean. Either commit (`commit` skill) or `git stash` first.
+1. Working tree must be clean. Either commit (`symphony-commit` skill) or `git stash` first.
 2. Enable rerere once per workspace so repeated conflicts auto-resolve:
    ```sh
    git config rerere.enabled true

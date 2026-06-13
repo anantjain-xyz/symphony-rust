@@ -68,13 +68,15 @@ struct AppState {
     database_path: PathBuf,
 }
 
+const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
 /// The agent skills shipped with the app, installed into target repos under
-/// `.agents/skills/<name>/SKILL.md`. Source of truth: symphony-ts.
+/// `.agents/skills/symphony-<name>/SKILL.md`. Source of truth: symphony-ts.
 fn bundled_skills() -> Vec<SkillFile> {
     macro_rules! skill {
         ($name:literal) => {
             SkillFile {
-                name: $name.to_string(),
+                name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
                 content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
             }
         };
@@ -881,10 +883,21 @@ mod tests {
                     .lines()
                     .take(5)
                     .any(|line| line.trim() == name_line),
-                "skill {} frontmatter does not declare its directory name",
+                "skill {} frontmatter does not declare its installed name",
                 skill.name
             );
             assert!(skill.content.starts_with("---\n"));
+        }
+    }
+
+    #[test]
+    fn bundled_skills_are_symphony_prefixed() {
+        for skill in bundled_skills() {
+            assert!(
+                skill.name.starts_with(SYMPHONY_SKILL_PREFIX),
+                "bundled skill {} is not Symphony-prefixed",
+                skill.name
+            );
         }
     }
 

@@ -972,7 +972,7 @@ function SetupChecklist({
           text={
             setup.skillsState === "pr_open"
               ? "An install PR is open — merge it to finish this step."
-              : "Open a PR that adds Symphony's agent skills (workpad, commit, push, …) to each repo. Recommended — agents fall back to plain git and gh without them."
+              : "Open a PR that adds Symphony's agent skills (symphony-workpad, symphony-commit, symphony-push, …) to each repo. Recommended — agents fall back to plain git and gh without them."
           }
         />
         <SetupStep
@@ -1499,11 +1499,12 @@ function SettingsView({
             </small>
           </label>
           <small className="hint">
-            Agent skills are procedural guides (workpad, commit, push, …) that
-            Symphony agents follow. Each card above shows whether its repo has
-            them; installing starts an agent session that opens a PR adding them
-            under <code>.agents/skills/</code>, with validation commands adapted
-            to that repo's toolchain.
+            Agent skills are procedural guides (symphony-workpad,
+            symphony-commit, symphony-push, …) that Symphony agents follow. Each
+            card above shows whether its repo has them; installing starts an
+            agent session that opens a PR adding them under{" "}
+            <code>.agents/skills/</code>, with validation commands adapted to
+            that repo's toolchain.
           </small>
         </section>
 
