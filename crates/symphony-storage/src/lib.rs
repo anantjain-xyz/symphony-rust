@@ -2,8 +2,12 @@ mod repo;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+    SqlitePool,
+};
 use std::path::Path;
+use std::time::Duration;
 use symphony_core::AgentEventKind;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -57,10 +61,22 @@ pub async fn open_sqlite(path: impl AsRef<Path>) -> Result<SqlitePool, StorageEr
             .await
             .map_err(sqlx::Error::Io)?;
     }
-    let url = format!("sqlite://{}?mode=rwc", path.display());
+    // WAL lets readers run concurrently with a writer, and a non-zero
+    // busy_timeout makes a blocked writer wait-and-retry instead of failing
+    // immediately with SQLITE_BUSY. Without these, the rollback-journal default
+    // serializes every writer on a whole-database lock, so the worker's
+    // concurrent agents plus the 2s heartbeat contend and a losing write
+    // surfaces as an error that can strand a run. NORMAL synchronous is the
+    // standard, crash-safe companion to WAL.
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(10))
+        .synchronous(SqliteSynchronous::Normal);
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
-        .connect(&url)
+        .connect_with(options)
         .await?;
     migrate(&pool).await?;
     Ok(pool)
