@@ -50,6 +50,7 @@ export type AppSettings = {
   codex_command: string | null;
   claude_command: string | null;
   turn_timeout_ms: number;
+  session_env: Record<string, string>;
   codex_approval_policy: ApprovalPolicy;
   codex_thread_sandbox: ThreadSandbox;
   codex_turn_sandbox_policy: TurnSandboxPolicy;

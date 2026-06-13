@@ -102,6 +102,7 @@ const previewSettings: AppSettings = {
   codex_command: null,
   claude_command: null,
   turn_timeout_ms: 3600000,
+  session_env: {},
   codex_approval_policy: "never",
   codex_thread_sandbox: "workspace-write",
   codex_turn_sandbox_policy: "inherit",
@@ -1703,6 +1704,18 @@ function SettingsView({
               Max time for one agent turn. 3600 = 1 hour.
             </small>
           </label>
+          <label>
+            Session environment
+            <EnvInput
+              value={settings.session_env}
+              disabled={!runtimeAvailable}
+              onChange={(next) => setSettings({ ...settings, session_env: next })}
+            />
+            <small className="hint">
+              Optional. One <code>KEY=value</code> per line, injected into the Codex or
+              Claude process. Values are saved in settings.
+            </small>
+          </label>
           {settings.agent_backend === "codex" ? (
             <>
               <label>
@@ -2105,6 +2118,64 @@ function ListInput({
       disabled={disabled}
       autoComplete="off"
       placeholder={placeholder}
+      onChange={(e) => handleChange(e.currentTarget.value)}
+    />
+  );
+}
+
+function EnvInput({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+  disabled: boolean;
+}) {
+  const joined = Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, envValue]) => `${key}=${envValue}`)
+    .join("\n");
+  const [draft, setDraft] = useState(joined);
+  const lastEmitted = useRef(joined);
+
+  useEffect(() => {
+    if (joined !== lastEmitted.current) {
+      setDraft(joined);
+      lastEmitted.current = joined;
+    }
+  }, [joined]);
+
+  function parse(text: string): Record<string, string> {
+    const next: Record<string, string> = {};
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      const separator = line.indexOf("=");
+      const key = (separator === -1 ? line : line.slice(0, separator)).trim();
+      if (key === "") continue;
+      next[key] = separator === -1 ? "" : line.slice(separator + 1);
+    }
+    return next;
+  }
+
+  function handleChange(text: string) {
+    setDraft(text);
+    const next = parse(text);
+    lastEmitted.current = Object.entries(next)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, envValue]) => `${key}=${envValue}`)
+      .join("\n");
+    onChange(next);
+  }
+
+  return (
+    <textarea
+      className="mono-input"
+      value={draft}
+      disabled={disabled}
+      rows={4}
+      spellCheck={false}
+      placeholder={"OPENAI_API_KEY=...\nFEATURE_FLAG=1"}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
   );

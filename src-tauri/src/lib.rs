@@ -153,6 +153,9 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
     if settings.prompt_template.trim().is_empty() {
         return Some("The prompt template is empty.".to_string());
     }
+    if let Some(error) = validate_session_env(&settings.session_env) {
+        return Some(error);
+    }
     let unknown = unknown_placeholders(&settings.prompt_template);
     if !unknown.is_empty() {
         return Some(format!(
@@ -163,6 +166,45 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
         ));
     }
     None
+}
+
+fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
+    let invalid = env
+        .keys()
+        .filter(|key| !valid_env_key(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+        return Some(format!(
+            "Session environment variable name{} invalid: {}. Use letters, numbers, and underscores, and do not start with a number.",
+            if invalid.len() == 1 { " is" } else { "s are" },
+            invalid.join(", ")
+        ));
+    }
+
+    let nul_values = env
+        .iter()
+        .filter_map(|(key, value)| value.contains('\0').then(|| key.clone()))
+        .collect::<Vec<_>>();
+    if !nul_values.is_empty() {
+        return Some(format!(
+            "Session environment variable value{} contain a NUL byte: {}.",
+            if nul_values.len() == 1 {
+                " must not"
+            } else {
+                "s must not"
+            },
+            nul_values.join(", ")
+        ));
+    }
+
+    None
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// The repos list must route unambiguously: names are the `repo:<name>`
@@ -401,6 +443,7 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
             workflow,
             repos: settings.repos.clone(),
             env,
+            session_env: settings.session_env.clone(),
             app_data_dir: state.app_data_dir.clone(),
         })
         .await
@@ -723,6 +766,25 @@ mod tests {
             unknown_placeholders(&bad_prompt.prompt_template),
             vec!["issue.foo"]
         );
+
+        let invalid_env = AppSettings {
+            session_env: BTreeMap::from([
+                ("GOOD_VAR".to_string(), "ok".to_string()),
+                ("1_BAD".to_string(), "no".to_string()),
+            ]),
+            ..configured_settings()
+        };
+        assert!(validate_workflow_settings(&invalid_env)
+            .expect("invalid session env name")
+            .contains("1_BAD"));
+
+        let invalid_value = AppSettings {
+            session_env: BTreeMap::from([("GOOD_VAR".to_string(), "bad\0value".to_string())]),
+            ..configured_settings()
+        };
+        assert!(validate_workflow_settings(&invalid_value)
+            .expect("invalid session env value")
+            .contains("NUL"));
     }
 
     #[test]
