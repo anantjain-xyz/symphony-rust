@@ -39,6 +39,9 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
         cancel,
     } = invocation;
     let start = Instant::now();
+    if cancel.is_cancelled() {
+        return cancelled_result(start);
+    }
     let mut child_env = filter_env(env);
     child_env.insert("SYMPHONY_HOOK".to_string(), hook.as_env_value().to_string());
     child_env.insert("ISSUE_ID".to_string(), issue.id.clone());
@@ -120,12 +123,16 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             stderr_tail: Some("hook timed out".to_string()),
             timed_out: true,
         },
-        HookExit::Cancelled => HookResult {
-            exit_code: -1,
-            duration_ms: start.elapsed().as_millis() as i64,
-            stderr_tail: Some("hook cancelled".to_string()),
-            timed_out: false,
-        },
+        HookExit::Cancelled => cancelled_result(start),
+    }
+}
+
+fn cancelled_result(start: Instant) -> HookResult {
+    HookResult {
+        exit_code: -1,
+        duration_ms: start.elapsed().as_millis() as i64,
+        stderr_tail: Some("hook cancelled".to_string()),
+        timed_out: false,
     }
 }
 
@@ -136,20 +143,26 @@ enum HookExit {
 }
 
 async fn terminate_hook(child: &mut tokio::process::Child) {
-    terminate_hook_process(child).await;
+    terminate_hook_process(child, "TERM").await;
     if tokio::time::timeout(Duration::from_millis(500), child.wait())
         .await
         .is_err()
     {
-        let _ = child.kill().await;
+        terminate_hook_process(child, "KILL").await;
+        if tokio::time::timeout(Duration::from_millis(500), child.wait())
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+        }
     }
 }
 
 #[cfg(unix)]
-async fn terminate_hook_process(child: &mut tokio::process::Child) {
+async fn terminate_hook_process(child: &mut tokio::process::Child, signal: &str) {
     if let Some(pid) = child.id() {
         let _ = Command::new("/bin/kill")
-            .arg("-TERM")
+            .arg(format!("-{signal}"))
             .arg(format!("-{pid}"))
             .status()
             .await;
@@ -157,15 +170,21 @@ async fn terminate_hook_process(child: &mut tokio::process::Child) {
 }
 
 #[cfg(not(unix))]
-async fn terminate_hook_process(child: &mut tokio::process::Child) {
+async fn terminate_hook_process(child: &mut tokio::process::Child, _signal: &str) {
     let _ = child.start_kill();
 }
 
 async fn collect_stderr(handle: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    let Some(handle) = handle else {
+    let Some(mut handle) = handle else {
         return Vec::new();
     };
-    handle.await.unwrap_or_default()
+    tokio::select! {
+        result = &mut handle => result.unwrap_or_default(),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            handle.abort();
+            Vec::new()
+        }
+    }
 }
 
 fn filter_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -249,6 +268,70 @@ while true; do /bin/sleep 0.01; done
         let result = tokio::time::timeout(Duration::from_secs(2), &mut handle)
             .await
             .expect("hook should finish promptly after cancellation")
+            .unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        assert!(!result.timed_out);
+        assert_eq!(result.stderr_tail.as_deref(), Some("hook cancelled"));
+    }
+
+    #[tokio::test]
+    async fn run_hook_does_not_spawn_when_already_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook_issue = issue();
+        let env = BTreeMap::new();
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        let result = run_hook(HookInvocation {
+            hook: HookName::AfterCreate,
+            script: r#"printf touched > "$WORKSPACE_PATH/side-effect""#,
+            issue: &hook_issue,
+            workspace_path: temp.path(),
+            run_number: 1,
+            timeout_ms: 60_000,
+            env: &env,
+            cancel: &stop,
+        })
+        .await;
+
+        assert_eq!(result.stderr_tail.as_deref(), Some("hook cancelled"));
+        assert!(tokio::fs::metadata(temp.path().join("side-effect"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn run_hook_kills_stubborn_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let hook_issue = issue();
+        let env = BTreeMap::new();
+        let stop = CancellationToken::new();
+        let hook_stop = stop.clone();
+        let mut handle = tokio::spawn(async move {
+            run_hook(HookInvocation {
+                hook: HookName::AfterCreate,
+                script: r#"trap "" TERM
+(trap "" TERM; while true; do echo child-still-running >&2; /bin/sleep 0.01; done) &
+printf started > "$WORKSPACE_PATH/stubborn-started"
+wait
+"#,
+                issue: &hook_issue,
+                workspace_path: &workspace,
+                run_number: 1,
+                timeout_ms: 60_000,
+                env: &env,
+                cancel: &hook_stop,
+            })
+            .await
+        });
+
+        wait_for_path(&temp.path().join("stubborn-started")).await;
+        stop.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut handle)
+            .await
+            .expect("stubborn hook should finish after SIGKILL fallback")
             .unwrap();
 
         assert_eq!(result.exit_code, -1);

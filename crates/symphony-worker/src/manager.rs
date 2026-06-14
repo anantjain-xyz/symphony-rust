@@ -1,7 +1,11 @@
 use crate::{backoff_ms, run_hook, sanitize_key, HookInvocation, WorkspaceManager};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
 use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
@@ -17,6 +21,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uuid::Uuid;
+
+const USER_CANCELLED_SUPPRESSION: &str = "user_cancelled";
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -70,16 +76,19 @@ struct InnerState {
 #[derive(Debug, Clone, Default)]
 struct RunCancellationRegistry {
     tokens: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    user_requested: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl RunCancellationRegistry {
     async fn register(&self, run_id: &str, token: CancellationToken) {
         self.tokens.lock().await.insert(run_id.to_string(), token);
+        self.user_requested.lock().await.remove(run_id);
     }
 
     async fn cancel(&self, run_id: &str) -> bool {
         let token = self.tokens.lock().await.get(run_id).cloned();
         if let Some(token) = token {
+            self.user_requested.lock().await.insert(run_id.to_string());
             token.cancel();
             true
         } else {
@@ -87,8 +96,13 @@ impl RunCancellationRegistry {
         }
     }
 
+    async fn was_user_requested(&self, run_id: &str) -> bool {
+        self.user_requested.lock().await.contains(run_id)
+    }
+
     async fn unregister(&self, run_id: &str) {
         self.tokens.lock().await.remove(run_id);
+        self.user_requested.lock().await.remove(run_id);
     }
 }
 
@@ -362,12 +376,15 @@ async fn tick<T: TrackerClient>(
         if !issue.blockers.is_empty() || retry_ids.contains(&issue.id) {
             continue;
         }
-        if repo
-            .latest_run_for_issue(&issue.id)
+        if let Some(fingerprint) = repo
+            .issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
             .await?
-            .is_some_and(|run| user_cancelled_run(&run))
         {
-            continue;
+            if fingerprint == issue_fingerprint(&issue) {
+                continue;
+            }
+            repo.clear_issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
+                .await?;
         }
         if repo.has_active_run(&issue.id).await? {
             continue;
@@ -650,7 +667,7 @@ where
     D: AgentDriver + 'static,
 {
     let workspaces = workspace_manager(&config, &repo_config);
-    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
     adopt_legacy_workspace(&repo, &config, &issue, &run, &workspaces).await;
@@ -660,7 +677,7 @@ where
         .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
     let env = run_env(&config.env, &repo_config);
 
-    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
     if workspace.needs_init {
@@ -684,7 +701,7 @@ where
                 result.stderr_tail.as_deref(),
             )
             .await?;
-            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+            if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
             if result.exit_code != 0 {
@@ -703,7 +720,7 @@ where
                 return Ok(());
             }
         }
-        if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+        if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
             return Ok(());
         }
         workspaces
@@ -727,7 +744,7 @@ where
         Err(err) => return Err(err.into()),
     }
 
-    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
     if let Some(script) = &config.workflow.front_matter.hooks.before_run {
@@ -752,7 +769,7 @@ where
         .await?;
     }
 
-    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
     let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
@@ -877,7 +894,7 @@ where
                 )
                 .await?;
             }
-            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+            if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
             match result.outcome {
@@ -913,7 +930,7 @@ where
             }
         }
         Err(err) => {
-            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+            if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
             fail(
@@ -931,11 +948,23 @@ where
     Ok(())
 }
 
+async fn finish_if_cancelled_for_run(
+    repo: &Repository,
+    config: &RuntimeConfig,
+    run: &RunRow,
+    issue: &Issue,
+    stop: &CancellationToken,
+) -> Result<bool, WorkerError> {
+    let suppress_dispatch = config.run_cancellations.was_user_requested(&run.id).await;
+    finish_if_cancelled(repo, run, issue, stop, suppress_dispatch).await
+}
+
 async fn finish_if_cancelled(
     repo: &Repository,
     run: &RunRow,
     issue: &Issue,
     stop: &CancellationToken,
+    suppress_dispatch: bool,
 ) -> Result<bool, WorkerError> {
     if !stop.is_cancelled() {
         return Ok(false);
@@ -947,14 +976,21 @@ async fn finish_if_cancelled(
         Some("run cancelled"),
     )
     .await?;
+    if suppress_dispatch {
+        repo.suppress_issue_dispatch(
+            &issue.id,
+            USER_CANCELLED_SUPPRESSION,
+            &issue_fingerprint(issue),
+        )
+        .await?;
+    }
     repo.clear_retry(&issue.id).await?;
     repo.delete_live_session(&run.id).await.ok();
     Ok(true)
 }
 
-fn user_cancelled_run(run: &RunRow) -> bool {
-    run.status == RunStatus::Cancelled.as_db_str()
-        && run.error_class.as_deref() == Some("cancelled")
+fn issue_fingerprint(issue: &Issue) -> String {
+    serde_json::to_string(issue).expect("issue serialization should not fail")
 }
 
 async fn persist_run_event(
@@ -1830,7 +1866,7 @@ mod tests {
         let stop = CancellationToken::new();
         stop.cancel();
 
-        let cancelled = finish_if_cancelled(&repo, &run, &issue("todo", vec![]), &stop)
+        let cancelled = finish_if_cancelled(&repo, &run, &issue("todo", vec![]), &stop, true)
             .await
             .unwrap();
 
@@ -1839,7 +1875,40 @@ mod tests {
             repo.get_run(&run.id).await.unwrap().unwrap().status,
             "cancelled"
         );
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_some());
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_stop_cancellation_does_not_suppress_issue_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        let cancelled = finish_if_cancelled(&repo, &run, &issue("todo", vec![]), &stop, false)
+            .await
+            .unwrap();
+
+        assert!(cancelled);
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1849,7 +1918,7 @@ mod tests {
             .await
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
-        let config = runtime_config(temp.path());
+        let mut config = runtime_config(temp.path());
         let ready = issue("todo", vec![]);
         repo.upsert_issues(std::slice::from_ref(&ready))
             .await
@@ -1859,25 +1928,46 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        repo.finish_run(
-            &run.id,
-            RunStatus::Cancelled,
-            Some("cancelled"),
-            Some("run cancelled"),
-        )
-        .await
-        .unwrap();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        finish_if_cancelled(&repo, &run, &ready, &stop, true)
+            .await
+            .unwrap();
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_some());
         let tracker = StaticTracker {
-            active: vec![ready],
+            active: vec![ready.clone()],
             terminal: vec![],
         };
-        let stop = CancellationToken::new();
+        let worker_stop = CancellationToken::new();
 
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, &worker_stop).await.unwrap();
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 1);
         assert!(repo.list_pending().await.unwrap().is_empty());
         assert!(repo.list_running().await.unwrap().is_empty());
+
+        config.workflow.front_matter.agent.max_concurrent_agents = 0;
+        let changed = Issue {
+            title: "Updated after cancellation".to_string(),
+            ..ready
+        };
+        let tracker = StaticTracker {
+            active: vec![changed],
+            terminal: vec![],
+        };
+
+        tick(&repo, &tracker, &config, &worker_stop).await.unwrap();
+
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 1);
     }
 
     #[tokio::test]
