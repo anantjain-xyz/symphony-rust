@@ -1184,6 +1184,7 @@ function RepoFilterSelect({
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<(HTMLLIElement | null)[]>([]);
   const options = useMemo(
     () => [
       { value: "", label: "All repos" },
@@ -1198,6 +1199,10 @@ function RepoFilterSelect({
   const selected = options[selectedIndex];
 
   useEffect(() => {
+    setActiveIndex((index) => Math.min(index, options.length - 1));
+  }, [options.length]);
+
+  useEffect(() => {
     if (!open) return;
     function onPointerDown(event: PointerEvent) {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
@@ -1205,6 +1210,11 @@ function RepoFilterSelect({
     window.addEventListener("pointerdown", onPointerDown);
     return () => window.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    optionRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
 
   function openList() {
     setActiveIndex(selectedIndex);
@@ -1277,6 +1287,9 @@ function RepoFilterSelect({
               id={`repo-filter-option-${index}`}
               role="option"
               aria-selected={option.value === value}
+              ref={(node) => {
+                optionRefs.current[index] = node;
+              }}
               className={
                 index === activeIndex ? "icon-select-option active" : "icon-select-option"
               }
