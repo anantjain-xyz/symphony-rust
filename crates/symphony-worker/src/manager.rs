@@ -22,6 +22,12 @@ use uuid::Uuid;
 pub enum WorkerError {
     #[error("worker is already running")]
     AlreadyRunning,
+    #[error("run {0} was not found")]
+    RunNotFound(String),
+    #[error("run {0} is not active")]
+    RunNotActive(String),
+    #[error("run {0} is not managed by this worker")]
+    RunNotManaged(String),
     #[error("tracker error: {0}")]
     Tracker(#[from] TrackerError),
     #[error("storage error: {0}")]
@@ -61,10 +67,36 @@ struct InnerState {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RunCancellationRegistry {
+    tokens: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+}
+
+impl RunCancellationRegistry {
+    async fn register(&self, run_id: &str, token: CancellationToken) {
+        self.tokens.lock().await.insert(run_id.to_string(), token);
+    }
+
+    async fn cancel(&self, run_id: &str) -> bool {
+        let token = self.tokens.lock().await.get(run_id).cloned();
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn unregister(&self, run_id: &str) {
+        self.tokens.lock().await.remove(run_id);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerManager {
     repo: Repository,
     inner: Arc<Mutex<InnerState>>,
+    run_cancellations: RunCancellationRegistry,
 }
 
 impl WorkerManager {
@@ -80,6 +112,7 @@ impl WorkerManager {
                 stop: None,
                 handle: None,
             })),
+            run_cancellations: RunCancellationRegistry::default(),
         }
     }
 
@@ -103,6 +136,7 @@ impl WorkerManager {
                 env: config.env,
                 session_env: config.session_env,
                 app_data_dir: config.app_data_dir,
+                run_cancellations: self.run_cancellations.clone(),
             };
             let stop_for_task = stop.clone();
             inner.status = WorkerStatus {
@@ -122,6 +156,28 @@ impl WorkerManager {
             }));
         }
         Ok(self.status().await)
+    }
+
+    pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
+        if self.run_cancellations.cancel(run_id).await {
+            self.repo
+                .append_event(
+                    run_id,
+                    symphony_core::AgentEventKind::Status,
+                    &serde_json::json!({ "message": "Run cancellation requested" }),
+                )
+                .await
+                .ok();
+            return Ok(());
+        }
+
+        let Some(run) = self.repo.get_run(run_id).await? else {
+            return Err(WorkerError::RunNotFound(run_id.to_string()));
+        };
+        if matches!(run.status.as_str(), "pending" | "running") {
+            return Err(WorkerError::RunNotManaged(run_id.to_string()));
+        }
+        Err(WorkerError::RunNotActive(run_id.to_string()))
     }
 
     pub async fn stop(&self) -> WorkerStatus {
@@ -146,6 +202,7 @@ struct RuntimeConfig {
     env: BTreeMap<String, String>,
     session_env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
+    run_cancellations: RunCancellationRegistry,
 }
 
 async fn run_worker(
@@ -422,8 +479,22 @@ async fn reserve_and_dispatch(
     let recovery_run = run.clone();
     let recovery_issue_id = issue.id.clone();
     let retry_backoff_cap = config.workflow.front_matter.agent.max_retry_backoff_ms;
+    let run_stop = stop.child_token();
+    config
+        .run_cancellations
+        .register(&run.id, run_stop.clone())
+        .await;
+    let run_cancellations = config.run_cancellations.clone();
     tokio::spawn(async move {
-        let result = tokio::spawn(dispatch_run(repo, config, issue, repo_config, run, stop)).await;
+        let result = tokio::spawn(dispatch_run(
+            repo,
+            config,
+            issue,
+            repo_config,
+            run,
+            run_stop,
+        ))
+        .await;
         handle_dispatch_result(
             result,
             &recovery_repo,
@@ -432,6 +503,7 @@ async fn reserve_and_dispatch(
             retry_backoff_cap,
         )
         .await;
+        run_cancellations.unregister(&recovery_run.id).await;
     });
     Ok(())
 }
@@ -547,6 +619,9 @@ async fn dispatch_run(
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
     let workspaces = workspace_manager(&config, &repo_config);
+    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+        return Ok(());
+    }
     adopt_legacy_workspace(&repo, &config, &issue, &run, &workspaces).await;
     let workspace = workspaces
         .create_or_reuse(&issue)
@@ -554,6 +629,9 @@ async fn dispatch_run(
         .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
     let env = run_env(&config.env, &repo_config);
 
+    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+        return Ok(());
+    }
     if workspace.needs_init {
         if let Some(script) = &config.workflow.front_matter.hooks.after_create {
             let result = run_hook(
@@ -590,6 +668,9 @@ async fn dispatch_run(
                 return Ok(());
             }
         }
+        if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+            return Ok(());
+        }
         workspaces
             .mark_ready(&issue)
             .await
@@ -611,6 +692,9 @@ async fn dispatch_run(
         Err(err) => return Err(err.into()),
     }
 
+    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+        return Ok(());
+    }
     if let Some(script) = &config.workflow.front_matter.hooks.before_run {
         let result = run_hook(
             HookName::BeforeRun,
@@ -632,6 +716,9 @@ async fn dispatch_run(
         .await?;
     }
 
+    if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+        return Ok(());
+    }
     let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
     if let Some(prior) = repo.prior_run(&issue.id, &run.id).await? {
         let recent_events = repo
@@ -800,6 +887,27 @@ async fn dispatch_run(
     }
     repo.delete_live_session(&run.id).await.ok();
     Ok(())
+}
+
+async fn finish_if_cancelled(
+    repo: &Repository,
+    run: &RunRow,
+    issue: &Issue,
+    stop: &CancellationToken,
+) -> Result<bool, WorkerError> {
+    if !stop.is_cancelled() {
+        return Ok(false);
+    }
+    repo.finish_run(
+        &run.id,
+        RunStatus::Cancelled,
+        Some("cancelled"),
+        Some("run cancelled"),
+    )
+    .await?;
+    repo.clear_retry(&issue.id).await?;
+    repo.delete_live_session(&run.id).await.ok();
+    Ok(true)
 }
 
 async fn persist_run_event(
@@ -1019,6 +1127,7 @@ mod tests {
             env: BTreeMap::new(),
             session_env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
+            run_cancellations: RunCancellationRegistry::default(),
         }
     }
 
@@ -1580,6 +1689,86 @@ mod tests {
         );
         assert!(!err.to_string().contains("storage error"));
         assert!(!err.to_string().contains("database error"));
+    }
+
+    #[tokio::test]
+    async fn stop_run_cancels_only_the_requested_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let manager = WorkerManager::new(repo);
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+
+        manager
+            .run_cancellations
+            .register("run-1", first.clone())
+            .await;
+        manager
+            .run_cancellations
+            .register("run-2", second.clone())
+            .await;
+
+        manager.stop_run("run-1").await.unwrap();
+
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stop_run_rejects_a_finished_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(&run.id, RunStatus::Success, None, None)
+            .await
+            .unwrap();
+        let manager = WorkerManager::new(repo);
+
+        let err = manager.stop_run(&run.id).await.unwrap_err();
+
+        assert_eq!(err.to_string(), format!("run {} is not active", run.id));
+    }
+
+    #[tokio::test]
+    async fn cancellation_finishes_run_without_scheduling_a_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.schedule_retry("lin-1", 2, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        let cancelled = finish_if_cancelled(&repo, &run, &issue("todo", vec![]), &stop)
+            .await
+            .unwrap();
+
+        assert!(cancelled);
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "cancelled"
+        );
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]

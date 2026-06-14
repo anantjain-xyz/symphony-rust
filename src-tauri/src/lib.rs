@@ -402,6 +402,21 @@ async fn get_run_detail(
 }
 
 #[tauri::command]
+async fn stop_run(state: State<'_, AppState>, id: String) -> Result<Option<RunDetail>, String> {
+    state
+        .worker
+        .stop_run(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    state
+        .repo
+        .get_run_detail(&id)
+        .await
+        .map(|detail| detail.map(|(run, events)| RunDetail { run, events }))
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
     state
         .repo
@@ -558,6 +573,7 @@ pub fn run() {
             get_overview,
             list_runs,
             get_run_detail,
+            stop_run,
             list_issues,
             get_issue_detail,
             get_worker_status,
