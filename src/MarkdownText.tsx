@@ -12,6 +12,8 @@ type MarkdownBlock =
       rows: string[][];
     };
 
+type Fence = { marker: "`" | "~"; length: number; language: string | null };
+
 export function countMatches(text: string, needle: string) {
   const normalizedNeedle = needle.toLowerCase();
   if (!normalizedNeedle) return 0;
@@ -165,11 +167,11 @@ function parseMarkdownBlocks(input: string): MarkdownBlock[] {
       continue;
     }
 
-    const fence = parseFence(lines[index]);
+    const fence = parseFenceStart(lines[index]);
     if (fence) {
       const codeLines: string[] = [];
       index += 1;
-      while (index < lines.length && !parseFence(lines[index])) {
+      while (index < lines.length && !isFenceEnd(lines[index], fence)) {
         codeLines.push(lines[index]);
         index += 1;
       }
@@ -193,7 +195,7 @@ function parseMarkdownBlocks(input: string): MarkdownBlock[] {
     while (
       index < lines.length &&
       lines[index].trim() !== "" &&
-      !parseFence(lines[index]) &&
+      !parseFenceStart(lines[index]) &&
       !parseTable(lines, index)
     ) {
       paragraphLines.push(lines[index]);
@@ -205,10 +207,23 @@ function parseMarkdownBlocks(input: string): MarkdownBlock[] {
   return blocks;
 }
 
-function parseFence(line: string): { language: string | null } | null {
-  const match = line.trimStart().match(/^```([^`\s]*)/);
+function parseFenceStart(line: string): Fence | null {
+  const match = line.trimStart().match(/^(`{3,}|~{3,})(.*)$/);
   if (!match) return null;
-  return { language: match[1] || null };
+  const marker = match[1][0] as "`" | "~";
+  const info = match[2].trim();
+  if (marker === "`" && info.includes("`")) return null;
+  return {
+    marker,
+    length: match[1].length,
+    language: info.split(/\s+/, 1)[0] || null,
+  };
+}
+
+function isFenceEnd(line: string, fence: Fence) {
+  const trimmed = line.trim();
+  const pattern = fence.marker === "`" ? /^`+$/ : /^~+$/;
+  return pattern.test(trimmed) && trimmed.length >= fence.length;
 }
 
 function parseTable(
@@ -224,8 +239,8 @@ function parseTable(
   let nextIndex = index + 2;
   while (nextIndex < lines.length && lines[nextIndex].trim() !== "") {
     const row = splitTableRow(lines[nextIndex]);
-    if (!row || row.length !== headers.length) break;
-    rows.push(row);
+    if (!row) break;
+    rows.push(fitTableRow(row, headers.length));
     nextIndex += 1;
   }
 
@@ -243,24 +258,31 @@ function splitTableRow(line: string): string[] | null {
 
   const cells: string[] = [];
   let cell = "";
-  let escaped = false;
-  for (const char of row) {
-    if (escaped) {
-      cell += char;
-      escaped = false;
-    } else if (char === "\\") {
-      escaped = true;
-    } else if (char === "|") {
+  let codeSpanTicks = 0;
+  for (let index = 0; index < row.length; index += 1) {
+    const char = row[index];
+    if (char === "`") {
+      const tickCount = countRun(row, index, "`");
+      cell += row.slice(index, index + tickCount);
+      if (codeSpanTicks === 0) {
+        codeSpanTicks = tickCount;
+      } else if (tickCount === codeSpanTicks) {
+        codeSpanTicks = 0;
+      }
+      index += tickCount - 1;
+    } else if (char === "\\" && row[index + 1] === "|") {
+      cell += "|";
+      index += 1;
+    } else if (char === "|" && codeSpanTicks === 0) {
       cells.push(cell.trim());
       cell = "";
     } else {
       cell += char;
     }
   }
-  if (escaped) cell += "\\";
   cells.push(cell.trim());
 
-  return cells.length >= 2 ? cells : null;
+  return cells.length >= 1 ? cells : null;
 }
 
 function parseDelimiterRow(line: string, expectedCells: number): Alignment[] | null {
@@ -275,6 +297,18 @@ function parseDelimiterRow(line: string, expectedCells: number): Alignment[] | n
     alignments.push(left && right ? "center" : right ? "right" : left ? "left" : undefined);
   }
   return alignments;
+}
+
+function fitTableRow(row: string[], width: number) {
+  if (row.length === width) return row;
+  if (row.length > width) return row.slice(0, width);
+  return [...row, ...Array.from({ length: width - row.length }, () => "")];
+}
+
+function countRun(value: string, start: number, char: string) {
+  let end = start;
+  while (end < value.length && value[end] === char) end += 1;
+  return end - start;
 }
 
 function textAlignStyle(alignment: Alignment): CSSProperties | undefined {
