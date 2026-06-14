@@ -5,7 +5,7 @@ mod skills;
 mod workspace;
 
 pub use backoff::backoff_ms;
-pub use hooks::{run_hook, HookResult};
+pub use hooks::{run_hook, HookInvocation, HookResult};
 pub use manager::{WorkerManager, WorkerStartConfig, WorkerState, WorkerStatus};
 pub use skills::{
     check_skills, SkillFile, SkillsError, SkillsInstallConfig, SkillsInstallState,

@@ -370,6 +370,59 @@ impl Repository {
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
+    pub async fn suppress_issue_dispatch(
+        &self,
+        issue_id: &str,
+        reason: &str,
+        issue_fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            insert into issue_dispatch_suppressions (issue_id, reason, issue_fingerprint)
+            values (?1, ?2, ?3)
+            on conflict(issue_id, reason) do update set
+              issue_fingerprint = excluded.issue_fingerprint,
+              created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            "#,
+        )
+        .bind(issue_id)
+        .bind(reason)
+        .bind(issue_fingerprint)
+        .execute(&self.pool)
+        .await?;
+        self.changed("issue_dispatch_suppressions", "upsert");
+        Ok(())
+    }
+
+    pub async fn issue_dispatch_suppression(
+        &self,
+        issue_id: &str,
+        reason: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "select issue_fingerprint from issue_dispatch_suppressions where issue_id = ?1 and reason = ?2",
+        )
+        .bind(issue_id)
+        .bind(reason)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.0))
+    }
+
+    pub async fn clear_issue_dispatch_suppression(
+        &self,
+        issue_id: &str,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("delete from issue_dispatch_suppressions where issue_id = ?1 and reason = ?2")
+            .bind(issue_id)
+            .bind(reason)
+            .execute(&self.pool)
+            .await?;
+        self.changed("issue_dispatch_suppressions", "delete");
+        Ok(())
+    }
+
     pub async fn has_active_run(&self, issue_id: &str) -> Result<bool, StorageError> {
         let (count,): (i64,) = sqlx::query_as(
             "select count(*) from runs where issue_id = ?1 and status in ('pending', 'running')",

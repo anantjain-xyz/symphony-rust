@@ -713,6 +713,14 @@ td strong {
   padding: 13px 15px;
 }
 
+.run-meta-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
 .run-meta-row {
   align-items: center;
   display: flex;
@@ -792,6 +800,15 @@ td strong {
 
 .link-button:hover:not(:disabled) {
   color: var(--foreground);
+}
+
+.link-button.danger {
+  color: var(--destructive-foreground);
+}
+
+.link-button.danger:hover:not(:disabled) {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
 }
 
 .link-button.outlined {
