@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 describe("App settings", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     Object.defineProperty(window, "matchMedia", {
       writable: true,
@@ -28,5 +32,15 @@ describe("App settings", () => {
 
     const repoNameInput = screen.getByLabelText(/^Name/, { selector: "input" });
     expect(repoNameInput.getAttribute("autocapitalize")).toBe("none");
+  });
+
+  it("shows the mycode launch wrapper in the launch command helper", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const example = screen.getByText("mycode --agent codex");
+    expect(example.tagName.toLowerCase()).toBe("code");
+    expect(example.getAttribute("class")).toBe("command-example");
   });
 });
