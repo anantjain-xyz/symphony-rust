@@ -77,24 +77,75 @@ impl SkillsStatus {
     }
 }
 
-/// Extract `owner/repo` from the GitHub remote URL forms users paste into
-/// Settings (SSH scp-like, ssh://, https://, with or without .git).
-pub fn parse_github_repo(url: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubRemote {
+    host: String,
+    owner: String,
+    name: String,
+}
+
+impl GithubRemote {
+    fn slug(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
+    fn gh_repo_arg(&self) -> String {
+        if self.host == "github.com" {
+            self.slug()
+        } else {
+            format!("{}/{}", self.host, self.slug())
+        }
+    }
+
+    fn auth_hint(&self) -> String {
+        if self.host == "github.com" {
+            "`gh auth status`".to_string()
+        } else {
+            format!("`gh auth status --hostname {}`", self.host)
+        }
+    }
+}
+
+#[cfg(test)]
+fn parse_github_repo(url: &str) -> Option<String> {
+    parse_github_remote(url).map(|remote| remote.slug())
+}
+
+/// Extract the GitHub host and `owner/repo` from github.com or GHE.com remote
+/// URL forms users paste into Settings.
+fn parse_github_remote(url: &str) -> Option<GithubRemote> {
     let trimmed = url.trim().trim_end_matches('/');
-    let rest = trimmed
-        .strip_prefix("git@github.com:")
-        .or_else(|| trimmed.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| trimmed.strip_prefix("https://github.com/"))
-        .or_else(|| trimmed.strip_prefix("http://github.com/"))
-        .or_else(|| trimmed.strip_prefix("github.com/"))?;
+    let (host, rest) = if let Some(rest) = trimmed.strip_prefix("git@") {
+        rest.split_once(':')?
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://") {
+        let rest = rest
+            .split_once('@')
+            .map_or(rest, |(_, host_and_path)| host_and_path);
+        rest.split_once('/')?
+    } else if let Some(rest) = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+    {
+        rest.split_once('/')?
+    } else {
+        trimmed.split_once('/')?
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if !is_supported_github_host(&host) {
+        return None;
+    }
     let rest = rest.trim_end_matches(".git");
     let mut parts = rest.split('/');
-    let owner = parts.next().filter(|part| !part.is_empty())?;
-    let repo = parts.next().filter(|part| !part.is_empty())?;
+    let owner = parts.next().filter(|part| !part.is_empty())?.to_string();
+    let name = parts.next().filter(|part| !part.is_empty())?.to_string();
     if parts.next().is_some() {
         return None;
     }
-    Some(format!("{owner}/{repo}"))
+    Some(GithubRemote { host, owner, name })
+}
+
+fn is_supported_github_host(host: &str) -> bool {
+    host == "github.com" || host == "ghe.com" || host.ends_with(".ghe.com")
 }
 
 /// Check the repo's default branch for the bundled skills without cloning.
@@ -108,18 +159,24 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
     if repo_url.trim().is_empty() {
         return SkillsStatus::unavailable("No repository configured.");
     }
-    let Some(slug) = parse_github_repo(repo_url) else {
-        return SkillsStatus::unavailable("Skill detection needs a github.com repository URL.");
+    let Some(remote) = parse_github_remote(repo_url) else {
+        return SkillsStatus::unavailable(
+            "Skill detection needs a github.com or GHE.com repository URL.",
+        );
     };
-    // parse_github_repo always yields owner/repo.
-    let (owner, name) = slug.split_once('/').unwrap_or((slug.as_str(), ""));
+    let repo_arg = remote.gh_repo_arg();
 
     let query = format!(
-        r#"query {{ repository(owner: "{owner}", name: "{name}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#
+        r#"query {{ repository(owner: "{}", name: "{}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#,
+        remote.owner, remote.name
     );
     let listing = run_shell(
         None,
-        &format!("gh api graphql -f query={}", shell_quote(&query)),
+        &format!(
+            "gh api graphql --hostname {} -f query={}",
+            shell_quote(&remote.host),
+            shell_quote(&query)
+        ),
     )
     .await;
     let present: Vec<String> = match listing {
@@ -142,11 +199,12 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("Could not resolve to a Repository") {
                 return SkillsStatus::unavailable(format!(
-                    "Could not access {slug}. Check the repo URL and `gh auth status`."
+                    "Could not access {repo_arg}. Check the repo URL and {}.",
+                    remote.auth_hint()
                 ));
             }
             return SkillsStatus::unavailable(format!(
-                "Could not check {slug}: {}",
+                "Could not check {repo_arg}: {}",
                 tail(&stderr, 200)
             ));
         }
@@ -171,7 +229,7 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         None,
         &format!(
             "gh pr list --repo {} --head {} --state open --json url --jq '.[0].url'",
-            shell_quote(&slug),
+            shell_quote(&repo_arg),
             shell_quote(INSTALL_BRANCH)
         ),
     )
@@ -647,6 +705,41 @@ mod tests {
                 "failed for {url}"
             );
         }
+    }
+
+    #[test]
+    fn parses_ghe_urls() {
+        for url in [
+            "git@octocorp.ghe.com:acme/widgets.git",
+            "git@octocorp.ghe.com:acme/widgets",
+            "ssh://git@octocorp.ghe.com/acme/widgets.git",
+            "ssh://octocorp.ghe.com/acme/widgets.git",
+            "https://octocorp.ghe.com/acme/widgets",
+            "https://octocorp.ghe.com/acme/widgets.git",
+            "http://octocorp.ghe.com/acme/widgets",
+            "octocorp.ghe.com/acme/widgets",
+            "  https://octocorp.ghe.com/acme/widgets  ",
+        ] {
+            let remote = parse_github_remote(url).unwrap_or_else(|| panic!("failed for {url}"));
+            assert_eq!(remote.host, "octocorp.ghe.com", "failed for {url}");
+            assert_eq!(remote.slug(), "acme/widgets", "failed for {url}");
+            assert_eq!(
+                remote.gh_repo_arg(),
+                "octocorp.ghe.com/acme/widgets",
+                "failed for {url}"
+            );
+            assert_eq!(
+                parse_github_repo(url).as_deref(),
+                Some("acme/widgets"),
+                "failed for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn omits_github_com_from_gh_repo_arg() {
+        let remote = parse_github_remote("https://github.com/acme/widgets").unwrap();
+        assert_eq!(remote.gh_repo_arg(), "acme/widgets");
     }
 
     #[test]
