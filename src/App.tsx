@@ -1816,8 +1816,10 @@ function SettingsView({
             />
             <small className="hint">
               Optional. How the agent is launched — e.g. a wrapper like{" "}
-              <code>mycode --agent {settings.agent_backend}</code>. Leave blank to run{" "}
-              <code>{settings.agent_backend}</code> directly.
+              <code className="command-example">
+                {`mycode --agent ${settings.agent_backend}`}
+              </code>
+              . Leave blank to run <code>{settings.agent_backend}</code> directly.
             </small>
           </label>
           {validation ? (

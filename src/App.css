@@ -1027,6 +1027,17 @@ pre {
   font-size: 11px;
 }
 
+.hint code.command-example {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--foreground);
+  display: inline-block;
+  padding: 0 3px;
+  white-space: nowrap;
+  word-spacing: 0.2em;
+}
+
 .inline-link {
   background: transparent;
   border: 0;
