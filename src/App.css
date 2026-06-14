@@ -214,7 +214,7 @@ tr:focus-visible {
 .topbar-actions {
   align-items: center;
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   gap: 10px;
   min-width: 0;
 }
@@ -1232,11 +1232,13 @@ pre {
   font-weight: 500;
 }
 
-.settings-actions {
+.settings-header-actions {
   align-items: flex-end;
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 6px;
+  max-width: min(460px, 45vw);
   min-width: 0;
 }
 
@@ -1646,9 +1648,14 @@ textarea.mono-input {
     flex-wrap: wrap;
   }
 
-  .settings-actions {
+  .topbar-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .settings-header-actions {
     align-items: flex-start;
-    width: 100%;
+    max-width: 100%;
   }
 
   .settings-action-row {
@@ -1705,7 +1712,12 @@ textarea.mono-input {
   }
 
   .topbar-actions {
+    flex-wrap: wrap;
     justify-content: space-between;
+  }
+
+  .settings-header-actions {
+    flex: 1 1 100%;
   }
 
   .brand-mark {

@@ -43,4 +43,22 @@ describe("App settings", () => {
     expect(example.tagName.toLowerCase()).toBe("code");
     expect(example.getAttribute("class")).toBe("command-example");
   });
+
+  it("keeps settings validate and save actions in the app header", () => {
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const topbar = container.querySelector(".topbar");
+    const pageHeader = container.querySelector(".page-header");
+    const settingsForm = container.querySelector(".settings-form");
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    expect(topbar?.textContent).toContain("Validate");
+    expect(topbar?.textContent).toContain("Save");
+    expect(pageHeader?.textContent).not.toContain("Validate");
+    expect(pageHeader?.textContent).not.toContain("Save");
+    expect(settingsForm?.id).toBe("settings-form");
+    expect(saveButton.getAttribute("type")).toBe("submit");
+    expect(saveButton.getAttribute("form")).toBe("settings-form");
+  });
 });
