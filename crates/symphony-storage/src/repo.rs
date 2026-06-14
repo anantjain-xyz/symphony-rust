@@ -370,6 +370,18 @@ impl Repository {
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
+    pub async fn latest_run_for_issue(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<RunRow>, StorageError> {
+        Ok(sqlx::query_as::<_, RunRow>(
+            "select * from runs where issue_id = ?1 order by run_number desc limit 1",
+        )
+        .bind(issue_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn has_active_run(&self, issue_id: &str) -> Result<bool, StorageError> {
         let (count,): (i64,) = sqlx::query_as(
             "select count(*) from runs where issue_id = ?1 and status in ('pending', 'running')",

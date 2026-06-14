@@ -1,4 +1,4 @@
-use crate::{backoff_ms, run_hook, sanitize_key, WorkspaceManager};
+use crate::{backoff_ms, run_hook, sanitize_key, HookInvocation, WorkspaceManager};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
@@ -362,6 +362,13 @@ async fn tick<T: TrackerClient>(
         if !issue.blockers.is_empty() || retry_ids.contains(&issue.id) {
             continue;
         }
+        if repo
+            .latest_run_for_issue(&issue.id)
+            .await?
+            .is_some_and(|run| user_cancelled_run(&run))
+        {
+            continue;
+        }
         if repo.has_active_run(&issue.id).await? {
             continue;
         }
@@ -658,15 +665,16 @@ where
     }
     if workspace.needs_init {
         if let Some(script) = &config.workflow.front_matter.hooks.after_create {
-            let result = run_hook(
-                HookName::AfterCreate,
+            let result = run_hook(HookInvocation {
+                hook: HookName::AfterCreate,
                 script,
-                &issue,
-                &workspace.path,
-                run.run_number,
-                config.workflow.front_matter.hooks.timeout_ms,
-                &env,
-            )
+                issue: &issue,
+                workspace_path: &workspace.path,
+                run_number: run.run_number,
+                timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+                env: &env,
+                cancel: &stop,
+            })
             .await;
             repo.record_hook(
                 &run.id,
@@ -723,15 +731,16 @@ where
         return Ok(());
     }
     if let Some(script) = &config.workflow.front_matter.hooks.before_run {
-        let result = run_hook(
-            HookName::BeforeRun,
+        let result = run_hook(HookInvocation {
+            hook: HookName::BeforeRun,
             script,
-            &issue,
-            &workspace.path,
-            run.run_number,
-            config.workflow.front_matter.hooks.timeout_ms,
-            &env,
-        )
+            issue: &issue,
+            workspace_path: &workspace.path,
+            run_number: run.run_number,
+            timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+            env: &env,
+            cancel: &stop,
+        })
         .await;
         repo.record_hook(
             &run.id,
@@ -848,15 +857,16 @@ where
             )
             .await?;
             if let Some(script) = &config.workflow.front_matter.hooks.after_run {
-                let hook = run_hook(
-                    HookName::AfterRun,
+                let hook = run_hook(HookInvocation {
+                    hook: HookName::AfterRun,
                     script,
-                    &issue,
-                    &workspace.path,
-                    run.run_number,
-                    config.workflow.front_matter.hooks.timeout_ms,
-                    &env,
-                )
+                    issue: &issue,
+                    workspace_path: &workspace.path,
+                    run_number: run.run_number,
+                    timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+                    env: &env,
+                    cancel: &stop,
+                })
                 .await;
                 repo.record_hook(
                     &run.id,
@@ -940,6 +950,11 @@ async fn finish_if_cancelled(
     repo.clear_retry(&issue.id).await?;
     repo.delete_live_session(&run.id).await.ok();
     Ok(true)
+}
+
+fn user_cancelled_run(run: &RunRow) -> bool {
+    run.status == RunStatus::Cancelled.as_db_str()
+        && run.error_class.as_deref() == Some("cancelled")
 }
 
 async fn persist_run_event(
@@ -1828,6 +1843,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_cancelled_active_issue_is_not_immediately_redispatched() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        let tracker = StaticTracker {
+            active: vec![ready],
+            terminal: vec![],
+        };
+        let stop = CancellationToken::new();
+
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 1);
+        assert!(repo.list_pending().await.unwrap().is_empty());
+        assert!(repo.list_running().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn cancellation_during_after_create_wins_over_hook_failure() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
@@ -1879,10 +1932,11 @@ exit 1
             result = &mut handle => panic!("dispatch finished before after_create hook started: {result:?}"),
         }
         stop.cancel();
-        tokio::fs::write(workspace_path.join("release-hook"), "")
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
             .await
+            .expect("dispatch should finish promptly after hook cancellation")
+            .unwrap()
             .unwrap();
-        handle.await.unwrap().unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled");
@@ -1940,10 +1994,11 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
             result = &mut handle => panic!("dispatch finished before after_run hook started: {result:?}"),
         }
         stop.cancel();
-        tokio::fs::write(workspace_path.join("release-after-run"), "")
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
             .await
+            .expect("dispatch should finish promptly after hook cancellation")
+            .unwrap()
             .unwrap();
-        handle.await.unwrap().unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(row.status, "cancelled");
