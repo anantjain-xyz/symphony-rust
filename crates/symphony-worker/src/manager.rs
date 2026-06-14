@@ -1845,7 +1845,9 @@ exit 1
             .to_string(),
         );
         let ready = issue("todo", vec![]);
-        repo.upsert_issues(&[ready.clone()]).await.unwrap();
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
         let repo_config = config.repos[0].clone();
         let workspace_path = workspace_manager(&config, &repo_config)
             .path_for(&ready.identifier)
@@ -1904,7 +1906,9 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
             .to_string(),
         );
         let ready = issue("todo", vec![]);
-        repo.upsert_issues(&[ready.clone()]).await.unwrap();
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
         let repo_config = config.repos[0].clone();
         let workspace_path = workspace_manager(&config, &repo_config)
             .path_for(&ready.identifier)
