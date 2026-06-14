@@ -1072,9 +1072,16 @@ function RunsView({
   const [repoFilter, setRepoFilter] = useState("");
   // Repos that actually appear in the loaded history; a filter for a repo
   // with no runs would only ever show an empty table.
-  const repoOptions = Array.from(
-    new Set(runs.map((run) => run.repo_name).filter((name): name is string => !!name)),
-  ).sort();
+  const repoOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(runs.map((run) => run.repo_name).filter((name): name is string => !!name)),
+      ).sort(),
+    [runs],
+  );
+  useEffect(() => {
+    if (repoFilter !== "" && !repoOptions.includes(repoFilter)) setRepoFilter("");
+  }, [repoFilter, repoOptions]);
   const visibleRuns =
     repoFilter === "" ? runs : runs.filter((run) => run.repo_name === repoFilter);
   return (
@@ -1086,19 +1093,11 @@ function RunsView({
         </div>
         {multiRepo && repoOptions.length > 0 ? (
           <div className="actions">
-            <select
-              className="repo-filter"
+            <RepoFilterSelect
               value={repoFilter}
-              aria-label="Filter runs by repository"
-              onChange={(e) => setRepoFilter(e.currentTarget.value)}
-            >
-              <option value="">All repos</option>
-              {repoOptions.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+              repos={repoOptions}
+              onChange={setRepoFilter}
+            />
           </div>
         ) : null}
       </header>
@@ -1171,6 +1170,154 @@ function RunsView({
         </Panel>
       </div>
     </>
+  );
+}
+
+function RepoFilterSelect({
+  value,
+  repos,
+  onChange,
+}: {
+  value: string;
+  repos: string[];
+  onChange: (next: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<(HTMLLIElement | null)[]>([]);
+  const options = useMemo(
+    () => [
+      { value: "", label: "All repos" },
+      ...repos.map((repo) => ({ value: repo, label: repo })),
+    ],
+    [repos],
+  );
+  const selectedIndex = Math.max(
+    0,
+    options.findIndex((option) => option.value === value),
+  );
+  const selected = options[selectedIndex];
+
+  useEffect(() => {
+    setActiveIndex((index) => Math.min(index, options.length - 1));
+  }, [options.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    optionRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
+
+  function openList() {
+    setActiveIndex(selectedIndex);
+    setOpen(true);
+  }
+
+  function commit(index: number) {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (!open) {
+      if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault();
+        openList();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((index) => Math.min(options.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((index) => Math.max(0, index - 1));
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      commit(activeIndex);
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="icon-select repo-filter-select" ref={rootRef}>
+      <button
+        type="button"
+        className="icon-select-trigger repo-filter-trigger"
+        role="combobox"
+        aria-label="Filter runs by repository"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? "repo-filter-listbox" : undefined}
+        aria-activedescendant={open ? `repo-filter-option-${activeIndex}` : undefined}
+        onClick={() => (open ? setOpen(false) : openList())}
+        onKeyDown={handleKeyDown}
+      >
+        <span className="repo-filter-label">{selected.label}</span>
+        <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+          <path
+            d="M4 6l4 4 4-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {open ? (
+        <ul className="icon-select-list repo-filter-list" id="repo-filter-listbox" role="listbox">
+          {options.map((option, index) => (
+            <li
+              key={option.value || "all"}
+              id={`repo-filter-option-${index}`}
+              role="option"
+              aria-selected={option.value === value}
+              ref={(node) => {
+                optionRefs.current[index] = node;
+              }}
+              className={
+                index === activeIndex ? "icon-select-option active" : "icon-select-option"
+              }
+              title={option.label}
+              onPointerMove={() => setActiveIndex(index)}
+              onClick={() => commit(index)}
+            >
+              <span className="icon-select-check" aria-hidden="true">
+                {option.value === value ? (
+                  <svg viewBox="0 0 16 16" width="12" height="12">
+                    <path
+                      d="M3 8.5l3.5 3.5L13 4.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : null}
+              </span>
+              <span className="repo-filter-option-label">{option.label}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 

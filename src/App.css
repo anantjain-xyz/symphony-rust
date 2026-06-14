@@ -1065,11 +1065,6 @@ pre {
   vertical-align: middle;
 }
 
-select.repo-filter {
-  min-height: 34px;
-  width: auto;
-}
-
 .repo-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1306,6 +1301,28 @@ textarea:disabled {
   flex: 0 0 auto;
   justify-content: center;
   width: 14px;
+}
+
+.repo-filter-select {
+  min-width: 180px;
+  width: min(260px, 100%);
+}
+
+.repo-filter-label,
+.repo-filter-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-filter-option-label {
+  flex: 1 1 auto;
+}
+
+.repo-filter-list {
+  max-height: min(280px, 50vh);
+  overflow-y: auto;
 }
 
 .backend-icon {
