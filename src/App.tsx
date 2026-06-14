@@ -31,6 +31,12 @@ import {
   statusSlug,
   timeOnly,
 } from "./format";
+import {
+  MarkdownText,
+  countMarkdownMatches,
+  countMatches,
+  highlightMatches,
+} from "./MarkdownText";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "settings";
@@ -2685,50 +2691,6 @@ function ExternalLink({
   );
 }
 
-function countMatches(text: string, needle: string) {
-  if (!needle) return 0;
-  const haystack = text.toLowerCase();
-  let count = 0;
-  let at = haystack.indexOf(needle);
-  while (at !== -1) {
-    count += 1;
-    at = haystack.indexOf(needle, at + needle.length);
-  }
-  return count;
-}
-
-function highlightMatches(
-  text: string,
-  needle: string,
-  firstIndex: number,
-  currentIndex: number,
-): React.ReactNode {
-  if (!needle) return text;
-  const haystack = text.toLowerCase();
-  let at = haystack.indexOf(needle);
-  if (at === -1) return text;
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  let matchIndex = firstIndex;
-  while (at !== -1) {
-    if (at > cursor) parts.push(text.slice(cursor, at));
-    parts.push(
-      <mark
-        key={matchIndex}
-        data-match-index={matchIndex}
-        className={matchIndex === currentIndex ? "search-hit current" : "search-hit"}
-      >
-        {text.slice(at, at + needle.length)}
-      </mark>,
-    );
-    matchIndex += 1;
-    cursor = at + needle.length;
-    at = haystack.indexOf(needle, cursor);
-  }
-  parts.push(text.slice(cursor));
-  return parts;
-}
-
 function scrollToMatch(container: HTMLElement | null, index: number) {
   const mark = container?.querySelector(`mark[data-match-index="${index}"]`);
   if (!(mark instanceof HTMLElement)) return;
@@ -2779,7 +2741,7 @@ function EventStream({
       const label = totalMatches;
       totalMatches += countMatches(item.label, needle);
       const summary = totalMatches;
-      totalMatches += countMatches(item.summary, needle);
+      totalMatches += countMarkdownMatches(item.summary, needle);
       const payload = totalMatches;
       totalMatches += countMatches(item.pretty, needle);
       matchStarts.push({ label, summary, payload });
@@ -2934,17 +2896,22 @@ function EventStream({
                 <span className="event-kind">
                   {highlightMatches(label, needle, starts.label, current)}
                 </span>
-                <span
+                <div
                   className={
                     event.kind === "tool_call" ? "event-summary mono" : "event-summary"
                   }
                 >
                   {summary ? (
-                    highlightMatches(summary, needle, starts.summary, current)
+                    <MarkdownText
+                      text={summary}
+                      needle={needle}
+                      firstIndex={starts.summary}
+                      currentIndex={current}
+                    />
                   ) : (
                     <em>no details</em>
                   )}
-                </span>
+                </div>
                 <time title={shortTime(event.created_at)}>
                   {timeOnly(event.created_at)}
                 </time>

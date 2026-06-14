@@ -851,7 +851,7 @@ td strong {
 }
 
 .event-line {
-  align-items: baseline;
+  align-items: flex-start;
   display: flex;
   gap: 10px;
 }
@@ -867,6 +867,7 @@ td strong {
 }
 
 .event-summary {
+  flex: 1 1 auto;
   font-size: 13px;
   line-height: 1.45;
   min-width: 0;
@@ -884,6 +885,75 @@ td strong {
 
 .event-error .event-summary {
   color: var(--destructive-foreground);
+}
+
+.markdown-text {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.markdown-text p {
+  margin: 0;
+}
+
+.markdown-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-text table {
+  border: 1px solid var(--border);
+  border-collapse: collapse;
+  border-radius: 6px;
+  display: table;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  min-width: min(100%, 320px);
+  overflow: hidden;
+  width: max-content;
+}
+
+.markdown-text thead {
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-text tr {
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-text tr:last-child {
+  border-bottom: 0;
+}
+
+.markdown-text tbody tr:hover {
+  background: transparent;
+}
+
+.markdown-text th,
+.markdown-text td {
+  display: table-cell;
+  font-size: 12px;
+  letter-spacing: 0;
+  padding: 6px 8px;
+  text-align: left;
+  text-transform: none;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.markdown-text th {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.markdown-text td {
+  color: inherit;
+}
+
+.markdown-code {
+  margin: 0;
 }
 
 .events time {
@@ -1687,6 +1757,11 @@ textarea.mono-input {
   th:nth-child(2),
   td:nth-child(2) {
     display: none;
+  }
+
+  .markdown-text th:nth-child(2),
+  .markdown-text td:nth-child(2) {
+    display: table-cell;
   }
 }
 
