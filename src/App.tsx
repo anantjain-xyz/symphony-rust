@@ -1443,6 +1443,11 @@ function SettingsView({
   onInstallSkills: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
+  const validationLabel = validation
+    ? validation.workflow_ok
+      ? "Settings valid"
+      : "Settings need attention"
+    : null;
   const updateRepo = (index: number, patch: Partial<RepoConfig>) =>
     setSettings({
       ...settings,
@@ -1485,15 +1490,31 @@ function SettingsView({
           <h2>Settings</h2>
           <p>Linear connection, repository, agent backend, and the prompt that drives runs.</p>
         </div>
-        <div className="actions">
-          <span
-            className={savedFlash ? "save-status ok" : "save-status"}
-            aria-live="polite"
-          >
-            {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
-          </span>
-          <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>Validate</button>
-          <button disabled={busy || !runtimeAvailable || !dirty} className="primary" type="submit">Save</button>
+        <div className="settings-actions">
+          <div className="settings-action-row">
+            <span
+              className={savedFlash ? "save-status ok" : "save-status"}
+              aria-live="polite"
+            >
+              {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
+            </span>
+            <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>
+              Validate
+            </button>
+            <button disabled={busy || !runtimeAvailable || !dirty} className="primary" type="submit">Save</button>
+          </div>
+          {validation ? (
+            <span
+              className={
+                validation.workflow_ok ? "validation-status ok" : "validation-status invalid"
+              }
+              role="status"
+              aria-live="polite"
+            >
+              <strong>{validationLabel}</strong>
+              {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
+            </span>
+          ) : null}
         </div>
       </header>
 
@@ -2143,13 +2164,6 @@ function SettingsView({
           </details>
         </section>
       </div>
-
-      {validation ? (
-        <div className={validation.workflow_ok ? "banner ok validation" : "banner error validation"}>
-          <strong>{validation.workflow_ok ? "Settings valid" : "Settings need attention"}</strong>
-          {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
-        </div>
-      ) : null}
 
       <Panel title="Prompt template">
         <PromptEditor

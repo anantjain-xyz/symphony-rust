@@ -1151,6 +1151,52 @@ pre {
   font-weight: 500;
 }
 
+.settings-actions {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-action-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.validation-status {
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  justify-content: flex-end;
+  line-height: 1.4;
+  max-width: min(460px, 45vw);
+  min-width: 0;
+  text-align: right;
+}
+
+.validation-status.ok {
+  color: var(--success-foreground);
+}
+
+.validation-status.invalid {
+  color: var(--destructive-foreground);
+}
+
+.validation-status strong {
+  flex: 0 0 auto;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.validation-status span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .settings-footer {
   align-items: center;
   display: flex;
@@ -1462,11 +1508,6 @@ textarea.mono-input {
   color: var(--success-foreground);
 }
 
-.validation {
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-
 .runtime-banner {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1522,6 +1563,22 @@ textarea.mono-input {
   .kpis,
   .actions {
     flex-wrap: wrap;
+  }
+
+  .settings-actions {
+    align-items: flex-start;
+    width: 100%;
+  }
+
+  .settings-action-row {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .validation-status {
+    justify-content: flex-start;
+    max-width: 100%;
+    text-align: left;
   }
 
   .grid.two,
