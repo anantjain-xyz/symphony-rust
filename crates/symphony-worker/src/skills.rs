@@ -115,8 +115,8 @@ fn parse_github_repo(url: &str) -> Option<String> {
 /// URL forms users paste into Settings.
 fn parse_github_remote(url: &str) -> Option<GithubRemote> {
     let trimmed = url.trim().trim_end_matches('/');
-    let (host, rest) = if let Some(rest) = trimmed.strip_prefix("git@") {
-        rest.split_once(':')?
+    let (host, rest) = if let Some((host, rest)) = parse_scp_like_remote(trimmed) {
+        (host, rest)
     } else if let Some(rest) = trimmed.strip_prefix("ssh://") {
         let rest = rest
             .split_once('@')
@@ -142,6 +142,12 @@ fn parse_github_remote(url: &str) -> Option<GithubRemote> {
         return None;
     }
     Some(GithubRemote { host, owner, name })
+}
+
+fn parse_scp_like_remote(url: &str) -> Option<(&str, &str)> {
+    let (user_and_host, rest) = url.split_once(':')?;
+    let (_, host) = user_and_host.rsplit_once('@')?;
+    Some((host, rest))
 }
 
 fn is_supported_github_host(host: &str) -> bool {
@@ -712,6 +718,7 @@ mod tests {
         for url in [
             "git@octocorp.ghe.com:acme/widgets.git",
             "git@octocorp.ghe.com:acme/widgets",
+            "octocorp@octocorp.ghe.com:acme/widgets.git",
             "ssh://git@octocorp.ghe.com/acme/widgets.git",
             "ssh://octocorp.ghe.com/acme/widgets.git",
             "https://octocorp.ghe.com/acme/widgets",
