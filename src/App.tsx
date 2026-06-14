@@ -38,6 +38,7 @@ type Theme = "light" | "dark";
 
 const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
+const SETTINGS_FORM_ID = "settings-form";
 
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "light";
@@ -592,6 +593,16 @@ function App() {
         </div>
 
         <div className="topbar-actions">
+          {view === "settings" && settings ? (
+            <SettingsHeaderActions
+              validation={validation}
+              dirty={dirty}
+              savedFlash={savedFlash}
+              busy={busy}
+              runtimeAvailable={runtimeAvailable}
+              onValidate={validate}
+            />
+          ) : null}
           <button
             type="button"
             className="theme-toggle"
@@ -686,13 +697,10 @@ function App() {
             skillsStatuses={skillsStatuses}
             skillsChecking={skillsChecking}
             skillsInstall={skillsInstall}
-            dirty={dirty}
-            savedFlash={savedFlash}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
             appVersion={appVersion}
             onSave={saveSettings}
-            onValidate={validate}
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
             onResetPrompt={resetPrompt}
@@ -702,6 +710,53 @@ function App() {
         ) : null}
       </section>
     </main>
+  );
+}
+
+function SettingsHeaderActions({
+  validation,
+  dirty,
+  savedFlash,
+  busy,
+  runtimeAvailable,
+  onValidate,
+}: {
+  validation: ValidationResult | null;
+  dirty: boolean;
+  savedFlash: boolean;
+  busy: boolean;
+  runtimeAvailable: boolean;
+  onValidate: () => void;
+}) {
+  return (
+    <div className="settings-header-actions" aria-label="Settings actions">
+      <div className="settings-action-row">
+        <span className={savedFlash ? "save-status ok" : "save-status"} aria-live="polite">
+          {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
+        </span>
+        <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>
+          Validate
+        </button>
+        <button
+          disabled={busy || !runtimeAvailable || !dirty}
+          className="primary"
+          form={SETTINGS_FORM_ID}
+          type="submit"
+        >
+          Save
+        </button>
+      </div>
+      {validation && (validation.workflow_ok || validation.workflow_error) ? (
+        <span
+          className={validation.workflow_ok ? "validation-status ok" : "validation-status invalid"}
+          role="status"
+          aria-live="polite"
+        >
+          {validation.workflow_ok ? <strong>Settings valid</strong> : null}
+          {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
@@ -1407,13 +1462,10 @@ function SettingsView({
   skillsStatuses,
   skillsChecking,
   skillsInstall,
-  dirty,
-  savedFlash,
   busy,
   runtimeAvailable,
   appVersion,
   onSave,
-  onValidate,
   onTestConnection,
   onRemoveKey,
   onResetPrompt,
@@ -1429,13 +1481,10 @@ function SettingsView({
   skillsStatuses: Record<string, SkillsStatus>;
   skillsChecking: Record<string, boolean>;
   skillsInstall: SkillsInstallStatus | null;
-  dirty: boolean;
-  savedFlash: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
   appVersion: string | null;
   onSave: () => void;
-  onValidate: () => void;
   onTestConnection: () => void;
   onRemoveKey: () => void;
   onResetPrompt: () => void;
@@ -1443,11 +1492,6 @@ function SettingsView({
   onInstallSkills: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
-  const validationLabel = validation
-    ? validation.workflow_ok
-      ? "Settings valid"
-      : "Settings need attention"
-    : null;
   const updateRepo = (index: number, patch: Partial<RepoConfig>) =>
     setSettings({
       ...settings,
@@ -1479,6 +1523,7 @@ function SettingsView({
   return (
     <form
       className="settings-form"
+      id={SETTINGS_FORM_ID}
       autoComplete="off"
       onSubmit={(event) => {
         event.preventDefault();
@@ -1489,32 +1534,6 @@ function SettingsView({
         <div>
           <h2>Settings</h2>
           <p>Linear connection, repository, agent backend, and the prompt that drives runs.</p>
-        </div>
-        <div className="settings-actions">
-          <div className="settings-action-row">
-            <span
-              className={savedFlash ? "save-status ok" : "save-status"}
-              aria-live="polite"
-            >
-              {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
-            </span>
-            <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>
-              Validate
-            </button>
-            <button disabled={busy || !runtimeAvailable || !dirty} className="primary" type="submit">Save</button>
-          </div>
-          {validation ? (
-            <span
-              className={
-                validation.workflow_ok ? "validation-status ok" : "validation-status invalid"
-              }
-              role="status"
-              aria-live="polite"
-            >
-              <strong>{validationLabel}</strong>
-              {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
-            </span>
-          ) : null}
         </div>
       </header>
 
