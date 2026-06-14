@@ -520,10 +520,12 @@ function App() {
   useEffect(() => {
     setStoppingRunIds((prev) => {
       if (prev.size === 0) return prev;
-      const running = new Set(
-        runs.filter((run) => run.status === "running").map((run) => run.id),
+      const cancellable = new Set(
+        runs
+          .filter((run) => run.status === "pending" || run.status === "running")
+          .map((run) => run.id),
       );
-      const next = new Set([...prev].filter((id) => running.has(id)));
+      const next = new Set([...prev].filter((id) => cancellable.has(id)));
       return next.size === prev.size ? prev : next;
     });
   }, [runs]);
@@ -1529,7 +1531,7 @@ function RunsView({
                     ) : null}
                     <span>{selected.run.issue_title}</span>
                   </div>
-                  {selected.run.status === "running" ? (
+                  {selected.run.status === "pending" || selected.run.status === "running" ? (
                     <button
                       type="button"
                       className="link-button danger outlined"

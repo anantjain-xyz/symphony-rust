@@ -618,6 +618,30 @@ async fn dispatch_run(
     run: RunRow,
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
+    dispatch_run_with_driver(
+        repo,
+        config,
+        issue,
+        repo_config,
+        run,
+        stop,
+        NativeAgentDriver,
+    )
+    .await
+}
+
+async fn dispatch_run_with_driver<D>(
+    repo: Repository,
+    config: RuntimeConfig,
+    issue: Issue,
+    repo_config: RepoConfig,
+    run: RunRow,
+    stop: CancellationToken,
+    driver: D,
+) -> Result<(), WorkerError>
+where
+    D: AgentDriver + 'static,
+{
     let workspaces = workspace_manager(&config, &repo_config);
     if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
         return Ok(());
@@ -652,6 +676,9 @@ async fn dispatch_run(
                 result.stderr_tail.as_deref(),
             )
             .await?;
+            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+                return Ok(());
+            }
             if result.exit_code != 0 {
                 fail(
                     &repo,
@@ -756,7 +783,6 @@ async fn dispatch_run(
     }
 
     let (tx, mut rx) = mpsc::channel(256);
-    let driver = NativeAgentDriver;
     let request = AgentRunRequest {
         backend: backend.clone(),
         command: match backend {
@@ -841,6 +867,9 @@ async fn dispatch_run(
                 )
                 .await?;
             }
+            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+                return Ok(());
+            }
             match result.outcome {
                 AgentOutcome::Success => {
                     repo.finish_run(&run.id, RunStatus::Success, None, None)
@@ -874,6 +903,9 @@ async fn dispatch_run(
             }
         }
         Err(err) => {
+            if finish_if_cancelled(&repo, &run, &issue, &stop).await? {
+                return Ok(());
+            }
             fail(
                 &repo,
                 &config,
@@ -1145,6 +1177,30 @@ mod tests {
             pr_urls: vec![],
             project_id: None,
         }
+    }
+
+    fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
+        let failed = outcome == AgentOutcome::Failure;
+        symphony_agents::MockAgentDriver {
+            result: symphony_agents::AgentRunResult {
+                thread_id: "thread-test".to_string(),
+                turn_id: "turn-test".to_string(),
+                outcome,
+                error_class: failed.then(|| "agent_failure".to_string()),
+                error_message: failed.then(|| "agent reported failure".to_string()),
+            },
+            events: vec![],
+        }
+    }
+
+    async fn wait_for_path(path: &std::path::Path) {
+        for _ in 0..500 {
+            if tokio::fs::metadata(path).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {}", path.display());
     }
 
     #[tokio::test]
@@ -1768,6 +1824,126 @@ mod tests {
             repo.get_run(&run.id).await.unwrap().unwrap().status,
             "cancelled"
         );
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_after_create_wins_over_hook_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        config.workflow.front_matter.hooks.after_create = Some(
+            r#"printf started > "$WORKSPACE_PATH/hook-started"
+while [ ! -f "$WORKSPACE_PATH/release-hook" ]; do /bin/sleep 0.01; done
+echo after_create failed >&2
+exit 1
+"#
+            .to_string(),
+        );
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(&[ready.clone()]).await.unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let stop = CancellationToken::new();
+        let mut handle = tokio::spawn(dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            stop.clone(),
+            mock_driver(AgentOutcome::Success),
+        ));
+
+        let hook_started = workspace_path.join("hook-started");
+        tokio::select! {
+            _ = wait_for_path(&hook_started) => {}
+            result = &mut handle => panic!("dispatch finished before after_create hook started: {result:?}"),
+        }
+        stop.cancel();
+        tokio::fs::write(workspace_path.join("release-hook"), "")
+            .await
+            .unwrap();
+        handle.await.unwrap().unwrap();
+
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.error_class.as_deref(), Some("cancelled"));
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_after_run_wins_over_terminal_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        config.workflow.front_matter.hooks.after_run = Some(
+            r#"printf started > "$WORKSPACE_PATH/after-run-started"
+while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
+"#
+            .to_string(),
+        );
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(&[ready.clone()]).await.unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let stop = CancellationToken::new();
+        let mut handle = tokio::spawn(dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            stop.clone(),
+            mock_driver(AgentOutcome::Failure),
+        ));
+
+        let hook_started = workspace_path.join("after-run-started");
+        tokio::select! {
+            _ = wait_for_path(&hook_started) => {}
+            result = &mut handle => panic!("dispatch finished before after_run hook started: {result:?}"),
+        }
+        stop.cancel();
+        tokio::fs::write(workspace_path.join("release-after-run"), "")
+            .await
+            .unwrap();
+        handle.await.unwrap().unwrap();
+
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
 
