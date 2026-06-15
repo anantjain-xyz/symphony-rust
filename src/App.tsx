@@ -650,8 +650,12 @@ function App() {
 
   async function saveSettings() {
     if (!settings) return;
+    // Validate first, but only abort on a genuine configuration mistake. An
+    // unfinished setup (e.g. saving a Linear key before any repo exists) is
+    // tracked by the setup checklist and must stay saveable, so a non-blocking
+    // validation error still proceeds to save.
     const result = await validate();
-    if (!result?.workflow_ok) return;
+    if (!result || result.workflow_blocking) return;
     const saved = await call(() =>
       invoke<AppSettings>("save_settings", {
         request: {
@@ -1123,7 +1127,10 @@ function SettingsHeaderActions({
   busy: boolean;
   runtimeAvailable: boolean;
 }) {
-  const validationError = validation?.workflow_error;
+  // Only surface blocking validation errors here. Incomplete-setup messages
+  // (e.g. no repo configured yet) are shown by the setup checklist, not flagged
+  // red next to Save while the user is still working through setup.
+  const validationError = validation?.workflow_blocking ? validation.workflow_error : null;
   const status = validationError ?? (savedFlash ? "Saved" : dirty ? "Unsaved changes" : "");
   const statusClass = validationError
     ? "save-status invalid"

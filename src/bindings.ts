@@ -75,6 +75,7 @@ export type TrackerTestResult = {
 
 export type ValidationResult = {
   workflow_ok: boolean;
+  workflow_blocking: boolean;
   workflow_error: string | null;
   codex_found: boolean;
   claude_found: boolean;

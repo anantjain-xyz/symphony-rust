@@ -31,6 +31,10 @@ pub struct SaveSettingsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ValidationResult {
     pub workflow_ok: bool,
+    /// Whether `workflow_error` should stop a save. Genuine configuration
+    /// mistakes block; an unfinished setup (see `workflow_setup_incomplete`)
+    /// does not, so partial progress stays saveable.
+    pub workflow_blocking: bool,
     pub workflow_error: Option<String>,
     pub codex_found: bool,
     pub claude_found: bool,
@@ -125,10 +129,12 @@ async fn validate_settings(
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
     let workflow_error = validate_workflow_settings(&settings);
+    let workflow_blocking = workflow_error.is_some() && !workflow_setup_incomplete(&settings);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
     Ok(ValidationResult {
         workflow_ok: workflow_error.is_none(),
+        workflow_blocking,
         workflow_error,
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
@@ -168,6 +174,16 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
         ));
     }
     None
+}
+
+/// Whether the workflow is unrunnable only because setup is not finished yet,
+/// rather than because something entered is wrong. The setup checklist already
+/// guides the user through configuring a repository, so this state must not
+/// block a save — a first-time user who has typed only their Linear API key
+/// (no repo yet) still needs `save_settings` to persist that key. Genuine
+/// mistakes once a repo exists (duplicate names, bad placeholders, …) do block.
+fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
+    settings.repos.is_empty()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
@@ -877,6 +893,25 @@ mod tests {
             ..repo("backend")
         };
         assert!(validate_repos(&[web, backend]).is_none());
+    }
+
+    #[test]
+    fn missing_repo_is_an_incomplete_setup_not_a_blocking_error() {
+        // No repo yet (e.g. a first-time user who has only entered a Linear
+        // key): the workflow is not runnable, but this is unfinished setup, so
+        // the save must not be blocked.
+        let fresh = AppSettings::default();
+        assert!(validate_workflow_settings(&fresh).is_some());
+        assert!(workflow_setup_incomplete(&fresh));
+
+        // Once a repo exists, a real mistake (here, empty active states) is a
+        // blocking error rather than incomplete setup.
+        let broken = AppSettings {
+            active_states: Vec::new(),
+            ..configured_settings()
+        };
+        assert!(validate_workflow_settings(&broken).is_some());
+        assert!(!workflow_setup_incomplete(&broken));
     }
 
     #[test]
