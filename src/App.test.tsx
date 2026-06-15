@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AppSettings, ValidationResult } from "./bindings";
+import type { AppSettings, SkillsStatus, ValidationResult, WorkerStatus } from "./bindings";
 
 const tauriMocks = vi.hoisted(() => ({
   runtimeAvailable: false,
@@ -122,6 +122,63 @@ function settingsInvoke({
           throw new Error("save_settings should not run after failed validation");
         }
         return { ...settings, linear_api_key_set: true };
+      default:
+        throw new Error(`Unhandled command: ${command}`);
+    }
+  };
+}
+
+function dashboardInvoke({
+  settings,
+  skillsStatus = {
+    state: "missing",
+    missing: ["symphony-workpad"],
+    pr_url: null,
+    detail: null,
+  },
+  workerStatus = {
+    state: "running",
+    started_at: "2026-01-01T00:00:00.000Z",
+    last_error: null,
+  },
+}: {
+  settings: AppSettings;
+  skillsStatus?: SkillsStatus;
+  workerStatus?: WorkerStatus;
+}) {
+  return async (command: string) => {
+    switch (command) {
+      case "load_settings":
+        return settings;
+      case "get_overview":
+        return {
+          active_runs: [],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        };
+      case "list_runs":
+      case "list_issues":
+        return [];
+      case "get_worker_status":
+        return workerStatus;
+      case "get_skills_status":
+        return skillsStatus;
+      case "validate_settings":
+        return {
+          workflow_ok: true,
+          workflow_blocking: false,
+          workflow_error: null,
+          codex_found: true,
+          claude_found: true,
+          codex_command: "codex",
+          claude_command: "claude",
+          app_data_dir: "/tmp/symphony",
+          database_path: "/tmp/symphony/symphony.db",
+        };
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
@@ -268,5 +325,52 @@ describe("App settings", () => {
     // A non-blocking incompleteness message is not shown as a header error.
     const topbar = container.querySelector(".topbar");
     expect(topbar?.textContent).not.toContain(incompleteError);
+  });
+
+  it("shows overview onboarding only for the first two setup requirements", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), repos: [], linear_api_key_set: false };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+
+    expect(await screen.findByText("Welcome to Symphony")).toBeTruthy();
+    expect(screen.getByText("Connect Linear")).toBeTruthy();
+    expect(screen.getByText("Add your repositories")).toBeTruthy();
+    expect(screen.queryByText("Install agent skills")).toBeNull();
+    expect(screen.queryByText("Start the worker")).toBeNull();
+  });
+
+  it("dismisses overview onboarding after Linear and repo setup even when skills are missing", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const repoUrl = settings.repos[0].url;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        skillsStatus: {
+          state: "missing",
+          missing: ["symphony-workpad"],
+          pr_url: null,
+          detail: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Not installed — 1 of 7 skills missing.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(screen.queryByText("Welcome to Symphony")).toBeNull();
+    expect(screen.queryByText("Install agent skills")).toBeNull();
   });
 });
