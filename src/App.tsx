@@ -3086,10 +3086,9 @@ function SkillsBlock({
       <>
         <button
           type="button"
-          className="link-button outlined"
           onClick={() => openUrl(prUrl).catch(() => undefined)}
         >
-          Open PR
+          View PR
         </button>
         {checkAgainButton}
       </>

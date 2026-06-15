@@ -263,6 +263,43 @@ describe("App settings", () => {
     expect(createPrButton.getAttribute("disabled")).not.toBeNull();
   });
 
+  it("shows PR links as standard view actions when an install PR is open", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const prUrl = "https://github.com/acme/widgets/pull/61";
+    tauriMocks.openUrl.mockResolvedValue(undefined);
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        skillsStatus: {
+          state: "missing",
+          missing: ["symphony-workpad"],
+          pr_url: prUrl,
+          detail: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url.trim(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByText("An install PR is waiting for review.")).toBeTruthy();
+    const viewPrButton = screen.getByRole("button", { name: "View PR" });
+    const checkAgainButton = screen.getByRole("button", { name: "Check again" });
+    expect(screen.queryByRole("button", { name: "Open PR" })).toBeNull();
+    expect(viewPrButton.className).toBe(checkAgainButton.className);
+
+    fireEvent.click(viewPrButton);
+
+    expect(tauriMocks.openUrl).toHaveBeenCalledWith(prUrl);
+  });
+
   it("validates before saving and shows validation errors in the header status", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -376,7 +413,7 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByText("Not installed")).toBeTruthy();
+    expect(await screen.findByText("Agent skills are not installed.")).toBeTruthy();
     expect(screen.getByText("1 of 7 bundled skills are missing.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
