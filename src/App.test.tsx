@@ -252,6 +252,17 @@ describe("App settings", () => {
     expect(saveButton.getAttribute("form")).toBe("settings-form");
   });
 
+  it("shows actionable agent skills install guidance in preview settings", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(screen.getByText("Agent skills are not installed.")).toBeTruthy();
+    expect(screen.getByText("7 of 7 bundled skills are missing.")).toBeTruthy();
+    const createPrButton = screen.getByRole("button", { name: "Create install PR" });
+    expect(createPrButton.getAttribute("disabled")).not.toBeNull();
+  });
+
   it("validates before saving and shows validation errors in the header status", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();

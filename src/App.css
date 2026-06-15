@@ -1206,6 +1206,122 @@ pre {
   width: auto;
 }
 
+.field-label-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.skills-status-pill {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0 8px;
+}
+
+.skills-status-pill.success {
+  background: var(--success);
+  border-color: transparent;
+  color: var(--success-foreground);
+}
+
+.skills-status-pill.warning {
+  background: var(--warning);
+  border-color: transparent;
+  color: var(--warning-foreground);
+}
+
+.skills-status-pill.error {
+  background: var(--destructive);
+  border-color: transparent;
+  color: var(--destructive-foreground);
+}
+
+.skills-status-pill.info {
+  background: var(--info);
+  border-color: transparent;
+  color: var(--info-foreground);
+}
+
+.skills-install {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--neutral-dot);
+  border-radius: 6px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 11px 12px;
+}
+
+.skills-install.success {
+  border-left-color: var(--success-solid);
+}
+
+.skills-install.warning {
+  border-left-color: var(--warning-solid);
+}
+
+.skills-install.error {
+  border-left-color: var(--destructive-foreground);
+}
+
+.skills-install.info {
+  border-left-color: var(--info-foreground);
+}
+
+.skills-install-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.skills-install-copy strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.skills-install-copy small {
+  line-height: 1.45;
+}
+
+.skills-install-detail {
+  color: var(--foreground);
+}
+
+.skills-install-detail.error {
+  color: var(--destructive-foreground);
+}
+
+.skills-install-detail span {
+  display: block;
+}
+
+.skills-install-detail span + span {
+  margin-top: 2px;
+}
+
+.skills-install-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.skills-install-actions button {
+  white-space: nowrap;
+}
+
 .section-row {
   align-items: center;
   display: flex;
@@ -1655,6 +1771,15 @@ textarea.mono-input {
 
   .settings-action-row {
     flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .skills-install {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .skills-install-actions {
     justify-content: flex-start;
   }
 
