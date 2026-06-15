@@ -45,6 +45,17 @@ type Theme = "light" | "dark";
 const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
+const BUNDLED_SKILL_NAMES = [
+  "symphony-commit",
+  "symphony-land",
+  "symphony-pr-feedback",
+  "symphony-pull",
+  "symphony-push",
+  "symphony-screenshot",
+  "symphony-workpad",
+];
+const BUNDLED_SKILL_COUNT = BUNDLED_SKILL_NAMES.length;
+const BUNDLED_SKILL_EXAMPLES = "symphony-workpad, symphony-commit, symphony-push";
 
 function getInitialTheme(): Theme {
   if (typeof window === "undefined") return "light";
@@ -121,6 +132,15 @@ const previewSettings: AppSettings = {
   linear_api_key_set: true,
 };
 
+const previewSkillsStatuses: Record<string, SkillsStatus> = {
+  [previewSettings.repos[0].url.trim()]: {
+    state: "missing",
+    missing: BUNDLED_SKILL_NAMES,
+    pr_url: null,
+    detail: null,
+  },
+};
+
 function previewIso(offsetMs: number) {
   return new Date(Date.now() + offsetMs).toISOString();
 }
@@ -183,7 +203,7 @@ const previewFailedRun: RunWithIssueRow = {
   repo_name: "widgets",
   created_at: previewFailureCreatedAt,
   issue_identifier: "SYM-61",
-  issue_title: "Tighten retry queue filtering",
+  issue_title: "Agent skills installation UX",
   issue_state: "Rework",
 };
 
@@ -242,23 +262,23 @@ const previewIssues: IssueRow[] = [
   {
     id: "preview-issue-sym-61",
     identifier: "SYM-61",
-    title: "Tighten retry queue filtering",
-    description: null,
+    title: "Agent skills installation UX",
+    description: "Make the agent skills installation state clearer in Settings.",
     priority: 3,
     state: "Rework",
-    branch: "codex/sym-61-retries",
-    labels: JSON.stringify(["worker"]),
+    branch: "codex/sym-61-skills-install-ux",
+    labels: JSON.stringify(["ui", "skills"]),
     blockers: JSON.stringify(["SYM-60"]),
     pr_urls: JSON.stringify(["https://github.com/acme/widgets/pull/61"]),
     raw: JSON.stringify({
       id: "preview-issue-sym-61",
       identifier: "SYM-61",
-      title: "Tighten retry queue filtering",
-      description: null,
+      title: "Agent skills installation UX",
+      description: "Make the agent skills installation state clearer in Settings.",
       priority: 3,
       state: "Rework",
-      branch: "codex/sym-61-retries",
-      labels: ["worker"],
+      branch: "codex/sym-61-skills-install-ux",
+      labels: ["ui", "skills"],
       blockers: ["SYM-60"],
       pr_urls: ["https://github.com/acme/widgets/pull/61"],
       project_id: null,
@@ -369,7 +389,7 @@ const previewOverview: Overview = {
       error_message: "Typecheck failed after applying the requested dashboard change.",
       created_at: previewFailureEndedAt,
       issue_identifier: "SYM-61",
-      issue_title: "Tighten retry queue filtering",
+      issue_title: "Agent skills installation UX",
     },
   ],
   recent_failures: [previewFailedRun],
@@ -481,7 +501,9 @@ function App() {
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
-  const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>({});
+  const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>(
+    runtimeAvailable ? {} : previewSkillsStatuses,
+  );
   const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
@@ -3022,6 +3044,7 @@ function SkillsBlock({
   onInstall: () => void;
 }) {
   const installing = install?.state === "running";
+  const otherInstallRunning = installRunning && !installing;
   const actionsDisabled = busy || installRunning || !runtimeAvailable || !repoConfigured;
   // A just-finished install knows the PR URL before the next status check does.
   const prUrl =
@@ -3029,71 +3052,148 @@ function SkillsBlock({
     status?.pr_url ??
     null;
 
-  let detail: React.ReactNode;
-  let action: React.ReactNode = null;
+  let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
+  let label = "Not checked";
+  let headline = "Check this repo for Symphony skills.";
+  let detail: React.ReactNode =
+    "Symphony can detect whether this repo already ships the bundled agent skills.";
+  let meta: React.ReactNode = null;
+  let actions: React.ReactNode = null;
+
+  const checkButton = (
+    <button type="button" disabled={actionsDisabled} onClick={onRefresh}>
+      Check status
+    </button>
+  );
+  const checkAgainButton = (
+    <button type="button" disabled={actionsDisabled} onClick={onRefresh}>
+      Check again
+    </button>
+  );
+
   if (installing) {
-    detail = install?.message ?? "Installing…";
-    action = (
+    tone = "info";
+    label = "Creating PR";
+    headline = "Creating an install PR.";
+    detail =
+      "Symphony is working in a temporary checkout, writing the bundled skills, adapting validation commands, and opening a PR.";
+    meta = install?.message ?? "Preparing install session...";
+    actions = (
       <button type="button" disabled>
-        Creating install PR…
+        Creating PR...
       </button>
     );
   } else if (install?.state === "failed") {
-    detail = (
-      <span className="test-result err">{install.error ?? "Install failed."}</span>
-    );
-    action = (
-      <button type="button" disabled={actionsDisabled} onClick={onInstall}>
+    tone = "error";
+    label = "Failed";
+    headline = "Install PR was not created.";
+    detail =
+      "Fix the reported GitHub or agent access problem, then retry the install session.";
+    meta = install.error ?? "Install failed.";
+    actions = (
+      <button
+        type="button"
+        className="primary"
+        disabled={actionsDisabled}
+        onClick={onInstall}
+      >
         Retry install PR
       </button>
     );
   } else if (checking) {
-    detail = "Checking your repository…";
+    tone = "info";
+    label = "Checking";
+    headline = "Checking the default branch.";
+    detail = "Symphony is using GitHub to verify the bundled skill manifests.";
   } else if (status?.state === "installed") {
-    detail = (
-      <span className="test-result ok">
-        Installed — agents will use the skills in this repo.
-      </span>
-    );
+    tone = "success";
+    label = "Installed";
+    headline = "Agent skills are installed.";
+    detail = `All ${BUNDLED_SKILL_COUNT} Symphony skills are present on this repo's default branch.`;
+    actions = checkAgainButton;
   } else if (prUrl) {
-    detail = (
-      <span className="test-result ok">Install PR open — merge it to finish.</span>
-    );
-    action = (
-      <button
-        type="button"
-        className="link-button"
-        onClick={() => openUrl(prUrl).catch(() => undefined)}
-      >
-        View PR ↗
-      </button>
+    tone = "warning";
+    label = "PR open";
+    headline = "An install PR is waiting for review.";
+    detail =
+      "Merge the install PR, then refresh this status. Symphony marks the step complete once the skills land on the default branch.";
+    actions = (
+      <>
+        <button
+          type="button"
+          className="link-button outlined"
+          onClick={() => openUrl(prUrl).catch(() => undefined)}
+        >
+          Open PR
+        </button>
+        {checkAgainButton}
+      </>
     );
   } else if (status?.state === "missing") {
-    detail = `Not installed — ${status.missing.length} of 7 skills missing.`;
-    action = (
-      <button type="button" disabled={actionsDisabled} onClick={onInstall}>
-        Create install PR
-      </button>
+    tone = "warning";
+    label = "Not installed";
+    headline = "Agent skills are not installed.";
+    detail = `Create an install PR for ${BUNDLED_SKILL_EXAMPLES}, and the rest of the bundled workflow skills.`;
+    meta = `${status.missing.length} of ${BUNDLED_SKILL_COUNT} bundled skills are missing.`;
+    actions = (
+      <>
+        <button
+          type="button"
+          className="primary"
+          disabled={actionsDisabled}
+          onClick={onInstall}
+        >
+          Create install PR
+        </button>
+        {checkAgainButton}
+      </>
     );
+  } else if (status?.state === "unavailable") {
+    tone = "error";
+    label = "Can't check";
+    headline = "Symphony could not check this repo.";
+    detail = status.detail ?? "Check the repository URL, GitHub CLI, and authentication.";
+    actions = checkButton;
   } else if (!repoConfigured) {
-    detail = "Add this repo's URL first.";
+    label = "Repo needed";
+    headline = "Add a repository URL first.";
+    detail = "Skill detection and install PR creation run against the repo URL above.";
   } else {
-    detail = status?.detail ?? "Status not checked yet.";
-    action = (
-      <button type="button" disabled={actionsDisabled} onClick={onRefresh}>
-        Check
-      </button>
+    actions = checkButton;
+  }
+
+  if (otherInstallRunning) {
+    meta = (
+      <>
+        {meta ? <span>{meta}</span> : null}
+        <span>Another repository is already creating an install PR.</span>
+      </>
     );
   }
 
   return (
-    <div className="field-group">
-      Agent skills
-      <div className="section-row">
-        {action}
-        <small className="test-result" role="status">
-          {detail}
-        </small>
+    <div className="field-group skills-field">
+      <div className="field-label-row">
+        <span>Agent skills</span>
+        <span className={`skills-status-pill ${tone}`}>{label}</span>
+      </div>
+      <div className={`skills-install ${tone}`} aria-live="polite">
+        <div className="skills-install-copy">
+          <strong>{headline}</strong>
+          <small>{detail}</small>
+          {meta ? (
+            <small
+              className={
+                tone === "error"
+                  ? "skills-install-detail error"
+                  : "skills-install-detail"
+              }
+            >
+              {meta}
+            </small>
+          ) : null}
+        </div>
+        {actions ? <div className="skills-install-actions">{actions}</div> : null}
       </div>
     </div>
   );
