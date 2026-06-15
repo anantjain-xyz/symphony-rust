@@ -620,6 +620,10 @@ function App() {
     [settings, runs],
   );
 
+  useEffect(() => {
+    setValidation(null);
+  }, [settings]);
+
   // Keep relative timestamps fresh while the dashboard is otherwise idle.
   const [, tick] = useReducer((x: number) => x + 1, 0);
   useEffect(() => {
@@ -646,6 +650,12 @@ function App() {
 
   async function saveSettings() {
     if (!settings) return;
+    // Validate first, but only abort on a genuine configuration mistake. An
+    // unfinished setup (e.g. saving a Linear key before any repo exists) is
+    // tracked by the setup checklist and must stay saveable, so a non-blocking
+    // validation error still proceeds to save.
+    const result = await validate();
+    if (!result || result.workflow_blocking) return;
     const saved = await call(() =>
       invoke<AppSettings>("save_settings", {
         request: {
@@ -671,6 +681,7 @@ function App() {
       invoke<ValidationResult>("validate_settings", { settings }),
     );
     setValidation(result);
+    return result;
   }
 
   async function testConnection() {
@@ -989,7 +1000,6 @@ function App() {
               savedFlash={savedFlash}
               busy={busy}
               runtimeAvailable={runtimeAvailable}
-              onValidate={validate}
             />
           ) : null}
           <button
@@ -1110,24 +1120,30 @@ function SettingsHeaderActions({
   savedFlash,
   busy,
   runtimeAvailable,
-  onValidate,
 }: {
   validation: ValidationResult | null;
   dirty: boolean;
   savedFlash: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
-  onValidate: () => void;
 }) {
+  // Only surface blocking validation errors here. Incomplete-setup messages
+  // (e.g. no repo configured yet) are shown by the setup checklist, not flagged
+  // red next to Save while the user is still working through setup.
+  const validationError = validation?.workflow_blocking ? validation.workflow_error : null;
+  const status = validationError ?? (savedFlash ? "Saved" : dirty ? "Unsaved changes" : "");
+  const statusClass = validationError
+    ? "save-status invalid"
+    : savedFlash
+      ? "save-status ok"
+      : "save-status";
+
   return (
     <div className="settings-header-actions" aria-label="Settings actions">
       <div className="settings-action-row">
-        <span className={savedFlash ? "save-status ok" : "save-status"} aria-live="polite">
-          {savedFlash ? "Saved" : dirty ? "Unsaved changes" : ""}
+        <span className={statusClass} aria-live="polite">
+          {status}
         </span>
-        <button disabled={busy || !runtimeAvailable} type="button" onClick={onValidate}>
-          Validate
-        </button>
         <button
           disabled={busy || !runtimeAvailable || !dirty}
           className="primary"
@@ -1137,16 +1153,6 @@ function SettingsHeaderActions({
           Save
         </button>
       </div>
-      {validation && (validation.workflow_ok || validation.workflow_error) ? (
-        <span
-          className={validation.workflow_ok ? "validation-status ok" : "validation-status invalid"}
-          role="status"
-          aria-live="polite"
-        >
-          {validation.workflow_ok ? <strong>Settings valid</strong> : null}
-          {validation.workflow_error ? <span>{validation.workflow_error}</span> : null}
-        </span>
-      ) : null}
     </div>
   );
 }

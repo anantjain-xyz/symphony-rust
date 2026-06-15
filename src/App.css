@@ -1249,6 +1249,14 @@ pre {
   font-weight: 500;
 }
 
+.save-status.invalid {
+  color: var(--destructive-foreground);
+  font-weight: 500;
+  max-width: min(320px, 35vw);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .settings-header-actions {
   align-items: flex-end;
   display: flex;
@@ -1265,36 +1273,6 @@ pre {
   gap: 10px;
   justify-content: flex-end;
   min-width: 0;
-}
-
-.validation-status {
-  display: flex;
-  font-size: 12px;
-  gap: 6px;
-  justify-content: flex-end;
-  line-height: 1.4;
-  max-width: min(460px, 45vw);
-  min-width: 0;
-  text-align: right;
-}
-
-.validation-status.ok {
-  color: var(--success-foreground);
-}
-
-.validation-status.invalid {
-  color: var(--destructive-foreground);
-}
-
-.validation-status strong {
-  flex: 0 0 auto;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.validation-status span {
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 .settings-footer {
@@ -1680,8 +1658,7 @@ textarea.mono-input {
     justify-content: flex-start;
   }
 
-  .validation-status {
-    justify-content: flex-start;
+  .save-status.invalid {
     max-width: 100%;
     text-align: left;
   }
