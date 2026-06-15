@@ -376,7 +376,8 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByText("Not installed — 1 of 7 skills missing.")).toBeTruthy();
+    expect(await screen.findByText("Not installed")).toBeTruthy();
+    expect(screen.getByText("1 of 7 bundled skills are missing.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
 
