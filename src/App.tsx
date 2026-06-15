@@ -890,33 +890,16 @@ function App() {
   }
 
   // `blocked` covers the hard requirements without which runs cannot work;
-  // it gates the worker-start affordances and matches the boot auto-start
-  // condition. Skills are recommended only: when we positively know they are
-  // not installed they keep the checklist visible (`needed`) but never block
-  // the worker — and unknown/unavailable must not nag users we can't check.
+  // it gates the worker-start affordances, overview onboarding, and matches
+  // the boot auto-start condition. Skills are recommended only and live in
+  // Settings, so they must not keep the overview onboarding visible.
   const setupBlocked =
     settings !== null &&
     (!settings.linear_api_key_set || !anyRepoConfigured(settings));
-  // Worst skills state across the configured repos: one repo missing skills
-  // keeps the checklist visible, and the step counts as done only when every
-  // repo reports installed. Unknown/unavailable repos stay neutral.
-  const skillsAggregate = (() => {
-    if (settings === null) return null;
-    const states = configuredRepoUrls(settings).map((url) => skillsStatuses[url]?.state);
-    if (states.some((state) => state === "missing")) return "missing" as const;
-    if (states.some((state) => state === "pr_open")) return "pr_open" as const;
-    if (states.length > 0 && states.every((state) => state === "installed")) {
-      return "installed" as const;
-    }
-    return null;
-  })();
   const setup = {
     blocked: setupBlocked,
-    needed:
-      setupBlocked || skillsAggregate === "missing" || skillsAggregate === "pr_open",
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: settings !== null && anyRepoConfigured(settings),
-    skillsState: skillsAggregate,
   };
 
   const dirty =
@@ -1159,10 +1142,8 @@ function SettingsHeaderActions({
 
 type SetupState = {
   blocked: boolean;
-  needed: boolean;
   linearConnected: boolean;
   repoConfigured: boolean;
-  skillsState: "installed" | "pr_open" | "missing" | null;
 };
 
 function OverviewView({
@@ -1217,7 +1198,7 @@ function OverviewView({
         </div>
       </header>
 
-      {setup.needed ? (
+      {setup.blocked ? (
         <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
       ) : null}
 
@@ -1399,9 +1380,9 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          {setup.blocked
-            ? "Symphony watches your Linear project and dispatches Codex or Claude agents to work on issues in isolated workspaces. Finish setup to start the worker."
-            : "Symphony is ready to run. One recommended step remains: install the agent skills so dispatched agents follow proven procedures in your repo."}
+          Symphony watches your Linear project and dispatches Codex or Claude
+          agents to work on issues in isolated workspaces. Finish the first two
+          setup steps to start the worker.
         </p>
       </div>
       <ol className="setup-steps">
@@ -1416,22 +1397,6 @@ function SetupChecklist({
           step={2}
           title="Add your repositories"
           text="Each run clones the repo its issue routes to into a fresh workspace."
-        />
-        <SetupStep
-          done={setup.skillsState === "installed"}
-          step={3}
-          title="Install agent skills"
-          text={
-            setup.skillsState === "pr_open"
-              ? "An install PR is open — merge it to finish this step."
-              : "Open a PR that adds Symphony's agent skills (symphony-workpad, symphony-commit, symphony-push, …) to each repo. Recommended — agents fall back to plain git and gh without them."
-          }
-        />
-        <SetupStep
-          done={false}
-          step={4}
-          title="Start the worker"
-          text="Symphony polls Linear and dispatches an agent for each issue in an active state."
         />
       </ol>
       <div className="setup-actions">
