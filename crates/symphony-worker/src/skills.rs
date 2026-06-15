@@ -415,6 +415,9 @@ async fn run_install(
     inner: &Arc<Mutex<Option<SkillsInstallStatus>>>,
     config: SkillsInstallConfig,
 ) -> Result<String, String> {
+    set_message(inner, "Resolving default branch…").await;
+    let default_branch = resolve_default_branch(&config.repo_url).await?;
+
     let workspace = config.workspace_root.join(INSTALL_WORKSPACE_KEY);
     tokio::fs::remove_dir_all(&workspace).await.ok();
     tokio::fs::create_dir_all(&workspace)
@@ -424,7 +427,7 @@ async fn run_install(
     set_message(inner, "Cloning repository…").await;
     let clone = run_shell(
         Some(&workspace),
-        &format!("git clone --depth 1 {} .", shell_quote(&config.repo_url)),
+        &clone_default_branch_command(&config.repo_url, &default_branch),
     )
     .await
     .map_err(|err| format!("could not run git: {err}"))?;
@@ -441,7 +444,7 @@ async fn run_install(
         .map_err(|err| format!("could not write skill files: {err}"))?;
 
     set_message(inner, "Agent is adapting the skills and opening a PR…").await;
-    let request = install_run_request(&config, &workspace);
+    let request = install_run_request(&config, &workspace, &default_branch);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let driver = NativeAgentDriver;
@@ -476,6 +479,45 @@ async fn run_install(
             .error_message
             .unwrap_or_else(|| "agent reported failure".to_string())),
     }
+}
+
+async fn resolve_default_branch(repo_url: &str) -> Result<String, String> {
+    let output = run_shell(
+        None,
+        &format!("git ls-remote --symref {} HEAD", shell_quote(repo_url)),
+    )
+    .await
+    .map_err(|err| format!("could not run git: {err}"))?;
+    if !output.status.success() {
+        if output.status.code() == Some(127) {
+            return Err("Git not found. Install it to enable skills installation.".to_string());
+        }
+        return Err(format!(
+            "could not determine the default branch: {}",
+            tail(&String::from_utf8_lossy(&output.stderr), 300)
+        ));
+    }
+    default_branch_from_ls_remote(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        "could not determine the default branch: remote HEAD is not a branch".to_string()
+    })
+}
+
+fn default_branch_from_ls_remote(raw: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let line = line.trim_end_matches('\r');
+        let branch = line
+            .strip_prefix("ref: refs/heads/")?
+            .strip_suffix("\tHEAD")?;
+        (!branch.is_empty()).then(|| branch.to_string())
+    })
+}
+
+fn clone_default_branch_command(repo_url: &str, default_branch: &str) -> String {
+    format!(
+        "git clone --depth 1 --branch {} --single-branch -- {} .",
+        shell_quote(default_branch),
+        shell_quote(repo_url)
+    )
 }
 
 /// Tools the Claude install session needs regardless of how the user
@@ -513,7 +555,11 @@ const INSTALL_ALLOWED_TOOLS: &[&str] = &[
 /// no-network) or restrictive Claude permission modes and tool lists are
 /// valid for issue runs but would guarantee this run fails. The user's
 /// allowed tools are merged in on top, never subtracted from.
-fn install_run_request(config: &SkillsInstallConfig, workspace: &Path) -> AgentRunRequest {
+fn install_run_request(
+    config: &SkillsInstallConfig,
+    workspace: &Path,
+    default_branch: &str,
+) -> AgentRunRequest {
     let front = &config.workflow.front_matter;
     let backend = front.agent.backend.clone();
     let mut allowed_tools: Vec<String> = INSTALL_ALLOWED_TOOLS
@@ -532,7 +578,7 @@ fn install_run_request(config: &SkillsInstallConfig, workspace: &Path) -> AgentR
             AgentBackend::Claude => front.claude.command.clone(),
         },
         cwd: workspace.to_path_buf(),
-        prompt: install_prompt(&config.repo_url, &config.skills),
+        prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
         thread_sandbox: ThreadSandbox::WorkspaceWrite,
         turn_sandbox_policy: TurnSandboxPolicy::WorkspaceWrite,
         network_access: true,
@@ -638,7 +684,7 @@ async fn find_pr_url(workspace: &Path) -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
-fn install_prompt(repo_url: &str, skills: &[SkillFile]) -> String {
+fn install_prompt(repo_url: &str, default_branch: &str, skills: &[SkillFile]) -> String {
     let names = skills
         .iter()
         .map(|skill| skill.name.as_str())
@@ -647,13 +693,13 @@ fn install_prompt(repo_url: &str, skills: &[SkillFile]) -> String {
     format!(
         r#"You are bootstrapping Symphony's agent skills in this repository so Symphony-dispatched agents can use them.
 
-This workspace is a fresh clone of {repo_url}. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`, with `{claude_dir}/<name>` symlinks for Claude Code auto-discovery: {names}.
+This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`, with `{claude_dir}/<name>` symlinks for Claude Code auto-discovery: {names}.
 
 Do the following, in order:
 
 1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
-2. Create a branch named `{branch}`, stage only the new skill files and symlinks, and commit with the message "Add Symphony agent skills".
-3. Push the branch to origin and open a pull request titled "Install Symphony agent skills". In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
+2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and symlinks, and commit with the message "Add Symphony agent skills".
+3. Push the branch to origin and open a pull request titled "Install Symphony agent skills" targeting `{default_branch}`. In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
 Rules:
 - Only add files under `{skills_dir}/` and `{claude_dir}/`; do not modify any other files.
@@ -661,6 +707,7 @@ Rules:
 - This is unattended: do not ask a human anything.
 - End your final message with the PR URL on its own line."#,
         repo_url = repo_url,
+        default_branch = default_branch,
         skills_dir = SKILLS_DIR,
         claude_dir = CLAUDE_SKILLS_DIR,
         names = names,
@@ -796,11 +843,43 @@ mod tests {
                 content: "---\nname: symphony-push\n---".to_string(),
             },
         ];
-        let prompt = install_prompt("git@github.com:acme/widgets.git", &skills);
+        let prompt = install_prompt("git@github.com:acme/widgets.git", "develop", &skills);
         assert!(prompt.contains("symphony-workpad, symphony-push"));
         assert!(prompt.contains(INSTALL_BRANCH));
+        assert!(prompt.contains("default branch, `develop`"));
+        assert!(prompt.contains("targeting `develop`"));
         assert!(prompt.contains(SKILLS_DIR));
         assert!(prompt.contains("never use --no-verify"));
+    }
+
+    #[test]
+    fn parses_default_branch_from_ls_remote_symref() {
+        let raw = "ref: refs/heads/release/2026.06\tHEAD\nabc123\tHEAD\n";
+        assert_eq!(
+            default_branch_from_ls_remote(raw).as_deref(),
+            Some("release/2026.06")
+        );
+    }
+
+    #[test]
+    fn rejects_ls_remote_without_branch_symref() {
+        assert_eq!(default_branch_from_ls_remote("abc123\tHEAD\n"), None);
+        assert_eq!(
+            default_branch_from_ls_remote("ref: refs/tags/v1\tHEAD\n"),
+            None
+        );
+        assert_eq!(
+            default_branch_from_ls_remote("ref: refs/heads/\tHEAD\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn clone_command_pins_resolved_default_branch() {
+        assert_eq!(
+            clone_default_branch_command("git@github.com:acme/widgets.git", "release/2026.06"),
+            "git clone --depth 1 --branch 'release/2026.06' --single-branch -- 'git@github.com:acme/widgets.git' ."
+        );
     }
 
     #[tokio::test]
@@ -859,7 +938,7 @@ mod tests {
             skills: Vec::new(),
         };
 
-        let request = install_run_request(&config, Path::new("/tmp/ws"));
+        let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
 
         assert_eq!(request.thread_sandbox, ThreadSandbox::WorkspaceWrite);
         assert_eq!(
@@ -881,6 +960,7 @@ mod tests {
             .allowed_tools
             .iter()
             .any(|t| t == "Bash(npm *)"));
+        assert!(request.prompt.contains("targeting `master`"));
     }
 
     #[tokio::test]
