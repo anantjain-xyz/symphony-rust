@@ -25,12 +25,13 @@ use tracing::{error, info};
 
 /// Canonical, runner-agnostic skill location in the target repo.
 pub const SKILLS_DIR: &str = ".agents/skills";
-/// Claude Code auto-discovery location; entries are symlinks into SKILLS_DIR.
+/// Claude Code auto-discovery location.
 pub const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 /// Branch the bootstrap session pushes; detection also looks for an open PR
 /// from this branch so the UI can show "install in review".
 pub const INSTALL_BRANCH: &str = "symphony/install-skills";
 
+const CLAUDE_DIR: &str = ".claude";
 const INSTALL_WORKSPACE_KEY: &str = "_skills-install";
 
 #[derive(Debug, Error)]
@@ -633,19 +634,56 @@ async fn ensure_real_dir_all(workspace: &Path, relative: &Path) -> std::io::Resu
 }
 
 async fn write_skills(workspace: &Path, skills: &[SkillFile]) -> std::io::Result<()> {
-    // The clone is untrusted input: any level of either skills path could be
-    // a symlink pointing outside the workspace, so each is normalized to a
-    // real directory before anything is written.
+    // The clone is untrusted input: any level of the canonical skills path
+    // could be a symlink pointing outside the workspace, so each is normalized
+    // to a real directory before anything is written.
     ensure_real_dir_all(workspace, Path::new(SKILLS_DIR)).await?;
-    ensure_real_dir_all(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
     for skill in skills {
         let dir = workspace.join(SKILLS_DIR).join(&skill.name);
         ensure_real_dir(&dir).await?;
         let manifest = dir.join("SKILL.md");
         remove_existing(&manifest).await?;
         tokio::fs::write(&manifest, &skill.content).await?;
+    }
 
-        let link = workspace.join(CLAUDE_SKILLS_DIR).join(&skill.name);
+    write_claude_discovery(workspace, skills).await
+}
+
+async fn write_claude_discovery(workspace: &Path, skills: &[SkillFile]) -> std::io::Result<()> {
+    // Keep `.claude` itself real so a top-level discovery link cannot be
+    // created through a repo-controlled parent symlink.
+    ensure_real_dir_all(workspace, Path::new(CLAUDE_DIR)).await?;
+    let discovery = workspace.join(CLAUDE_SKILLS_DIR);
+    match tokio::fs::symlink_metadata(&discovery).await {
+        Ok(meta) if meta.is_dir() => write_per_skill_claude_entries(&discovery, skills).await,
+        Ok(meta) if meta.file_type().is_symlink() => {
+            #[cfg(unix)]
+            {
+                let target = tokio::fs::read_link(&discovery).await?;
+                if is_expected_claude_skills_link(&target, workspace) {
+                    return Ok(());
+                }
+            }
+            remove_existing(&discovery).await?;
+            create_claude_skills_discovery(&discovery, skills).await
+        }
+        Ok(_) => {
+            remove_existing(&discovery).await?;
+            create_claude_skills_discovery(&discovery, skills).await
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            create_claude_skills_discovery(&discovery, skills).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn write_per_skill_claude_entries(
+    discovery: &Path,
+    skills: &[SkillFile],
+) -> std::io::Result<()> {
+    for skill in skills {
+        let link = discovery.join(&skill.name);
         // Replace whatever the repo previously tracked at the discovery path.
         // Keeping a stale entry would leave Claude Code pointing at the old
         // target even after the install PR merges.
@@ -664,6 +702,33 @@ async fn write_skills(workspace: &Path, skills: &[SkillFile]) -> std::io::Result
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+async fn create_claude_skills_discovery(
+    discovery: &Path,
+    _skills: &[SkillFile],
+) -> std::io::Result<()> {
+    tokio::fs::symlink(claude_skills_symlink_target(), discovery).await
+}
+
+#[cfg(not(unix))]
+async fn create_claude_skills_discovery(
+    discovery: &Path,
+    skills: &[SkillFile],
+) -> std::io::Result<()> {
+    tokio::fs::create_dir(discovery).await?;
+    write_per_skill_claude_entries(discovery, skills).await
+}
+
+#[cfg(unix)]
+fn claude_skills_symlink_target() -> PathBuf {
+    PathBuf::from("..").join(SKILLS_DIR)
+}
+
+#[cfg(unix)]
+fn is_expected_claude_skills_link(target: &Path, workspace: &Path) -> bool {
+    target == claude_skills_symlink_target() || target == workspace.join(SKILLS_DIR)
 }
 
 /// Best-effort PR URL lookup for the branch the agent pushed.
@@ -693,16 +758,16 @@ fn install_prompt(repo_url: &str, default_branch: &str, skills: &[SkillFile]) ->
     format!(
         r#"You are bootstrapping Symphony's agent skills in this repository so Symphony-dispatched agents can use them.
 
-This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`, with `{claude_dir}/<name>` symlinks for Claude Code auto-discovery: {names}.
+This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it.
 
 Do the following, in order:
 
 1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
-2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and symlinks, and commit with the message "Add Symphony agent skills".
+2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude discovery link or entries, and commit with the message "Add Symphony agent skills".
 3. Push the branch to origin and open a pull request titled "Install Symphony agent skills" targeting `{default_branch}`. In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
 Rules:
-- Only add files under `{skills_dir}/` and `{claude_dir}/`; do not modify any other files.
+- Only add files under `{skills_dir}/` and the Claude discovery link or entries at `{claude_dir}`; do not modify any other files.
 - Never force-push, never use --no-verify, never rewrite history.
 - This is unattended: do not ask a human anything.
 - End your final message with the PR URL on its own line."#,
@@ -849,6 +914,9 @@ mod tests {
         assert!(prompt.contains("default branch, `develop`"));
         assert!(prompt.contains("targeting `develop`"));
         assert!(prompt.contains(SKILLS_DIR));
+        assert!(prompt.contains(CLAUDE_SKILLS_DIR));
+        assert!(prompt.contains("fresh installs link that path"));
+        assert!(prompt.contains("per-skill compatibility entries"));
         assert!(prompt.contains("never use --no-verify"));
     }
 
@@ -883,7 +951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writes_skill_files_and_symlinks() {
+    async fn writes_skill_files_and_top_level_claude_discovery_link() {
         let temp = tempfile::tempdir().unwrap();
         let skills = vec![SkillFile {
             name: "commit".to_string(),
@@ -893,16 +961,22 @@ mod tests {
 
         let canonical = temp.path().join(".agents/skills/commit/SKILL.md");
         assert_eq!(std::fs::read_to_string(&canonical).unwrap(), "body");
-        let link = temp.path().join(".claude/skills/commit");
+        let discovery = temp.path().join(CLAUDE_SKILLS_DIR);
         assert_eq!(
-            std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
+            std::fs::read_to_string(discovery.join("commit/SKILL.md")).unwrap(),
             "body"
         );
         #[cfg(unix)]
-        assert!(std::fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        {
+            assert!(std::fs::symlink_metadata(&discovery)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                std::fs::read_link(&discovery).unwrap(),
+                claude_skills_symlink_target()
+            );
+        }
     }
 
     #[test]
@@ -971,6 +1045,9 @@ mod tests {
         let stale = temp.path().join(".claude/skills/commit");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("SKILL.md"), "stale").unwrap();
+        let custom = temp.path().join(".claude/skills/local");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("SKILL.md"), "custom").unwrap();
 
         let skills = vec![SkillFile {
             name: "commit".to_string(),
@@ -978,16 +1055,52 @@ mod tests {
         }];
         write_skills(temp.path(), &skills).await.unwrap();
 
+        let discovery = temp.path().join(CLAUDE_SKILLS_DIR);
+        assert!(!std::fs::symlink_metadata(&discovery)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let link = temp.path().join(".claude/skills/commit");
         assert_eq!(
             std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
             "fresh"
+        );
+        assert_eq!(
+            std::fs::read_to_string(custom.join("SKILL.md")).unwrap(),
+            "custom"
         );
         #[cfg(unix)]
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaces_unexpected_claude_skills_symlink() {
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(CLAUDE_DIR)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join(CLAUDE_SKILLS_DIR))
+            .unwrap();
+
+        let skills = vec![SkillFile {
+            name: "commit".to_string(),
+            content: "fresh".to_string(),
+        }];
+        write_skills(workspace.path(), &skills).await.unwrap();
+
+        let discovery = workspace.path().join(CLAUDE_SKILLS_DIR);
+        assert_eq!(
+            std::fs::read_link(&discovery).unwrap(),
+            claude_skills_symlink_target()
+        );
+        assert_eq!(
+            std::fs::read_to_string(discovery.join("commit/SKILL.md")).unwrap(),
+            "fresh"
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]
