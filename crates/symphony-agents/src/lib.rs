@@ -881,16 +881,21 @@ async fn run_cursor(
             }
             let value: Value = serde_json::from_str(&line)?;
             if let Some(done) = stream.push(value, &events).await? {
+                // The `result` record is terminal, but cursor-agent can keep
+                // the process alive afterwards waiting on a command-based MCP
+                // subprocess. Stop reading here instead of blocking on EOF /
+                // exit, which would otherwise strand the run until the turn
+                // timeout and mark a completed run as a timeout.
                 result = Some(done);
+                break;
             }
         }
-        let status = child.wait().await?;
-        Ok::<_, AgentError>((status, result))
+        Ok::<_, AgentError>(result)
     };
 
     let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
     tokio::pin!(timeout);
-    let (status, parsed_result) = tokio::select! {
+    let parsed_result = tokio::select! {
         outcome = run => outcome?,
         _ = &mut timeout => {
             kill_pid(pid).await;
@@ -909,7 +914,15 @@ async fn run_cursor(
     };
 
     let sid = stream.session_id.clone();
-    Ok(parsed_result.unwrap_or_else(|| AgentRunResult {
+    if let Some(done) = parsed_result {
+        // Terminate any process still lingering on an MCP subprocess.
+        kill_pid(pid).await;
+        return Ok(done);
+    }
+
+    // Stdout closed without a `result` record: fall back to the exit status.
+    let status = child.wait().await?;
+    Ok(AgentRunResult {
         thread_id: sid.clone(),
         turn_id: sid,
         outcome: if status.success() {
@@ -919,7 +932,7 @@ async fn run_cursor(
         },
         error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
         error_message: (!status.success()).then(|| format!("cursor exit {status}")),
-    }))
+    })
 }
 
 struct CursorStreamState {

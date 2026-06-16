@@ -606,10 +606,13 @@ fn install_run_request(
             force: true,
             trust: true,
             approve_mcps: false,
-            sandbox: CursorSandboxMode::Enabled,
+            // Disable the sandbox: the bootstrap run must reach the remote to
+            // push a branch and open the install PR (including GHE remotes),
+            // and Cursor's sandbox filters network access. Pinning it open
+            // keeps installs working regardless of the user's run config.
+            sandbox: CursorSandboxMode::Disabled,
             // Honor the user's configured model so installs behave like
-            // ordinary Cursor runs; the rest of the options stay fixed-
-            // permissive so the bootstrap PR flow cannot be locked out.
+            // ordinary Cursor runs.
             model: front.cursor.model.clone(),
         },
         env: config
@@ -1063,6 +1066,8 @@ mod tests {
             .any(|t| t == "Bash(npm *)"));
         // The configured Cursor model rides along so installs match issue runs.
         assert_eq!(request.cursor.model.as_deref(), Some("sonnet-4-thinking"));
+        // The Cursor sandbox is pinned open so the install can reach the remote.
+        assert_eq!(request.cursor.sandbox, CursorSandboxMode::Disabled);
         assert!(request.prompt.contains("targeting `master`"));
     }
 
