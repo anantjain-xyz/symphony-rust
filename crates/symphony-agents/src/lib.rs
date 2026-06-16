@@ -860,10 +860,15 @@ async fn run_cursor(
             args.push(model.to_string());
         }
     }
-    args.push(request.prompt);
 
+    // Stream the prompt over stdin (cursor-agent reads it in print mode) rather
+    // than as an argv entry: large issue prompts can exceed the OS command-line
+    // limit, and argv is visible to other processes while the agent runs.
     let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
     let pid = child.id();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(request.prompt.as_bytes()).await?;
+    }
     let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
     let mut lines = BufReader::new(stdout).lines();
     let mut stream = CursorStreamState::new(session_id.clone());
@@ -1021,9 +1026,10 @@ impl CursorStreamState {
             }
             "result" => {
                 self.completed = true;
+                // cursor-agent reports usage with camelCase keys.
                 let usage = &ev["usage"];
-                let input = usage["input_tokens"].as_i64().unwrap_or(0);
-                let output = usage["output_tokens"].as_i64().unwrap_or(0);
+                let input = usage["inputTokens"].as_i64().unwrap_or(0);
+                let output = usage["outputTokens"].as_i64().unwrap_or(0);
                 if input > 0 || output > 0 {
                     send_token_count(
                         events,
@@ -1823,7 +1829,7 @@ mod tests {
                     "subtype": "success",
                     "is_error": false,
                     "result": "All done",
-                    "usage": { "input_tokens": 120, "output_tokens": 45 }
+                    "usage": { "inputTokens": 120, "outputTokens": 45 }
                 }),
                 &tx,
             )

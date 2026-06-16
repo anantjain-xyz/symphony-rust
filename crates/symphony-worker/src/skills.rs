@@ -607,7 +607,10 @@ fn install_run_request(
             trust: true,
             approve_mcps: false,
             sandbox: CursorSandboxMode::Enabled,
-            model: None,
+            // Honor the user's configured model so installs behave like
+            // ordinary Cursor runs; the rest of the options stay fixed-
+            // permissive so the bootstrap PR flow cannot be locked out.
+            model: front.cursor.model.clone(),
         },
         env: config
             .session_env
@@ -1020,6 +1023,10 @@ mod tests {
                     disallowed_tools: vec!["Bash(git push*)".to_string()],
                     ..Default::default()
                 },
+                cursor: symphony_core::CursorConfig {
+                    model: Some("sonnet-4-thinking".to_string()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             "body".to_string(),
@@ -1054,6 +1061,8 @@ mod tests {
             .allowed_tools
             .iter()
             .any(|t| t == "Bash(npm *)"));
+        // The configured Cursor model rides along so installs match issue runs.
+        assert_eq!(request.cursor.model.as_deref(), Some("sonnet-4-thinking"));
         assert!(request.prompt.contains("targeting `master`"));
     }
 
