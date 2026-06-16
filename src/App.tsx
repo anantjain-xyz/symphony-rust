@@ -129,6 +129,13 @@ const previewSettings: AppSettings = {
   claude_allowed_tools: ["Bash(gh *)", "Bash(git status*)", "Bash(curl *)"],
   claude_disallowed_tools: [],
   claude_add_dirs: [],
+  cursor_command: null,
+  cursor_mode: "agent",
+  cursor_force: true,
+  cursor_trust: true,
+  cursor_approve_mcps: false,
+  cursor_sandbox: "enabled",
+  cursor_model: null,
   linear_api_key_set: true,
 };
 
@@ -1402,7 +1409,7 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          Symphony watches your Linear project and dispatches Codex or Claude
+          Symphony watches your Linear project and dispatches Codex, Claude Code, or Cursor
           agents to work on issues in isolated workspaces. Finish the first two
           setup steps to start the worker.
         </p>
@@ -2238,21 +2245,27 @@ function SettingsView({
             Launch command
             <input
               value={
-                (settings.agent_backend === "codex"
-                  ? settings.codex_command
-                  : settings.claude_command) ?? ""
+                settings.agent_backend === "codex"
+                  ? (settings.codex_command ?? "")
+                  : settings.agent_backend === "claude"
+                    ? (settings.claude_command ?? "")
+                    : (settings.cursor_command ?? "")
               }
               disabled={!runtimeAvailable}
               autoComplete="off"
               onChange={(e) => {
                 const value = nullable(e.currentTarget.value);
-                setSettings(
-                  settings.agent_backend === "codex"
-                    ? { ...settings, codex_command: value }
-                    : { ...settings, claude_command: value },
-                );
+                if (settings.agent_backend === "codex") {
+                  setSettings({ ...settings, codex_command: value });
+                } else if (settings.agent_backend === "claude") {
+                  setSettings({ ...settings, claude_command: value });
+                } else {
+                  setSettings({ ...settings, cursor_command: value });
+                }
               }}
-              placeholder={settings.agent_backend}
+              placeholder={
+                settings.agent_backend === "cursor" ? "agent" : settings.agent_backend
+              }
             />
             <small className="hint">
               Optional. How the agent is launched — e.g. a wrapper like{" "}
@@ -2274,6 +2287,12 @@ function SettingsView({
               {validation.claude_command === "claude" ? "" : ` (${validation.claude_command})`}:{" "}
               <span className={validation.claude_found ? "detect ok" : "detect missing"}>
                 {validation.claude_found ? "found" : "not found"}
+              </span>
+              {" · "}
+              Cursor CLI
+              {validation.cursor_command === "agent" ? "" : ` (${validation.cursor_command})`}:{" "}
+              <span className={validation.cursor_found ? "detect ok" : "detect missing"}>
+                {validation.cursor_found ? "found" : "not found"}
               </span>
             </small>
           ) : null}
@@ -2303,8 +2322,8 @@ function SettingsView({
               onChange={(next) => setSettings({ ...settings, session_env: next })}
             />
             <small className="hint">
-              Optional. One <code>KEY=value</code> per line, injected into the Codex or
-              Claude process. Values are saved in settings.
+              Optional. One <code>KEY=value</code> per line, injected into the agent process
+              (e.g. <code>CURSOR_API_KEY</code> for Cursor). Values are saved in settings.
             </small>
           </label>
           {settings.agent_backend === "codex" ? (
@@ -2383,7 +2402,7 @@ function SettingsView({
                 </small>
               </label>
             </>
-          ) : (
+          ) : settings.agent_backend === "claude" ? (
             <>
               <label>
                 Permission mode
@@ -2447,6 +2466,103 @@ function SettingsView({
                 <small className="hint">
                   One path per line, made available to the agent beyond the workspace.
                 </small>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Mode
+                <select
+                  value={settings.cursor_mode}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      cursor_mode: e.currentTarget.value as AppSettings["cursor_mode"],
+                    })
+                  }
+                >
+                  <option value="agent">Agent</option>
+                  <option value="plan">Plan (read-only design)</option>
+                  <option value="ask">Ask (read-only exploration)</option>
+                </select>
+                <small className="hint">
+                  Agent mode can edit files. Plan and Ask are read-only — use Agent for issue runs.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.cursor_force}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, cursor_force: e.currentTarget.checked })
+                  }
+                />
+                Force auto-approve
+                <small className="hint">
+                  Maps to <code>--force</code>. Required for unattended runs.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.cursor_trust}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, cursor_trust: e.currentTarget.checked })
+                  }
+                />
+                Trust workspace
+                <small className="hint">
+                  Maps to <code>--trust</code>. Skips workspace trust prompts in headless mode.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.cursor_approve_mcps}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, cursor_approve_mcps: e.currentTarget.checked })
+                  }
+                />
+                Approve MCPs
+                <small className="hint">
+                  Maps to <code>--approve-mcps</code>. Auto-approves MCP servers for this run.
+                </small>
+              </label>
+              <label>
+                Sandbox
+                <select
+                  value={settings.cursor_sandbox}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      cursor_sandbox: e.currentTarget.value as AppSettings["cursor_sandbox"],
+                    })
+                  }
+                >
+                  <option value="enabled">Enabled</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </label>
+              <label>
+                Model
+                <input
+                  value={settings.cursor_model ?? ""}
+                  disabled={!runtimeAvailable}
+                  autoComplete="off"
+                  placeholder="Optional, e.g. composer-2.5"
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      cursor_model: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">Leave blank for the CLI default.</small>
               </label>
             </>
           )}
@@ -2768,6 +2884,7 @@ function EnvInput({
 const BACKEND_OPTIONS: Array<{ value: AppSettings["agent_backend"]; label: string }> = [
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude Code" },
+  { value: "cursor", label: "Cursor" },
 ];
 
 function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
@@ -2777,6 +2894,36 @@ function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
         <path
           fill="#D97757"
           d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.583.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.473.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"
+        />
+      </svg>
+    );
+  }
+  if (backend === "cursor") {
+    return (
+      <svg className="backend-icon" viewBox="600 300 400 400" aria-hidden="true">
+        <path
+          fill="#F7F7F4"
+          d="M999.994 554.294C999.994 559.859 999.994 565.419 999.962 570.984C999.935 575.67 999.882 580.357 999.753 585.038C999.475 595.247 998.875 605.542 997.059 615.639C995.217 625.88 992.212 635.409 987.477 644.718C982.822 653.861 976.738 662.233 969.485 669.491C962.227 676.748 953.861 682.828 944.712 687.482C935.409 692.217 925.875 695.222 915.633 697.065C905.537 698.88 895.242 699.48 885.033 699.759C880.346 699.887 875.665 699.941 870.978 699.968C865.413 700.005 859.853 700 854.288 700H745.695C740.13 700 734.571 700 729.005 699.968C724.319 699.941 719.632 699.887 714.951 699.759C704.742 699.48 694.447 698.88 684.35 697.065C674.109 695.222 664.58 692.217 655.271 687.482C646.128 682.828 637.756 676.743 630.499 669.491C623.241 662.233 617.161 653.866 612.507 644.718C607.772 635.414 604.767 625.88 602.925 615.639C601.109 605.542 600.509 595.247 600.23 585.038C600.102 580.352 600.048 575.67 600.021 570.984C600 565.419 600 559.859 600 554.294V445.701C600 440.136 600 434.576 600.032 429.011C600.059 424.324 600.112 419.637 600.241 414.956C600.52 404.747 601.119 394.452 602.935 384.356C604.778 374.115 607.783 364.586 612.518 355.277C617.172 346.133 623.257 337.762 630.509 330.504C637.767 323.246 646.133 317.167 655.282 312.512C664.586 307.777 674.12 304.772 684.361 302.93C694.458 301.114 704.752 300.514 714.961 300.236C719.648 300.107 724.329 300.054 729.016 300.027C734.576 300 740.136 300 745.701 300H854.294C859.859 300 865.419 300 870.984 300.032C875.67 300.059 880.357 300.112 885.038 300.241C895.247 300.52 905.542 301.119 915.639 302.935C925.88 304.778 935.409 307.783 944.718 312.518C953.861 317.172 962.233 323.257 969.491 330.509C976.748 337.767 982.828 346.133 987.482 355.282C992.217 364.586 995.222 374.12 997.065 384.361C998.88 394.458 999.48 404.752 999.759 414.961C999.887 419.648 999.941 424.329 999.968 429.016C1000.01 434.581 1000 440.141 1000 445.706V554.299L999.994 554.294Z"
+        />
+        <path
+          fill="#72716D"
+          d="M800.001 500L928.151 573.986C927.364 575.352 926.223 576.515 924.809 577.329L805.025 646.484C801.913 648.279 798.078 648.279 794.966 646.484L675.182 577.329C673.768 576.515 672.627 575.347 671.84 573.986L799.99 500H800.001Z"
+        />
+        <path
+          fill="#55544F"
+          d="M800 352.165V500L671.85 573.987C671.062 572.621 670.623 571.046 670.623 569.418V430.582C670.623 427.314 672.364 424.304 675.192 422.67L794.97 353.515C796.529 352.615 798.264 352.165 800 352.165Z"
+        />
+        <path
+          fill="#43413C"
+          d="M928.15 426.013C927.363 424.647 926.222 423.485 924.808 422.67L805.024 353.515C803.471 352.615 801.735 352.165 800 352.165V500L928.15 573.987C928.938 572.621 929.377 571.046 929.377 569.418V430.582C929.377 428.948 928.943 427.384 928.15 426.013Z"
+        />
+        <path
+          fill="#D6D5D2"
+          d="M919.184 431.192C919.913 432.446 920.009 434.053 919.184 435.483L802.856 636.961C802.074 638.327 799.995 637.765 799.995 636.195V503.428C799.995 502.367 799.711 501.35 799.197 500.455L919.179 431.182H919.184V431.192Z"
+        />
+        <path
+          fill="white"
+          d="M919.184 431.192L799.202 500.466C798.694 499.577 797.949 498.827 797.028 498.291L682.054 431.91C680.688 431.128 681.251 429.05 682.82 429.05H915.467C917.117 429.05 918.461 429.944 919.179 431.198H919.184V431.192Z"
         />
       </svg>
     );

@@ -6,7 +6,9 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
+use symphony_agents::{
+    AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+};
 use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
     MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, RunStatus, TokenCountPayload,
@@ -814,6 +816,7 @@ where
         command: match backend {
             AgentBackend::Codex => config.workflow.front_matter.codex.command.clone(),
             AgentBackend::Claude => config.workflow.front_matter.claude.command.clone(),
+            AgentBackend::Cursor => config.workflow.front_matter.cursor.command.clone(),
         },
         cwd: workspace.path.clone(),
         prompt,
@@ -828,6 +831,7 @@ where
         turn_timeout_ms: match backend {
             AgentBackend::Codex => config.workflow.front_matter.codex.turn_timeout_ms,
             AgentBackend::Claude => config.workflow.front_matter.claude.turn_timeout_ms,
+            AgentBackend::Cursor => config.workflow.front_matter.cursor.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: config.workflow.front_matter.claude.permission_mode.clone(),
@@ -835,6 +839,14 @@ where
             disallowed_tools: config.workflow.front_matter.claude.disallowed_tools.clone(),
             add_dirs: config.workflow.front_matter.claude.add_dirs.clone(),
             session_id: pre_session,
+        },
+        cursor: CursorRunOptions {
+            mode: config.workflow.front_matter.cursor.mode.clone(),
+            force: config.workflow.front_matter.cursor.force,
+            trust: config.workflow.front_matter.cursor.trust,
+            approve_mcps: config.workflow.front_matter.cursor.approve_mcps,
+            sandbox: config.workflow.front_matter.cursor.sandbox.clone(),
+            model: config.workflow.front_matter.cursor.model.clone(),
         },
         env: agent_env(&env, &config.session_env),
     };

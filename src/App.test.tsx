@@ -72,6 +72,13 @@ function testSettings(): AppSettings {
     claude_allowed_tools: [],
     claude_disallowed_tools: [],
     claude_add_dirs: [],
+    cursor_command: null,
+    cursor_mode: "agent",
+    cursor_force: true,
+    cursor_trust: true,
+    cursor_approve_mcps: false,
+    cursor_sandbox: "enabled",
+    cursor_model: null,
     linear_api_key_set: false,
   };
 }
@@ -112,8 +119,10 @@ function settingsInvoke({
           ...validation,
           codex_found: true,
           claude_found: true,
+          cursor_found: true,
           codex_command: "codex",
           claude_command: "claude",
+          cursor_command: "agent",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
@@ -174,8 +183,10 @@ function dashboardInvoke({
           workflow_error: null,
           codex_found: true,
           claude_found: true,
+          cursor_found: true,
           codex_command: "codex",
           claude_command: "claude",
+          cursor_command: "agent",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };

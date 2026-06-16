@@ -10,13 +10,16 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
+use symphony_agents::{
+    AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+};
 use symphony_core::{
-    AgentBackend, AgentOutcome, ClaudePermissionMode, ParsedWorkflow, ThreadSandbox,
-    TurnSandboxPolicy,
+    AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
+    ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex};
@@ -330,6 +333,8 @@ pub struct SkillsInstallConfig {
     /// Parsed workflow supplying the agent backend and its CLI options.
     pub workflow: ParsedWorkflow,
     pub skills: Vec<SkillFile>,
+    /// Custom session env from settings (e.g. `CURSOR_API_KEY`).
+    pub session_env: BTreeMap<String, String>,
 }
 
 /// One-at-a-time background install; status is polled by the UI.
@@ -577,6 +582,7 @@ fn install_run_request(
         command: match backend {
             AgentBackend::Codex => front.codex.command.clone(),
             AgentBackend::Claude => front.claude.command.clone(),
+            AgentBackend::Cursor => front.cursor.command.clone(),
         },
         cwd: workspace.to_path_buf(),
         prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
@@ -586,6 +592,7 @@ fn install_run_request(
         turn_timeout_ms: match backend {
             AgentBackend::Codex => front.codex.turn_timeout_ms,
             AgentBackend::Claude => front.claude.turn_timeout_ms,
+            AgentBackend::Cursor => front.cursor.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: ClaudePermissionMode::Auto,
@@ -594,7 +601,25 @@ fn install_run_request(
             add_dirs: front.claude.add_dirs.clone(),
             session_id: None,
         },
-        env: Vec::new(),
+        cursor: CursorRunOptions {
+            mode: CursorAgentMode::Agent,
+            force: true,
+            trust: true,
+            approve_mcps: false,
+            // Disable the sandbox: the bootstrap run must reach the remote to
+            // push a branch and open the install PR (including GHE remotes),
+            // and Cursor's sandbox filters network access. Pinning it open
+            // keeps installs working regardless of the user's run config.
+            sandbox: CursorSandboxMode::Disabled,
+            // Honor the user's configured model so installs behave like
+            // ordinary Cursor runs.
+            model: front.cursor.model.clone(),
+        },
+        env: config
+            .session_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
     }
 }
 
@@ -758,16 +783,16 @@ fn install_prompt(repo_url: &str, default_branch: &str, skills: &[SkillFile]) ->
     format!(
         r#"You are bootstrapping Symphony's agent skills in this repository so Symphony-dispatched agents can use them.
 
-This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it.
+This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it. Cursor loads skills from `{skills_dir}` automatically and does not need a separate discovery path.
 
 Do the following, in order:
 
 1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
-2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude discovery link or entries, and commit with the message "Add Symphony agent skills".
+2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude discovery links or entries, and commit with the message "Add Symphony agent skills".
 3. Push the branch to origin and open a pull request titled "Install Symphony agent skills" targeting `{default_branch}`. In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
 Rules:
-- Only add files under `{skills_dir}/` and the Claude discovery link or entries at `{claude_dir}`; do not modify any other files.
+- Only add files under `{skills_dir}/` and the Claude discovery links or entries at `{claude_dir}`; do not modify any other files.
 - Never force-push, never use --no-verify, never rewrite history.
 - This is unattended: do not ask a human anything.
 - End your final message with the PR URL on its own line."#,
@@ -1001,6 +1026,10 @@ mod tests {
                     disallowed_tools: vec!["Bash(git push*)".to_string()],
                     ..Default::default()
                 },
+                cursor: symphony_core::CursorConfig {
+                    model: Some("sonnet-4-thinking".to_string()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             "body".to_string(),
@@ -1010,6 +1039,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             workflow,
             skills: Vec::new(),
+            session_env: BTreeMap::new(),
         };
 
         let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
@@ -1034,7 +1064,40 @@ mod tests {
             .allowed_tools
             .iter()
             .any(|t| t == "Bash(npm *)"));
+        // The configured Cursor model rides along so installs match issue runs.
+        assert_eq!(request.cursor.model.as_deref(), Some("sonnet-4-thinking"));
+        // The Cursor sandbox is pinned open so the install can reach the remote.
+        assert_eq!(request.cursor.sandbox, CursorSandboxMode::Disabled);
         assert!(request.prompt.contains("targeting `master`"));
+    }
+
+    #[test]
+    fn install_run_forwards_session_env() {
+        let workflow = symphony_core::build_parsed_workflow(
+            symphony_core::WorkflowFrontMatter {
+                tracker: symphony_core::TrackerConfig {
+                    api_key: "k".to_string(),
+                    active_states: vec!["Todo".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "body".to_string(),
+        );
+        let config = SkillsInstallConfig {
+            repo_url: "git@github.com:acme/widgets.git".to_string(),
+            workspace_root: PathBuf::from("/tmp"),
+            workflow,
+            skills: Vec::new(),
+            session_env: BTreeMap::from([("CURSOR_API_KEY".to_string(), "test-key".to_string())]),
+        };
+
+        let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
+        assert!(request
+            .env
+            .iter()
+            .any(|(key, value)| key == "CURSOR_API_KEY" && value == "test-key"));
     }
 
     #[tokio::test]
@@ -1176,6 +1239,7 @@ mod tests {
                 "body".to_string(),
             ),
             skills: Vec::new(),
+            session_env: BTreeMap::new(),
         };
         assert!(matches!(
             installer.start(config).await,

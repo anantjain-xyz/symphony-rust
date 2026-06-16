@@ -8,6 +8,7 @@ pub enum AgentBackend {
     #[default]
     Codex,
     Claude,
+    Cursor,
 }
 
 impl AgentBackend {
@@ -17,6 +18,7 @@ impl AgentBackend {
         match self {
             AgentBackend::Codex => "codex",
             AgentBackend::Claude => "claude",
+            AgentBackend::Cursor => "cursor",
         }
     }
 }
@@ -336,6 +338,66 @@ fn default_claude_command() -> String {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorAgentMode {
+    #[default]
+    Agent,
+    Plan,
+    Ask,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorSandboxMode {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+pub struct CursorConfig {
+    #[serde(default = "default_cursor_command")]
+    pub command: String,
+    #[serde(default)]
+    pub mode: CursorAgentMode,
+    #[serde(default = "default_true")]
+    pub force: bool,
+    #[serde(default = "default_true")]
+    pub trust: bool,
+    #[serde(default)]
+    pub approve_mcps: bool,
+    #[serde(default)]
+    pub sandbox: CursorSandboxMode,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_turn_timeout_ms")]
+    pub turn_timeout_ms: u64,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            command: default_cursor_command(),
+            mode: CursorAgentMode::Agent,
+            force: true,
+            trust: true,
+            approve_mcps: false,
+            sandbox: CursorSandboxMode::Enabled,
+            model: None,
+            turn_timeout_ms: default_turn_timeout_ms(),
+        }
+    }
+}
+
+fn default_cursor_command() -> String {
+    "agent".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct WorkflowFrontMatter {
     pub tracker: TrackerConfig,
     #[serde(default)]
@@ -350,6 +412,8 @@ pub struct WorkflowFrontMatter {
     pub codex: CodexConfig,
     #[serde(default)]
     pub claude: ClaudeConfig,
+    #[serde(default)]
+    pub cursor: CursorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
