@@ -1,6 +1,6 @@
 // Initial bindings. In dev builds, src-tauri rewrites this file from Rust Specta types.
 
-export type AgentBackend = "codex" | "claude";
+export type AgentBackend = "codex" | "claude" | "cursor";
 
 export type ApprovalPolicy = "never" | "on-request" | "on-failure" | "always";
 
@@ -19,6 +19,10 @@ export type ClaudePermissionMode =
   | "bypassPermissions"
   | "dontAsk"
   | "plan";
+
+export type CursorAgentMode = "agent" | "plan" | "ask";
+
+export type CursorSandboxMode = "enabled" | "disabled";
 
 export type RepoConfig = {
   name: string;
@@ -59,6 +63,13 @@ export type AppSettings = {
   claude_allowed_tools: string[];
   claude_disallowed_tools: string[];
   claude_add_dirs: string[];
+  cursor_command: string | null;
+  cursor_mode: CursorAgentMode;
+  cursor_force: boolean;
+  cursor_trust: boolean;
+  cursor_approve_mcps: boolean;
+  cursor_sandbox: CursorSandboxMode;
+  cursor_model: string | null;
   linear_api_key_set: boolean;
 };
 
@@ -79,8 +90,10 @@ export type ValidationResult = {
   workflow_error: string | null;
   codex_found: boolean;
   claude_found: boolean;
+  cursor_found: boolean;
   codex_command: string;
   claude_command: string;
+  cursor_command: string;
   app_data_dir: string;
   database_path: string;
 };

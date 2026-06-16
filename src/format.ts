@@ -29,6 +29,7 @@ export function relativeTime(value: string, now = Date.now()) {
 const PROVIDERS = [
   { key: "claude", label: "Claude" },
   { key: "codex", label: "Codex" },
+  { key: "cursor", label: "Cursor" },
 ];
 
 export type ProviderRateLimit = {

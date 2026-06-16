@@ -13,10 +13,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, NativeAgentDriver};
+use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver};
 use symphony_core::{
-    AgentBackend, AgentOutcome, ClaudePermissionMode, ParsedWorkflow, ThreadSandbox,
-    TurnSandboxPolicy,
+    AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
+    ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex};
@@ -27,11 +27,14 @@ use tracing::{error, info};
 pub const SKILLS_DIR: &str = ".agents/skills";
 /// Claude Code auto-discovery location.
 pub const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
+/// Cursor agent auto-discovery location.
+pub const CURSOR_SKILLS_DIR: &str = ".cursor/skills";
 /// Branch the bootstrap session pushes; detection also looks for an open PR
 /// from this branch so the UI can show "install in review".
 pub const INSTALL_BRANCH: &str = "symphony/install-skills";
 
 const CLAUDE_DIR: &str = ".claude";
+const CURSOR_DIR: &str = ".cursor";
 const INSTALL_WORKSPACE_KEY: &str = "_skills-install";
 
 #[derive(Debug, Error)]
@@ -577,6 +580,7 @@ fn install_run_request(
         command: match backend {
             AgentBackend::Codex => front.codex.command.clone(),
             AgentBackend::Claude => front.claude.command.clone(),
+            AgentBackend::Cursor => front.cursor.command.clone(),
         },
         cwd: workspace.to_path_buf(),
         prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
@@ -586,6 +590,7 @@ fn install_run_request(
         turn_timeout_ms: match backend {
             AgentBackend::Codex => front.codex.turn_timeout_ms,
             AgentBackend::Claude => front.claude.turn_timeout_ms,
+            AgentBackend::Cursor => front.cursor.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: ClaudePermissionMode::Auto,
@@ -593,6 +598,14 @@ fn install_run_request(
             disallowed_tools: Vec::new(),
             add_dirs: front.claude.add_dirs.clone(),
             session_id: None,
+        },
+        cursor: CursorRunOptions {
+            mode: CursorAgentMode::Agent,
+            force: true,
+            trust: true,
+            approve_mcps: false,
+            sandbox: CursorSandboxMode::Enabled,
+            model: None,
         },
         env: Vec::new(),
     }
@@ -646,7 +659,8 @@ async fn write_skills(workspace: &Path, skills: &[SkillFile]) -> std::io::Result
         tokio::fs::write(&manifest, &skill.content).await?;
     }
 
-    write_claude_discovery(workspace, skills).await
+    write_claude_discovery(workspace, skills).await?;
+    write_cursor_discovery(workspace, skills).await
 }
 
 async fn write_claude_discovery(workspace: &Path, skills: &[SkillFile]) -> std::io::Result<()> {
@@ -731,6 +745,81 @@ fn is_expected_claude_skills_link(target: &Path, workspace: &Path) -> bool {
     target == claude_skills_symlink_target() || target == workspace.join(SKILLS_DIR)
 }
 
+async fn write_cursor_discovery(workspace: &Path, skills: &[SkillFile]) -> std::io::Result<()> {
+    ensure_real_dir_all(workspace, Path::new(CURSOR_DIR)).await?;
+    let discovery = workspace.join(CURSOR_SKILLS_DIR);
+    match tokio::fs::symlink_metadata(&discovery).await {
+        Ok(meta) if meta.is_dir() => write_per_skill_cursor_entries(&discovery, skills).await,
+        Ok(meta) if meta.file_type().is_symlink() => {
+            #[cfg(unix)]
+            {
+                let target = tokio::fs::read_link(&discovery).await?;
+                if is_expected_cursor_skills_link(&target, workspace) {
+                    return Ok(());
+                }
+            }
+            remove_existing(&discovery).await?;
+            create_cursor_skills_discovery(&discovery, skills).await
+        }
+        Ok(_) => {
+            remove_existing(&discovery).await?;
+            create_cursor_skills_discovery(&discovery, skills).await
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            create_cursor_skills_discovery(&discovery, skills).await
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn write_per_skill_cursor_entries(
+    discovery: &Path,
+    skills: &[SkillFile],
+) -> std::io::Result<()> {
+    for skill in skills {
+        let link = discovery.join(&skill.name);
+        remove_existing(&link).await?;
+        #[cfg(unix)]
+        {
+            let target = PathBuf::from("../..").join(SKILLS_DIR).join(&skill.name);
+            tokio::fs::symlink(&target, &link).await?;
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::fs::create_dir_all(&link).await?;
+            tokio::fs::write(link.join("SKILL.md"), &skill.content).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn create_cursor_skills_discovery(
+    discovery: &Path,
+    _skills: &[SkillFile],
+) -> std::io::Result<()> {
+    tokio::fs::symlink(cursor_skills_symlink_target(), discovery).await
+}
+
+#[cfg(not(unix))]
+async fn create_cursor_skills_discovery(
+    discovery: &Path,
+    skills: &[SkillFile],
+) -> std::io::Result<()> {
+    tokio::fs::create_dir(discovery).await?;
+    write_per_skill_cursor_entries(discovery, skills).await
+}
+
+#[cfg(unix)]
+fn cursor_skills_symlink_target() -> PathBuf {
+    PathBuf::from("..").join(SKILLS_DIR)
+}
+
+#[cfg(unix)]
+fn is_expected_cursor_skills_link(target: &Path, workspace: &Path) -> bool {
+    target == cursor_skills_symlink_target() || target == workspace.join(SKILLS_DIR)
+}
+
 /// Best-effort PR URL lookup for the branch the agent pushed.
 async fn find_pr_url(workspace: &Path) -> Option<String> {
     let output = run_shell(
@@ -758,16 +847,16 @@ fn install_prompt(repo_url: &str, default_branch: &str, skills: &[SkillFile]) ->
     format!(
         r#"You are bootstrapping Symphony's agent skills in this repository so Symphony-dispatched agents can use them.
 
-This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it.
+This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it. Cursor discovery uses `{cursor_dir}` with the same pattern.
 
 Do the following, in order:
 
 1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
-2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude discovery link or entries, and commit with the message "Add Symphony agent skills".
+2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude/Cursor discovery links or entries, and commit with the message "Add Symphony agent skills".
 3. Push the branch to origin and open a pull request titled "Install Symphony agent skills" targeting `{default_branch}`. In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
 Rules:
-- Only add files under `{skills_dir}/` and the Claude discovery link or entries at `{claude_dir}`; do not modify any other files.
+- Only add files under `{skills_dir}/` and the Claude/Cursor discovery links or entries at `{claude_dir}` and `{cursor_dir}`; do not modify any other files.
 - Never force-push, never use --no-verify, never rewrite history.
 - This is unattended: do not ask a human anything.
 - End your final message with the PR URL on its own line."#,
@@ -775,6 +864,7 @@ Rules:
         default_branch = default_branch,
         skills_dir = SKILLS_DIR,
         claude_dir = CLAUDE_SKILLS_DIR,
+        cursor_dir = CURSOR_SKILLS_DIR,
         names = names,
         branch = INSTALL_BRANCH,
     )

@@ -38,8 +38,10 @@ pub struct ValidationResult {
     pub workflow_error: Option<String>,
     pub codex_found: bool,
     pub claude_found: bool,
+    pub cursor_found: bool,
     pub codex_command: String,
     pub claude_command: String,
+    pub cursor_command: String,
     pub app_data_dir: String,
     pub database_path: String,
 }
@@ -132,14 +134,17 @@ async fn validate_settings(
     let workflow_blocking = workflow_error.is_some() && !workflow_setup_incomplete(&settings);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
+    let cursor_command = effective_cursor_command(settings.cursor_command.as_deref());
     Ok(ValidationResult {
         workflow_ok: workflow_error.is_none(),
         workflow_blocking,
         workflow_error,
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
+        cursor_found: command_found(&cursor_command),
         codex_command,
         claude_command,
+        cursor_command,
         app_data_dir: state.app_data_dir.display().to_string(),
         database_path: state.database_path.display().to_string(),
     })
@@ -318,6 +323,18 @@ fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
         Some(cmd) => cmd.to_string(),
         None => default.to_string(),
     }
+}
+
+fn effective_cursor_command(override_cmd: Option<&str>) -> String {
+    if let Some(cmd) = override_cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) {
+        return cmd.to_string();
+    }
+    for candidate in ["agent", "cursor-agent"] {
+        if which::which(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "agent".to_string()
 }
 
 // Launch commands may be wrappers with arguments (`mycode --agent codex`);
@@ -700,6 +717,8 @@ fn export_bindings() {
             specta::ts::export::<symphony_core::ThreadSandbox>(&conf),
             specta::ts::export::<symphony_core::TurnSandboxPolicy>(&conf),
             specta::ts::export::<symphony_core::ClaudePermissionMode>(&conf),
+            specta::ts::export::<symphony_core::CursorAgentMode>(&conf),
+            specta::ts::export::<symphony_core::CursorSandboxMode>(&conf),
             specta::ts::export::<symphony_core::RepoConfig>(&conf),
             specta::ts::export::<AppSettings>(&conf),
             specta::ts::export::<SaveSettingsRequest>(&conf),

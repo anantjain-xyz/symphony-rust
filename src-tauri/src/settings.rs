@@ -3,9 +3,9 @@ use specta::Type;
 use std::collections::BTreeMap;
 use symphony_core::{
     build_parsed_workflow, strip_front_matter, AgentBackend, AgentConfig, ApprovalPolicy,
-    ClaudeConfig, ClaudePermissionMode, CodexConfig, HooksConfig, ParsedWorkflow, PollingConfig,
-    RepoConfig, ThreadSandbox, TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter,
-    WorkspaceConfig,
+    ClaudeConfig, ClaudePermissionMode, CodexConfig, CursorAgentMode, CursorConfig,
+    CursorSandboxMode, HooksConfig, ParsedWorkflow, PollingConfig, RepoConfig, ThreadSandbox,
+    TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
 };
 
 /// Structured app settings — the single source of truth for worker, tracker,
@@ -79,6 +79,21 @@ pub struct AppSettings {
     pub claude_disallowed_tools: Vec<String>,
     #[serde(default)]
     pub claude_add_dirs: Vec<String>,
+    // Cursor options
+    #[serde(default)]
+    pub cursor_command: Option<String>,
+    #[serde(default)]
+    pub cursor_mode: CursorAgentMode,
+    #[serde(default = "default_true")]
+    pub cursor_force: bool,
+    #[serde(default = "default_true")]
+    pub cursor_trust: bool,
+    #[serde(default)]
+    pub cursor_approve_mcps: bool,
+    #[serde(default)]
+    pub cursor_sandbox: CursorSandboxMode,
+    #[serde(default)]
+    pub cursor_model: Option<String>,
     // Derived from the OS keychain; never user-edited.
     #[serde(default)]
     pub linear_api_key_set: bool,
@@ -116,6 +131,13 @@ impl Default for AppSettings {
             claude_allowed_tools: default_claude_allowed_tools(),
             claude_disallowed_tools: Vec::new(),
             claude_add_dirs: Vec::new(),
+            cursor_command: None,
+            cursor_mode: CursorAgentMode::Agent,
+            cursor_force: true,
+            cursor_trust: true,
+            cursor_approve_mcps: false,
+            cursor_sandbox: CursorSandboxMode::Enabled,
+            cursor_model: None,
             linear_api_key_set: false,
         }
     }
@@ -232,6 +254,19 @@ fn effective_command(override_cmd: &Option<String>, default: &str) -> String {
     normalize_opt(override_cmd).unwrap_or_else(|| default.to_string())
 }
 
+/// Resolve the Cursor CLI: configured override, then `agent`, then `cursor-agent`.
+fn effective_cursor_command(override_cmd: &Option<String>) -> String {
+    if let Some(cmd) = normalize_opt(override_cmd) {
+        return cmd;
+    }
+    for candidate in ["agent", "cursor-agent"] {
+        if which::which(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "agent".to_string()
+}
+
 /// Build the runtime workflow config from structured settings. The Linear API
 /// key comes from the OS keychain, not from settings.
 pub fn workflow_from_settings(
@@ -279,6 +314,16 @@ pub fn workflow_from_settings(
             allowed_tools: settings.claude_allowed_tools.clone(),
             disallowed_tools: settings.claude_disallowed_tools.clone(),
             add_dirs: settings.claude_add_dirs.clone(),
+            turn_timeout_ms: settings.turn_timeout_ms,
+        },
+        cursor: CursorConfig {
+            command: effective_cursor_command(&settings.cursor_command),
+            mode: settings.cursor_mode.clone(),
+            force: settings.cursor_force,
+            trust: settings.cursor_trust,
+            approve_mcps: settings.cursor_approve_mcps,
+            sandbox: settings.cursor_sandbox.clone(),
+            model: normalize_opt(&settings.cursor_model),
             turn_timeout_ms: settings.turn_timeout_ms,
         },
     };

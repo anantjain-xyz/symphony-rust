@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 use symphony_core::{
-    AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, MappedAgentEvent,
-    RateLimitPayload, SessionInfoPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload,
-    TurnSandboxPolicy,
+    AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CursorAgentMode,
+    CursorSandboxMode, MappedAgentEvent, RateLimitPayload, SessionInfoPayload, ThreadSandbox,
+    TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{
@@ -40,6 +40,7 @@ pub struct AgentRunRequest {
     pub network_access: bool,
     pub turn_timeout_ms: u64,
     pub claude: ClaudeRunOptions,
+    pub cursor: CursorRunOptions,
     /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
     /// which lives in the OS keychain and is absent from the inherited env).
     pub env: Vec<(String, String)>,
@@ -52,6 +53,16 @@ pub struct ClaudeRunOptions {
     pub disallowed_tools: Vec<String>,
     pub add_dirs: Vec<String>,
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CursorRunOptions {
+    pub mode: CursorAgentMode,
+    pub force: bool,
+    pub trust: bool,
+    pub approve_mcps: bool,
+    pub sandbox: CursorSandboxMode,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +100,7 @@ impl AgentDriver for NativeAgentDriver {
         match request.backend {
             AgentBackend::Codex => run_codex(request, events, cancel).await,
             AgentBackend::Claude => run_claude(request, events, cancel).await,
+            AgentBackend::Cursor => run_cursor(request, events, cancel).await,
         }
     }
 }
@@ -804,6 +816,357 @@ impl ClaudeStreamState {
     }
 }
 
+async fn run_cursor(
+    request: AgentRunRequest,
+    events: AgentEventSender,
+    cancel: CancellationToken,
+) -> Result<AgentRunResult, AgentError> {
+    let session_id = format!("cs_{}", Uuid::new_v4());
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--workspace".to_string(),
+        request.cwd.display().to_string(),
+    ];
+    if request.cursor.force {
+        args.push("--force".to_string());
+    }
+    if request.cursor.trust {
+        args.push("--trust".to_string());
+    }
+    if request.cursor.approve_mcps {
+        args.push("--approve-mcps".to_string());
+    }
+    match request.cursor.mode {
+        CursorAgentMode::Plan => {
+            args.push("--mode".to_string());
+            args.push("plan".to_string());
+        }
+        CursorAgentMode::Ask => {
+            args.push("--mode".to_string());
+            args.push("ask".to_string());
+        }
+        CursorAgentMode::Agent => {}
+    }
+    match request.cursor.sandbox {
+        CursorSandboxMode::Enabled => {
+            args.push("--sandbox".to_string());
+            args.push("enabled".to_string());
+        }
+        CursorSandboxMode::Disabled => {
+            args.push("--sandbox".to_string());
+            args.push("disabled".to_string());
+        }
+    }
+    if let Some(model) = &request.cursor.model {
+        let model = model.trim();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    args.push(request.prompt);
+
+    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
+    let pid = child.id();
+    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut stream = CursorStreamState::new(session_id.clone());
+    let mut result: Option<AgentRunResult> = None;
+
+    let run = async {
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&line)?;
+            if let Some(done) = stream.push(value, &events).await? {
+                result = Some(done);
+            }
+        }
+        let status = child.wait().await?;
+        Ok::<_, AgentError>((status, result))
+    };
+
+    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
+    tokio::pin!(timeout);
+    let (status, parsed_result) = tokio::select! {
+        outcome = run => outcome?,
+        _ = &mut timeout => {
+            kill_pid(pid).await;
+            return Err(AgentError::Timeout(request.turn_timeout_ms));
+        }
+        _ = cancel.cancelled() => {
+            kill_pid(pid).await;
+            return Ok(AgentRunResult {
+                thread_id: stream.session_id.clone(),
+                turn_id: stream.session_id.clone(),
+                outcome: AgentOutcome::Cancelled,
+                error_class: Some("cancelled".to_string()),
+                error_message: Some("run cancelled".to_string()),
+            });
+        }
+    };
+
+    let sid = stream.session_id.clone();
+    Ok(parsed_result.unwrap_or_else(|| AgentRunResult {
+        thread_id: sid.clone(),
+        turn_id: sid,
+        outcome: if status.success() {
+            AgentOutcome::Success
+        } else {
+            AgentOutcome::Failure
+        },
+        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
+        error_message: (!status.success()).then(|| format!("cursor exit {status}")),
+    }))
+}
+
+struct CursorStreamState {
+    session_id: String,
+    pending_tools: HashMap<String, String>,
+    completed: bool,
+    last_assistant_text: String,
+    session_info: SessionInfoPayload,
+}
+
+impl CursorStreamState {
+    fn new(fallback_session_id: String) -> Self {
+        Self {
+            session_id: fallback_session_id,
+            pending_tools: HashMap::new(),
+            completed: false,
+            last_assistant_text: String::new(),
+            session_info: SessionInfoPayload::default(),
+        }
+    }
+
+    async fn push(
+        &mut self,
+        ev: Value,
+        events: &AgentEventSender,
+    ) -> Result<Option<AgentRunResult>, AgentError> {
+        if self.completed {
+            return Ok(None);
+        }
+        match ev["type"].as_str().unwrap_or_default() {
+            "system" if ev["subtype"].as_str() == Some("init") => {
+                if let Some(sid) = ev["session_id"].as_str() {
+                    self.session_id = sid.to_string();
+                }
+                let text = |key: &str| ev[key].as_str().map(ToOwned::to_owned);
+                self.session_info = SessionInfoPayload {
+                    model: text("model"),
+                    permission_mode: text("permissionMode"),
+                    agent_version: None,
+                    output_style: None,
+                    fast_mode: None,
+                    thinking_tokens: None,
+                };
+                let mut message = format!("Cursor session {} started", self.session_id);
+                if let Some(model) = &self.session_info.model {
+                    message.push_str(&format!(" · {model}"));
+                }
+                if let Some(mode) = &self.session_info.permission_mode {
+                    message.push_str(&format!(" · {mode}"));
+                }
+                send_mapped(
+                    events,
+                    MappedAgentEvent {
+                        kind: AgentEventKind::Status,
+                        payload: json!({ "message": message }),
+                        humanized: Some(message),
+                        tokens: None,
+                        rate_limit: None,
+                        session_info: Some(self.session_info.clone()),
+                    },
+                )
+                .await;
+            }
+            "assistant" => {
+                for block in ev["message"]["content"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    if block["type"].as_str() != Some("text") {
+                        continue;
+                    }
+                    let text = block["text"].as_str().unwrap_or_default().trim();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.last_assistant_text = text.to_string();
+                    send_status(events, truncate(text, 2000)).await;
+                }
+            }
+            "tool_call" => {
+                let call_id = ev["call_id"].as_str().map(ToOwned::to_owned);
+                let subtype = ev["subtype"].as_str().unwrap_or_default();
+                let (tool, args, summary) = cursor_tool_call_fields(&ev, subtype);
+                if subtype == "started" {
+                    if let Some(id) = &call_id {
+                        self.pending_tools.insert(id.clone(), tool.clone());
+                    }
+                }
+                let payload = serde_json::to_value(ToolCallPayload {
+                    tool,
+                    args,
+                    call_id: call_id.clone(),
+                    result_summary: summary.clone(),
+                })?;
+                send_mapped(
+                    events,
+                    MappedAgentEvent {
+                        kind: AgentEventKind::ToolCall,
+                        payload,
+                        humanized: summary.or_else(|| {
+                            Some(if subtype == "started" {
+                                "Tool started".to_string()
+                            } else {
+                                "Tool completed".to_string()
+                            })
+                        }),
+                        tokens: None,
+                        rate_limit: None,
+                        session_info: None,
+                    },
+                )
+                .await;
+            }
+            "result" => {
+                self.completed = true;
+                let result_text = ev["result"].as_str().unwrap_or_default();
+                let error_text = ev["error"].as_str().unwrap_or_default();
+                let limit_hit = [result_text, error_text, self.last_assistant_text.as_str()]
+                    .into_iter()
+                    .find_map(|text| detect_cursor_rate_limit(text).map(|limit| (text, limit)));
+                if let Some((text, limit)) = limit_hit {
+                    send_rate_limit(events, limit).await?;
+                    return Ok(Some(AgentRunResult {
+                        thread_id: self.session_id.clone(),
+                        turn_id: self.session_id.clone(),
+                        outcome: AgentOutcome::Failure,
+                        error_class: Some("rate_limited".to_string()),
+                        error_message: Some(truncate(text, 1000)),
+                    }));
+                }
+                if ev["subtype"].as_str() == Some("success") && !ev["is_error"].as_bool().unwrap_or(false)
+                {
+                    return Ok(Some(AgentRunResult {
+                        thread_id: self.session_id.clone(),
+                        turn_id: self.session_id.clone(),
+                        outcome: AgentOutcome::Success,
+                        error_class: None,
+                        error_message: None,
+                    }));
+                }
+                return Ok(Some(AgentRunResult {
+                    thread_id: self.session_id.clone(),
+                    turn_id: self.session_id.clone(),
+                    outcome: AgentOutcome::Failure,
+                    error_class: Some(
+                        ev["subtype"]
+                            .as_str()
+                            .unwrap_or("cursor_error")
+                            .to_string(),
+                    ),
+                    error_message: Some(
+                        error_text
+                            .is_empty()
+                            .then(|| result_text.to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                if error_text.is_empty() {
+                                    "Cursor run failed".to_string()
+                                } else {
+                                    error_text.to_string()
+                                }
+                            }),
+                    ),
+                }));
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+}
+
+fn cursor_tool_call_fields(
+    ev: &Value,
+    subtype: &str,
+) -> (String, Option<Value>, Option<String>) {
+    let tool_call = ev.get("tool_call").unwrap_or(ev);
+    let tool = cursor_tool_name(tool_call);
+    let args = cursor_tool_args(tool_call, &tool);
+    let summary = if subtype == "completed" {
+        Some(cursor_tool_summary(tool_call, &tool))
+    } else {
+        None
+    };
+    (tool, args, summary)
+}
+
+fn cursor_tool_name(tool_call: &Value) -> String {
+    if let Some(obj) = tool_call.as_object() {
+        for key in obj.keys() {
+            if key.ends_with("ToolCall") {
+                return key.trim_end_matches("ToolCall").to_string();
+            }
+        }
+        if let Some(name) = tool_call["function"]["name"].as_str() {
+            return name.to_string();
+        }
+    }
+    "tool".to_string()
+}
+
+fn cursor_tool_args(tool_call: &Value, tool: &str) -> Option<Value> {
+    if let Some(obj) = tool_call.as_object() {
+        for (key, value) in obj {
+            if key.ends_with("ToolCall") {
+                return value.get("args").cloned();
+            }
+        }
+    }
+    tool_call
+        .get("function")
+        .and_then(|f| f.get("arguments"))
+        .cloned()
+        .or_else(|| Some(json!({ "tool": tool })))
+}
+
+fn cursor_tool_summary(tool_call: &Value, tool: &str) -> String {
+    if let Some(obj) = tool_call.as_object() {
+        for (key, value) in obj {
+            if !key.ends_with("ToolCall") {
+                continue;
+            }
+            if let Some(path) = value["args"]["path"].as_str() {
+                return format!("{tool}: {path}");
+            }
+            if value.get("result").is_some() {
+                return format!("{tool} completed");
+            }
+        }
+    }
+    format!("{tool} completed")
+}
+
+fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
+    let lower = text.trim().to_lowercase();
+    let hit = lower.starts_with("api error: 429")
+        || (lower.starts_with("api error:") && lower.contains("rate_limit"))
+        || lower.contains("usage limit reached")
+        || lower.contains("rate limit");
+    hit.then(|| RateLimitPayload {
+        source: "cursor".to_string(),
+        remaining: None,
+        reset_at: None,
+    })
+}
+
 fn spawn_shell_command(
     command: &str,
     args: &[String],
@@ -1412,5 +1775,95 @@ mod tests {
         }
         let done = stream.push(success_result_event(), &tx).await.unwrap();
         assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
+    }
+
+    fn cursor_stream() -> (CursorStreamState, mpsc::Sender<MappedAgentEvent>, mpsc::Receiver<MappedAgentEvent>) {
+        let (tx, rx) = mpsc::channel(64);
+        (CursorStreamState::new("sess-cursor".to_string()), tx, rx)
+    }
+
+    #[tokio::test]
+    async fn cursor_init_maps_session_info() {
+        let (mut stream, tx, mut rx) = cursor_stream();
+        assert!(stream
+            .push(
+                json!({
+                    "type": "system",
+                    "subtype": "init",
+                    "session_id": "abc-123",
+                    "model": "Composer 2.5",
+                    "permissionMode": "default"
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .is_none());
+        let event = rx.recv().await.expect("init status event");
+        let info = event.session_info.expect("session info");
+        assert_eq!(info.model.as_deref(), Some("Composer 2.5"));
+        assert_eq!(info.permission_mode.as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn cursor_tool_call_started_and_completed() {
+        let (mut stream, tx, mut rx) = cursor_stream();
+        stream
+            .push(
+                json!({
+                    "type": "tool_call",
+                    "subtype": "started",
+                    "call_id": "c1",
+                    "tool_call": { "readToolCall": { "args": { "path": "README.md" } } }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let started = rx.recv().await.expect("tool started");
+        assert!(matches!(started.kind, AgentEventKind::ToolCall));
+        stream
+            .push(
+                json!({
+                    "type": "tool_call",
+                    "subtype": "completed",
+                    "call_id": "c1",
+                    "tool_call": { "readToolCall": {
+                        "args": { "path": "README.md" },
+                        "result": { "success": { "content": "hello" } }
+                    } }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let completed = rx.recv().await.expect("tool completed");
+        assert!(matches!(completed.kind, AgentEventKind::ToolCall));
+    }
+
+    #[tokio::test]
+    async fn cursor_success_result_ends_run() {
+        let (mut stream, tx, _rx) = cursor_stream();
+        let done = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "result": "All done"
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result finishes run");
+        assert!(matches!(done.outcome, AgentOutcome::Success));
+    }
+
+    #[test]
+    fn detects_cursor_rate_limit_hits() {
+        assert!(detect_cursor_rate_limit("API Error: 429 too many requests").is_some());
+        assert!(detect_cursor_rate_limit("Your usage limit reached for today").is_some());
+        assert!(detect_cursor_rate_limit("All tests passing").is_none());
     }
 }

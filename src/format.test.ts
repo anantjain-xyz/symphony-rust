@@ -57,7 +57,7 @@ describe("format helpers", () => {
 
   it("always lists a rate-limit row per provider", () => {
     const rows = providerRateLimits([]);
-    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex"]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex", "Cursor"]);
     expect(rows.every((row) => row.limit === null)).toBe(true);
   });
 
@@ -84,13 +84,14 @@ describe("format helpers", () => {
     expect(rows.map((row) => [row.label, row.limit])).toEqual([
       ["Claude", claude],
       ["Codex · primary", codexPrimary],
+      ["Cursor", null],
       ["gemini", mystery],
     ]);
   });
 
   it("always lists a token-usage row per provider", () => {
     const rows = providerTokenUsage([]);
-    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex"]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex", "Cursor"]);
     expect(rows.every((row) => row.usage === null)).toBe(true);
   });
 
@@ -108,6 +109,7 @@ describe("format helpers", () => {
     expect(rows.map((row) => [row.label, row.usage])).toEqual([
       ["Claude", null],
       ["Codex", codex],
+      ["Cursor", null],
       ["gemini", mystery],
     ]);
   });
