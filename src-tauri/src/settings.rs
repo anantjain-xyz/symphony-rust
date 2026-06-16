@@ -255,7 +255,7 @@ fn effective_command(override_cmd: &Option<String>, default: &str) -> String {
 }
 
 /// Resolve the Cursor CLI: configured override, then `agent`, then `cursor-agent`.
-fn effective_cursor_command(override_cmd: &Option<String>) -> String {
+pub(crate) fn effective_cursor_command(override_cmd: &Option<String>) -> String {
     if let Some(cmd) = normalize_opt(override_cmd) {
         return cmd;
     }

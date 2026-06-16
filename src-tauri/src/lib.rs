@@ -134,7 +134,7 @@ async fn validate_settings(
     let workflow_blocking = workflow_error.is_some() && !workflow_setup_incomplete(&settings);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
-    let cursor_command = effective_cursor_command(settings.cursor_command.as_deref());
+    let cursor_command = settings::effective_cursor_command(&settings.cursor_command);
     Ok(ValidationResult {
         workflow_ok: workflow_error.is_none(),
         workflow_blocking,
@@ -323,18 +323,6 @@ fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
         Some(cmd) => cmd.to_string(),
         None => default.to_string(),
     }
-}
-
-fn effective_cursor_command(override_cmd: Option<&str>) -> String {
-    if let Some(cmd) = override_cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) {
-        return cmd.to_string();
-    }
-    for candidate in ["agent", "cursor-agent"] {
-        if which::which(candidate).is_ok() {
-            return candidate.to_string();
-        }
-    }
-    "agent".to_string()
 }
 
 // Launch commands may be wrappers with arguments (`mycode --agent codex`);

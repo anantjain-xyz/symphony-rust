@@ -838,27 +838,21 @@ async fn run_cursor(
     if request.cursor.approve_mcps {
         args.push("--approve-mcps".to_string());
     }
-    match request.cursor.mode {
-        CursorAgentMode::Plan => {
-            args.push("--mode".to_string());
-            args.push("plan".to_string());
-        }
-        CursorAgentMode::Ask => {
-            args.push("--mode".to_string());
-            args.push("ask".to_string());
-        }
-        CursorAgentMode::Agent => {}
+    let mode = match request.cursor.mode {
+        CursorAgentMode::Plan => Some("plan"),
+        CursorAgentMode::Ask => Some("ask"),
+        CursorAgentMode::Agent => None,
+    };
+    if let Some(mode) = mode {
+        args.push("--mode".to_string());
+        args.push(mode.to_string());
     }
-    match request.cursor.sandbox {
-        CursorSandboxMode::Enabled => {
-            args.push("--sandbox".to_string());
-            args.push("enabled".to_string());
-        }
-        CursorSandboxMode::Disabled => {
-            args.push("--sandbox".to_string());
-            args.push("disabled".to_string());
-        }
-    }
+    let sandbox = match request.cursor.sandbox {
+        CursorSandboxMode::Enabled => "enabled",
+        CursorSandboxMode::Disabled => "disabled",
+    };
+    args.push("--sandbox".to_string());
+    args.push(sandbox.to_string());
     if let Some(model) = &request.cursor.model {
         let model = model.trim();
         if !model.is_empty() {
@@ -925,7 +919,6 @@ async fn run_cursor(
 
 struct CursorStreamState {
     session_id: String,
-    pending_tools: HashMap<String, String>,
     completed: bool,
     last_assistant_text: String,
     session_info: SessionInfoPayload,
@@ -935,7 +928,6 @@ impl CursorStreamState {
     fn new(fallback_session_id: String) -> Self {
         Self {
             session_id: fallback_session_id,
-            pending_tools: HashMap::new(),
             completed: false,
             last_assistant_text: String::new(),
             session_info: SessionInfoPayload::default(),
@@ -959,10 +951,7 @@ impl CursorStreamState {
                 self.session_info = SessionInfoPayload {
                     model: text("model"),
                     permission_mode: text("permissionMode"),
-                    agent_version: None,
-                    output_style: None,
-                    fast_mode: None,
-                    thinking_tokens: None,
+                    ..Default::default()
                 };
                 let mut message = format!("Cursor session {} started", self.session_id);
                 if let Some(model) = &self.session_info.model {
@@ -1005,11 +994,6 @@ impl CursorStreamState {
                 let call_id = ev["call_id"].as_str().map(ToOwned::to_owned);
                 let subtype = ev["subtype"].as_str().unwrap_or_default();
                 let (tool, args, summary) = cursor_tool_call_fields(&ev, subtype);
-                if subtype == "started" {
-                    if let Some(id) = &call_id {
-                        self.pending_tools.insert(id.clone(), tool.clone());
-                    }
-                }
                 let payload = serde_json::to_value(ToolCallPayload {
                     tool,
                     args,
@@ -1082,19 +1066,13 @@ impl CursorStreamState {
                     turn_id: self.session_id.clone(),
                     outcome: AgentOutcome::Failure,
                     error_class: Some(ev["subtype"].as_str().unwrap_or("cursor_error").to_string()),
-                    error_message: Some(
-                        error_text
-                            .is_empty()
-                            .then(|| result_text.to_string())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| {
-                                if error_text.is_empty() {
-                                    "Cursor run failed".to_string()
-                                } else {
-                                    error_text.to_string()
-                                }
-                            }),
-                    ),
+                    error_message: Some(if !error_text.is_empty() {
+                        error_text.to_string()
+                    } else if !result_text.is_empty() {
+                        result_text.to_string()
+                    } else {
+                        "Cursor run failed".to_string()
+                    }),
                 }));
             }
             _ => {}
@@ -1105,60 +1083,39 @@ impl CursorStreamState {
 
 fn cursor_tool_call_fields(ev: &Value, subtype: &str) -> (String, Option<Value>, Option<String>) {
     let tool_call = ev.get("tool_call").unwrap_or(ev);
-    let tool = cursor_tool_name(tool_call);
-    let args = cursor_tool_args(tool_call, &tool);
-    let summary = if subtype == "completed" {
-        Some(cursor_tool_summary(tool_call, &tool))
-    } else {
-        None
+    // Cursor wraps each call in a single `<name>ToolCall` object; locate that
+    // entry once and derive the name, args, and summary from it. Fall back to
+    // the OpenAI-style `function` shape when the wrapper key is absent.
+    let variant = tool_call
+        .as_object()
+        .and_then(|obj| obj.iter().find(|(key, _)| key.ends_with("ToolCall")));
+
+    let tool = match variant {
+        Some((key, _)) => key.trim_end_matches("ToolCall").to_string(),
+        None => tool_call["function"]["name"]
+            .as_str()
+            .unwrap_or("tool")
+            .to_string(),
     };
+
+    let args = match variant {
+        Some((_, value)) => value.get("args").cloned(),
+        None => tool_call
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .cloned()
+            .or_else(|| Some(json!({ "tool": tool }))),
+    };
+
+    let summary = (subtype == "completed").then(|| match variant {
+        Some((_, value)) => match value["args"]["path"].as_str() {
+            Some(path) => format!("{tool}: {path}"),
+            None => format!("{tool} completed"),
+        },
+        None => format!("{tool} completed"),
+    });
+
     (tool, args, summary)
-}
-
-fn cursor_tool_name(tool_call: &Value) -> String {
-    if let Some(obj) = tool_call.as_object() {
-        for key in obj.keys() {
-            if key.ends_with("ToolCall") {
-                return key.trim_end_matches("ToolCall").to_string();
-            }
-        }
-        if let Some(name) = tool_call["function"]["name"].as_str() {
-            return name.to_string();
-        }
-    }
-    "tool".to_string()
-}
-
-fn cursor_tool_args(tool_call: &Value, tool: &str) -> Option<Value> {
-    if let Some(obj) = tool_call.as_object() {
-        for (key, value) in obj {
-            if key.ends_with("ToolCall") {
-                return value.get("args").cloned();
-            }
-        }
-    }
-    tool_call
-        .get("function")
-        .and_then(|f| f.get("arguments"))
-        .cloned()
-        .or_else(|| Some(json!({ "tool": tool })))
-}
-
-fn cursor_tool_summary(tool_call: &Value, tool: &str) -> String {
-    if let Some(obj) = tool_call.as_object() {
-        for (key, value) in obj {
-            if !key.ends_with("ToolCall") {
-                continue;
-            }
-            if let Some(path) = value["args"]["path"].as_str() {
-                return format!("{tool}: {path}");
-            }
-            if value.get("result").is_some() {
-                return format!("{tool} completed");
-            }
-        }
-    }
-    format!("{tool} completed")
 }
 
 fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
