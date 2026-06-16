@@ -1149,10 +1149,14 @@ fn cursor_tool_summary(tool_call: &Value, tool: &str) -> String {
 
 fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
     let lower = text.trim().to_lowercase();
+    // Anchor limit notices like Claude's detector: a successful final answer
+    // can mention "rate limit" in prose without being a limit hit.
     let hit = lower.starts_with("api error: 429")
         || (lower.starts_with("api error:") && lower.contains("rate_limit"))
-        || lower.contains("usage limit reached")
-        || lower.contains("rate limit");
+        || lower.starts_with("usage limit reached")
+        || lower.starts_with("your usage limit reached")
+        || lower.starts_with("you've reached your usage limit")
+        || lower.starts_with("rate limit exceeded");
     hit.then(|| RateLimitPayload {
         source: "cursor".to_string(),
         remaining: None,
@@ -1862,5 +1866,9 @@ mod tests {
         assert!(detect_cursor_rate_limit("API Error: 429 too many requests").is_some());
         assert!(detect_cursor_rate_limit("Your usage limit reached for today").is_some());
         assert!(detect_cursor_rate_limit("All tests passing").is_none());
+        assert!(
+            detect_cursor_rate_limit("Updated the rate limit docs and tests; all passing.")
+                .is_none()
+        );
     }
 }
