@@ -13,7 +13,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver};
+use symphony_agents::{
+    AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+};
 use symphony_core::{
     AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
     ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy,

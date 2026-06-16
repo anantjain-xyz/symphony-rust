@@ -6,7 +6,9 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use symphony_agents::{AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver};
+use symphony_agents::{
+    AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+};
 use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
     MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, RunStatus, TokenCountPayload,

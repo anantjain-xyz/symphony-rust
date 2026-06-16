@@ -1052,7 +1052,8 @@ impl CursorStreamState {
                         error_message: Some(truncate(text, 1000)),
                     }));
                 }
-                if ev["subtype"].as_str() == Some("success") && !ev["is_error"].as_bool().unwrap_or(false)
+                if ev["subtype"].as_str() == Some("success")
+                    && !ev["is_error"].as_bool().unwrap_or(false)
                 {
                     return Ok(Some(AgentRunResult {
                         thread_id: self.session_id.clone(),
@@ -1066,12 +1067,7 @@ impl CursorStreamState {
                     thread_id: self.session_id.clone(),
                     turn_id: self.session_id.clone(),
                     outcome: AgentOutcome::Failure,
-                    error_class: Some(
-                        ev["subtype"]
-                            .as_str()
-                            .unwrap_or("cursor_error")
-                            .to_string(),
-                    ),
+                    error_class: Some(ev["subtype"].as_str().unwrap_or("cursor_error").to_string()),
                     error_message: Some(
                         error_text
                             .is_empty()
@@ -1093,10 +1089,7 @@ impl CursorStreamState {
     }
 }
 
-fn cursor_tool_call_fields(
-    ev: &Value,
-    subtype: &str,
-) -> (String, Option<Value>, Option<String>) {
+fn cursor_tool_call_fields(ev: &Value, subtype: &str) -> (String, Option<Value>, Option<String>) {
     let tool_call = ev.get("tool_call").unwrap_or(ev);
     let tool = cursor_tool_name(tool_call);
     let args = cursor_tool_args(tool_call, &tool);
@@ -1777,7 +1770,11 @@ mod tests {
         assert!(matches!(done.unwrap().outcome, AgentOutcome::Success));
     }
 
-    fn cursor_stream() -> (CursorStreamState, mpsc::Sender<MappedAgentEvent>, mpsc::Receiver<MappedAgentEvent>) {
+    fn cursor_stream() -> (
+        CursorStreamState,
+        mpsc::Sender<MappedAgentEvent>,
+        mpsc::Receiver<MappedAgentEvent>,
+    ) {
         let (tx, rx) = mpsc::channel(64);
         (CursorStreamState::new("sess-cursor".to_string()), tx, rx)
     }
