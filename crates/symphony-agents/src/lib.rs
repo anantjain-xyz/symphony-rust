@@ -1037,6 +1037,20 @@ impl CursorStreamState {
             }
             "result" => {
                 self.completed = true;
+                let usage = &ev["usage"];
+                let input = usage["input_tokens"].as_i64().unwrap_or(0);
+                let output = usage["output_tokens"].as_i64().unwrap_or(0);
+                if input > 0 || output > 0 {
+                    send_token_count(
+                        events,
+                        TokenCountPayload {
+                            input_tokens: input,
+                            output_tokens: output,
+                            total_tokens: input + output,
+                        },
+                    )
+                    .await?;
+                }
                 let result_text = ev["result"].as_str().unwrap_or_default();
                 let error_text = ev["error"].as_str().unwrap_or_default();
                 let limit_hit = [result_text, error_text, self.last_assistant_text.as_str()]
@@ -1840,6 +1854,30 @@ mod tests {
             .unwrap();
         let completed = rx.recv().await.expect("tool completed");
         assert!(matches!(completed.kind, AgentEventKind::ToolCall));
+    }
+
+    #[tokio::test]
+    async fn cursor_success_result_emits_token_count() {
+        let (mut stream, tx, mut rx) = cursor_stream();
+        let done = stream
+            .push(
+                json!({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": false,
+                    "result": "All done",
+                    "usage": { "input_tokens": 120, "output_tokens": 45 }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("result finishes run");
+        assert!(matches!(done.outcome, AgentOutcome::Success));
+        let tokens = rx.recv().await.expect("token count event");
+        assert!(matches!(tokens.kind, AgentEventKind::TokenCount));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(120));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.output_tokens), Some(45));
     }
 
     #[tokio::test]

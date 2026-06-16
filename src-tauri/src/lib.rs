@@ -548,6 +548,7 @@ async fn install_skills(
             workspace_root,
             workflow,
             skills: bundled_skills(),
+            session_env: settings.session_env.clone(),
         })
         .await
         .map_err(|err| err.to_string())

@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -332,6 +333,8 @@ pub struct SkillsInstallConfig {
     /// Parsed workflow supplying the agent backend and its CLI options.
     pub workflow: ParsedWorkflow,
     pub skills: Vec<SkillFile>,
+    /// Custom session env from settings (e.g. `CURSOR_API_KEY`).
+    pub session_env: BTreeMap<String, String>,
 }
 
 /// One-at-a-time background install; status is polled by the UI.
@@ -606,7 +609,11 @@ fn install_run_request(
             sandbox: CursorSandboxMode::Enabled,
             model: None,
         },
-        env: Vec::new(),
+        env: config
+            .session_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
     }
 }
 
@@ -1022,6 +1029,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             workflow,
             skills: Vec::new(),
+            session_env: BTreeMap::new(),
         };
 
         let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
@@ -1047,6 +1055,35 @@ mod tests {
             .iter()
             .any(|t| t == "Bash(npm *)"));
         assert!(request.prompt.contains("targeting `master`"));
+    }
+
+    #[test]
+    fn install_run_forwards_session_env() {
+        let workflow = symphony_core::build_parsed_workflow(
+            symphony_core::WorkflowFrontMatter {
+                tracker: symphony_core::TrackerConfig {
+                    api_key: "k".to_string(),
+                    active_states: vec!["Todo".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "body".to_string(),
+        );
+        let config = SkillsInstallConfig {
+            repo_url: "git@github.com:acme/widgets.git".to_string(),
+            workspace_root: PathBuf::from("/tmp"),
+            workflow,
+            skills: Vec::new(),
+            session_env: BTreeMap::from([("CURSOR_API_KEY".to_string(), "test-key".to_string())]),
+        };
+
+        let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
+        assert!(request
+            .env
+            .iter()
+            .any(|(key, value)| key == "CURSOR_API_KEY" && value == "test-key"));
     }
 
     #[tokio::test]
@@ -1188,6 +1225,7 @@ mod tests {
                 "body".to_string(),
             ),
             skills: Vec::new(),
+            session_env: BTreeMap::new(),
         };
         assert!(matches!(
             installer.start(config).await,
