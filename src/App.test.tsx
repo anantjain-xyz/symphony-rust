@@ -3,7 +3,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AppSettings, SkillsStatus, ValidationResult, WorkerStatus } from "./bindings";
+import type {
+  AppSettings,
+  Overview,
+  SkillsStatus,
+  ValidationResult,
+  WorkerStatus,
+} from "./bindings";
 
 const tauriMocks = vi.hoisted(() => ({
   runtimeAvailable: false,
@@ -139,6 +145,15 @@ function settingsInvoke({
 
 function dashboardInvoke({
   settings,
+  overview = {
+    active_runs: [],
+    retry_queue: [],
+    recent_failures: [],
+    live_sessions: [],
+    worker_heartbeat: null,
+    rate_limits: [],
+    token_usage: [],
+  },
   skillsStatus = {
     state: "missing",
     missing: ["symphony-workpad"],
@@ -152,6 +167,7 @@ function dashboardInvoke({
   },
 }: {
   settings: AppSettings;
+  overview?: Overview;
   skillsStatus?: SkillsStatus;
   workerStatus?: WorkerStatus;
 }) {
@@ -160,20 +176,14 @@ function dashboardInvoke({
       case "load_settings":
         return settings;
       case "get_overview":
-        return {
-          active_runs: [],
-          retry_queue: [],
-          recent_failures: [],
-          live_sessions: [],
-          worker_heartbeat: null,
-          rate_limits: [],
-          token_usage: [],
-        };
+        return overview;
       case "list_runs":
       case "list_issues":
         return [];
       case "get_worker_status":
         return workerStatus;
+      case "trigger_retry_now":
+        return true;
       case "get_skills_status":
         return skillsStatus;
       case "validate_settings":
@@ -222,6 +232,19 @@ describe("App settings", () => {
         removeListener: vi.fn(),
         dispatchEvent: vi.fn(),
       })),
+    });
+
+    const localStorageItems = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: vi.fn((key: string) => localStorageItems.get(key) ?? null),
+        setItem: vi.fn((key: string, value: string) =>
+          localStorageItems.set(key, value),
+        ),
+        removeItem: vi.fn((key: string) => localStorageItems.delete(key)),
+        clear: vi.fn(() => localStorageItems.clear()),
+      },
     });
   });
 
@@ -432,5 +455,51 @@ describe("App settings", () => {
     expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(screen.queryByText("Welcome to Symphony")).toBeNull();
     expect(screen.queryByText("Install agent skills")).toBeNull();
+  });
+
+  it("lets the user trigger a queued retry immediately", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        overview: {
+          active_runs: [],
+          retry_queue: [
+            {
+              issue_id: "lin-retry-1",
+              run_number: 3,
+              due_at: "2099-01-01T00:00:00.000Z",
+              error_class: "agent_failure",
+              error_message: "failed",
+              created_at: "2026-01-01T00:00:00.000Z",
+              issue_identifier: "SYM-99",
+              issue_title: "Retry from the dashboard",
+            },
+          ],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        },
+        workerStatus: {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    const retryButton = await screen.findByRole("button", { name: "Retry now" });
+    fireEvent.click(retryButton);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("trigger_retry_now", {
+        issueId: "lin-retry-1",
+      }),
+    );
   });
 });

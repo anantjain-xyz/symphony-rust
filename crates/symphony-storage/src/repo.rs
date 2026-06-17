@@ -779,6 +779,19 @@ impl Repository {
         .await?)
     }
 
+    pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query("update retry_queue set due_at = ?1 where issue_id = ?2")
+            .bind(now_iso())
+            .bind(issue_id)
+            .execute(&self.pool)
+            .await?;
+        let updated = result.rows_affected() > 0;
+        if updated {
+            self.changed("retry_queue", "update");
+        }
+        Ok(updated)
+    }
+
     pub async fn pending_retry_issue_ids(&self) -> Result<Vec<String>, StorageError> {
         let rows: Vec<(String,)> = sqlx::query_as("select issue_id from retry_queue")
             .fetch_all(&self.pool)
@@ -1132,6 +1145,28 @@ mod tests {
             .expect("session info should be stored");
         let parsed: SessionInfoPayload = serde_json::from_str(&stored).unwrap();
         assert_eq!(parsed, info);
+    }
+
+    #[tokio::test]
+    async fn trigger_retry_now_makes_scheduled_retry_due() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        repo.schedule_retry(
+            "lin-1",
+            2,
+            "2099-01-01T00:00:00.000Z",
+            Some("agent_failure"),
+            Some("failed"),
+        )
+        .await
+        .unwrap();
+
+        assert!(repo.trigger_retry_now("lin-1").await.unwrap());
+        assert_eq!(
+            repo.due_retries(&now_iso()).await.unwrap()[0].issue_id,
+            "lin-1"
+        );
+        assert!(!repo.trigger_retry_now("missing").await.unwrap());
     }
 
     #[tokio::test]
