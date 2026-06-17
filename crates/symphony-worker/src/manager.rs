@@ -299,10 +299,12 @@ async fn run_worker(
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
+            let next_tracker = LinearTracker::new(current_tracker_config.clone());
+            next_tracker.preflight().await?;
             tracker_config = current_tracker_config;
-            tracker = LinearTracker::new(tracker_config.clone());
+            tracker = next_tracker;
         }
-        if let Err(err) = tick(&repo, &tracker, &current_config, &stop).await {
+        if let Err(err) = tick(&repo, &tracker, &current_config, Some(&config), &stop).await {
             error!(error = %err, "worker tick failed");
         }
         let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
@@ -381,6 +383,7 @@ async fn tick<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
     config: &RuntimeConfig,
+    latest_config: Option<&SharedRuntimeConfig>,
     stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
     let active = tracker.fetch_active().await?;
@@ -451,7 +454,11 @@ async fn tick<T: TrackerClient>(
         if repo.has_active_run(&issue.id).await? {
             continue;
         }
-        let Some(repo_config) = route_issue(&config.repos, &issue) else {
+        let dispatch_config = latest_runtime_config(config, latest_config).await;
+        if dispatch_config.workflow.front_matter.tracker != config.workflow.front_matter.tracker {
+            return Ok(());
+        }
+        let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
                 "no repository matches this issue; skipping (mark a repo as default or add a repo:<name> label)"
@@ -459,13 +466,17 @@ async fn tick<T: TrackerClient>(
             continue;
         };
         if repo.count_running().await?
-            >= config.workflow.front_matter.agent.max_concurrent_agents as i64
+            >= dispatch_config
+                .workflow
+                .front_matter
+                .agent
+                .max_concurrent_agents as i64
         {
             break;
         }
         reserve_and_dispatch(
             repo.clone(),
-            config.clone(),
+            dispatch_config.clone(),
             issue,
             repo_config.clone(),
             None,
@@ -479,8 +490,16 @@ async fn tick<T: TrackerClient>(
         if stop.is_cancelled() {
             return Ok(());
         }
+        let dispatch_config = latest_runtime_config(config, latest_config).await;
+        if dispatch_config.workflow.front_matter.tracker != config.workflow.front_matter.tracker {
+            return Ok(());
+        }
         if repo.count_running().await?
-            >= config.workflow.front_matter.agent.max_concurrent_agents as i64
+            >= dispatch_config
+                .workflow
+                .front_matter
+                .agent
+                .max_concurrent_agents as i64
         {
             break;
         }
@@ -488,7 +507,7 @@ async fn tick<T: TrackerClient>(
             // The issue may have left the active set since the failed run
             // (e.g. moved to Done); drop the retry rather than keep it queued
             // or dispatch a run nobody asked for.
-            let is_active = config
+            let is_active = dispatch_config
                 .workflow
                 .front_matter
                 .tracker
@@ -506,7 +525,7 @@ async fn tick<T: TrackerClient>(
             }
             // Unroutable issues stay queued, like blocked ones: routing rules
             // only change with a worker restart, which re-enters this loop.
-            let Some(repo_config) = route_issue(&config.repos, &issue) else {
+            let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
                 warn!(
                     issue = %issue.identifier,
                     "no repository matches this retry; keeping it queued"
@@ -515,7 +534,7 @@ async fn tick<T: TrackerClient>(
             };
             reserve_and_dispatch(
                 repo.clone(),
-                config.clone(),
+                dispatch_config.clone(),
                 issue,
                 repo_config.clone(),
                 Some(retry.run_number),
@@ -527,6 +546,16 @@ async fn tick<T: TrackerClient>(
         }
     }
     Ok(())
+}
+
+async fn latest_runtime_config(
+    fallback: &RuntimeConfig,
+    latest_config: Option<&SharedRuntimeConfig>,
+) -> RuntimeConfig {
+    match latest_config {
+        Some(config) => config.read().await.clone(),
+        None => fallback.clone(),
+    }
 }
 
 async fn reserve_and_dispatch(
@@ -1510,7 +1539,7 @@ mod tests {
             active: vec![todo.clone()],
             terminal: vec![],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         assert_eq!(
             repo.get_issue("lin-1").await.unwrap().unwrap().state,
             "todo"
@@ -1527,7 +1556,7 @@ mod tests {
             active: vec![],
             terminal: vec![in_review.clone()],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         assert_eq!(
             repo.get_issue("lin-1").await.unwrap().unwrap().state,
             "in review"
@@ -1542,7 +1571,7 @@ mod tests {
             active: vec![],
             terminal: vec![done],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         assert_eq!(
             repo.get_issue("lin-1").await.unwrap().unwrap().state,
             "done"
@@ -1565,7 +1594,7 @@ mod tests {
             active: vec![todo.clone()],
             terminal: vec![],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         let row = repo.get_issue("lin-1").await.unwrap().unwrap();
         assert_eq!(row.state, "todo");
 
@@ -1578,7 +1607,7 @@ mod tests {
             active: vec![],
             terminal: vec![done],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         let row = repo.get_issue("lin-1").await.unwrap().unwrap();
         assert_eq!(row.state, "done");
     }
@@ -1598,13 +1627,13 @@ mod tests {
             active: vec![todo],
             terminal: vec![],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
 
         let tracker = StaticTracker {
             active: vec![],
             terminal: vec![],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
         let row = repo.get_issue("lin-1").await.unwrap().unwrap();
         assert_eq!(row.state, "todo");
     }
@@ -1629,7 +1658,7 @@ mod tests {
             .await
             .unwrap();
 
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
         assert_eq!(
@@ -1660,7 +1689,7 @@ mod tests {
             .await
             .unwrap();
 
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
@@ -1694,7 +1723,7 @@ mod tests {
             active: vec![ready],
             terminal: vec![],
         };
-        tick(&repo, &tracker, &config, &stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
@@ -1938,6 +1967,47 @@ mod tests {
             shared.read().await.repos[0].install_cmd.as_deref(),
             Some("make gen")
         );
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            manager.wake.notified(),
+        )
+        .await
+        .expect("reconfigure should wake the worker loop");
+    }
+
+    #[tokio::test]
+    async fn due_retry_uses_latest_runtime_config_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let mut latest = config.clone();
+        latest.workflow.front_matter.agent.max_concurrent_agents = 0;
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(latest));
+        let stop = CancellationToken::new();
+        let ready = issue("todo", vec![]);
+        let tracker = StaticTracker {
+            active: vec![ready.clone()],
+            terminal: vec![],
+        };
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+
+        tick(&repo, &tracker, &config, Some(&shared), &stop)
+            .await
+            .unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -2060,7 +2130,9 @@ mod tests {
         };
         let worker_stop = CancellationToken::new();
 
-        tick(&repo, &tracker, &config, &worker_stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &worker_stop)
+            .await
+            .unwrap();
 
         assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 1);
         assert!(repo.list_pending().await.unwrap().is_empty());
@@ -2076,7 +2148,9 @@ mod tests {
             terminal: vec![],
         };
 
-        tick(&repo, &tracker, &config, &worker_stop).await.unwrap();
+        tick(&repo, &tracker, &config, None, &worker_stop)
+            .await
+            .unwrap();
 
         assert!(repo
             .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
