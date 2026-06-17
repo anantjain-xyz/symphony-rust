@@ -1,4 +1,7 @@
-use crate::types::{Issue, RepoConfig};
+use crate::{
+    project::LinearProjectRef,
+    types::{Issue, RepoConfig},
+};
 
 /// Resolve which configured repository an issue's runs should clone.
 ///
@@ -26,16 +29,17 @@ pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a Rep
                 .find(|repo| repo.name.trim().eq_ignore_ascii_case(name))
         });
     }
-    if let Some(project_id) = issue
-        .project_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
+    let project_id = issue.project_id.as_deref().map(str::trim);
+    let project_slug_id = issue.project_slug_id.as_deref().map(str::trim);
+    if project_id.is_some_and(|id| !id.is_empty())
+        || project_slug_id.is_some_and(|slug_id| !slug_id.is_empty())
     {
-        if let Some(repo) = repos
-            .iter()
-            .find(|repo| repo.project_ids.iter().any(|id| id.trim() == project_id))
-        {
+        if let Some(repo) = repos.iter().find(|repo| {
+            repo.project_ids.iter().any(|raw| {
+                LinearProjectRef::parse(raw)
+                    .is_some_and(|project| project.matches_project(project_id, project_slug_id))
+            })
+        }) {
             return Some(repo);
         }
     }
@@ -97,6 +101,14 @@ mod tests {
             blockers: vec![],
             pr_urls: vec![],
             project_id: project_id.map(ToString::to_string),
+            project_slug_id: None,
+        }
+    }
+
+    fn issue_with_project_slug(identifier: &str, project_slug_id: &str) -> Issue {
+        Issue {
+            project_slug_id: Some(project_slug_id.to_string()),
+            ..issue(identifier, &[], None)
         }
     }
 
@@ -150,6 +162,24 @@ mod tests {
         assert_eq!(routed.map(|r| r.name.as_str()), Some("mobile"));
         let routed = route_issue(&repos, &issue("ENG-42", &[], Some("proj-other")));
         assert_eq!(routed.map(|r| r.name.as_str()), Some("backend"));
+    }
+
+    #[test]
+    fn project_url_slug_beats_team_default() {
+        let mut by_team = repo("backend");
+        by_team.team_prefixes = vec!["ENG".to_string()];
+        let mut by_project = repo("mobile");
+        by_project.project_ids = vec![
+            "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
+                .to_string(),
+        ];
+        let repos = vec![by_team, by_project];
+
+        let routed = route_issue(
+            &repos,
+            &issue_with_project_slug("ENG-42", "phase-1-pre-launch-fixes-00bdaf30dd39"),
+        );
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("mobile"));
     }
 
     #[test]

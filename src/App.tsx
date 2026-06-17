@@ -2097,11 +2097,11 @@ function SettingsView({
                   value={repo.project_ids}
                   disabled={!runtimeAvailable}
                   separator="comma"
-                  placeholder="Project IDs"
+                  placeholder="Project URLs or IDs"
                   onChange={(next) => updateRepo(index, { project_ids: next })}
                 />
                 <small className="hint">
-                  Optional. Issues in these projects land here; beats the team rule.
+                  Optional. Paste Linear project URLs or IDs; beats the team rule.
                 </small>
               </label>
               <SkillsBlock
@@ -2199,7 +2199,7 @@ function SettingsView({
             </small>
           </label>
           <label>
-            Project ID
+            Project
             <input
               {...literalInputProps}
               value={settings.tracker_project_id ?? ""}
@@ -2209,7 +2209,7 @@ function SettingsView({
               }
             />
             <small className="hint">
-              Optional. Watch a single project — copy its ID from the project details panel.
+              Optional. Watch a single project by pasting its Linear URL or project ID.
             </small>
           </label>
           <label>

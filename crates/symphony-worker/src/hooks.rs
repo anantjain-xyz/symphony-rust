@@ -226,6 +226,7 @@ mod tests {
             blockers: vec![],
             pr_urls: vec![],
             project_id: None,
+            project_slug_id: None,
         }
     }
 
