@@ -279,13 +279,14 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
             }
         }
         for project in &repo.project_ids {
-            let key = project.trim().to_string();
-            if key.is_empty() {
+            let Some(project_ref) = symphony_core::LinearProjectRef::parse(project) else {
                 continue;
-            }
+            };
+            let key = project_ref.canonical_key();
             if let Some(other) = projects.insert(key.clone(), name) {
                 return Some(format!(
-                    "Project \"{key}\" is claimed by both \"{other}\" and \"{name}\"."
+                    "Project \"{}\" is claimed by both \"{other}\" and \"{name}\".",
+                    project.trim()
                 ));
             }
         }
@@ -894,6 +895,20 @@ mod tests {
         assert!(validate_repos(&[proj_a, proj_b])
             .expect("overlapping projects")
             .contains("Project \"proj-1\""));
+
+        let mut proj_url_a = repo("a");
+        proj_url_a.project_ids = vec![
+            "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
+                .to_string(),
+        ];
+        let mut proj_url_b = repo("b");
+        proj_url_b.project_ids = vec![
+            "linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/updates"
+                .to_string(),
+        ];
+        assert!(validate_repos(&[proj_url_a, proj_url_b])
+            .expect("overlapping project URLs")
+            .contains("phase-1-pre-launch-fixes-00bdaf30dd39"));
 
         let two_defaults = vec![
             RepoConfig {

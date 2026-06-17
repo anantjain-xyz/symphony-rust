@@ -277,7 +277,7 @@ describe("App settings", () => {
       screen.getByLabelText(/^Workspace root/, { selector: "input" }),
       screen.getByLabelText(/^API key/, { selector: "input" }),
       screen.getByPlaceholderText("acme"),
-      screen.getByLabelText(/^Project ID/, { selector: "input" }),
+      screen.getByLabelText(/^Project/, { selector: "input" }),
       screen.getByLabelText(/^Team prefix/, { selector: "input" }),
       screen.getByLabelText(/^Active states/, { selector: "input" }),
       screen.getByLabelText(/^Terminal states/, { selector: "input" }),

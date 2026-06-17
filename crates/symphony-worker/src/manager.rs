@@ -1310,6 +1310,7 @@ mod tests {
             blockers,
             pr_urls: vec![],
             project_id: None,
+            project_slug_id: None,
         }
     }
 

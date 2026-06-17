@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::{header::RETRY_AFTER, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
-use symphony_core::{Issue, TrackerConfig};
+use symphony_core::{Issue, LinearProjectRef, TrackerConfig};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -83,6 +83,13 @@ impl LinearTracker {
         issues
     }
 
+    fn project_ref(&self) -> Option<LinearProjectRef> {
+        self.config
+            .project_id
+            .as_deref()
+            .and_then(LinearProjectRef::parse)
+    }
+
     async fn fetch_by_state_names(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
         if states.is_empty() {
             return Ok(Vec::new());
@@ -104,13 +111,22 @@ impl LinearTracker {
             filter_parts.push("team: { key: { eq: $teamKey } }".to_string());
             variables.insert("teamKey".to_string(), serde_json::Value::String(team_key));
         }
-        if let Some(project_id) = &self.config.project_id {
-            var_decls.push("$projectId: ID!".to_string());
-            filter_parts.push("project: { id: { eq: $projectId } }".to_string());
-            variables.insert(
-                "projectId".to_string(),
-                serde_json::Value::String(project_id.clone()),
-            );
+        if let Some(project_ref) = self.project_ref() {
+            if let Some(project_id) = project_ref.id() {
+                var_decls.push("$projectId: ID!".to_string());
+                filter_parts.push("project: { id: { eq: $projectId } }".to_string());
+                variables.insert(
+                    "projectId".to_string(),
+                    serde_json::Value::String(project_id.to_string()),
+                );
+            } else if let Some(project_slug_id) = project_ref.slug_id() {
+                var_decls.push("$projectSlugId: String!".to_string());
+                filter_parts.push("project: { slugId: { eq: $projectSlugId } }".to_string());
+                variables.insert(
+                    "projectSlugId".to_string(),
+                    serde_json::Value::String(project_slug_id.to_string()),
+                );
+            }
         }
         let query = format!(
             r#"
@@ -241,8 +257,10 @@ impl TrackerClient for LinearTracker {
         let Some(node) = data.issue else {
             return Ok(None);
         };
-        if let Some(project_id) = &self.config.project_id {
-            if node.project.as_ref().map(|p| &p.id) != Some(project_id) {
+        if let Some(project_ref) = self.project_ref() {
+            let project_id = node.project.as_ref().map(|p| p.id.as_str());
+            let project_slug_id = node.project.as_ref().and_then(|p| p.slug_id.as_deref());
+            if !project_ref.matches_project(project_id, project_slug_id) {
                 return Ok(None);
             }
         }
@@ -364,8 +382,10 @@ struct LinearIssueNode {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LinearProject {
     id: String,
+    slug_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -469,7 +489,8 @@ fn normalize(node: LinearIssueNode) -> Issue {
             .unwrap_or_default(),
         blockers,
         pr_urls,
-        project_id: node.project.map(|project| project.id),
+        project_id: node.project.as_ref().map(|project| project.id.clone()),
+        project_slug_id: node.project.and_then(|project| project.slug_id),
     }
 }
 
@@ -492,7 +513,7 @@ const ISSUE_FIELDS: &str = r#"
   priority
   branchName
   state { name }
-  project { id }
+  project { id slugId }
   labels { nodes { name } }
   inverseRelations {
     nodes {
@@ -522,7 +543,7 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       priority
       branchName
       state { name }
-      project { id }
+      project { id slugId }
       labels { nodes { name } }
       inverseRelations {
         nodes {
@@ -607,5 +628,23 @@ mod tests {
             assert_eq!(tracker.team_key_from_prefix(), None);
             assert_eq!(tracker.identifier_match_prefix(), None);
         }
+    }
+
+    #[test]
+    fn project_ref_accepts_linear_project_urls() {
+        let tracker = LinearTracker::new(TrackerConfig {
+            project_id: Some(
+                "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
+                    .to_string(),
+            ),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            tracker
+                .project_ref()
+                .and_then(|project| { project.slug_id().map(str::to_string) }),
+            Some("phase-1-pre-launch-fixes-00bdaf30dd39".to_string())
+        );
     }
 }
