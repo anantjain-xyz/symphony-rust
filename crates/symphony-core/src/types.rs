@@ -439,6 +439,10 @@ pub struct Issue {
     /// Default so issue snapshots stored before this field deserialize.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Linear URL slug for the issue's project; lets project URLs route too.
+    /// Default so issue snapshots stored before this field deserialize.
+    #[serde(default)]
+    pub project_slug_id: Option<String>,
 }
 
 /// One repository Symphony can dispatch runs into. `name` doubles as the

@@ -50,7 +50,7 @@ On first launch the Overview shows a setup checklist:
 2. **Add your repositories** — one or more Git URLs; each run clones the repo its issue routes to.
 3. **Start the worker** — the ▶ button in the top bar. Symphony begins polling and dispatching.
 
-Optional Linear filters (workspace slug, project ID, identifier prefix like `ENG`) narrow which issues Symphony picks up. Use **Validate** in Settings to check your configuration and confirm the agent CLIs are discoverable before starting.
+Optional Linear filters (workspace slug, project URL or ID, identifier prefix like `ENG`) narrow which issues Symphony picks up. Use **Validate** in Settings to check your configuration and confirm the agent CLIs are discoverable before starting.
 
 ## Settings and the prompt template
 
