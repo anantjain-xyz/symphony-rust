@@ -83,6 +83,13 @@ function testSettings(): AppSettings {
   };
 }
 
+function expectLiteralInput(element: Element) {
+  expect(element.getAttribute("autocomplete")).toBe("off");
+  expect(element.getAttribute("autocorrect")).toBe("off");
+  expect(element.getAttribute("autocapitalize")).toBe("none");
+  expect(element.getAttribute("spellcheck")).toBe("false");
+}
+
 // A `tauri.invoke` stand-in for the settings screen: it serves the commands the
 // dashboard issues on load and lets each test vary only what it cares about —
 // the validation verdict and whether saving is allowed.
@@ -231,7 +238,72 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     const repoNameInput = screen.getByLabelText(/^Name/, { selector: "input" });
-    expect(repoNameInput.getAttribute("autocapitalize")).toBe("none");
+    expectLiteralInput(repoNameInput);
+  });
+
+  it("uses literal input behavior for settings config fields", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const fields = [
+      screen.getByLabelText(/^Repo URL/, { selector: "input" }),
+      screen.getByLabelText(/^Install command/, { selector: "input" }),
+      screen.getByLabelText(/^Linear teams/, { selector: "input" }),
+      screen.getByLabelText(/^Linear projects/, { selector: "input" }),
+      screen.getByLabelText(/^Workspace root/, { selector: "input" }),
+      screen.getByLabelText(/^API key/, { selector: "input" }),
+      screen.getByPlaceholderText("acme"),
+      screen.getByLabelText(/^Project ID/, { selector: "input" }),
+      screen.getByLabelText(/^Team prefix/, { selector: "input" }),
+      screen.getByLabelText(/^Active states/, { selector: "input" }),
+      screen.getByLabelText(/^Terminal states/, { selector: "input" }),
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+    ];
+
+    fireEvent.click(screen.getByText("Hooks (advanced)"));
+    fields.push(
+      screen.getByLabelText(/^After create/, { selector: "textarea" }),
+      screen.getByLabelText(/^Before run/, { selector: "textarea" }),
+      screen.getByLabelText(/^After run/, { selector: "textarea" }),
+      screen.getByLabelText(/^Before remove/, { selector: "textarea" }),
+    );
+
+    for (const field of fields) {
+      expectLiteralInput(field);
+    }
+  });
+
+  it("keeps launch commands as literal shell text", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({ settings: { ...testSettings(), agent_backend: "claude" } }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const launchCommand = await screen.findByLabelText(/^Launch command/, { selector: "input" });
+    expectLiteralInput(launchCommand);
+    expectLiteralInput(screen.getByLabelText(/^Allowed tools/, { selector: "textarea" }));
+    expectLiteralInput(screen.getByLabelText(/^Disallowed tools/, { selector: "textarea" }));
+    expectLiteralInput(screen.getByLabelText(/^Additional directories/, { selector: "textarea" }));
+
+    fireEvent.change(launchCommand, { target: { value: "mycode --agent claude" } });
+
+    expect((launchCommand as HTMLInputElement).value).toBe("mycode --agent claude");
+  });
+
+  it("uses literal input behavior for Cursor model names", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({ settings: { ...testSettings(), agent_backend: "cursor" } }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    expectLiteralInput(await screen.findByLabelText(/^Model/, { selector: "input" }));
   });
 
   it("shows the mycode launch wrapper in the launch command helper", () => {

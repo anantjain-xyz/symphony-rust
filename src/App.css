@@ -1638,10 +1638,14 @@ textarea:disabled {
   font-weight: 500;
 }
 
-/* Smaller in-form code editors (hooks, tool lists). */
+/* Smaller in-form code editors and command inputs. */
+input.mono-input,
 textarea.mono-input {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+textarea.mono-input {
   resize: vertical;
 }
 
