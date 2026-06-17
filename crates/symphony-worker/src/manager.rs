@@ -17,7 +17,7 @@ use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, RwLock},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -73,7 +73,10 @@ struct InnerState {
     status: WorkerStatus,
     stop: Option<CancellationToken>,
     handle: Option<JoinHandle<()>>,
+    runtime_config: Option<SharedRuntimeConfig>,
 }
+
+type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 
 #[derive(Debug, Clone, Default)]
 struct RunCancellationRegistry {
@@ -127,6 +130,7 @@ impl WorkerManager {
                 },
                 stop: None,
                 handle: None,
+                runtime_config: None,
             })),
             run_cancellations: RunCancellationRegistry::default(),
         }
@@ -137,7 +141,6 @@ impl WorkerManager {
     }
 
     pub async fn start(&self, config: WorkerStartConfig) -> Result<WorkerStatus, WorkerError> {
-        let workflow = config.workflow;
         {
             let mut inner = self.inner.lock().await;
             if inner.status.state == WorkerState::Running {
@@ -146,14 +149,8 @@ impl WorkerManager {
             let stop = CancellationToken::new();
             let repo = self.repo.clone();
             let manager = self.clone();
-            let runtime = RuntimeConfig {
-                workflow,
-                repos: config.repos,
-                env: config.env,
-                session_env: config.session_env,
-                app_data_dir: config.app_data_dir,
-                run_cancellations: self.run_cancellations.clone(),
-            };
+            let runtime = runtime_config_from_start(config, self.run_cancellations.clone());
+            let runtime_config = Arc::new(RwLock::new(runtime));
             let stop_for_task = stop.clone();
             inner.status = WorkerStatus {
                 state: WorkerState::Running,
@@ -161,17 +158,36 @@ impl WorkerManager {
                 last_error: None,
             };
             inner.stop = Some(stop);
+            inner.runtime_config = Some(runtime_config.clone());
             inner.handle = Some(tokio::spawn(async move {
-                let result = run_worker(repo, runtime, stop_for_task).await;
+                let result = run_worker(repo, runtime_config, stop_for_task).await;
                 let mut inner = manager.inner.lock().await;
                 inner.status.state = WorkerState::Stopped;
                 inner.status.started_at = None;
                 inner.status.last_error = result.err().map(|err| err.to_string());
                 inner.stop = None;
                 inner.handle = None;
+                inner.runtime_config = None;
             }));
         }
         Ok(self.status().await)
+    }
+
+    /// Refresh the settings snapshot used by future worker ticks. Runs that
+    /// have already been dispatched keep the config they started with.
+    pub async fn reconfigure(&self, config: WorkerStartConfig) -> WorkerStatus {
+        let runtime = runtime_config_from_start(config, self.run_cancellations.clone());
+        let runtime_config = {
+            let inner = self.inner.lock().await;
+            if inner.status.state != WorkerState::Running {
+                return inner.status.clone();
+            }
+            inner.runtime_config.clone()
+        };
+        if let Some(runtime_config) = runtime_config {
+            *runtime_config.write().await = runtime;
+        }
+        self.status().await
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
@@ -201,6 +217,7 @@ impl WorkerManager {
         if inner.stop.is_none() && inner.handle.is_none() {
             inner.status.state = WorkerState::Stopped;
             inner.status.started_at = None;
+            inner.runtime_config = None;
             return inner.status.clone();
         }
         inner.status.state = WorkerState::Stopping;
@@ -221,15 +238,31 @@ struct RuntimeConfig {
     run_cancellations: RunCancellationRegistry,
 }
 
+fn runtime_config_from_start(
+    config: WorkerStartConfig,
+    run_cancellations: RunCancellationRegistry,
+) -> RuntimeConfig {
+    RuntimeConfig {
+        workflow: config.workflow,
+        repos: config.repos,
+        env: config.env,
+        session_env: config.session_env,
+        app_data_dir: config.app_data_dir,
+        run_cancellations,
+    }
+}
+
 async fn run_worker(
     repo: Repository,
-    config: RuntimeConfig,
+    config: SharedRuntimeConfig,
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
-    repo.upsert_workflow(&config.workflow).await?;
-    let tracker = LinearTracker::new(config.workflow.front_matter.tracker.clone());
+    let initial_config = config.read().await.clone();
+    repo.upsert_workflow(&initial_config.workflow).await?;
+    let mut tracker_config = initial_config.workflow.front_matter.tracker.clone();
+    let mut tracker = LinearTracker::new(tracker_config.clone());
     tracker.preflight().await?;
-    recover(&repo, &tracker, &config).await?;
+    recover(&repo, &tracker, &initial_config).await?;
     let started_at = now_iso();
     repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
         .await?;
@@ -244,12 +277,19 @@ async fn run_worker(
     });
 
     while !stop.is_cancelled() {
-        if let Err(err) = tick(&repo, &tracker, &config, &stop).await {
+        let current_config = config.read().await.clone();
+        let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
+        if current_tracker_config != tracker_config {
+            tracker_config = current_tracker_config;
+            tracker = LinearTracker::new(tracker_config.clone());
+        }
+        if let Err(err) = tick(&repo, &tracker, &current_config, &stop).await {
             error!(error = %err, "worker tick failed");
         }
+        let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
         tokio::select! {
             _ = stop.cancelled() => break,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(config.workflow.front_matter.polling.interval_ms)) => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
         }
     }
     Ok(())
@@ -1226,6 +1266,16 @@ mod tests {
         }
     }
 
+    fn start_config(config: RuntimeConfig) -> WorkerStartConfig {
+        WorkerStartConfig {
+            workflow: config.workflow,
+            repos: config.repos,
+            env: config.env,
+            session_env: config.session_env,
+            app_data_dir: config.app_data_dir,
+        }
+    }
+
     fn issue(state: &str, blockers: Vec<String>) -> Issue {
         Issue {
             id: "lin-1".to_string(),
@@ -1834,6 +1884,38 @@ mod tests {
 
         assert!(first.is_cancelled());
         assert!(!second.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn reconfigure_refreshes_the_running_worker_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.repos[0].install_cmd = Some("make get".to_string());
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(initial));
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.status = WorkerStatus {
+                state: WorkerState::Running,
+                started_at: Some(now_iso()),
+                last_error: None,
+            };
+            inner.runtime_config = Some(shared.clone());
+        }
+        let mut updated = runtime_config(temp.path());
+        updated.repos[0].install_cmd = Some("make gen".to_string());
+
+        let status = manager.reconfigure(start_config(updated)).await;
+
+        assert_eq!(status.state, WorkerState::Running);
+        assert_eq!(
+            shared.read().await.repos[0].install_cmd.as_deref(),
+            Some("make gen")
+        );
     }
 
     #[tokio::test]

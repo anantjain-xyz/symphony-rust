@@ -122,6 +122,10 @@ async fn save_settings(
     tokio::fs::write(&state.settings_path, json)
         .await
         .map_err(|err| err.to_string())?;
+    state
+        .worker
+        .reconfigure(worker_start_config(&state, &settings))
+        .await;
     Ok(settings)
 }
 
@@ -472,18 +476,9 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
     if let Some(error) = validate_workflow_settings(&settings) {
         return Err(error);
     }
-    let api_key = linear_api_key();
-    let workflow = workflow_from_settings(&settings, api_key.as_deref());
-    let env = build_env();
     state
         .worker
-        .start(WorkerStartConfig {
-            workflow,
-            repos: settings.repos.clone(),
-            env,
-            session_env: settings.session_env.clone(),
-            app_data_dir: state.app_data_dir.clone(),
-        })
+        .start(worker_start_config(&state, &settings))
         .await
         .map_err(|err| err.to_string())
 }
@@ -491,6 +486,17 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
 #[tauri::command]
 async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
     Ok(state.worker.stop().await)
+}
+
+fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartConfig {
+    let api_key = linear_api_key();
+    WorkerStartConfig {
+        workflow: workflow_from_settings(settings, api_key.as_deref()),
+        repos: settings.repos.clone(),
+        env: build_env(),
+        session_env: settings.session_env.clone(),
+        app_data_dir: state.app_data_dir.clone(),
+    }
 }
 
 // Both skills commands take the repo URL straight from the caller's form
