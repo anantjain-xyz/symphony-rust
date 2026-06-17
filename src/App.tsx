@@ -514,6 +514,9 @@ function App() {
   const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
+  const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
@@ -918,6 +921,22 @@ function App() {
     }
   }
 
+  async function triggerRetryNow(issueId: string) {
+    setTriggeringRetryIds((prev) => new Set(prev).add(issueId));
+    try {
+      await call(() => invoke<boolean>("trigger_retry_now", { issueId }));
+      await refreshDashboard();
+    } catch {
+      // call() has already surfaced the error banner.
+    } finally {
+      setTriggeringRetryIds((prev) => {
+        const next = new Set(prev);
+        next.delete(issueId);
+        return next;
+      });
+    }
+  }
+
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
   // the boot auto-start condition. Skills are recommended only and live in
@@ -1072,11 +1091,14 @@ function App() {
           <OverviewView
             overview={overview}
             canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
             workerRunning={worker.state === "running"}
             setup={setup}
             multiRepo={multiRepo}
             onOpenRun={openRun}
             onStartWorker={startWorker}
+            onTriggerRetryNow={triggerRetryNow}
+            triggeringRetryIds={triggeringRetryIds}
             onOpenSettings={() => setView("settings")}
             onOpenIssues={() => setView("issues")}
           />
@@ -1178,21 +1200,27 @@ type SetupState = {
 function OverviewView({
   overview,
   canStartWorker,
+  canTriggerRetry,
   workerRunning,
   setup,
   multiRepo,
   onOpenRun,
   onStartWorker,
+  onTriggerRetryNow,
+  triggeringRetryIds,
   onOpenSettings,
   onOpenIssues,
 }: {
   overview: Overview;
   canStartWorker: boolean;
+  canTriggerRetry: boolean;
   workerRunning: boolean;
   setup: SetupState;
   multiRepo: boolean;
   onOpenRun: (id: string) => void;
   onStartWorker: () => void;
+  onTriggerRetryNow: (issueId: string) => void;
+  triggeringRetryIds: Set<string>;
   onOpenSettings: () => void;
   onOpenIssues: () => void;
 }) {
@@ -1289,6 +1317,7 @@ function OverviewView({
                   <th>Issue</th>
                   <th>Run</th>
                   <th>Due</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -1301,6 +1330,23 @@ function OverviewView({
                     <td>#{retry.run_number}</td>
                     <td className="tnum" title={shortTime(retry.due_at)}>
                       {relativeTime(retry.due_at)}
+                    </td>
+                    <td className="row-actions">
+                      <button
+                        type="button"
+                        className="link-button outlined"
+                        disabled={!canTriggerRetry || triggeringRetryIds.has(retry.issue_id)}
+                        title={
+                          workerRunning
+                            ? "Run this scheduled retry now"
+                            : "Start the worker to retry now"
+                        }
+                        onClick={() => onTriggerRetryNow(retry.issue_id)}
+                      >
+                        {triggeringRetryIds.has(retry.issue_id)
+                          ? "Retrying..."
+                          : "Retry now"}
+                      </button>
                     </td>
                   </tr>
                 ))}

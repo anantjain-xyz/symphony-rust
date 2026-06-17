@@ -17,7 +17,7 @@ use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, Notify},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -113,6 +113,7 @@ pub struct WorkerManager {
     repo: Repository,
     inner: Arc<Mutex<InnerState>>,
     run_cancellations: RunCancellationRegistry,
+    wake: Arc<Notify>,
 }
 
 impl WorkerManager {
@@ -129,6 +130,7 @@ impl WorkerManager {
                 handle: None,
             })),
             run_cancellations: RunCancellationRegistry::default(),
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -153,6 +155,7 @@ impl WorkerManager {
                 session_env: config.session_env,
                 app_data_dir: config.app_data_dir,
                 run_cancellations: self.run_cancellations.clone(),
+                wake: self.wake.clone(),
             };
             let stop_for_task = stop.clone();
             inner.status = WorkerStatus {
@@ -172,6 +175,14 @@ impl WorkerManager {
             }));
         }
         Ok(self.status().await)
+    }
+
+    pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, WorkerError> {
+        let updated = self.repo.trigger_retry_now(issue_id).await?;
+        if updated {
+            self.wake.notify_one();
+        }
+        Ok(updated)
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
@@ -219,6 +230,7 @@ struct RuntimeConfig {
     session_env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
     run_cancellations: RunCancellationRegistry,
+    wake: Arc<Notify>,
 }
 
 async fn run_worker(
@@ -249,6 +261,7 @@ async fn run_worker(
         }
         tokio::select! {
             _ = stop.cancelled() => break,
+            _ = config.wake.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(config.workflow.front_matter.polling.interval_ms)) => {}
         }
     }
@@ -1223,6 +1236,7 @@ mod tests {
             session_env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
             run_cancellations: RunCancellationRegistry::default(),
+            wake: Arc::new(Notify::new()),
         }
     }
 
