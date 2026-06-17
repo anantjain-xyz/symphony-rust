@@ -3165,7 +3165,6 @@ function SkillsBlock({
     null;
 
   let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
-  let label = "Not checked";
   let headline = "Check this repo for Symphony skills.";
   let detail: React.ReactNode =
     "Symphony can detect whether this repo already ships the bundled agent skills.";
@@ -3185,7 +3184,6 @@ function SkillsBlock({
 
   if (installing) {
     tone = "info";
-    label = "Creating PR";
     headline = "Creating an install PR.";
     detail =
       "Symphony is working in a temporary checkout, writing the bundled skills, adapting validation commands, and opening a PR.";
@@ -3197,7 +3195,6 @@ function SkillsBlock({
     );
   } else if (install?.state === "failed") {
     tone = "error";
-    label = "Failed";
     headline = "Install PR was not created.";
     detail =
       "Fix the reported GitHub or agent access problem, then retry the install session.";
@@ -3214,18 +3211,15 @@ function SkillsBlock({
     );
   } else if (checking) {
     tone = "info";
-    label = "Checking";
     headline = "Checking the default branch.";
     detail = "Symphony is using GitHub to verify the bundled skill manifests.";
   } else if (status?.state === "installed") {
     tone = "success";
-    label = "Installed";
     headline = "Agent skills are installed.";
     detail = `All ${BUNDLED_SKILL_COUNT} Symphony skills are present on this repo's default branch.`;
     actions = checkAgainButton;
   } else if (prUrl) {
     tone = "warning";
-    label = "PR open";
     headline = "An install PR is waiting for review.";
     detail =
       "Merge the install PR, then refresh this status. Symphony marks the step complete once the skills land on the default branch.";
@@ -3242,7 +3236,6 @@ function SkillsBlock({
     );
   } else if (status?.state === "missing") {
     tone = "warning";
-    label = "Not installed";
     headline = "Agent skills are not installed.";
     detail = `Create an install PR for ${BUNDLED_SKILL_EXAMPLES}, and the rest of the bundled workflow skills.`;
     meta = `${status.missing.length} of ${BUNDLED_SKILL_COUNT} bundled skills are missing.`;
@@ -3261,12 +3254,10 @@ function SkillsBlock({
     );
   } else if (status?.state === "unavailable") {
     tone = "error";
-    label = "Can't check";
     headline = "Symphony could not check this repo.";
     detail = status.detail ?? "Check the repository URL, GitHub CLI, and authentication.";
     actions = checkButton;
   } else if (!repoConfigured) {
-    label = "Repo needed";
     headline = "Add a repository URL first.";
     detail = "Skill detection and install PR creation run against the repo URL above.";
   } else {
@@ -3286,7 +3277,6 @@ function SkillsBlock({
     <div className="field-group skills-field">
       <div className="field-label-row">
         <span>Agent skills</span>
-        <span className={`skills-status-pill ${tone}`}>{label}</span>
       </div>
       <div className={`skills-install ${tone}`} aria-live="polite">
         <div className="skills-install-copy">
