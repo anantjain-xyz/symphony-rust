@@ -45,6 +45,12 @@ type Theme = "light" | "dark";
 const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
+const literalInputProps = {
+  autoComplete: "off",
+  autoCorrect: "off",
+  autoCapitalize: "none",
+  spellCheck: false,
+} as const;
 const BUNDLED_SKILL_NAMES = [
   "symphony-commit",
   "symphony-land",
@@ -2032,10 +2038,9 @@ function SettingsView({
               <label>
                 Name
                 <input
+                  {...literalInputProps}
                   value={repo.name}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
-                  autoCapitalize="none"
                   onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
                   placeholder="widgets"
                 />
@@ -2047,9 +2052,9 @@ function SettingsView({
               <label>
                 Repo URL
                 <input
+                  {...literalInputProps}
                   value={repo.url}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   onChange={(e) => updateRepo(index, { url: e.currentTarget.value })}
                   placeholder="git@github.com:org/repo.git"
                 />
@@ -2060,9 +2065,9 @@ function SettingsView({
               <label>
                 Install command
                 <input
+                  {...literalInputProps}
                   value={repo.install_cmd ?? ""}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   onChange={(e) =>
                     updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
                   }
@@ -2125,9 +2130,9 @@ function SettingsView({
           <label>
             Workspace root
             <input
+              {...literalInputProps}
               value={settings.workspace_root ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, workspace_root: nullable(e.currentTarget.value) })
               }
@@ -2153,10 +2158,10 @@ function SettingsView({
           <label>
             API key
             <input
+              {...literalInputProps}
               value={linearKey}
               disabled={!runtimeAvailable}
               type="password"
-              autoComplete="new-password"
               onChange={(e) => setLinearKey(e.currentTarget.value)}
               placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
             />
@@ -2181,9 +2186,9 @@ function SettingsView({
           <label>
             Workspace
             <input
+              {...literalInputProps}
               value={settings.tracker_workspace ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
               }
@@ -2196,9 +2201,9 @@ function SettingsView({
           <label>
             Project ID
             <input
+              {...literalInputProps}
               value={settings.tracker_project_id ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
               }
@@ -2210,9 +2215,9 @@ function SettingsView({
           <label>
             Team prefix
             <input
+              {...literalInputProps}
               value={settings.tracker_prefix ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
               }
@@ -2290,6 +2295,8 @@ function SettingsView({
           <label>
             Launch command
             <input
+              {...literalInputProps}
+              className="mono-input"
               value={
                 settings.agent_backend === "codex"
                   ? (settings.codex_command ?? "")
@@ -2298,7 +2305,6 @@ function SettingsView({
                     : (settings.cursor_command ?? "")
               }
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) => {
                 const value = nullable(e.currentTarget.value);
                 if (settings.agent_backend === "codex") {
@@ -2597,9 +2603,9 @@ function SettingsView({
               <label>
                 Model
                 <input
+                  {...literalInputProps}
                   value={settings.cursor_model ?? ""}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   placeholder="Optional, e.g. composer-2.5"
                   onChange={(e) =>
                     setSettings({
@@ -2692,11 +2698,11 @@ function SettingsView({
             <label>
               After create
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={4}
                 value={settings.hook_after_create ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_after_create: nullable(e.currentTarget.value) })
                 }
@@ -2708,11 +2714,11 @@ function SettingsView({
             <label>
               Before run
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_before_run ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_before_run: nullable(e.currentTarget.value) })
                 }
@@ -2721,11 +2727,11 @@ function SettingsView({
             <label>
               After run
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_after_run ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_after_run: nullable(e.currentTarget.value) })
                 }
@@ -2734,11 +2740,11 @@ function SettingsView({
             <label>
               Before remove
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_before_remove ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_before_remove: nullable(e.currentTarget.value) })
                 }
@@ -2848,11 +2854,11 @@ function ListInput({
   if (separator === "newline") {
     return (
       <textarea
+        {...literalInputProps}
         className="mono-input"
         value={draft}
         disabled={disabled}
         rows={rows ?? 6}
-        spellCheck={false}
         placeholder={placeholder}
         onChange={(e) => handleChange(e.currentTarget.value)}
       />
@@ -2860,9 +2866,9 @@ function ListInput({
   }
   return (
     <input
+      {...literalInputProps}
       value={draft}
       disabled={disabled}
-      autoComplete="off"
       placeholder={placeholder}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
@@ -2916,11 +2922,11 @@ function EnvInput({
 
   return (
     <textarea
+      {...literalInputProps}
       className="mono-input"
       value={draft}
       disabled={disabled}
       rows={4}
-      spellCheck={false}
       placeholder={"OPENAI_API_KEY=...\nFEATURE_FLAG=1"}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
