@@ -45,6 +45,12 @@ type Theme = "light" | "dark";
 const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
+const literalInputProps = {
+  autoComplete: "off",
+  autoCorrect: "off",
+  autoCapitalize: "none",
+  spellCheck: false,
+} as const;
 const BUNDLED_SKILL_NAMES = [
   "symphony-commit",
   "symphony-land",
@@ -514,6 +520,9 @@ function App() {
   const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
+  const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
@@ -918,6 +927,22 @@ function App() {
     }
   }
 
+  async function triggerRetryNow(issueId: string) {
+    setTriggeringRetryIds((prev) => new Set(prev).add(issueId));
+    try {
+      await call(() => invoke<boolean>("trigger_retry_now", { issueId }));
+      await refreshDashboard();
+    } catch {
+      // call() has already surfaced the error banner.
+    } finally {
+      setTriggeringRetryIds((prev) => {
+        const next = new Set(prev);
+        next.delete(issueId);
+        return next;
+      });
+    }
+  }
+
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
   // the boot auto-start condition. Skills are recommended only and live in
@@ -1072,11 +1097,14 @@ function App() {
           <OverviewView
             overview={overview}
             canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
             workerRunning={worker.state === "running"}
             setup={setup}
             multiRepo={multiRepo}
             onOpenRun={openRun}
             onStartWorker={startWorker}
+            onTriggerRetryNow={triggerRetryNow}
+            triggeringRetryIds={triggeringRetryIds}
             onOpenSettings={() => setView("settings")}
             onOpenIssues={() => setView("issues")}
           />
@@ -1178,21 +1206,27 @@ type SetupState = {
 function OverviewView({
   overview,
   canStartWorker,
+  canTriggerRetry,
   workerRunning,
   setup,
   multiRepo,
   onOpenRun,
   onStartWorker,
+  onTriggerRetryNow,
+  triggeringRetryIds,
   onOpenSettings,
   onOpenIssues,
 }: {
   overview: Overview;
   canStartWorker: boolean;
+  canTriggerRetry: boolean;
   workerRunning: boolean;
   setup: SetupState;
   multiRepo: boolean;
   onOpenRun: (id: string) => void;
   onStartWorker: () => void;
+  onTriggerRetryNow: (issueId: string) => void;
+  triggeringRetryIds: Set<string>;
   onOpenSettings: () => void;
   onOpenIssues: () => void;
 }) {
@@ -1289,6 +1323,7 @@ function OverviewView({
                   <th>Issue</th>
                   <th>Run</th>
                   <th>Due</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -1301,6 +1336,23 @@ function OverviewView({
                     <td>#{retry.run_number}</td>
                     <td className="tnum" title={shortTime(retry.due_at)}>
                       {relativeTime(retry.due_at)}
+                    </td>
+                    <td className="row-actions">
+                      <button
+                        type="button"
+                        className="link-button outlined"
+                        disabled={!canTriggerRetry || triggeringRetryIds.has(retry.issue_id)}
+                        title={
+                          workerRunning
+                            ? "Run this scheduled retry now"
+                            : "Start the worker to retry now"
+                        }
+                        onClick={() => onTriggerRetryNow(retry.issue_id)}
+                      >
+                        {triggeringRetryIds.has(retry.issue_id)
+                          ? "Retrying..."
+                          : "Retry now"}
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1986,10 +2038,9 @@ function SettingsView({
               <label>
                 Name
                 <input
+                  {...literalInputProps}
                   value={repo.name}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
-                  autoCapitalize="none"
                   onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
                   placeholder="widgets"
                 />
@@ -2001,9 +2052,9 @@ function SettingsView({
               <label>
                 Repo URL
                 <input
+                  {...literalInputProps}
                   value={repo.url}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   onChange={(e) => updateRepo(index, { url: e.currentTarget.value })}
                   placeholder="git@github.com:org/repo.git"
                 />
@@ -2014,9 +2065,9 @@ function SettingsView({
               <label>
                 Install command
                 <input
+                  {...literalInputProps}
                   value={repo.install_cmd ?? ""}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   onChange={(e) =>
                     updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
                   }
@@ -2079,9 +2130,9 @@ function SettingsView({
           <label>
             Workspace root
             <input
+              {...literalInputProps}
               value={settings.workspace_root ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, workspace_root: nullable(e.currentTarget.value) })
               }
@@ -2107,10 +2158,10 @@ function SettingsView({
           <label>
             API key
             <input
+              {...literalInputProps}
               value={linearKey}
               disabled={!runtimeAvailable}
               type="password"
-              autoComplete="new-password"
               onChange={(e) => setLinearKey(e.currentTarget.value)}
               placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
             />
@@ -2135,9 +2186,9 @@ function SettingsView({
           <label>
             Workspace
             <input
+              {...literalInputProps}
               value={settings.tracker_workspace ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
               }
@@ -2150,9 +2201,9 @@ function SettingsView({
           <label>
             Project ID
             <input
+              {...literalInputProps}
               value={settings.tracker_project_id ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
               }
@@ -2164,9 +2215,9 @@ function SettingsView({
           <label>
             Team prefix
             <input
+              {...literalInputProps}
               value={settings.tracker_prefix ?? ""}
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) =>
                 setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
               }
@@ -2244,6 +2295,8 @@ function SettingsView({
           <label>
             Launch command
             <input
+              {...literalInputProps}
+              className="mono-input"
               value={
                 settings.agent_backend === "codex"
                   ? (settings.codex_command ?? "")
@@ -2252,7 +2305,6 @@ function SettingsView({
                     : (settings.cursor_command ?? "")
               }
               disabled={!runtimeAvailable}
-              autoComplete="off"
               onChange={(e) => {
                 const value = nullable(e.currentTarget.value);
                 if (settings.agent_backend === "codex") {
@@ -2551,9 +2603,9 @@ function SettingsView({
               <label>
                 Model
                 <input
+                  {...literalInputProps}
                   value={settings.cursor_model ?? ""}
                   disabled={!runtimeAvailable}
-                  autoComplete="off"
                   placeholder="Optional, e.g. composer-2.5"
                   onChange={(e) =>
                     setSettings({
@@ -2646,11 +2698,11 @@ function SettingsView({
             <label>
               After create
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={4}
                 value={settings.hook_after_create ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_after_create: nullable(e.currentTarget.value) })
                 }
@@ -2662,11 +2714,11 @@ function SettingsView({
             <label>
               Before run
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_before_run ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_before_run: nullable(e.currentTarget.value) })
                 }
@@ -2675,11 +2727,11 @@ function SettingsView({
             <label>
               After run
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_after_run ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_after_run: nullable(e.currentTarget.value) })
                 }
@@ -2688,11 +2740,11 @@ function SettingsView({
             <label>
               Before remove
               <textarea
+                {...literalInputProps}
                 className="mono-input"
                 rows={2}
                 value={settings.hook_before_remove ?? ""}
                 disabled={!runtimeAvailable}
-                spellCheck={false}
                 onChange={(e) =>
                   setSettings({ ...settings, hook_before_remove: nullable(e.currentTarget.value) })
                 }
@@ -2802,11 +2854,11 @@ function ListInput({
   if (separator === "newline") {
     return (
       <textarea
+        {...literalInputProps}
         className="mono-input"
         value={draft}
         disabled={disabled}
         rows={rows ?? 6}
-        spellCheck={false}
         placeholder={placeholder}
         onChange={(e) => handleChange(e.currentTarget.value)}
       />
@@ -2814,9 +2866,9 @@ function ListInput({
   }
   return (
     <input
+      {...literalInputProps}
       value={draft}
       disabled={disabled}
-      autoComplete="off"
       placeholder={placeholder}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
@@ -2870,11 +2922,11 @@ function EnvInput({
 
   return (
     <textarea
+      {...literalInputProps}
       className="mono-input"
       value={draft}
       disabled={disabled}
       rows={4}
-      spellCheck={false}
       placeholder={"OPENAI_API_KEY=...\nFEATURE_FLAG=1"}
       onChange={(e) => handleChange(e.currentTarget.value)}
     />
@@ -3165,7 +3217,6 @@ function SkillsBlock({
     null;
 
   let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
-  let label = "Not checked";
   let headline = "Check this repo for Symphony skills.";
   let detail: React.ReactNode =
     "Symphony can detect whether this repo already ships the bundled agent skills.";
@@ -3185,7 +3236,6 @@ function SkillsBlock({
 
   if (installing) {
     tone = "info";
-    label = "Creating PR";
     headline = "Creating an install PR.";
     detail =
       "Symphony is working in a temporary checkout, writing the bundled skills, adapting validation commands, and opening a PR.";
@@ -3197,7 +3247,6 @@ function SkillsBlock({
     );
   } else if (install?.state === "failed") {
     tone = "error";
-    label = "Failed";
     headline = "Install PR was not created.";
     detail =
       "Fix the reported GitHub or agent access problem, then retry the install session.";
@@ -3214,18 +3263,15 @@ function SkillsBlock({
     );
   } else if (checking) {
     tone = "info";
-    label = "Checking";
     headline = "Checking the default branch.";
     detail = "Symphony is using GitHub to verify the bundled skill manifests.";
   } else if (status?.state === "installed") {
     tone = "success";
-    label = "Installed";
     headline = "Agent skills are installed.";
     detail = `All ${BUNDLED_SKILL_COUNT} Symphony skills are present on this repo's default branch.`;
     actions = checkAgainButton;
   } else if (prUrl) {
     tone = "warning";
-    label = "PR open";
     headline = "An install PR is waiting for review.";
     detail =
       "Merge the install PR, then refresh this status. Symphony marks the step complete once the skills land on the default branch.";
@@ -3242,7 +3288,6 @@ function SkillsBlock({
     );
   } else if (status?.state === "missing") {
     tone = "warning";
-    label = "Not installed";
     headline = "Agent skills are not installed.";
     detail = `Create an install PR for ${BUNDLED_SKILL_EXAMPLES}, and the rest of the bundled workflow skills.`;
     meta = `${status.missing.length} of ${BUNDLED_SKILL_COUNT} bundled skills are missing.`;
@@ -3261,12 +3306,10 @@ function SkillsBlock({
     );
   } else if (status?.state === "unavailable") {
     tone = "error";
-    label = "Can't check";
     headline = "Symphony could not check this repo.";
     detail = status.detail ?? "Check the repository URL, GitHub CLI, and authentication.";
     actions = checkButton;
   } else if (!repoConfigured) {
-    label = "Repo needed";
     headline = "Add a repository URL first.";
     detail = "Skill detection and install PR creation run against the repo URL above.";
   } else {
@@ -3286,7 +3329,6 @@ function SkillsBlock({
     <div className="field-group skills-field">
       <div className="field-label-row">
         <span>Agent skills</span>
-        <span className={`skills-status-pill ${tone}`}>{label}</span>
       </div>
       <div className={`skills-install ${tone}`} aria-live="polite">
         <div className="skills-install-copy">

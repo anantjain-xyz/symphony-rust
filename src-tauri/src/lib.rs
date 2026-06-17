@@ -499,6 +499,15 @@ fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartC
     }
 }
 
+#[tauri::command]
+async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Result<bool, String> {
+    state
+        .worker
+        .trigger_retry_now(&issue_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 // Both skills commands take the repo URL straight from the caller's form
 // (and install_skills the caller's settings, like validate_settings) rather
 // than reloading from disk, so unsaved edits — a just-typed repo URL in
@@ -607,6 +616,7 @@ pub fn run() {
             get_worker_status,
             start_worker,
             stop_worker,
+            trigger_retry_now,
             get_skills_status,
             get_skills_install_status,
             install_skills

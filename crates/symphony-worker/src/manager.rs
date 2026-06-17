@@ -17,7 +17,7 @@ use symphony_storage::{now_iso, Repository, RunRow, StorageError};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, Mutex, RwLock},
+    sync::{mpsc, Mutex, Notify, RwLock},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -116,6 +116,7 @@ pub struct WorkerManager {
     repo: Repository,
     inner: Arc<Mutex<InnerState>>,
     run_cancellations: RunCancellationRegistry,
+    wake: Arc<Notify>,
 }
 
 impl WorkerManager {
@@ -133,6 +134,7 @@ impl WorkerManager {
                 runtime_config: None,
             })),
             run_cancellations: RunCancellationRegistry::default(),
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -149,7 +151,11 @@ impl WorkerManager {
             let stop = CancellationToken::new();
             let repo = self.repo.clone();
             let manager = self.clone();
-            let runtime = runtime_config_from_start(config, self.run_cancellations.clone());
+            let runtime = runtime_config_from_start(
+                config,
+                self.run_cancellations.clone(),
+                self.wake.clone(),
+            );
             let runtime_config = Arc::new(RwLock::new(runtime));
             let stop_for_task = stop.clone();
             inner.status = WorkerStatus {
@@ -176,7 +182,8 @@ impl WorkerManager {
     /// Refresh the settings snapshot used by future worker ticks. Runs that
     /// have already been dispatched keep the config they started with.
     pub async fn reconfigure(&self, config: WorkerStartConfig) -> WorkerStatus {
-        let runtime = runtime_config_from_start(config, self.run_cancellations.clone());
+        let runtime =
+            runtime_config_from_start(config, self.run_cancellations.clone(), self.wake.clone());
         let runtime_config = {
             let inner = self.inner.lock().await;
             if inner.status.state != WorkerState::Running {
@@ -186,8 +193,17 @@ impl WorkerManager {
         };
         if let Some(runtime_config) = runtime_config {
             *runtime_config.write().await = runtime;
+            self.wake.notify_one();
         }
         self.status().await
+    }
+
+    pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, WorkerError> {
+        let updated = self.repo.trigger_retry_now(issue_id).await?;
+        if updated {
+            self.wake.notify_one();
+        }
+        Ok(updated)
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
@@ -236,11 +252,13 @@ struct RuntimeConfig {
     session_env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
     run_cancellations: RunCancellationRegistry,
+    wake: Arc<Notify>,
 }
 
 fn runtime_config_from_start(
     config: WorkerStartConfig,
     run_cancellations: RunCancellationRegistry,
+    wake: Arc<Notify>,
 ) -> RuntimeConfig {
     RuntimeConfig {
         workflow: config.workflow,
@@ -249,6 +267,7 @@ fn runtime_config_from_start(
         session_env: config.session_env,
         app_data_dir: config.app_data_dir,
         run_cancellations,
+        wake,
     }
 }
 
@@ -289,6 +308,7 @@ async fn run_worker(
         let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
         tokio::select! {
             _ = stop.cancelled() => break,
+            _ = current_config.wake.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
         }
     }
@@ -1263,6 +1283,7 @@ mod tests {
             session_env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
             run_cancellations: RunCancellationRegistry::default(),
+            wake: Arc::new(Notify::new()),
         }
     }
 

@@ -3,7 +3,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import type { AppSettings, SkillsStatus, ValidationResult, WorkerStatus } from "./bindings";
+import type {
+  AppSettings,
+  Overview,
+  SkillsStatus,
+  ValidationResult,
+  WorkerStatus,
+} from "./bindings";
 
 const tauriMocks = vi.hoisted(() => ({
   runtimeAvailable: false,
@@ -83,6 +89,13 @@ function testSettings(): AppSettings {
   };
 }
 
+function expectLiteralInput(element: Element) {
+  expect(element.getAttribute("autocomplete")).toBe("off");
+  expect(element.getAttribute("autocorrect")).toBe("off");
+  expect(element.getAttribute("autocapitalize")).toBe("none");
+  expect(element.getAttribute("spellcheck")).toBe("false");
+}
+
 // A `tauri.invoke` stand-in for the settings screen: it serves the commands the
 // dashboard issues on load and lets each test vary only what it cares about —
 // the validation verdict and whether saving is allowed.
@@ -139,6 +152,15 @@ function settingsInvoke({
 
 function dashboardInvoke({
   settings,
+  overview = {
+    active_runs: [],
+    retry_queue: [],
+    recent_failures: [],
+    live_sessions: [],
+    worker_heartbeat: null,
+    rate_limits: [],
+    token_usage: [],
+  },
   skillsStatus = {
     state: "missing",
     missing: ["symphony-workpad"],
@@ -152,6 +174,7 @@ function dashboardInvoke({
   },
 }: {
   settings: AppSettings;
+  overview?: Overview;
   skillsStatus?: SkillsStatus;
   workerStatus?: WorkerStatus;
 }) {
@@ -160,20 +183,14 @@ function dashboardInvoke({
       case "load_settings":
         return settings;
       case "get_overview":
-        return {
-          active_runs: [],
-          retry_queue: [],
-          recent_failures: [],
-          live_sessions: [],
-          worker_heartbeat: null,
-          rate_limits: [],
-          token_usage: [],
-        };
+        return overview;
       case "list_runs":
       case "list_issues":
         return [];
       case "get_worker_status":
         return workerStatus;
+      case "trigger_retry_now":
+        return true;
       case "get_skills_status":
         return skillsStatus;
       case "validate_settings":
@@ -223,6 +240,19 @@ describe("App settings", () => {
         dispatchEvent: vi.fn(),
       })),
     });
+
+    const localStorageItems = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: vi.fn((key: string) => localStorageItems.get(key) ?? null),
+        setItem: vi.fn((key: string, value: string) =>
+          localStorageItems.set(key, value),
+        ),
+        removeItem: vi.fn((key: string) => localStorageItems.delete(key)),
+        clear: vi.fn(() => localStorageItems.clear()),
+      },
+    });
   });
 
   it("does not auto-capitalize repository names", () => {
@@ -231,7 +261,72 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
     const repoNameInput = screen.getByLabelText(/^Name/, { selector: "input" });
-    expect(repoNameInput.getAttribute("autocapitalize")).toBe("none");
+    expectLiteralInput(repoNameInput);
+  });
+
+  it("uses literal input behavior for settings config fields", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const fields = [
+      screen.getByLabelText(/^Repo URL/, { selector: "input" }),
+      screen.getByLabelText(/^Install command/, { selector: "input" }),
+      screen.getByLabelText(/^Linear teams/, { selector: "input" }),
+      screen.getByLabelText(/^Linear projects/, { selector: "input" }),
+      screen.getByLabelText(/^Workspace root/, { selector: "input" }),
+      screen.getByLabelText(/^API key/, { selector: "input" }),
+      screen.getByPlaceholderText("acme"),
+      screen.getByLabelText(/^Project ID/, { selector: "input" }),
+      screen.getByLabelText(/^Team prefix/, { selector: "input" }),
+      screen.getByLabelText(/^Active states/, { selector: "input" }),
+      screen.getByLabelText(/^Terminal states/, { selector: "input" }),
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+    ];
+
+    fireEvent.click(screen.getByText("Hooks (advanced)"));
+    fields.push(
+      screen.getByLabelText(/^After create/, { selector: "textarea" }),
+      screen.getByLabelText(/^Before run/, { selector: "textarea" }),
+      screen.getByLabelText(/^After run/, { selector: "textarea" }),
+      screen.getByLabelText(/^Before remove/, { selector: "textarea" }),
+    );
+
+    for (const field of fields) {
+      expectLiteralInput(field);
+    }
+  });
+
+  it("keeps launch commands as literal shell text", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({ settings: { ...testSettings(), agent_backend: "claude" } }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const launchCommand = await screen.findByLabelText(/^Launch command/, { selector: "input" });
+    expectLiteralInput(launchCommand);
+    expectLiteralInput(screen.getByLabelText(/^Allowed tools/, { selector: "textarea" }));
+    expectLiteralInput(screen.getByLabelText(/^Disallowed tools/, { selector: "textarea" }));
+    expectLiteralInput(screen.getByLabelText(/^Additional directories/, { selector: "textarea" }));
+
+    fireEvent.change(launchCommand, { target: { value: "mycode --agent claude" } });
+
+    expect((launchCommand as HTMLInputElement).value).toBe("mycode --agent claude");
+  });
+
+  it("uses literal input behavior for Cursor model names", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({ settings: { ...testSettings(), agent_backend: "cursor" } }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    expectLiteralInput(await screen.findByLabelText(/^Model/, { selector: "input" }));
   });
 
   it("shows the mycode launch wrapper in the launch command helper", () => {
@@ -432,5 +527,51 @@ describe("App settings", () => {
     expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(screen.queryByText("Welcome to Symphony")).toBeNull();
     expect(screen.queryByText("Install agent skills")).toBeNull();
+  });
+
+  it("lets the user trigger a queued retry immediately", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        overview: {
+          active_runs: [],
+          retry_queue: [
+            {
+              issue_id: "lin-retry-1",
+              run_number: 3,
+              due_at: "2099-01-01T00:00:00.000Z",
+              error_class: "agent_failure",
+              error_message: "failed",
+              created_at: "2026-01-01T00:00:00.000Z",
+              issue_identifier: "SYM-99",
+              issue_title: "Retry from the dashboard",
+            },
+          ],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        },
+        workerStatus: {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    const retryButton = await screen.findByRole("button", { name: "Retry now" });
+    fireEvent.click(retryButton);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("trigger_retry_now", {
+        issueId: "lin-retry-1",
+      }),
+    );
   });
 });
