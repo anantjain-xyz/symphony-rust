@@ -2006,9 +2006,9 @@ function SettingsView({
         <section className="settings-section">
           <h3>Repositories</h3>
           <small className="hint">
-            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> label in
-            Linear wins, then the repo claiming the issue's project, then its team,
-            then the default.
+            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching
+            bare label in Linear wins, then the repo claiming the issue's project,
+            then its team, then the default.
           </small>
           {settings.repos.map((repo, index) => (
             <fieldset className="repo-card" key={index}>

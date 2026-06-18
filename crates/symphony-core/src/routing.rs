@@ -6,28 +6,35 @@ use crate::{
 /// Resolve which configured repository an issue's runs should clone.
 ///
 /// Precedence, first match wins:
-/// 1. An explicit `repo:<name>` label on the issue. If the issue carries such
-///    a label but it names no configured repo, the issue is unroutable — the
-///    user stated an intent we cannot honor, and silently falling through to
-///    a team or project default could dispatch an agent at the wrong codebase.
+/// 1. A matching repo label on the issue: either `repo:<name>` or a bare label
+///    exactly matching a configured repo name. If the issue carries a
+///    `repo:<name>` label but no such label names a configured repo, the issue
+///    is unroutable — the user stated an intent we cannot honor, and silently
+///    falling through to a team or project default could dispatch an agent at
+///    the wrong codebase.
 /// 2. The repo claiming the issue's Linear project in `project_ids`.
 /// 3. The repo claiming the issue's team key (identifier prefix, e.g. the
 ///    `ENG` in `ENG-42`) in `team_prefixes`.
 /// 4. The repo marked `is_default`, or the only repo when exactly one exists.
 pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a RepoConfig> {
-    let labeled: Vec<&str> = issue
+    let prefixed_labels: Vec<&str> = issue
         .labels
         .iter()
         .filter_map(|label| label_repo_name(label))
         .collect();
-    if !labeled.is_empty() {
+    if !prefixed_labels.is_empty() {
         // Compare against the trimmed name — the same form validation accepts
         // and the Settings UI advertises as the label to use.
-        return labeled.iter().find_map(|name| {
-            repos
-                .iter()
-                .find(|repo| repo.name.trim().eq_ignore_ascii_case(name))
-        });
+        return prefixed_labels
+            .iter()
+            .find_map(|name| repo_named(repos, name));
+    }
+    if let Some(repo) = issue
+        .labels
+        .iter()
+        .find_map(|label| repo_named(repos, label))
+    {
+        return Some(repo);
     }
     let project_id = issue.project_id.as_deref().map(str::trim);
     let project_slug_id = issue.project_slug_id.as_deref().map(str::trim);
@@ -74,6 +81,16 @@ fn label_repo_name(label: &str) -> Option<&str> {
         return None;
     }
     Some(trimmed[5..].trim()).filter(|name| !name.is_empty())
+}
+
+fn repo_named<'a>(repos: &'a [RepoConfig], name: &str) -> Option<&'a RepoConfig> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    repos
+        .iter()
+        .find(|repo| repo.name.trim().eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
@@ -123,6 +140,9 @@ mod tests {
 
         let routed = route_issue(&repos, &issue("ENG-42", &["repo:web"], Some("proj-1")));
         assert_eq!(routed.map(|r| r.name.as_str()), Some("web"));
+
+        let routed = route_issue(&repos, &issue("ENG-42", &["web"], Some("proj-1")));
+        assert_eq!(routed.map(|r| r.name.as_str()), Some("web"));
     }
 
     #[test]
@@ -130,7 +150,13 @@ mod tests {
         // The configured name carries accidental padding; the label still
         // matches because both sides are trimmed.
         let repos = vec![repo(" Web-App ")];
-        for label in ["repo:web-app", "REPO:Web-App", "  repo: web-app  "] {
+        for label in [
+            "repo:web-app",
+            "REPO:Web-App",
+            "  repo: web-app  ",
+            "web-app",
+            "  Web-App  ",
+        ] {
             let routed = route_issue(&repos, &issue("ENG-1", &[label], None));
             assert_eq!(
                 routed.map(|r| r.name.as_str()),
@@ -148,6 +174,15 @@ mod tests {
         assert!(route_issue(&repos, &issue("ENG-1", &["repo:gone"], None)).is_none());
         // Non-repo labels do not trigger the explicit-label path.
         assert!(route_issue(&repos, &issue("ENG-1", &["bug", "repository"], None)).is_some());
+    }
+
+    #[test]
+    fn prefixed_repo_label_takes_precedence_over_bare_label() {
+        let mut fallback = repo("backend");
+        fallback.is_default = true;
+        let repos = vec![repo("web"), fallback];
+
+        assert!(route_issue(&repos, &issue("ENG-1", &["repo:gone", "web"], None)).is_none());
     }
 
     #[test]

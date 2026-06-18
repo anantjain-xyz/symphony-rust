@@ -230,9 +230,10 @@ fn valid_env_key(key: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-/// The repos list must route unambiguously: names are the `repo:<name>`
-/// routing keys (and workspace namespaces), so they have to exist and be
-/// unique, and no team or project may be claimed as the default of two repos.
+/// The repos list must route unambiguously: names are label routing keys
+/// (either `repo:<name>` or bare `<name>`) and workspace namespaces, so they
+/// have to exist and be unique, and no team or project may be claimed as the
+/// default of two repos.
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
     if repos.is_empty() {
         return Some(
@@ -246,7 +247,7 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
         let name = repo.name.trim();
         if name.is_empty() {
             return Some(
-                "Every repository needs a name — it is the key issues route by (repo:<name> labels) and the workspace folder.".to_string(),
+                "Every repository needs a name — it is the key issues route by (repo:<name> or matching bare labels) and the workspace folder.".to_string(),
             );
         }
         if repo.url.trim().is_empty() {
