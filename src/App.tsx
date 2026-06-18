@@ -7,6 +7,7 @@ import type {
   AgentEventRow,
   AppSettings,
   IssueRow,
+  LinearViewerProfile,
   Overview,
   RepoConfig,
   RunDetail,
@@ -118,6 +119,7 @@ const previewSettings: AppSettings = {
   tracker_workspace: "optimism-llc",
   tracker_prefix: null,
   tracker_project_id: null,
+  tracker_assigned_to_me: false,
   active_states: ["Todo", "In Progress", "Rework", "Merging"],
   terminal_states: ["Done", "Canceled"],
   polling_interval_ms: 30000,
@@ -500,6 +502,9 @@ function App() {
     runtimeAvailable ? null : previewSettings,
   );
   const [linearKey, setLinearKey] = useState("");
+  const [linearViewer, setLinearViewer] = useState<LinearViewerProfile | null>(null);
+  const [linearViewerLoading, setLinearViewerLoading] = useState(false);
+  const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
   const [overview, setOverview] = useState<Overview>(
     runtimeAvailable ? emptyOverview : previewOverview,
   );
@@ -543,6 +548,7 @@ function App() {
   const selectedRunIdRef = useRef<string | null>(null);
   const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
+  const linearViewerSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
@@ -668,6 +674,54 @@ function App() {
   useEffect(() => {
     setValidation(null);
   }, [settings]);
+
+  useEffect(() => {
+    if (!runtimeAvailable || !settings?.tracker_assigned_to_me) {
+      linearViewerSeq.current += 1;
+      setLinearViewer(null);
+      setLinearViewerLoading(false);
+      setLinearViewerError(null);
+      return;
+    }
+
+    const typedKey = linearKey.trim();
+    if (!settings.linear_api_key_set && typedKey === "") {
+      linearViewerSeq.current += 1;
+      setLinearViewer(null);
+      setLinearViewerLoading(false);
+      setLinearViewerError("Add a Linear API key to show the current user.");
+      return;
+    }
+
+    const seq = linearViewerSeq.current + 1;
+    linearViewerSeq.current = seq;
+    setLinearViewerLoading(true);
+    setLinearViewerError(null);
+    invoke<LinearViewerProfile>("get_linear_viewer", {
+      request: {
+        settings,
+        linear_api_key: typedKey ? typedKey : null,
+      },
+    })
+      .then((viewer) => {
+        if (linearViewerSeq.current !== seq) return;
+        setLinearViewer(viewer);
+      })
+      .catch((err) => {
+        if (linearViewerSeq.current !== seq) return;
+        setLinearViewer(null);
+        setLinearViewerError(formatError(err));
+      })
+      .finally(() => {
+        if (linearViewerSeq.current !== seq) return;
+        setLinearViewerLoading(false);
+      });
+  }, [
+    runtimeAvailable,
+    settings?.tracker_assigned_to_me,
+    settings?.linear_api_key_set,
+    linearKey,
+  ]);
 
   // Keep relative timestamps fresh while the dashboard is otherwise idle.
   const [, tick] = useReducer((x: number) => x + 1, 0);
@@ -1140,6 +1194,9 @@ function App() {
             setSettings={setSettings}
             linearKey={linearKey}
             setLinearKey={setLinearKey}
+            linearViewer={linearViewer}
+            linearViewerLoading={linearViewerLoading}
+            linearViewerError={linearViewerError}
             validation={validation}
             trackerTest={trackerTest}
             skillsStatuses={skillsStatuses}
@@ -2269,6 +2326,9 @@ function SettingsView({
   setSettings,
   linearKey,
   setLinearKey,
+  linearViewer,
+  linearViewerLoading,
+  linearViewerError,
   validation,
   trackerTest,
   skillsStatuses,
@@ -2288,6 +2348,9 @@ function SettingsView({
   setSettings: (settings: AppSettings) => void;
   linearKey: string;
   setLinearKey: (value: string) => void;
+  linearViewer: LinearViewerProfile | null;
+  linearViewerLoading: boolean;
+  linearViewerError: string | null;
   validation: ValidationResult | null;
   trackerTest: TrackerTestResult | null;
   skillsStatuses: Record<string, SkillsStatus>;
@@ -2579,6 +2642,38 @@ function SettingsView({
             <small className="hint">
               Optional. Watch only issues whose identifier starts with this team key.
             </small>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.tracker_assigned_to_me}
+              disabled={!runtimeAvailable}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  tracker_assigned_to_me: e.currentTarget.checked,
+                })
+              }
+            />
+            <span>
+              Only pick issues assigned to me{" "}
+              {settings.tracker_assigned_to_me ? (
+                <span className="inline-meta">
+                  {linearViewerLoading
+                    ? "Checking Linear..."
+                    : linearViewer
+                      ? linearViewer.username
+                      : ""}
+                </span>
+              ) : null}
+            </span>
+            <small className="hint">
+              When enabled, Symphony dispatches matching active issues only from
+              the Linear user tied to the configured API key.
+            </small>
+            {settings.tracker_assigned_to_me && linearViewerError ? (
+              <small className="test-result err">{linearViewerError}</small>
+            ) : null}
           </label>
           <label>
             Active states

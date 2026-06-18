@@ -31,6 +31,9 @@ pub trait TrackerClient: Send + Sync {
     async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError>;
     async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError>;
     async fn fetch_by_id(&self, id: &str) -> Result<Option<Issue>, TrackerError>;
+    async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+        self.fetch_by_id(id).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,11 @@ impl LinearTracker {
         self.request_timeout_ms = request_timeout_ms;
         self.max_attempts = max_attempts.max(1);
         self
+    }
+
+    pub async fn viewer(&self) -> Result<LinearViewer, TrackerError> {
+        let data: ViewerData = self.execute(VIEWER_QUERY, None).await?;
+        Ok(data.viewer)
     }
 
     /// The Linear team key derived from the configured identifier prefix.
@@ -90,7 +98,11 @@ impl LinearTracker {
             .and_then(LinearProjectRef::parse)
     }
 
-    async fn fetch_by_state_names(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
+    async fn fetch_by_state_names(
+        &self,
+        states: &[String],
+        assigned_to_me: bool,
+    ) -> Result<Vec<Issue>, TrackerError> {
         if states.is_empty() {
             return Ok(Vec::new());
         }
@@ -128,6 +140,33 @@ impl LinearTracker {
                 );
             }
         }
+        let filter = filter_parts.join(", ");
+        if assigned_to_me {
+            let query = format!(
+                r#"
+                query SymphonyIssuesByState({}) {{
+                  viewer {{
+                    assignedIssues(filter: {{ {} }}, first: 100) {{
+                      nodes {{ {} }}
+                    }}
+                  }}
+                }}
+                "#,
+                var_decls.join(", "),
+                filter,
+                ISSUE_FIELDS
+            );
+            let data: AssignedIssuesByStateData =
+                self.execute(&query, Some(variables.into())).await?;
+            return Ok(data
+                .viewer
+                .assigned_issues
+                .nodes
+                .into_iter()
+                .map(normalize)
+                .collect());
+        }
+
         let query = format!(
             r#"
             query SymphonyIssuesByState({}) {{
@@ -137,11 +176,50 @@ impl LinearTracker {
             }}
             "#,
             var_decls.join(", "),
-            filter_parts.join(", "),
+            filter,
             ISSUE_FIELDS
         );
         let data: IssuesByStateData = self.execute(&query, Some(variables.into())).await?;
         Ok(data.issues.nodes.into_iter().map(normalize).collect())
+    }
+
+    async fn fetch_by_id_inner(
+        &self,
+        id: &str,
+        assigned_to_me: bool,
+    ) -> Result<Option<Issue>, TrackerError> {
+        let variables = serde_json::json!({ "id": id });
+        let data = match self
+            .execute::<IssueByIdData>(ISSUE_BY_ID_QUERY, Some(variables))
+            .await
+        {
+            Ok(data) => data,
+            Err(TrackerError::NotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let Some(node) = data.issue else {
+            return Ok(None);
+        };
+        if assigned_to_me {
+            let viewer = self.viewer().await?;
+            if node.assignee.as_ref().map(|user| user.id.as_str()) != Some(viewer.id.as_str()) {
+                return Ok(None);
+            }
+        }
+        if let Some(project_ref) = self.project_ref() {
+            let project_id = node.project.as_ref().map(|p| p.id.as_str());
+            let project_slug_id = node.project.as_ref().and_then(|p| p.slug_id.as_deref());
+            if !project_ref.matches_project(project_id, project_slug_id) {
+                return Ok(None);
+            }
+        }
+        let issue = normalize(node);
+        if let Some(prefix) = self.identifier_match_prefix() {
+            if !issue.identifier.starts_with(&prefix) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(issue))
     }
 
     async fn execute<T: DeserializeOwned>(
@@ -224,13 +302,13 @@ impl LinearTracker {
 #[async_trait]
 impl TrackerClient for LinearTracker {
     async fn preflight(&self) -> Result<(), TrackerError> {
-        let _: ViewerData = self.execute(VIEWER_QUERY, None).await?;
+        self.viewer().await?;
         Ok(())
     }
 
     async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
         let mut issues = self.filter_by_prefix(
-            self.fetch_by_state_names(&self.config.active_states)
+            self.fetch_by_state_names(&self.config.active_states, self.config.assigned_to_me)
                 .await?,
         );
         issues.sort_by(by_priority_then_identifier);
@@ -239,38 +317,17 @@ impl TrackerClient for LinearTracker {
 
     async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
         Ok(self.filter_by_prefix(
-            self.fetch_by_state_names(&self.config.terminal_states)
+            self.fetch_by_state_names(&self.config.terminal_states, false)
                 .await?,
         ))
     }
 
     async fn fetch_by_id(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
-        let variables = serde_json::json!({ "id": id });
-        let data = match self
-            .execute::<IssueByIdData>(ISSUE_BY_ID_QUERY, Some(variables))
-            .await
-        {
-            Ok(data) => data,
-            Err(TrackerError::NotFound) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let Some(node) = data.issue else {
-            return Ok(None);
-        };
-        if let Some(project_ref) = self.project_ref() {
-            let project_id = node.project.as_ref().map(|p| p.id.as_str());
-            let project_slug_id = node.project.as_ref().and_then(|p| p.slug_id.as_deref());
-            if !project_ref.matches_project(project_id, project_slug_id) {
-                return Ok(None);
-            }
-        }
-        let issue = normalize(node);
-        if let Some(prefix) = self.identifier_match_prefix() {
-            if !issue.identifier.starts_with(&prefix) {
-                return Ok(None);
-            }
-        }
-        Ok(Some(issue))
+        self.fetch_by_id_inner(id, false).await
+    }
+
+    async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+        self.fetch_by_id_inner(id, self.config.assigned_to_me).await
     }
 }
 
@@ -340,19 +397,32 @@ struct GraphqlErrorExtensions {
 
 #[derive(Deserialize)]
 struct ViewerData {
-    #[allow(dead_code)]
-    viewer: Viewer,
+    viewer: LinearViewer,
 }
 
-#[derive(Deserialize)]
-struct Viewer {
-    #[allow(dead_code)]
-    id: String,
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearViewer {
+    pub id: String,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct IssuesByStateData {
     issues: LinearIssueConnection,
+}
+
+#[derive(Deserialize)]
+struct AssignedIssuesByStateData {
+    viewer: AssignedIssueViewer,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignedIssueViewer {
+    assigned_issues: LinearIssueConnection,
 }
 
 #[derive(Deserialize)]
@@ -376,6 +446,7 @@ struct LinearIssueNode {
     branch_name: Option<String>,
     state: Option<LinearState>,
     project: Option<LinearProject>,
+    assignee: Option<LinearAssignee>,
     labels: Option<LinearLabelConnection>,
     inverse_relations: Option<LinearRelationConnection>,
     attachments: Option<LinearAttachmentConnection>,
@@ -394,6 +465,11 @@ struct LinearState {
     #[allow(dead_code)]
     #[serde(rename = "type")]
     state_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LinearAssignee {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -514,6 +590,7 @@ const ISSUE_FIELDS: &str = r#"
   branchName
   state { name }
   project { id slugId }
+  assignee { id }
   labels { nodes { name } }
   inverseRelations {
     nodes {
@@ -529,7 +606,7 @@ const ISSUE_FIELDS: &str = r#"
 
 const VIEWER_QUERY: &str = r#"
   query SymphonyPreflight {
-    viewer { id }
+    viewer { id name displayName email }
   }
 "#;
 
@@ -544,6 +621,7 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       branchName
       state { name }
       project { id slugId }
+      assignee { id }
       labels { nodes { name } }
       inverseRelations {
         nodes {

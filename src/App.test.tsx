@@ -56,6 +56,7 @@ function testSettings(): AppSettings {
     tracker_workspace: "acme",
     tracker_prefix: null,
     tracker_project_id: null,
+    tracker_assigned_to_me: false,
     active_states: ["Todo"],
     terminal_states: ["Done"],
     polling_interval_ms: 60_000,
@@ -140,6 +141,13 @@ function settingsInvoke({
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
+      case "get_linear_viewer":
+        return {
+          id: "user-1",
+          username: "alice",
+          display_name: "Alice",
+          email: "alice@example.com",
+        };
       case "save_settings":
         if (!allowSave) {
           throw new Error("save_settings should not run after failed validation");
@@ -210,6 +218,13 @@ function dashboardInvoke({
           cursor_command: "agent",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
+        };
+      case "get_linear_viewer":
+        return {
+          id: "user-1",
+          username: "alice",
+          display_name: "Alice",
+          email: "alice@example.com",
         };
       default:
         throw new Error(`Unhandled command: ${command}`);
@@ -323,7 +338,7 @@ describe("App settings", () => {
       screen.getByLabelText(/^Workspace root/, { selector: "input" }),
       screen.getByLabelText(/^API key/, { selector: "input" }),
       screen.getByPlaceholderText("acme"),
-      screen.getByLabelText(/^Project ID/, { selector: "input" }),
+      screen.getByLabelText(/^Project/, { selector: "input" }),
       screen.getByLabelText(/^Team prefix/, { selector: "input" }),
       screen.getByLabelText(/^Active states/, { selector: "input" }),
       screen.getByLabelText(/^Terminal states/, { selector: "input" }),
@@ -341,6 +356,31 @@ describe("App settings", () => {
     for (const field of fields) {
       expectLiteralInput(field);
     }
+  });
+
+  it("shows the Linear user next to the assigned-to-me setting", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /Only pick issues assigned to me/,
+    });
+    fireEvent.click(checkbox);
+
+    const expectedSettings = { ...settings, tracker_assigned_to_me: true };
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_linear_viewer", {
+        request: {
+          settings: expectedSettings,
+          linear_api_key: null,
+        },
+      }),
+    );
+    expect(await screen.findByText("alice")).toBeTruthy();
   });
 
   it("keeps launch commands as literal shell text", async () => {
