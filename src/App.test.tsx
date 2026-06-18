@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
   AppSettings,
+  IssueRow,
   Overview,
   SkillsStatus,
   ValidationResult,
@@ -152,6 +153,7 @@ function settingsInvoke({
 
 function dashboardInvoke({
   settings,
+  issues = [],
   overview = {
     active_runs: [],
     retry_queue: [],
@@ -174,6 +176,7 @@ function dashboardInvoke({
   },
 }: {
   settings: AppSettings;
+  issues?: IssueRow[];
   overview?: Overview;
   skillsStatus?: SkillsStatus;
   workerStatus?: WorkerStatus;
@@ -185,8 +188,9 @@ function dashboardInvoke({
       case "get_overview":
         return overview;
       case "list_runs":
-      case "list_issues":
         return [];
+      case "list_issues":
+        return issues;
       case "get_worker_status":
         return workerStatus;
       case "trigger_retry_now":
@@ -210,6 +214,48 @@ function dashboardInvoke({
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
+  };
+}
+
+function issueRow({
+  id,
+  identifier,
+  title,
+  state,
+  blockers = [],
+}: {
+  id: string;
+  identifier: string;
+  title: string;
+  state: string;
+  blockers?: string[];
+}): IssueRow {
+  return {
+    id,
+    identifier,
+    title,
+    description: null,
+    priority: 2,
+    state,
+    branch: null,
+    labels: "[]",
+    blockers: JSON.stringify(blockers),
+    pr_urls: "[]",
+    raw: JSON.stringify({
+      id,
+      identifier,
+      title,
+      description: null,
+      priority: 2,
+      state,
+      branch: null,
+      labels: [],
+      blockers,
+      pr_urls: [],
+      project_id: null,
+      project_slug_id: null,
+    }),
+    last_seen_at: "2026-01-01T00:00:00.000Z",
   };
 }
 
@@ -404,6 +450,43 @@ describe("App settings", () => {
     fireEvent.click(viewPrButton);
 
     expect(tauriMocks.openUrl).toHaveBeenCalledWith(prUrl);
+  });
+
+  it("shows a dependency graph for watched issue blockers", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const issues = [
+      issueRow({
+        id: "issue-sym-10",
+        identifier: "SYM-10",
+        title: "Create deploy queue",
+        state: "Todo",
+      }),
+      issueRow({
+        id: "issue-sym-11",
+        identifier: "SYM-11",
+        title: "Build deploy dashboard",
+        state: "In Progress",
+        blockers: ["SYM-10", "OPS-1"],
+      }),
+    ];
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings, issues }));
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
+    expect(await screen.findByText("Build deploy dashboard")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
+
+    expect(
+      screen.getByRole("group", { name: /Dependency graph with 3 nodes and 2 blocking links/ }),
+    ).toBeTruthy();
+    expect(screen.getByText("Blocked issues")).toBeTruthy();
+    expect(screen.getByLabelText("OPS-1, external blocker")).toBeTruthy();
+    expect(screen.getByText("Outside current issue filters")).toBeTruthy();
+    expect(screen.getByLabelText("SYM-10 blocks SYM-11")).toBeTruthy();
+    expect(screen.getByLabelText("OPS-1 blocks SYM-11")).toBeTruthy();
   });
 
   it("validates before saving and shows validation errors in the header status", async () => {
