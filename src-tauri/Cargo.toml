@@ -1,6 +1,6 @@
 [package]
 name = "symphony-desktop"
-version = "0.1.4"
+version = "0.1.5"
 description = "Symphony desktop operator app"
 authors.workspace = true
 edition.workspace = true
