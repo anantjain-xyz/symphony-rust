@@ -288,16 +288,38 @@ impl Repository {
     }
 
     pub async fn mark_running(&self, run_id: &str) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             "update runs set status = 'running', started_at = ?1 where id = ?2 and status = 'pending'",
         )
         .bind(now_iso())
         .bind(run_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match result {
-            Ok(_) => {
-                self.changed("runs", "update");
+            Ok(result) => {
+                let updated = result.rows_affected() > 0;
+                let cleared_retry = if updated {
+                    sqlx::query(
+                        r#"
+                        delete from retry_queue
+                        where issue_id = (select issue_id from runs where id = ?1)
+                        "#,
+                    )
+                    .bind(run_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                } else {
+                    0
+                };
+                tx.commit().await?;
+                if updated {
+                    self.changed("runs", "update");
+                }
+                if cleared_retry > 0 {
+                    self.changed("retry_queue", "delete");
+                }
                 Ok(())
             }
             Err(sqlx::Error::Database(db_err))
@@ -1168,6 +1190,34 @@ mod tests {
             "lin-1"
         );
         assert!(!repo.trigger_retry_now("missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn marking_retry_run_running_clears_retry_queue() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        repo.schedule_retry(
+            "lin-1",
+            2,
+            "2000-01-01T00:00:00.000Z",
+            Some("agent_failure"),
+            Some("failed"),
+        )
+        .await
+        .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        repo.mark_running(&run.id).await.unwrap();
+
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.active_runs.len(), 1);
+        assert_eq!(overview.active_runs[0].id, run.id);
+        assert!(overview.retry_queue.is_empty());
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
