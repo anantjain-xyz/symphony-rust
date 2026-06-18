@@ -57,6 +57,11 @@ impl LinearTracker {
         self
     }
 
+    pub async fn viewer(&self) -> Result<LinearViewer, TrackerError> {
+        let data: ViewerData = self.execute(VIEWER_QUERY, None).await?;
+        Ok(data.viewer)
+    }
+
     /// The Linear team key derived from the configured identifier prefix.
     /// Accepts either form — `WAL` or `WAL-` — by trimming an optional
     /// trailing hyphen.
@@ -128,6 +133,33 @@ impl LinearTracker {
                 );
             }
         }
+        let filter = filter_parts.join(", ");
+        if self.config.assigned_to_me {
+            let query = format!(
+                r#"
+                query SymphonyIssuesByState({}) {{
+                  viewer {{
+                    assignedIssues(filter: {{ {} }}, first: 100) {{
+                      nodes {{ {} }}
+                    }}
+                  }}
+                }}
+                "#,
+                var_decls.join(", "),
+                filter,
+                ISSUE_FIELDS
+            );
+            let data: AssignedIssuesByStateData =
+                self.execute(&query, Some(variables.into())).await?;
+            return Ok(data
+                .viewer
+                .assigned_issues
+                .nodes
+                .into_iter()
+                .map(normalize)
+                .collect());
+        }
+
         let query = format!(
             r#"
             query SymphonyIssuesByState({}) {{
@@ -137,7 +169,7 @@ impl LinearTracker {
             }}
             "#,
             var_decls.join(", "),
-            filter_parts.join(", "),
+            filter,
             ISSUE_FIELDS
         );
         let data: IssuesByStateData = self.execute(&query, Some(variables.into())).await?;
@@ -224,7 +256,7 @@ impl LinearTracker {
 #[async_trait]
 impl TrackerClient for LinearTracker {
     async fn preflight(&self) -> Result<(), TrackerError> {
-        let _: ViewerData = self.execute(VIEWER_QUERY, None).await?;
+        self.viewer().await?;
         Ok(())
     }
 
@@ -257,6 +289,12 @@ impl TrackerClient for LinearTracker {
         let Some(node) = data.issue else {
             return Ok(None);
         };
+        if self.config.assigned_to_me {
+            let viewer = self.viewer().await?;
+            if node.assignee.as_ref().map(|user| user.id.as_str()) != Some(viewer.id.as_str()) {
+                return Ok(None);
+            }
+        }
         if let Some(project_ref) = self.project_ref() {
             let project_id = node.project.as_ref().map(|p| p.id.as_str());
             let project_slug_id = node.project.as_ref().and_then(|p| p.slug_id.as_deref());
@@ -340,19 +378,32 @@ struct GraphqlErrorExtensions {
 
 #[derive(Deserialize)]
 struct ViewerData {
-    #[allow(dead_code)]
-    viewer: Viewer,
+    viewer: LinearViewer,
 }
 
-#[derive(Deserialize)]
-struct Viewer {
-    #[allow(dead_code)]
-    id: String,
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinearViewer {
+    pub id: String,
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct IssuesByStateData {
     issues: LinearIssueConnection,
+}
+
+#[derive(Deserialize)]
+struct AssignedIssuesByStateData {
+    viewer: AssignedIssueViewer,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssignedIssueViewer {
+    assigned_issues: LinearIssueConnection,
 }
 
 #[derive(Deserialize)]
@@ -376,6 +427,7 @@ struct LinearIssueNode {
     branch_name: Option<String>,
     state: Option<LinearState>,
     project: Option<LinearProject>,
+    assignee: Option<LinearAssignee>,
     labels: Option<LinearLabelConnection>,
     inverse_relations: Option<LinearRelationConnection>,
     attachments: Option<LinearAttachmentConnection>,
@@ -394,6 +446,11 @@ struct LinearState {
     #[allow(dead_code)]
     #[serde(rename = "type")]
     state_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LinearAssignee {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -514,6 +571,7 @@ const ISSUE_FIELDS: &str = r#"
   branchName
   state { name }
   project { id slugId }
+  assignee { id }
   labels { nodes { name } }
   inverseRelations {
     nodes {
@@ -529,7 +587,7 @@ const ISSUE_FIELDS: &str = r#"
 
 const VIEWER_QUERY: &str = r#"
   query SymphonyPreflight {
-    viewer { id }
+    viewer { id name displayName email }
   }
 "#;
 
@@ -544,6 +602,7 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       branchName
       state { name }
       project { id slugId }
+      assignee { id }
       labels { nodes { name } }
       inverseRelations {
         nodes {

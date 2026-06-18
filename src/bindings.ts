@@ -40,6 +40,7 @@ export type AppSettings = {
   tracker_workspace: string | null;
   tracker_prefix: string | null;
   tracker_project_id: string | null;
+  tracker_assigned_to_me: boolean;
   active_states: string[];
   terminal_states: string[];
   polling_interval_ms: number;
@@ -82,6 +83,13 @@ export type TrackerTestResult = {
   ok: boolean;
   message: string;
   active_issue_count: number | null;
+};
+
+export type LinearViewerProfile = {
+  id: string;
+  username: string;
+  display_name: string | null;
+  email: string | null;
 };
 
 export type ValidationResult = {

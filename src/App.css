@@ -1629,6 +1629,11 @@ textarea.mono-input {
   flex-basis: 100%;
 }
 
+.inline-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .hooks-details {
   display: grid;
   gap: 12px;
