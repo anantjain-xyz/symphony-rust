@@ -437,7 +437,7 @@ async fn tick<T: TrackerClient>(
         {
             break;
         }
-        if let Some(issue) = tracker.fetch_by_id(&retry.issue_id).await? {
+        if let Some(issue) = tracker.fetch_by_id_for_dispatch(&retry.issue_id).await? {
             // The issue may have left the active set since the failed run
             // (e.g. moved to Done); drop the retry rather than keep it queued
             // or dispatch a run nobody asked for.
@@ -1257,6 +1257,38 @@ mod tests {
         }
     }
 
+    struct DispatchFilteringTracker {
+        by_id: Option<Issue>,
+        by_id_for_dispatch: Option<Issue>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for DispatchFilteringTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(self.by_id.as_ref().filter(|issue| issue.id == id).cloned())
+        }
+
+        async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(self
+                .by_id_for_dispatch
+                .as_ref()
+                .filter(|issue| issue.id == id)
+                .cloned())
+        }
+    }
+
     fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
         let failed = outcome == AgentOutcome::Failure;
         symphony_agents::MockAgentDriver {
@@ -1524,6 +1556,38 @@ mod tests {
         tick(&repo, &tracker, &config, &stop).await.unwrap();
         let row = repo.get_issue("lin-1").await.unwrap().unwrap();
         assert_eq!(row.state, "done");
+    }
+
+    #[tokio::test]
+    async fn refreshes_departed_issue_even_when_dispatch_lookup_hides_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        let todo = issue("todo", vec![]);
+        repo.upsert_issues(&[todo.clone()]).await.unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+        let done = Issue {
+            state: "done".to_string(),
+            ..todo
+        };
+        let tracker = DispatchFilteringTracker {
+            by_id: Some(done),
+            by_id_for_dispatch: None,
+        };
+
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        let row = repo.get_issue("lin-1").await.unwrap().unwrap();
+        assert_eq!(row.state, "done");
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
