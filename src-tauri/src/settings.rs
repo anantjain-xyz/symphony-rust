@@ -15,8 +15,8 @@ use symphony_core::{
 pub struct AppSettings {
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
-    // Repositories; each issue routes to one by repo:<name> label, project,
-    // team key, or the default flag (symphony_core::route_issue).
+    // Repositories; each issue routes to one by repo:<name> or bare repo-name
+    // label, project, team key, or the default flag (symphony_core::route_issue).
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
     #[serde(default)]
