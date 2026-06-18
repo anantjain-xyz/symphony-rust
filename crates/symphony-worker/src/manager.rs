@@ -407,7 +407,7 @@ async fn tick<T: TrackerClient>(
         let Some(repo_config) = route_issue(&config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
-                "no repository matches this issue; skipping (add a repo:<name> label, matching repo rule, or default)"
+                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, add a matching repo rule, or mark a default)"
             );
             continue;
         };
