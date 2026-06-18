@@ -1569,7 +1569,9 @@ mod tests {
         let stop = CancellationToken::new();
 
         let todo = issue("todo", vec![]);
-        repo.upsert_issues(&[todo.clone()]).await.unwrap();
+        repo.upsert_issues(std::slice::from_ref(&todo))
+            .await
+            .unwrap();
         repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
             .await
             .unwrap();
