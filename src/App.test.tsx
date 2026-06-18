@@ -325,6 +325,48 @@ describe("App settings", () => {
     expectLiteralInput(repoNameInput);
   });
 
+  it("lets the repository default be cleared or moved", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = {
+      ...testSettings(),
+      repos: [
+        testSettings().repos[0],
+        {
+          ...testSettings().repos[0],
+          name: "backend",
+          url: "git@github.com:acme/backend.git",
+          team_prefixes: [],
+          is_default: false,
+        },
+      ],
+    };
+    tauriMocks.invoke.mockImplementation(
+      settingsInvoke({
+        settings,
+        validation: { workflow_ok: true, workflow_blocking: false, workflow_error: null },
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const defaultToggles = (await screen.findAllByLabelText("Default", {
+      selector: "input",
+    })) as HTMLInputElement[];
+
+    expect(defaultToggles).toHaveLength(2);
+    expect(defaultToggles[0].checked).toBe(true);
+    expect(defaultToggles[1].checked).toBe(false);
+
+    fireEvent.click(defaultToggles[0]);
+    expect(defaultToggles[0].checked).toBe(false);
+    expect(defaultToggles[1].checked).toBe(false);
+
+    fireEvent.click(defaultToggles[1]);
+    expect(defaultToggles[0].checked).toBe(false);
+    expect(defaultToggles[1].checked).toBe(true);
+  });
+
   it("uses literal input behavior for settings config fields", () => {
     render(<App />);
 

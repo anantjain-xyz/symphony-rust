@@ -15,7 +15,7 @@ use crate::{
 /// 2. The repo claiming the issue's Linear project in `project_ids`.
 /// 3. The repo claiming the issue's team key (identifier prefix, e.g. the
 ///    `ENG` in `ENG-42`) in `team_prefixes`.
-/// 4. The repo marked `is_default`, or the only repo when exactly one exists.
+/// 4. The repo marked `is_default`.
 pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a RepoConfig> {
     let prefixed_labels: Vec<&str> = issue
         .labels
@@ -63,14 +63,11 @@ pub fn route_issue<'a>(repos: &'a [RepoConfig], issue: &Issue) -> Option<&'a Rep
     default_repo(repos)
 }
 
-/// The repo non-routed work falls back to: the one marked default, or the
-/// only configured repo. Also the target for repo-scoped actions taken
-/// outside any issue context (e.g. the skills install).
+/// The repo non-routed work falls back to: the one marked default. Also the
+/// target for repo-scoped actions taken outside any issue context (e.g. the
+/// skills install).
 pub fn default_repo(repos: &[RepoConfig]) -> Option<&RepoConfig> {
-    match repos {
-        [only] => Some(only),
-        _ => repos.iter().find(|repo| repo.is_default),
-    }
+    repos.iter().find(|repo| repo.is_default)
 }
 
 /// The repo name carried by a `repo:<name>` label, if this is one.
@@ -229,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_default_then_to_an_only_repo() {
+    fn falls_back_only_to_an_explicit_default() {
         let mut fallback = repo("backend");
         fallback.is_default = true;
         let repos = vec![repo("web"), fallback];
@@ -237,8 +234,7 @@ mod tests {
         assert_eq!(routed.map(|r| r.name.as_str()), Some("backend"));
 
         let only = vec![repo("web")];
-        let routed = route_issue(&only, &issue("OPS-1", &[], None));
-        assert_eq!(routed.map(|r| r.name.as_str()), Some("web"));
+        assert!(route_issue(&only, &issue("OPS-1", &[], None)).is_none());
 
         let two_no_default = vec![repo("web"), repo("backend")];
         assert!(route_issue(&two_no_default, &issue("OPS-1", &[], None)).is_none());

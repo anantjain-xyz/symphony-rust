@@ -407,7 +407,7 @@ async fn tick<T: TrackerClient>(
         let Some(repo_config) = route_issue(&config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
-                "no repository matches this issue; skipping (mark a repo as default or add a repo:<name> or matching bare label)"
+                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, add a matching repo rule, or mark a default)"
             );
             continue;
         };
@@ -457,13 +457,15 @@ async fn tick<T: TrackerClient>(
             if !issue.blockers.is_empty() {
                 continue;
             }
-            // Unroutable issues stay queued, like blocked ones: routing rules
-            // only change with a worker restart, which re-enters this loop.
+            // If the issue is still active but no longer routes anywhere
+            // (e.g. the default repo was cleared), drop the retry. Otherwise
+            // retry_ids suppresses the normal active-dispatch path forever.
             let Some(repo_config) = route_issue(&config.repos, &issue) else {
                 warn!(
                     issue = %issue.identifier,
-                    "no repository matches this retry; keeping it queued"
+                    "no repository matches this retry; clearing it"
                 );
+                repo.clear_retry(&retry.issue_id).await?;
                 continue;
             };
             reserve_and_dispatch(
@@ -1665,6 +1667,39 @@ mod tests {
             terminal: vec![done.clone()],
         };
         repo.upsert_issues(&[done]).await.unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+
+        tick(&repo, &tracker, &config, &stop).await.unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clears_due_retry_when_issue_loses_its_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        // No default and no matching team/project rule: a retry created before
+        // this route change should not suppress active dispatch forever.
+        config.repos = vec![RepoConfig {
+            name: "web".to_string(),
+            team_prefixes: vec!["WEB".to_string()],
+            ..RepoConfig::default()
+        }];
+        let stop = CancellationToken::new();
+
+        let ready = issue("todo", vec![]);
+        let tracker = StaticTracker {
+            active: vec![ready.clone()],
+            terminal: vec![],
+        };
+        repo.upsert_issues(&[ready]).await.unwrap();
         repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
             .await
             .unwrap();

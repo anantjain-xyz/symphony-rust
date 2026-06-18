@@ -1449,6 +1449,7 @@ pre {
   gap: 5px;
 }
 
+.repo-default input[type="checkbox"],
 .repo-default input[type="radio"] {
   accent-color: var(--foreground);
   margin: 0;

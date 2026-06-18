@@ -2383,17 +2383,20 @@ function SettingsView({
           install_cmd: null,
           team_prefixes: [],
           project_ids: [],
-          // The first repo is the natural fallback; later ones opt in.
+          // The first repo starts as the fallback, but users can clear it.
           is_default: settings.repos.length === 0,
         },
       ],
     });
   const removeRepo = (index: number) =>
     setSettings({ ...settings, repos: settings.repos.filter((_, i) => i !== index) });
-  const setDefaultRepo = (index: number) =>
+  const setDefaultRepo = (index: number, enabled: boolean) =>
     setSettings({
       ...settings,
-      repos: settings.repos.map((repo, i) => ({ ...repo, is_default: i === index })),
+      repos: settings.repos.map((repo, i) => ({
+        ...repo,
+        is_default: enabled && i === index,
+      })),
     });
   return (
     <form
@@ -2424,7 +2427,8 @@ function SettingsView({
           <small className="hint">
             Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching
             bare label in Linear wins, then the repo claiming the issue's project,
-            then its team, then the default.
+            then its team, then the default. Clear the default to require an
+            explicit route.
           </small>
           {settings.repos.map((repo, index) => (
             <fieldset className="repo-card" key={index}>
@@ -2433,11 +2437,10 @@ function SettingsView({
                 <div className="repo-card-actions">
                   <label className="repo-default">
                     <input
-                      type="radio"
-                      name="default-repo"
+                      type="checkbox"
                       checked={repo.is_default}
                       disabled={!runtimeAvailable}
-                      onChange={() => setDefaultRepo(index)}
+                      onChange={(event) => setDefaultRepo(index, event.currentTarget.checked)}
                     />
                     Default
                   </label>
