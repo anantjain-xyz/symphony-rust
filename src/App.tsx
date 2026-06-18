@@ -2199,7 +2199,7 @@ function SettingsView({
             </small>
           </label>
           <label>
-            Project
+            Project ID
             <input
               {...literalInputProps}
               value={settings.tracker_project_id ?? ""}
