@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 use sqlx::{sqlite::SqliteQueryResult, FromRow, QueryBuilder, Sqlite, SqlitePool};
+use std::collections::BTreeMap;
 use symphony_core::{
     AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus,
     SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
+
+const SQLITE_BIND_CHUNK_SIZE: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkflowRow {
@@ -115,6 +118,41 @@ pub struct RetryWithIssueRow {
     pub created_at: String,
     pub issue_identifier: String,
     pub issue_title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct RetroRow {
+    pub id: String,
+    pub since_at: String,
+    pub until_at: String,
+    pub status: String,
+    pub run_count: i64,
+    pub issue_count: i64,
+    pub report_json: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct RetroInputRow {
+    pub retro_id: String,
+    pub run_id: String,
+    pub issue_id: String,
+    pub repo_name: Option<String>,
+    pub workpad_comment_id: Option<String>,
+    pub workpad_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct WorkpadSnapshotRow {
+    pub issue_id: String,
+    pub comment_id: String,
+    pub body_hash: String,
+    pub body: String,
+    pub comment_created_at: Option<String>,
+    pub comment_updated_at: Option<String>,
+    pub fetched_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
@@ -993,6 +1031,277 @@ impl Repository {
         Ok(Some((run, events)))
     }
 
+    pub async fn create_retro(
+        &self,
+        since_at: &str,
+        until_at: &str,
+    ) -> Result<RetroRow, StorageError> {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            insert into retros (id, since_at, until_at, status)
+            values (?1, ?2, ?3, 'running')
+            "#,
+        )
+        .bind(&id)
+        .bind(since_at)
+        .bind(until_at)
+        .execute(&self.pool)
+        .await?;
+        self.changed("retros", "insert");
+        match self.get_retro(&id).await? {
+            Some(retro) => Ok(retro),
+            None => Err(StorageError::Sqlx(sqlx::Error::RowNotFound)),
+        }
+    }
+
+    pub async fn finish_retro(
+        &self,
+        retro_id: &str,
+        report_json: &str,
+        run_count: i64,
+        issue_count: i64,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            update retros
+            set status = 'completed',
+                report_json = ?1,
+                run_count = ?2,
+                issue_count = ?3,
+                error_message = null,
+                completed_at = ?4
+            where id = ?5
+            "#,
+        )
+        .bind(report_json)
+        .bind(run_count)
+        .bind(issue_count)
+        .bind(now_iso())
+        .bind(retro_id)
+        .execute(&self.pool)
+        .await?;
+        self.changed("retros", "update");
+        Ok(())
+    }
+
+    pub async fn fail_retro(
+        &self,
+        retro_id: &str,
+        error_message: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            update retros
+            set status = 'failed',
+                error_message = ?1,
+                completed_at = ?2
+            where id = ?3
+            "#,
+        )
+        .bind(error_message)
+        .bind(now_iso())
+        .bind(retro_id)
+        .execute(&self.pool)
+        .await?;
+        self.changed("retros", "update");
+        Ok(())
+    }
+
+    pub async fn fail_running_retros(&self, error_message: &str) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            r#"
+            update retros
+            set status = 'failed',
+                error_message = ?1,
+                completed_at = ?2
+            where status = 'running'
+            "#,
+        )
+        .bind(error_message)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            self.changed("retros", "update");
+        }
+        Ok(())
+    }
+
+    pub async fn latest_completed_retro(&self) -> Result<Option<RetroRow>, StorageError> {
+        Ok(sqlx::query_as::<_, RetroRow>(
+            "select * from retros where status = 'completed' order by until_at desc limit 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn list_retros(&self, limit: i64) -> Result<Vec<RetroRow>, StorageError> {
+        Ok(
+            sqlx::query_as::<_, RetroRow>("select * from retros order by created_at desc limit ?1")
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn get_retro(&self, id: &str) -> Result<Option<RetroRow>, StorageError> {
+        Ok(
+            sqlx::query_as::<_, RetroRow>("select * from retros where id = ?1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn list_retro_runs(
+        &self,
+        since_at: &str,
+        until_at: &str,
+    ) -> Result<Vec<RunWithIssueRow>, StorageError> {
+        Ok(sqlx::query_as::<_, RunWithIssueRow>(
+            r#"
+            select r.*, i.identifier as issue_identifier, i.title as issue_title, i.state as issue_state
+            from runs r
+            join issues i on i.id = r.issue_id
+            where r.status in ('success', 'failure', 'timeout', 'cancelled')
+              and coalesce(r.ended_at, r.created_at) > ?1
+              and coalesce(r.ended_at, r.created_at) <= ?2
+            order by coalesce(r.ended_at, r.created_at) asc
+            "#,
+        )
+        .bind(since_at)
+        .bind(until_at)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn events_for_run_ids(
+        &self,
+        run_ids: &[String],
+    ) -> Result<Vec<AgentEventRow>, StorageError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        for chunk in run_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            let mut qb =
+                QueryBuilder::<Sqlite>::new("select * from agent_events where run_id in (");
+            let mut separated = qb.separated(", ");
+            for run_id in chunk {
+                separated.push_bind(run_id);
+            }
+            separated.push_unseparated(") order by run_id, id asc");
+            events.extend(
+                qb.build_query_as::<AgentEventRow>()
+                    .fetch_all(&self.pool)
+                    .await?,
+            );
+        }
+        events.sort_by(|a, b| a.run_id.cmp(&b.run_id).then_with(|| a.id.cmp(&b.id)));
+        Ok(events)
+    }
+
+    pub async fn previous_retro_workpad_hashes(
+        &self,
+        issue_ids: &[String],
+        before_or_at: &str,
+    ) -> Result<BTreeMap<String, String>, StorageError> {
+        if issue_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut hashes = BTreeMap::new();
+        for chunk in issue_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                r#"
+                select ri.issue_id, ri.workpad_hash
+                from retro_inputs ri
+                join retros r on r.id = ri.retro_id
+                where r.status = 'completed'
+                  and r.until_at <=
+                "#,
+            );
+            qb.push_bind(before_or_at);
+            qb.push(" and ri.workpad_hash is not null and ri.issue_id in (");
+            let mut separated = qb.separated(", ");
+            for issue_id in chunk {
+                separated.push_bind(issue_id);
+            }
+            separated.push_unseparated(") order by r.until_at desc, r.completed_at desc");
+
+            let rows = qb
+                .build_query_as::<(String, String)>()
+                .fetch_all(&self.pool)
+                .await?;
+            for (issue_id, workpad_hash) in rows {
+                hashes.entry(issue_id).or_insert(workpad_hash);
+            }
+        }
+        Ok(hashes)
+    }
+
+    pub async fn insert_retro_inputs(&self, inputs: &[RetroInputRow]) -> Result<(), StorageError> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for input in inputs {
+            sqlx::query(
+                r#"
+                insert or replace into retro_inputs (
+                  retro_id, run_id, issue_id, repo_name, workpad_comment_id, workpad_hash
+                )
+                values (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+            )
+            .bind(&input.retro_id)
+            .bind(&input.run_id)
+            .bind(&input.issue_id)
+            .bind(&input.repo_name)
+            .bind(&input.workpad_comment_id)
+            .bind(&input.workpad_hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        self.changed("retro_inputs", "upsert");
+        Ok(())
+    }
+
+    pub async fn upsert_workpad_snapshot(
+        &self,
+        snapshot: &WorkpadSnapshotRow,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            insert into workpad_snapshots (
+              issue_id, comment_id, body_hash, body, comment_created_at,
+              comment_updated_at, fetched_at
+            )
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            on conflict(issue_id) do update set
+              comment_id = excluded.comment_id,
+              body_hash = excluded.body_hash,
+              body = excluded.body,
+              comment_created_at = excluded.comment_created_at,
+              comment_updated_at = excluded.comment_updated_at,
+              fetched_at = excluded.fetched_at
+            "#,
+        )
+        .bind(&snapshot.issue_id)
+        .bind(&snapshot.comment_id)
+        .bind(&snapshot.body_hash)
+        .bind(&snapshot.body)
+        .bind(&snapshot.comment_created_at)
+        .bind(&snapshot.comment_updated_at)
+        .bind(&snapshot.fetched_at)
+        .execute(&self.pool)
+        .await?;
+        self.changed("workpad_snapshots", "upsert");
+        Ok(())
+    }
+
     pub async fn issue_from_id(&self, id: &str) -> Result<Option<Issue>, StorageError> {
         let row = self.get_issue(id).await?;
         Ok(row
@@ -1266,6 +1575,144 @@ mod tests {
         assert_eq!(codex.source, "codex");
         assert_eq!(codex.total_tokens, 55);
         assert_eq!(codex.run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn stores_retros_and_lists_terminal_runs_in_window() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        repo.append_event(
+            &run.id,
+            AgentEventKind::Status,
+            &serde_json::json!({ "message": "done" }),
+        )
+        .await
+        .unwrap();
+        repo.finish_run(&run.id, RunStatus::Success, None, None)
+            .await
+            .unwrap();
+
+        let pending = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let retro = repo
+            .create_retro("1970-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        let runs = repo
+            .list_retro_runs(&retro.since_at, &retro.until_at)
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run.id);
+        assert_ne!(runs[0].id, pending.id);
+
+        let events = repo
+            .events_for_run_ids(std::slice::from_ref(&run.id))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        repo.upsert_workpad_snapshot(&WorkpadSnapshotRow {
+            issue_id: "lin-1".to_string(),
+            comment_id: "comment-1".to_string(),
+            body_hash: "hash".to_string(),
+            body: "## Symphony Workpad".to_string(),
+            comment_created_at: None,
+            comment_updated_at: None,
+            fetched_at: now_iso(),
+        })
+        .await
+        .unwrap();
+        repo.insert_retro_inputs(&[RetroInputRow {
+            retro_id: retro.id.clone(),
+            run_id: run.id,
+            issue_id: "lin-1".to_string(),
+            repo_name: Some("widgets".to_string()),
+            workpad_comment_id: Some("comment-1".to_string()),
+            workpad_hash: Some("hash".to_string()),
+        }])
+        .await
+        .unwrap();
+        repo.finish_retro(&retro.id, r#"{"ok":true}"#, 1, 1)
+            .await
+            .unwrap();
+
+        let latest = repo.latest_completed_retro().await.unwrap().unwrap();
+        assert_eq!(latest.id, retro.id);
+        assert_eq!(latest.status, "completed");
+        assert_eq!(latest.run_count, 1);
+        assert_eq!(repo.list_retros(10).await.unwrap().len(), 1);
+        let previous_hashes = repo
+            .previous_retro_workpad_hashes(&["lin-1".to_string()], "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            previous_hashes.get("lin-1").map(String::as_str),
+            Some("hash")
+        );
+
+        let stale = repo
+            .create_retro("2099-01-01T00:00:00.000Z", "2099-01-02T00:00:00.000Z")
+            .await
+            .unwrap();
+        repo.fail_running_retros("Retro interrupted before completion.")
+            .await
+            .unwrap();
+        let failed = repo.get_retro(&stale.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("Retro interrupted before completion.")
+        );
+    }
+
+    #[tokio::test]
+    async fn event_lookup_batches_large_run_sets() {
+        let repo = repo().await;
+        let issues = (0..=SQLITE_BIND_CHUNK_SIZE)
+            .map(|index| {
+                let mut issue = issue();
+                issue.id = format!("lin-{index}");
+                issue.identifier = format!("SYM-{index}");
+                issue
+            })
+            .collect::<Vec<_>>();
+        repo.upsert_issues(&issues).await.unwrap();
+
+        let mut run_ids = Vec::new();
+        for issue in &issues {
+            let run = repo
+                .try_reserve_run(&issue.id, 1, "/tmp/ws", Some("widgets"))
+                .await
+                .unwrap()
+                .unwrap();
+            repo.mark_running(&run.id).await.unwrap();
+            repo.append_event(
+                &run.id,
+                AgentEventKind::Status,
+                &serde_json::json!({ "message": "chunked" }),
+            )
+            .await
+            .unwrap();
+            run_ids.push(run.id);
+        }
+
+        let events = repo.events_for_run_ids(&run_ids).await.unwrap();
+        assert_eq!(events.len(), run_ids.len());
+        let event_run_ids = events
+            .iter()
+            .map(|event| event.run_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(event_run_ids.len(), run_ids.len());
     }
 
     #[tokio::test]

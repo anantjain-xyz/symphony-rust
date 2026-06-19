@@ -187,6 +187,88 @@ export type Overview = {
   token_usage: TokenUsageRow[];
 };
 
+export type RetroRow = {
+  id: string;
+  since_at: string;
+  until_at: string;
+  status: string;
+  run_count: number;
+  issue_count: number;
+  report_json: string | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type RetroRunState = "idle" | "running" | "completed" | "failed";
+
+export type RetroStatus = {
+  state: RetroRunState;
+  retro_id: string | null;
+  message: string | null;
+  report: RetroReport | null;
+  error: string | null;
+};
+
+export type RetroDetail = {
+  row: RetroRow;
+  report: RetroReport | null;
+};
+
+export type RetroReport = {
+  id: string;
+  since_at: string;
+  until_at: string;
+  generated_at: string;
+  run_count: number;
+  issue_count: number;
+  workpad_count: number;
+  repos: RetroRepoReport[];
+};
+
+export type RetroRepoReport = {
+  repo_name: string;
+  run_count: number;
+  issue_count: number;
+  workpad_count: number;
+  failure_count: number;
+  retry_count: number;
+  findings: RetroFinding[];
+  suggestions: RetroSuggestion[];
+};
+
+export type RetroFinding = {
+  title: string;
+  detail: string;
+  severity: RetroSeverity;
+  occurrences: number;
+  evidence: RetroEvidence[];
+};
+
+export type RetroSeverity = "low" | "medium" | "high";
+
+export type RetroEvidence = {
+  issue_identifier: string;
+  run_id: string | null;
+  run_number: number | null;
+  event_id: number | null;
+  kind: string;
+  summary: string;
+};
+
+export type RetroSuggestion = {
+  target_type: RetroSuggestionTarget;
+  target_id: string;
+  title: string;
+  body: string;
+  rationale: string;
+  confidence: RetroConfidence;
+};
+
+export type RetroSuggestionTarget = "prompt" | "skill";
+
+export type RetroConfidence = "low" | "medium" | "high";
+
 export type IssueRow = {
   id: string;
   identifier: string;

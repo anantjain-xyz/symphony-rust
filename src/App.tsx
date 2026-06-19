@@ -10,6 +10,10 @@ import type {
   LinearViewerProfile,
   Overview,
   RepoConfig,
+  RetroDetail,
+  RetroReport,
+  RetroRow,
+  RetroStatus,
   RunDetail,
   RunWithIssueRow,
   SkillsInstallStatus,
@@ -40,7 +44,7 @@ import {
 } from "./MarkdownText";
 import "./App.css";
 
-type View = "overview" | "runs" | "issues" | "settings";
+type View = "overview" | "runs" | "issues" | "retro" | "settings";
 type Theme = "light" | "dark";
 type IssueViewMode = "list" | "dependencies";
 
@@ -100,6 +104,14 @@ const emptyOverview: Overview = {
   worker_heartbeat: null,
   rate_limits: [],
   token_usage: [],
+};
+
+const emptyRetroStatus: RetroStatus = {
+  state: "idle",
+  retro_id: null,
+  message: null,
+  report: null,
+  error: null,
 };
 
 const previewSettings: AppSettings = {
@@ -462,6 +474,210 @@ const previewOverview: Overview = {
   ],
 };
 
+const previewRetroReport: RetroReport = {
+  id: "preview-retro-1",
+  since_at: previewIso(-7 * 24 * 60 * 60_000),
+  until_at: previewIso(-5 * 60_000),
+  generated_at: previewIso(-4 * 60_000),
+  run_count: 19,
+  issue_count: 11,
+  workpad_count: 10,
+  repos: [
+    {
+      repo_name: "widgets",
+      run_count: 12,
+      issue_count: 7,
+      workpad_count: 6,
+      failure_count: 3,
+      retry_count: 4,
+      findings: [
+        {
+          title: "Workpad confusion: unclear whether screenshots are required",
+          detail:
+            "Agents repeatedly hesitated on whether UI evidence needed full-page Playwright screenshots or a shorter textual proof.",
+          severity: "medium",
+          occurrences: 3,
+          evidence: [
+            {
+              issue_identifier: "SYM-61",
+              run_id: null,
+              run_number: null,
+              event_id: null,
+              kind: "workpad_confusion",
+              summary: "unclear whether screenshots are required",
+            },
+            {
+              issue_identifier: "SYM-58",
+              run_id: "preview-run-active",
+              run_number: 4,
+              event_id: 3,
+              kind: "humanized",
+              summary: "Agent deferred screenshot proof until after implementation.",
+            },
+          ],
+        },
+        {
+          title: "Runs failed with agent_failure",
+          detail: "Typecheck failed after applying dashboard changes.",
+          severity: "high",
+          occurrences: 2,
+          evidence: [
+            {
+              issue_identifier: "SYM-61",
+              run_id: "preview-run-failed",
+              run_number: 2,
+              event_id: 5,
+              kind: "error",
+              summary: "Typecheck failed after applying the requested dashboard change.",
+            },
+          ],
+        },
+      ],
+      suggestions: [
+        {
+          target_type: "skill",
+          target_id: "symphony-screenshot",
+          title: "Clarify screenshot evidence for widgets",
+          body:
+            "Add guidance to symphony-screenshot for when user-facing dashboard work requires full-page Playwright captures, including loading/error/mobile states.",
+          rationale: "3 occurrences found in widgets with medium severity.",
+          confidence: "high",
+        },
+        {
+          target_type: "prompt",
+          target_id: "common prompt",
+          title: "Clarify validation timing for widgets",
+          body:
+            "Add guidance to the common prompt that typecheck/test validation should run before each push and after UI proof artifacts are cleaned up.",
+          rationale: "2 occurrences found in widgets with high severity.",
+          confidence: "high",
+        },
+      ],
+    },
+    {
+      repo_name: "api",
+      run_count: 7,
+      issue_count: 4,
+      workpad_count: 4,
+      failure_count: 1,
+      retry_count: 2,
+      findings: [
+        {
+          title: "Workpad confusion: unclear auth setup for local API tests",
+          detail:
+            "Runs lost time rediscovering which environment variables were needed before integration tests could exercise authenticated routes.",
+          severity: "medium",
+          occurrences: 2,
+          evidence: [
+            {
+              issue_identifier: "API-24",
+              run_id: null,
+              run_number: null,
+              event_id: null,
+              kind: "workpad_confusion",
+              summary: "unclear which auth token fixture should be used locally",
+            },
+            {
+              issue_identifier: "API-27",
+              run_id: "preview-run-api-retry",
+              run_number: 2,
+              event_id: 11,
+              kind: "tool_call",
+              summary: "test command failed because API_TEST_TOKEN was not set",
+            },
+          ],
+        },
+        {
+          title: "Tool calls reported missing database migrations",
+          detail:
+            "The agent saw migration-related failures in repeated validation runs and had to infer the repo-specific setup order from shell output.",
+          severity: "high",
+          occurrences: 2,
+          evidence: [
+            {
+              issue_identifier: "API-28",
+              run_id: "preview-run-api-migrations",
+              run_number: 1,
+              event_id: 14,
+              kind: "tool_call",
+              summary: "cargo test failed until sqlx migrate run was executed",
+            },
+          ],
+        },
+      ],
+      suggestions: [
+        {
+          target_type: "prompt",
+          target_id: "common prompt",
+          title: "Clarify repo setup discovery for api",
+          body:
+            "Add guidance that repo-specific validation prerequisites should be captured in the workpad after the first failed setup command, not repeatedly rediscovered on retries.",
+          rationale: "2 occurrences found in api with medium severity.",
+          confidence: "medium",
+        },
+        {
+          target_type: "skill",
+          target_id: "symphony-workpad",
+          title: "Record validation prerequisites for api",
+          body:
+            "Add a workpad note pattern for persistent repo prerequisites such as auth fixtures, migration commands, or seeded services.",
+          rationale: "2 occurrences found in api with high severity.",
+          confidence: "high",
+        },
+      ],
+    },
+  ],
+};
+
+const previewRetros: RetroRow[] = [
+  {
+    id: previewRetroReport.id,
+    since_at: previewRetroReport.since_at,
+    until_at: previewRetroReport.until_at,
+    status: "completed",
+    run_count: previewRetroReport.run_count,
+    issue_count: previewRetroReport.issue_count,
+    report_json: JSON.stringify(previewRetroReport),
+    error_message: null,
+    created_at: previewRetroReport.generated_at,
+    completed_at: previewRetroReport.generated_at,
+  },
+  {
+    id: "preview-retro-0",
+    since_at: previewIso(-14 * 24 * 60 * 60_000),
+    until_at: previewRetroReport.since_at,
+    status: "completed",
+    run_count: 8,
+    issue_count: 5,
+    report_json: null,
+    error_message: null,
+    created_at: previewIso(-7 * 24 * 60 * 60_000),
+    completed_at: previewIso(-7 * 24 * 60 * 60_000),
+  },
+];
+
+const previewRetroStatus: RetroStatus = {
+  state: "completed",
+  retro_id: previewRetroReport.id,
+  message: null,
+  report: previewRetroReport,
+  error: null,
+};
+
+const previewRetroDetail: RetroDetail = {
+  row: previewRetros[0],
+  report: previewRetroReport,
+};
+
+function previewRetroDetailForId(id: string): RetroDetail | null {
+  const row = previewRetros.find((retro) => retro.id === id);
+  if (!row) return null;
+  return {
+    row,
+    report: row.id === previewRetroReport.id ? previewRetroReport : null,
+  };
+}
+
 // Mirrors PROMPT_VARIABLES in symphony-core (crates/symphony-core/src/prompt.rs).
 const PROMPT_VARIABLES: { name: string; description: string; example: string }[] = [
   { name: "issue.identifier", description: "Issue key", example: "SYM-42" },
@@ -514,6 +730,12 @@ function App() {
   const [issues, setIssues] = useState<IssueRow[]>(
     runtimeAvailable ? [] : previewIssues,
   );
+  const [retros, setRetros] = useState<RetroRow[]>(
+    runtimeAvailable ? [] : previewRetros,
+  );
+  const [retroStatus, setRetroStatus] = useState<RetroStatus>(
+    runtimeAvailable ? emptyRetroStatus : previewRetroStatus,
+  );
   const [worker, setWorker] = useState<WorkerStatus>({
     state: runtimeAvailable ? "stopped" : "running",
     started_at: runtimeAvailable ? null : previewActiveStartedAt,
@@ -521,6 +743,9 @@ function App() {
   });
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
+  const [selectedRetro, setSelectedRetro] = useState<RetroDetail | null>(
+    runtimeAvailable ? null : previewRetroDetail,
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
@@ -546,6 +771,9 @@ function App() {
   }, [runtimeAvailable]);
 
   const selectedRunIdRef = useRef<string | null>(null);
+  const selectedRetroIdRef = useRef<string | null>(
+    runtimeAvailable ? null : previewRetroReport.id,
+  );
   const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const linearViewerSeq = useRef(0);
@@ -555,7 +783,17 @@ function App() {
   async function refreshDashboard() {
     if (!runtimeAvailable) return;
     const detailId = selectedRunIdRef.current;
-    const [nextOverview, nextRuns, nextIssues, nextWorker, nextDetail] =
+    const retroDetailId = selectedRetroIdRef.current;
+    const [
+      nextOverview,
+      nextRuns,
+      nextIssues,
+      nextWorker,
+      nextDetail,
+      nextRetroStatus,
+      nextRetros,
+      nextRetroDetail,
+    ] =
       await Promise.all([
         invoke<Overview>("get_overview"),
         invoke<RunWithIssueRow[]>("list_runs"),
@@ -564,14 +802,32 @@ function App() {
         detailId
           ? invoke<RunDetail | null>("get_run_detail", { id: detailId })
           : Promise.resolve(null),
+        invoke<RetroStatus>("get_retro_status"),
+        invoke<RetroRow[]>("list_retros"),
+        retroDetailId
+          ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
+          : Promise.resolve(null),
       ]);
     setOverview(nextOverview);
     setRuns(nextRuns);
     setIssues(nextIssues);
     setWorker(nextWorker);
+    setRetroStatus(nextRetroStatus);
+    setRetros(nextRetros);
     if (detailId && detailId === selectedRunIdRef.current) {
       setSelectedRun(nextDetail);
       if (!nextDetail) selectedRunIdRef.current = null;
+    }
+    if (retroDetailId && retroDetailId === selectedRetroIdRef.current) {
+      setSelectedRetro(nextRetroDetail);
+      if (!nextRetroDetail) selectedRetroIdRef.current = null;
+    } else if (!retroDetailId && nextRetros.length > 0) {
+      const newest = nextRetros[0];
+      selectedRetroIdRef.current = newest.id;
+      const detail = await invoke<RetroDetail | null>("get_retro_detail", {
+        id: newest.id,
+      });
+      setSelectedRetro(detail);
     }
   }
 
@@ -1004,6 +1260,59 @@ function App() {
     }
   }
 
+  async function startRetro() {
+    if (!settings) return;
+    if (!runtimeAvailable) {
+      setRetroStatus(previewRetroStatus);
+      setRetros(previewRetros);
+      setSelectedRetro(previewRetroDetail);
+      selectedRetroIdRef.current = previewRetroReport.id;
+      setView("retro");
+      return;
+    }
+    const status = await call(() =>
+      invoke<RetroStatus>("start_retro", { settings }),
+    );
+    setRetroStatus(status);
+    selectedRetroIdRef.current = status.retro_id;
+    setSelectedRetro(null);
+    await refreshDashboard();
+    setView("retro");
+  }
+
+  async function openRetro(id: string) {
+    if (!runtimeAvailable) {
+      selectedRetroIdRef.current = id;
+      setSelectedRetro(previewRetroDetailForId(id));
+      setView("retro");
+      return;
+    }
+    const detail = await call(() =>
+      invoke<RetroDetail | null>("get_retro_detail", { id }),
+    );
+    selectedRetroIdRef.current = detail?.row.id ?? null;
+    setSelectedRetro(detail);
+    setView("retro");
+  }
+
+  useEffect(() => {
+    if (!runtimeAvailable || retroStatus.state !== "running") return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      refreshDashboard().catch(() => {
+        if (!cancelled) {
+          // The command wrapper will surface explicit action errors; polling
+          // failures are transient and should not pin a banner over the app.
+        }
+      });
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeAvailable, retroStatus.state]);
+
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
   // the boot auto-start condition. Skills are recommended only and live in
@@ -1077,7 +1386,7 @@ function App() {
           </div>
 
           <nav className="topnav" aria-label="Primary">
-            {(["overview", "runs", "issues", "settings"] as View[]).map((item) => (
+            {(["overview", "runs", "issues", "retro", "settings"] as View[]).map((item) => (
               <button
                 key={item}
                 className={view === item ? "nav-active" : ""}
@@ -1186,6 +1495,18 @@ function App() {
             issues={issues}
             linearWorkspace={settings?.tracker_workspace ?? null}
             onOpenSettings={() => setView("settings")}
+          />
+        ) : null}
+        {view === "retro" ? (
+          <RetroView
+            retros={retros}
+            status={retroStatus}
+            selected={selectedRetro}
+            runtimeAvailable={runtimeAvailable}
+            busy={busy}
+            setupBlocked={setup.blocked}
+            onStartRetro={startRetro}
+            onOpenRetro={openRetro}
           />
         ) : null}
         {view === "settings" && settings ? (
@@ -2170,6 +2491,230 @@ function DependencyNodeCard({ node }: { node: DependencyNode }) {
         {node.blockedByCount === 0 && node.blocksCount === 0 ? (
           <span>No blockers</span>
         ) : null}
+      </div>
+    </article>
+  );
+}
+
+function RetroView({
+  retros,
+  status,
+  selected,
+  runtimeAvailable,
+  busy,
+  setupBlocked,
+  onStartRetro,
+  onOpenRetro,
+}: {
+  retros: RetroRow[];
+  status: RetroStatus;
+  selected: RetroDetail | null;
+  runtimeAvailable: boolean;
+  busy: boolean;
+  setupBlocked: boolean;
+  onStartRetro: () => void;
+  onOpenRetro: (id: string) => void;
+}) {
+  const activeReport = selected ? selected.report : status.report;
+  const canStart =
+    !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
+  return (
+    <>
+      <header className="page-header">
+        <div>
+          <h2>Retro</h2>
+          <p>
+            Finds repeated confusion in runs and workpads, then suggests prompt or
+            skill changes per repo.
+          </p>
+        </div>
+        <div className="actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={!canStart}
+            onClick={onStartRetro}
+            title={
+              setupBlocked && runtimeAvailable
+                ? "Connect Linear and configure a repository before running a retro."
+                : undefined
+            }
+          >
+            {status.state === "running" ? "Generating..." : "Generate retro"}
+          </button>
+        </div>
+      </header>
+
+      {status.state === "running" ? (
+        <div className="banner info">
+          <strong>Retro running</strong>
+          <span>{status.message ?? "Analyzing recent runs..."}</span>
+        </div>
+      ) : null}
+      {status.state === "failed" && status.error ? (
+        <div className="banner error">
+          <strong>Retro failed</strong>
+          <span>{status.error}</span>
+        </div>
+      ) : null}
+
+      <div className="split retro-layout">
+        <Panel title="Retro history">
+          {retros.length === 0 ? (
+            <Empty
+              title="No retros yet"
+              text="Generate the first retro to create a durable marker for the next run window."
+              actionLabel="Generate retro"
+              actionDisabled={!canStart}
+              onAction={onStartRetro}
+            />
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Window</th>
+                  <th>Status</th>
+                  <th>Runs</th>
+                  <th>Issues</th>
+                </tr>
+              </thead>
+              <tbody>
+                {retros.map((retro) => (
+                  <tr
+                    key={retro.id}
+                    className={
+                      selected?.row.id === retro.id
+                        ? "clickable-row selected"
+                        : "clickable-row"
+                    }
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`Open retro from ${shortTime(retro.since_at)}`}
+                    onClick={() => onOpenRetro(retro.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onOpenRetro(retro.id);
+                      }
+                    }}
+                  >
+                    <td>
+                      <strong>{relativeTime(retro.created_at)}</strong>
+                      <small>
+                        {shortTime(retro.since_at)} to {shortTime(retro.until_at)}
+                      </small>
+                      {retro.error_message ? (
+                        <small className="row-error">{retro.error_message}</small>
+                      ) : null}
+                    </td>
+                    <td>
+                      <Badge status={retro.status} />
+                    </td>
+                    <td className="tnum">{retro.run_count}</td>
+                    <td className="tnum">{retro.issue_count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+
+        <Panel title="Findings and suggestions">
+          {!activeReport ? (
+            <Empty
+              title="No report selected"
+              text="Generate or select a retro to inspect repo-level confusion patterns."
+            />
+          ) : activeReport.repos.length === 0 ? (
+            <Empty
+              title="No runs in this window"
+              text="The retro marker was advanced, but no terminal runs finished in the selected period."
+            />
+          ) : (
+            <div className="retro-report">
+              {activeReport.repos.map((repo) => (
+                <RetroRepoCard key={repo.repo_name} repo={repo} />
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
+    </>
+  );
+}
+
+function RetroRepoCard({ repo }: { repo: RetroReport["repos"][number] }) {
+  return (
+    <article className="retro-repo-card">
+      <header>
+        <div className="retro-repo-title">
+          <span className="repo-badge">{repo.repo_name}</span>
+        </div>
+        <div className="retro-mini-stats">
+          <span>{repo.run_count} runs</span>
+          <span>{repo.failure_count} failures</span>
+          <span>{repo.retry_count} retries</span>
+        </div>
+      </header>
+      <div className="retro-columns">
+        <section>
+          <h5>Confusion patterns</h5>
+          {repo.findings.length === 0 ? (
+            <small>No repeated confusion found for this repo.</small>
+          ) : (
+            <div className="retro-list">
+              {repo.findings.map((finding) => (
+                <div className="retro-item" key={`${finding.title}-${finding.detail}`}>
+                  <div className="retro-item-head">
+                    <strong>{finding.title}</strong>
+                    <Badge status={finding.severity} />
+                  </div>
+                  <p>{finding.detail}</p>
+                  <small>
+                    {finding.occurrences} occurrence
+                    {finding.occurrences === 1 ? "" : "s"}
+                  </small>
+                  <ul className="retro-evidence">
+                    {finding.evidence.map((evidence) => (
+                      <li
+                        key={`${evidence.issue_identifier}-${evidence.run_id ?? evidence.kind}-${evidence.event_id ?? evidence.summary}`}
+                      >
+                        <code>{evidence.issue_identifier}</code>
+                        <span>
+                          {evidence.run_number ? `Run #${evidence.run_number}` : evidence.kind}
+                        </span>
+                        <small>{evidence.summary}</small>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section>
+          <h5>Suggested changes</h5>
+          {repo.suggestions.length === 0 ? (
+            <small>No prompt or skill changes suggested.</small>
+          ) : (
+            <div className="retro-list">
+              {repo.suggestions.map((suggestion) => (
+                <div className="retro-item" key={`${suggestion.target_id}-${suggestion.title}`}>
+                  <div className="retro-item-head">
+                    <strong>{suggestion.title}</strong>
+                    <span className="retro-target">
+                      {suggestion.target_type}: {suggestion.target_id}
+                    </span>
+                  </div>
+                  <p>{suggestion.body}</p>
+                  <small>
+                    {suggestion.confidence} confidence · {suggestion.rationale}
+                  </small>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </article>
   );

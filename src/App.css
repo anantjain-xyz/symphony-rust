@@ -534,6 +534,11 @@ small {
   grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
 }
 
+.retro-layout {
+  align-items: start;
+  grid-template-columns: minmax(360px, 0.75fr) minmax(520px, 1.25fr);
+}
+
 .panel {
   background: var(--card);
   border: 1px solid var(--border);
@@ -548,6 +553,158 @@ small {
   font-weight: 600;
   margin: 0;
   padding: 13px 15px;
+}
+
+.retro-report {
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+
+.retro-repo-card {
+  min-width: 0;
+  padding: 16px;
+}
+
+.retro-repo-card + .retro-repo-card {
+  border-top: 1px solid var(--border);
+}
+
+.retro-repo-card > header {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.retro-repo-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.retro-repo-title .repo-badge {
+  margin-left: 0;
+}
+
+.retro-repo-card h5,
+.retro-repo-card p {
+  margin: 0;
+}
+
+.retro-mini-stats {
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.retro-columns {
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.retro-columns > section {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 0;
+}
+
+.retro-columns > section + section {
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+
+.retro-columns > section:first-child {
+  padding-right: 16px;
+}
+
+.retro-repo-card h5 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.retro-list {
+  display: grid;
+  gap: 0;
+}
+
+.retro-item {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 7px;
+  padding: 0 0 14px;
+}
+
+.retro-item + .retro-item {
+  padding-top: 14px;
+}
+
+.retro-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.retro-item-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.retro-item-head strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.retro-item p {
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.retro-target {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.retro-evidence {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.retro-evidence li {
+  background: var(--muted);
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+}
+
+.retro-evidence code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.retro-evidence span {
+  font-size: 12px;
+  font-weight: 600;
 }
 
 table {

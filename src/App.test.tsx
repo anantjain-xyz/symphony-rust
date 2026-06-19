@@ -126,7 +126,18 @@ function settingsInvoke({
         };
       case "list_runs":
       case "list_issues":
+      case "list_retros":
         return [];
+      case "get_retro_status":
+        return {
+          state: "idle",
+          retro_id: null,
+          message: null,
+          report: null,
+          error: null,
+        };
+      case "get_retro_detail":
+        return null;
       case "get_worker_status":
         return { state: "stopped", started_at: null, last_error: null };
       case "validate_settings":
@@ -199,6 +210,18 @@ function dashboardInvoke({
         return [];
       case "list_issues":
         return issues;
+      case "list_retros":
+        return [];
+      case "get_retro_status":
+        return {
+          state: "idle",
+          retro_id: null,
+          message: null,
+          report: null,
+          error: null,
+        };
+      case "get_retro_detail":
+        return null;
       case "get_worker_status":
         return workerStatus;
       case "trigger_retry_now":
