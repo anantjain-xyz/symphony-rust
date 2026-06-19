@@ -182,6 +182,19 @@ impl WorkerManager {
     /// Refresh the settings snapshot used by future worker ticks. Runs that
     /// have already been dispatched keep the config they started with.
     pub async fn reconfigure(&self, config: WorkerStartConfig) -> WorkerStatus {
+        self.reconfigure_with_tracker_preflight(config, preflight_tracker_config)
+            .await
+    }
+
+    async fn reconfigure_with_tracker_preflight<F, Fut>(
+        &self,
+        config: WorkerStartConfig,
+        preflight_tracker: F,
+    ) -> WorkerStatus
+    where
+        F: FnOnce(symphony_core::TrackerConfig) -> Fut,
+        Fut: std::future::Future<Output = Result<(), WorkerError>>,
+    {
         let runtime =
             runtime_config_from_start(config, self.run_cancellations.clone(), self.wake.clone());
         let runtime_config = {
@@ -192,7 +205,25 @@ impl WorkerManager {
             inner.runtime_config.clone()
         };
         if let Some(runtime_config) = runtime_config {
+            let current = runtime_config.read().await.clone();
+            if current.workflow.front_matter.tracker != runtime.workflow.front_matter.tracker {
+                if let Err(err) =
+                    preflight_tracker(runtime.workflow.front_matter.tracker.clone()).await
+                {
+                    let mut inner = self.inner.lock().await;
+                    if inner.status.state == WorkerState::Running {
+                        inner.status.last_error = Some(err.to_string());
+                    }
+                    return inner.status.clone();
+                }
+            }
             *runtime_config.write().await = runtime;
+            {
+                let mut inner = self.inner.lock().await;
+                if inner.status.state == WorkerState::Running {
+                    inner.status.last_error = None;
+                }
+            }
             self.wake.notify_one();
         }
         self.status().await
@@ -271,6 +302,14 @@ fn runtime_config_from_start(
     }
 }
 
+async fn preflight_tracker_config(
+    tracker_config: symphony_core::TrackerConfig,
+) -> Result<(), WorkerError> {
+    let tracker = LinearTracker::new(tracker_config);
+    tracker.preflight().await?;
+    Ok(())
+}
+
 async fn run_worker(
     repo: Repository,
     config: SharedRuntimeConfig,
@@ -281,6 +320,7 @@ async fn run_worker(
     let mut tracker_config = initial_config.workflow.front_matter.tracker.clone();
     let mut tracker = LinearTracker::new(tracker_config.clone());
     tracker.preflight().await?;
+    let mut accepted_config = initial_config.clone();
     recover(&repo, &tracker, &initial_config).await?;
     let started_at = now_iso();
     repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
@@ -306,14 +346,28 @@ async fn run_worker(
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
-            let next_tracker = preflight_reconfigured_tracker(
-                LinearTracker::new(current_tracker_config.clone()),
-                &stop,
-            )
-            .await?;
+            let next_tracker = match preflight_reconfigured_tracker(LinearTracker::new(
+                current_tracker_config.clone(),
+            ))
+            .await
+            {
+                Ok(next_tracker) => next_tracker,
+                Err(err) => {
+                    error!(
+                        error = %err,
+                        "worker reconfigure preflight failed; keeping previous runtime config"
+                    );
+                    let mut latest = config.write().await;
+                    if latest.workflow.front_matter.tracker == current_tracker_config {
+                        *latest = accepted_config.clone();
+                    }
+                    continue;
+                }
+            };
             tracker_config = current_tracker_config;
             tracker = next_tracker;
         }
+        accepted_config = current_config.clone();
         if let Err(err) = tick(&repo, &tracker, &current_config, Some(&config), &stop).await {
             error!(error = %err, "worker tick failed");
         }
@@ -327,14 +381,8 @@ async fn run_worker(
     Ok(())
 }
 
-async fn preflight_reconfigured_tracker<T: TrackerClient>(
-    tracker: T,
-    stop: &CancellationToken,
-) -> Result<T, WorkerError> {
-    if let Err(err) = tracker.preflight().await {
-        stop.cancel();
-        return Err(err.into());
-    }
+async fn preflight_reconfigured_tracker<T: TrackerClient>(tracker: T) -> Result<T, WorkerError> {
+    tracker.preflight().await?;
     Ok(tracker)
 }
 
@@ -1398,28 +1446,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct FailingPreflightTracker;
-
-    #[async_trait::async_trait]
-    impl TrackerClient for FailingPreflightTracker {
-        async fn preflight(&self) -> Result<(), TrackerError> {
-            Err(TrackerError::Auth("bad key".to_string()))
-        }
-
-        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
-            Ok(Vec::new())
-        }
-
-        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
-            Ok(Vec::new())
-        }
-
-        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
-            Ok(None)
-        }
-    }
-
     fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
         let failed = outcome == AgentOutcome::Failure;
         symphony_agents::MockAgentDriver {
@@ -2056,18 +2082,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_reconfigure_preflight_cancels_worker_token() {
-        let stop = CancellationToken::new();
-
-        let err = preflight_reconfigured_tracker(FailingPreflightTracker, &stop)
+    async fn failed_reconfigure_preflight_keeps_live_config_and_worker_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
             .await
-            .unwrap_err();
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.repos[0].install_cmd = Some("make get".to_string());
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(initial));
+        let stop = CancellationToken::new();
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.status = WorkerStatus {
+                state: WorkerState::Running,
+                started_at: Some(now_iso()),
+                last_error: None,
+            };
+            inner.stop = Some(stop.clone());
+            inner.runtime_config = Some(shared.clone());
+        }
+        let mut updated = runtime_config(temp.path());
+        updated.workflow.front_matter.tracker.api_key = "bad-key".to_string();
+        updated.repos[0].install_cmd = Some("make gen".to_string());
 
-        assert!(stop.is_cancelled());
+        let status = manager
+            .reconfigure_with_tracker_preflight(start_config(updated), |_| async {
+                Err(WorkerError::from(TrackerError::Auth("bad key".to_string())))
+            })
+            .await;
+
+        assert_eq!(status.state, WorkerState::Running);
         assert_eq!(
-            err.to_string(),
-            "tracker error: Linear auth failed: bad key"
+            status.last_error.as_deref(),
+            Some("tracker error: Linear auth failed: bad key")
         );
+        assert!(!stop.is_cancelled());
+        let live = shared.read().await;
+        assert_eq!(live.workflow.front_matter.tracker.api_key, "test-key");
+        assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make get"));
     }
 
     #[tokio::test]
