@@ -137,6 +137,12 @@ async fn save_settings(
     tokio::fs::write(&state.settings_path, json)
         .await
         .map_err(|err| err.to_string())?;
+    if live_reconfigure_allowed(&settings) {
+        state
+            .worker
+            .reconfigure(worker_start_config(&state, &settings))
+            .await;
+    }
     Ok(settings)
 }
 
@@ -204,6 +210,10 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
 /// mistakes once a repo exists (duplicate names, bad placeholders, …) do block.
 fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
     settings.repos.is_empty()
+}
+
+fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
+    validate_workflow_settings(settings).is_none()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
@@ -524,18 +534,9 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
     if let Some(error) = validate_workflow_settings(&settings) {
         return Err(error);
     }
-    let api_key = linear_api_key();
-    let workflow = workflow_from_settings(&settings, api_key.as_deref());
-    let env = build_env();
     state
         .worker
-        .start(WorkerStartConfig {
-            workflow,
-            repos: settings.repos.clone(),
-            env,
-            session_env: settings.session_env.clone(),
-            app_data_dir: state.app_data_dir.clone(),
-        })
+        .start(worker_start_config(&state, &settings))
         .await
         .map_err(|err| err.to_string())
 }
@@ -543,6 +544,17 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
 #[tauri::command]
 async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
     Ok(state.worker.stop().await)
+}
+
+fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartConfig {
+    let api_key = linear_api_key();
+    WorkerStartConfig {
+        workflow: workflow_from_settings(settings, api_key.as_deref()),
+        repos: settings.repos.clone(),
+        env: build_env(),
+        session_env: settings.session_env.clone(),
+        app_data_dir: state.app_data_dir.clone(),
+    }
 }
 
 #[tauri::command]
@@ -1074,6 +1086,18 @@ mod tests {
         };
         assert!(validate_workflow_settings(&broken).is_some());
         assert!(!workflow_setup_incomplete(&broken));
+    }
+
+    #[test]
+    fn only_runnable_settings_reconfigure_a_live_worker() {
+        assert!(!live_reconfigure_allowed(&AppSettings::default()));
+        assert!(live_reconfigure_allowed(&configured_settings()));
+
+        let broken = AppSettings {
+            active_states: Vec::new(),
+            ..configured_settings()
+        };
+        assert!(!live_reconfigure_allowed(&broken));
     }
 
     #[test]
