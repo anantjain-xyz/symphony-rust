@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
 use sqlx::{sqlite::SqliteQueryResult, FromRow, QueryBuilder, Sqlite, SqlitePool};
+use std::collections::BTreeMap;
 use symphony_core::{
     AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus,
     SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
+
+const SQLITE_BIND_CHUNK_SIZE: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkflowRow {
@@ -1180,16 +1183,62 @@ impl Repository {
         if run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut qb = QueryBuilder::<Sqlite>::new("select * from agent_events where run_id in (");
-        let mut separated = qb.separated(", ");
-        for run_id in run_ids {
-            separated.push_bind(run_id);
+        let mut events = Vec::new();
+        for chunk in run_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            let mut qb =
+                QueryBuilder::<Sqlite>::new("select * from agent_events where run_id in (");
+            let mut separated = qb.separated(", ");
+            for run_id in chunk {
+                separated.push_bind(run_id);
+            }
+            separated.push_unseparated(") order by run_id, id asc");
+            events.extend(
+                qb.build_query_as::<AgentEventRow>()
+                    .fetch_all(&self.pool)
+                    .await?,
+            );
         }
-        separated.push_unseparated(") order by run_id, id asc");
-        Ok(qb
-            .build_query_as::<AgentEventRow>()
-            .fetch_all(&self.pool)
-            .await?)
+        events.sort_by(|a, b| a.run_id.cmp(&b.run_id).then_with(|| a.id.cmp(&b.id)));
+        Ok(events)
+    }
+
+    pub async fn previous_retro_workpad_hashes(
+        &self,
+        issue_ids: &[String],
+        before_or_at: &str,
+    ) -> Result<BTreeMap<String, String>, StorageError> {
+        if issue_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut hashes = BTreeMap::new();
+        for chunk in issue_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                r#"
+                select ri.issue_id, ri.workpad_hash
+                from retro_inputs ri
+                join retros r on r.id = ri.retro_id
+                where r.status = 'completed'
+                  and r.until_at <=
+                "#,
+            );
+            qb.push_bind(before_or_at);
+            qb.push(" and ri.workpad_hash is not null and ri.issue_id in (");
+            let mut separated = qb.separated(", ");
+            for issue_id in chunk {
+                separated.push_bind(issue_id);
+            }
+            separated.push_unseparated(") order by r.until_at desc, r.completed_at desc");
+
+            let rows = qb
+                .build_query_as::<(String, String)>()
+                .fetch_all(&self.pool)
+                .await?;
+            for (issue_id, workpad_hash) in rows {
+                hashes.entry(issue_id).or_insert(workpad_hash);
+            }
+        }
+        Ok(hashes)
     }
 
     pub async fn insert_retro_inputs(&self, inputs: &[RetroInputRow]) -> Result<(), StorageError> {
@@ -1602,6 +1651,14 @@ mod tests {
         assert_eq!(latest.status, "completed");
         assert_eq!(latest.run_count, 1);
         assert_eq!(repo.list_retros(10).await.unwrap().len(), 1);
+        let previous_hashes = repo
+            .previous_retro_workpad_hashes(&["lin-1".to_string()], "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(
+            previous_hashes.get("lin-1").map(String::as_str),
+            Some("hash")
+        );
 
         let stale = repo
             .create_retro("2099-01-01T00:00:00.000Z", "2099-01-02T00:00:00.000Z")
@@ -1616,6 +1673,46 @@ mod tests {
             failed.error_message.as_deref(),
             Some("Retro interrupted before completion.")
         );
+    }
+
+    #[tokio::test]
+    async fn event_lookup_batches_large_run_sets() {
+        let repo = repo().await;
+        let issues = (0..=SQLITE_BIND_CHUNK_SIZE)
+            .map(|index| {
+                let mut issue = issue();
+                issue.id = format!("lin-{index}");
+                issue.identifier = format!("SYM-{index}");
+                issue
+            })
+            .collect::<Vec<_>>();
+        repo.upsert_issues(&issues).await.unwrap();
+
+        let mut run_ids = Vec::new();
+        for issue in &issues {
+            let run = repo
+                .try_reserve_run(&issue.id, 1, "/tmp/ws", Some("widgets"))
+                .await
+                .unwrap()
+                .unwrap();
+            repo.mark_running(&run.id).await.unwrap();
+            repo.append_event(
+                &run.id,
+                AgentEventKind::Status,
+                &serde_json::json!({ "message": "chunked" }),
+            )
+            .await
+            .unwrap();
+            run_ids.push(run.id);
+        }
+
+        let events = repo.events_for_run_ids(&run_ids).await.unwrap();
+        assert_eq!(events.len(), run_ids.len());
+        let event_run_ids = events
+            .iter()
+            .map(|event| event.run_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(event_run_ids.len(), run_ids.len());
     }
 
     #[tokio::test]

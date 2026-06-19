@@ -222,7 +222,8 @@ fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
 
     let nul_values = env
         .iter()
-        .filter_map(|(key, value)| value.contains('\0').then(|| key.clone()))
+        .filter(|(_key, value)| value.contains('\0'))
+        .map(|(key, _value)| key.clone())
         .collect::<Vec<_>>();
     if !nul_values.is_empty() {
         return Some(format!(

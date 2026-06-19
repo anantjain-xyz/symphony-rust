@@ -315,13 +315,19 @@ where
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let previous_workpad_hashes = repo
+        .previous_retro_workpad_hashes(&issue_ids, &retro.since_at)
+        .await
+        .map_err(|err| err.to_string())?;
     let workpads = tracker
         .fetch_workpads(&issue_ids)
         .await
         .map_err(|err| err.to_string())?;
     let mut workpad_by_issue = BTreeMap::new();
+    let mut found_workpad_issue_ids = BTreeSet::new();
     for workpad in workpads {
         let hash = hash_body(&workpad.body);
+        found_workpad_issue_ids.insert(workpad.issue_id.clone());
         repo.upsert_workpad_snapshot(&WorkpadSnapshotRow {
             issue_id: workpad.issue_id.clone(),
             comment_id: workpad.comment_id.clone(),
@@ -333,11 +339,24 @@ where
         })
         .await
         .map_err(|err| err.to_string())?;
-        workpad_by_issue.insert(workpad.issue_id.clone(), (workpad, hash));
+        if should_inspect_workpad(
+            &workpad,
+            &hash,
+            previous_workpad_hashes.get(&workpad.issue_id),
+            &retro.since_at,
+        ) {
+            workpad_by_issue.insert(workpad.issue_id.clone(), (workpad, hash));
+        }
     }
 
     set_message(inner, "Analyzing confusion patterns...").await;
-    let report = analyze_retro(&retro, &runs, &events, &workpad_by_issue);
+    let report = analyze_retro(
+        &retro,
+        &runs,
+        &events,
+        &workpad_by_issue,
+        &found_workpad_issue_ids,
+    );
     let inputs = runs
         .iter()
         .map(|run| {
@@ -365,7 +384,8 @@ fn analyze_retro(
     retro: &RetroRow,
     runs: &[RunWithIssueRow],
     events: &[AgentEventRow],
-    workpads: &BTreeMap<String, (WorkpadComment, String)>,
+    changed_workpads: &BTreeMap<String, (WorkpadComment, String)>,
+    found_workpad_issue_ids: &BTreeSet<String>,
 ) -> RetroReport {
     let mut events_by_run: BTreeMap<&str, Vec<&AgentEventRow>> = BTreeMap::new();
     for event in events {
@@ -432,7 +452,7 @@ fn analyze_retro(
         }
     }
 
-    for (issue_id, (workpad, _hash)) in workpads {
+    for issue_id in found_workpad_issue_ids {
         for repo in repos
             .values_mut()
             .filter(|repo| repo.issue_ids.contains(issue_id))
@@ -440,6 +460,14 @@ fn analyze_retro(
             if repo.workpad_issue_ids.insert(issue_id.clone()) {
                 repo.workpad_count += 1;
             }
+        }
+    }
+
+    for (issue_id, (workpad, _hash)) in changed_workpads {
+        for repo in repos
+            .values_mut()
+            .filter(|repo| repo.issue_ids.contains(issue_id))
+        {
             let issue_identifier = issue_identifier_by_id
                 .get(issue_id.as_str())
                 .copied()
@@ -449,7 +477,7 @@ fn analyze_retro(
     }
 
     for run in runs {
-        if !workpads.contains_key(&run.issue_id) {
+        if !found_workpad_issue_ids.contains(&run.issue_id) {
             let repo_name = run
                 .repo_name
                 .clone()
@@ -482,9 +510,29 @@ fn analyze_retro(
             .map(|run| run.issue_id.as_str())
             .collect::<BTreeSet<_>>()
             .len() as i64,
-        workpad_count: workpads.len() as i64,
+        workpad_count: found_workpad_issue_ids.len() as i64,
         repos: repo_reports,
     }
+}
+
+fn should_inspect_workpad(
+    workpad: &WorkpadComment,
+    hash: &str,
+    previous_hash: Option<&String>,
+    since_at: &str,
+) -> bool {
+    if previous_hash.is_some_and(|previous_hash| previous_hash == hash) {
+        return false;
+    }
+    if previous_hash.is_some() {
+        return true;
+    }
+    workpad
+        .updated_at
+        .as_deref()
+        .or(workpad.created_at.as_deref())
+        .map(|changed_at| changed_at > since_at)
+        .unwrap_or(true)
 }
 
 fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &AgentEventRow) {
@@ -919,5 +967,56 @@ mod tests {
         assert!(looks_like_tool_confusion("exit 1"));
         assert!(looks_like_tool_confusion("command exited with exit 127"));
         assert!(!looks_like_tool_confusion("exit 0"));
+    }
+
+    #[test]
+    fn skips_workpads_that_match_previous_retro_hash() {
+        let workpad = WorkpadComment {
+            issue_id: "lin-1".to_string(),
+            comment_id: "comment-1".to_string(),
+            body: "## Symphony Workpad\n\n### Confusions\n\n- already reported".to_string(),
+            created_at: Some("2026-06-17T00:00:00.000Z".to_string()),
+            updated_at: Some("2026-06-19T00:00:00.000Z".to_string()),
+        };
+        let hash = hash_body(&workpad.body);
+
+        assert!(!should_inspect_workpad(
+            &workpad,
+            &hash,
+            Some(&hash),
+            "2026-06-18T00:00:00.000Z",
+        ));
+    }
+
+    #[test]
+    fn inspects_changed_or_new_workpads_only_when_the_body_is_new_to_the_window() {
+        let workpad = WorkpadComment {
+            issue_id: "lin-1".to_string(),
+            comment_id: "comment-1".to_string(),
+            body: "## Symphony Workpad\n\n### Confusions\n\n- new confusion".to_string(),
+            created_at: Some("2026-06-17T00:00:00.000Z".to_string()),
+            updated_at: Some("2026-06-19T00:00:00.000Z".to_string()),
+        };
+        let hash = hash_body(&workpad.body);
+        let previous_hash = "older-hash".to_string();
+
+        assert!(should_inspect_workpad(
+            &workpad,
+            &hash,
+            Some(&previous_hash),
+            "2026-06-18T00:00:00.000Z",
+        ));
+        assert!(should_inspect_workpad(
+            &workpad,
+            &hash,
+            None,
+            "2026-06-18T00:00:00.000Z",
+        ));
+        assert!(!should_inspect_workpad(
+            &workpad,
+            &hash,
+            None,
+            "2026-06-20T00:00:00.000Z",
+        ));
     }
 }
