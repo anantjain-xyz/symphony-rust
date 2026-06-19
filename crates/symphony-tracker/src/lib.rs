@@ -34,6 +34,19 @@ pub trait TrackerClient: Send + Sync {
     async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
         self.fetch_by_id(id).await
     }
+    async fn fetch_workpads(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<WorkpadComment>, TrackerError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkpadComment {
+    pub issue_id: String,
+    pub comment_id: String,
+    pub body: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +342,48 @@ impl TrackerClient for LinearTracker {
     async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
         self.fetch_by_id_inner(id, self.config.assigned_to_me).await
     }
+
+    async fn fetch_workpads(
+        &self,
+        issue_ids: &[String],
+    ) -> Result<Vec<WorkpadComment>, TrackerError> {
+        let mut workpads = Vec::new();
+        for issue_id in issue_ids {
+            if let Some(workpad) = self.fetch_workpad(issue_id).await? {
+                workpads.push(workpad);
+            }
+        }
+        Ok(workpads)
+    }
+}
+
+impl LinearTracker {
+    async fn fetch_workpad(&self, issue_id: &str) -> Result<Option<WorkpadComment>, TrackerError> {
+        let variables = serde_json::json!({ "id": issue_id });
+        let data = match self
+            .execute::<IssueCommentsData>(ISSUE_COMMENTS_QUERY, Some(variables))
+            .await
+        {
+            Ok(data) => data,
+            Err(TrackerError::NotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let Some(issue) = data.issue else {
+            return Ok(None);
+        };
+        let mut comments = issue.comments.nodes;
+        comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(comments
+            .into_iter()
+            .find(|comment| comment.body.trim_start().starts_with("## Symphony Workpad"))
+            .map(|comment| WorkpadComment {
+                issue_id: issue_id.to_string(),
+                comment_id: comment.id,
+                body: comment.body,
+                created_at: comment.created_at,
+                updated_at: comment.updated_at,
+            }))
+    }
 }
 
 impl TrackerError {
@@ -428,6 +483,30 @@ struct AssignedIssueViewer {
 #[derive(Deserialize)]
 struct IssueByIdData {
     issue: Option<LinearIssueNode>,
+}
+
+#[derive(Deserialize)]
+struct IssueCommentsData {
+    issue: Option<LinearIssueCommentsNode>,
+}
+
+#[derive(Deserialize)]
+struct LinearIssueCommentsNode {
+    comments: LinearCommentConnection,
+}
+
+#[derive(Deserialize)]
+struct LinearCommentConnection {
+    nodes: Vec<LinearComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinearComment {
+    id: String,
+    body: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -637,6 +716,21 @@ const ISSUE_BY_ID_QUERY: &str = r#"
   }
 "#;
 
+const ISSUE_COMMENTS_QUERY: &str = r#"
+  query SymphonyIssueWorkpad($id: String!) {
+    issue(id: $id) {
+      comments(first: 100) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+        }
+      }
+    }
+  }
+"#;
+
 #[derive(Debug, Clone)]
 pub struct StaticTracker {
     pub active: Vec<Issue>,
@@ -664,6 +758,13 @@ impl TrackerClient for StaticTracker {
             .chain(self.terminal.iter())
             .find(|issue| issue.id == id)
             .cloned())
+    }
+
+    async fn fetch_workpads(
+        &self,
+        _issue_ids: &[String],
+    ) -> Result<Vec<WorkpadComment>, TrackerError> {
+        Ok(Vec::new())
     }
 }
 

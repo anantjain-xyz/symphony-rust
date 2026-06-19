@@ -5538,6 +5538,7 @@ dependencies = [
  "keyring-core",
  "serde",
  "serde_json",
+ "sha2",
  "specta",
  "symphony-agents",
  "symphony-core",

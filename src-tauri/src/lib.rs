@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf};
 use symphony_storage::{
-    open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RunWithIssueRow,
-    StorageEvent,
+    open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroRow,
+    RunWithIssueRow, StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -14,8 +14,14 @@ use symphony_worker::{
 use tauri::{Emitter, Manager, State};
 
 mod path_env;
+mod retro;
 mod settings;
 
+use retro::{
+    parse_report, RetroConfidence, RetroDetail, RetroEvidence, RetroFinding, RetroManager,
+    RetroRepoReport, RetroReport, RetroRunState, RetroSeverity, RetroStatus, RetroSuggestion,
+    RetroSuggestionTarget,
+};
 pub use settings::AppSettings;
 use settings::{default_prompt_template, parse_settings, workflow_from_settings};
 
@@ -77,6 +83,7 @@ struct AppState {
     repo: Repository,
     worker: WorkerManager,
     skills_installer: SkillsInstaller,
+    retro: RetroManager,
     app_data_dir: PathBuf,
     settings_path: PathBuf,
     database_path: PathBuf,
@@ -546,6 +553,54 @@ async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Resu
         .map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+async fn start_retro(
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<RetroStatus, String> {
+    let Some(api_key) = linear_api_key() else {
+        return Err(
+            "No Linear API key configured. Add one under Settings → Linear, then run a retro."
+                .to_string(),
+        );
+    };
+    let workflow = workflow_from_settings(&settings, Some(&api_key));
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    state.retro.start(state.repo.clone(), tracker).await
+}
+
+#[tauri::command]
+async fn get_retro_status(state: State<'_, AppState>) -> Result<RetroStatus, String> {
+    Ok(state.retro.status().await)
+}
+
+#[tauri::command]
+async fn list_retros(state: State<'_, AppState>) -> Result<Vec<RetroRow>, String> {
+    state
+        .repo
+        .list_retros(50)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_retro_detail(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<RetroDetail>, String> {
+    state
+        .repo
+        .get_retro(&id)
+        .await
+        .map(|row| {
+            row.map(|row| RetroDetail {
+                report: parse_report(&row),
+                row,
+            })
+        })
+        .map_err(|err| err.to_string())
+}
+
 // Both skills commands take the repo URL straight from the caller's form
 // (and install_skills the caller's settings, like validate_settings) rather
 // than reloading from disk, so unsaved edits — a just-typed repo URL in
@@ -629,6 +684,7 @@ pub fn run() {
                 repo,
                 worker,
                 skills_installer: SkillsInstaller::new(),
+                retro: RetroManager::new(),
                 app_data_dir: app_dir.clone(),
                 settings_path: app_dir.join("settings.json"),
                 database_path: db_path,
@@ -656,6 +712,10 @@ pub fn run() {
             start_worker,
             stop_worker,
             trigger_retry_now,
+            start_retro,
+            get_retro_status,
+            list_retros,
+            get_retro_detail,
             get_skills_status,
             get_skills_install_status,
             install_skills
@@ -779,6 +839,18 @@ fn export_bindings() {
             specta::ts::export::<StorageEvent>(&conf),
             specta::ts::export::<SkillsStatus>(&conf),
             specta::ts::export::<SkillsInstallStatus>(&conf),
+            specta::ts::export::<RetroRow>(&conf),
+            specta::ts::export::<RetroRunState>(&conf),
+            specta::ts::export::<RetroStatus>(&conf),
+            specta::ts::export::<RetroDetail>(&conf),
+            specta::ts::export::<RetroReport>(&conf),
+            specta::ts::export::<RetroRepoReport>(&conf),
+            specta::ts::export::<RetroFinding>(&conf),
+            specta::ts::export::<RetroSeverity>(&conf),
+            specta::ts::export::<RetroEvidence>(&conf),
+            specta::ts::export::<RetroSuggestion>(&conf),
+            specta::ts::export::<RetroSuggestionTarget>(&conf),
+            specta::ts::export::<RetroConfidence>(&conf),
         ]
         .into_iter()
         .filter_map(Result::ok)

@@ -1289,6 +1289,13 @@ mod tests {
                 .filter(|issue| issue.id == id)
                 .cloned())
         }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
     }
 
     fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
