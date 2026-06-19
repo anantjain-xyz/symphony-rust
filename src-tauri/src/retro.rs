@@ -13,6 +13,7 @@ use symphony_tracker::{TrackerClient, WorkpadComment};
 use tokio::sync::Mutex;
 
 const RETRO_BEGINNING: &str = "1970-01-01T00:00:00.000Z";
+const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
 const MAX_FINDINGS_PER_REPO: usize = 8;
 const MAX_EVIDENCE_PER_FINDING: usize = 5;
 
@@ -151,26 +152,36 @@ impl RetroManager {
         T: TrackerClient + 'static,
     {
         {
-            let guard = self.inner.lock().await;
+            let mut guard = self.inner.lock().await;
             if matches!(
                 guard.as_ref().map(|status| &status.state),
                 Some(RetroRunState::Running)
             ) {
                 return Err("a retro is already running".to_string());
             }
+            *guard = Some(RetroStatus {
+                state: RetroRunState::Running,
+                retro_id: None,
+                message: Some("Preparing retro window...".to_string()),
+                report: None,
+                error: None,
+            });
         }
 
-        let since_at = repo
-            .latest_completed_retro()
-            .await
-            .map_err(|err| err.to_string())?
-            .map(|retro| retro.until_at)
-            .unwrap_or_else(|| RETRO_BEGINNING.to_string());
-        let until_at = now_iso();
-        let retro = repo
-            .create_retro(&since_at, &until_at)
-            .await
-            .map_err(|err| err.to_string())?;
+        let retro = match create_retro_window(&repo).await {
+            Ok(retro) => retro,
+            Err(message) => {
+                let mut guard = self.inner.lock().await;
+                *guard = Some(RetroStatus {
+                    state: RetroRunState::Failed,
+                    retro_id: None,
+                    message: None,
+                    report: None,
+                    error: Some(message.clone()),
+                });
+                return Err(message);
+            }
+        };
 
         {
             let mut guard = self.inner.lock().await;
@@ -245,6 +256,22 @@ impl RetroManager {
 
         Ok(self.status().await)
     }
+}
+
+async fn create_retro_window(repo: &Repository) -> Result<RetroRow, String> {
+    repo.fail_running_retros(INTERRUPTED_RETRO_MESSAGE)
+        .await
+        .map_err(|err| err.to_string())?;
+    let since_at = repo
+        .latest_completed_retro()
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|retro| retro.until_at)
+        .unwrap_or_else(|| RETRO_BEGINNING.to_string());
+    let until_at = now_iso();
+    repo.create_retro(&since_at, &until_at)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 pub fn parse_report(row: &RetroRow) -> Option<RetroReport> {
@@ -347,6 +374,10 @@ fn analyze_retro(
             .or_default()
             .push(event);
     }
+    let issue_identifier_by_id = runs
+        .iter()
+        .map(|run| (run.issue_id.as_str(), run.issue_identifier.as_str()))
+        .collect::<BTreeMap<_, _>>();
 
     let mut repos: BTreeMap<String, RepoAccumulator> = BTreeMap::new();
     for run in runs {
@@ -409,7 +440,11 @@ fn analyze_retro(
             if repo.workpad_issue_ids.insert(issue_id.clone()) {
                 repo.workpad_count += 1;
             }
-            inspect_workpad(repo, workpad);
+            let issue_identifier = issue_identifier_by_id
+                .get(issue_id.as_str())
+                .copied()
+                .unwrap_or(issue_id.as_str());
+            inspect_workpad(repo, workpad, issue_identifier);
         }
     }
 
@@ -509,7 +544,7 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
     }
 }
 
-fn inspect_workpad(repo: &mut RepoAccumulator, workpad: &WorkpadComment) {
+fn inspect_workpad(repo: &mut RepoAccumulator, workpad: &WorkpadComment, issue_identifier: &str) {
     for line in markdown_section_items(&workpad.body, "Confusions") {
         let title = format!("Workpad confusion: {}", short_title(&line));
         repo.push_finding(
@@ -518,7 +553,7 @@ fn inspect_workpad(repo: &mut RepoAccumulator, workpad: &WorkpadComment) {
             line.clone(),
             RetroSeverity::Medium,
             RetroEvidence {
-                issue_identifier: workpad.issue_id.clone(),
+                issue_identifier: issue_identifier.to_string(),
                 run_id: None,
                 run_number: None,
                 event_id: None,
@@ -537,7 +572,7 @@ fn inspect_workpad(repo: &mut RepoAccumulator, workpad: &WorkpadComment) {
             line.clone(),
             RetroSeverity::Low,
             RetroEvidence {
-                issue_identifier: workpad.issue_id.clone(),
+                issue_identifier: issue_identifier.to_string(),
                 run_id: None,
                 run_number: None,
                 event_id: None,
@@ -722,16 +757,31 @@ fn clean_markdown_item(line: &str) -> Option<String> {
 
 fn looks_like_tool_confusion(summary: &str) -> bool {
     let lower = summary.to_lowercase();
-    [
-        "error",
-        "failed",
-        "denied",
-        "not found",
-        "missing",
-        "unknown",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    looks_like_nonzero_exit(summary)
+        || [
+            "error",
+            "failed",
+            "denied",
+            "not found",
+            "missing",
+            "unknown",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn looks_like_nonzero_exit(summary: &str) -> bool {
+    let tokens = summary
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    tokens.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("exit")
+            && pair[1]
+                .parse::<i32>()
+                .map(|code| code != 0)
+                .unwrap_or(false)
+    })
 }
 
 fn looks_like_note_confusion(line: &str) -> bool {
@@ -862,5 +912,12 @@ mod tests {
             Some("symphony-pr-feedback")
         );
         assert_eq!(skill_target("unrelated"), None);
+    }
+
+    #[test]
+    fn treats_nonzero_exits_as_tool_confusion() {
+        assert!(looks_like_tool_confusion("exit 1"));
+        assert!(looks_like_tool_confusion("command exited with exit 127"));
+        assert!(!looks_like_tool_confusion("exit 0"));
     }
 }

@@ -669,6 +669,15 @@ const previewRetroDetail: RetroDetail = {
   report: previewRetroReport,
 };
 
+function previewRetroDetailForId(id: string): RetroDetail | null {
+  const row = previewRetros.find((retro) => retro.id === id);
+  if (!row) return null;
+  return {
+    row,
+    report: row.id === previewRetroReport.id ? previewRetroReport : null,
+  };
+}
+
 // Mirrors PROMPT_VARIABLES in symphony-core (crates/symphony-core/src/prompt.rs).
 const PROMPT_VARIABLES: { name: string; description: string; example: string }[] = [
   { name: "issue.identifier", description: "Issue key", example: "SYM-42" },
@@ -1265,6 +1274,8 @@ function App() {
       invoke<RetroStatus>("start_retro", { settings }),
     );
     setRetroStatus(status);
+    selectedRetroIdRef.current = status.retro_id;
+    setSelectedRetro(null);
     await refreshDashboard();
     setView("retro");
   }
@@ -1272,7 +1283,7 @@ function App() {
   async function openRetro(id: string) {
     if (!runtimeAvailable) {
       selectedRetroIdRef.current = id;
-      setSelectedRetro(previewRetroDetail);
+      setSelectedRetro(previewRetroDetailForId(id));
       setView("retro");
       return;
     }
@@ -2504,7 +2515,7 @@ function RetroView({
   onStartRetro: () => void;
   onOpenRetro: (id: string) => void;
 }) {
-  const activeReport = status.report ?? selected?.report ?? null;
+  const activeReport = selected ? selected.report : status.report;
   const canStart =
     !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
   return (

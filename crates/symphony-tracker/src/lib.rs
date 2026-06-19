@@ -359,30 +359,47 @@ impl TrackerClient for LinearTracker {
 
 impl LinearTracker {
     async fn fetch_workpad(&self, issue_id: &str) -> Result<Option<WorkpadComment>, TrackerError> {
-        let variables = serde_json::json!({ "id": issue_id });
-        let data = match self
-            .execute::<IssueCommentsData>(ISSUE_COMMENTS_QUERY, Some(variables))
-            .await
-        {
-            Ok(data) => data,
-            Err(TrackerError::NotFound) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let Some(issue) = data.issue else {
-            return Ok(None);
-        };
-        let mut comments = issue.comments.nodes;
-        comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        Ok(comments
-            .into_iter()
-            .find(|comment| comment.body.trim_start().starts_with("## Symphony Workpad"))
-            .map(|comment| WorkpadComment {
-                issue_id: issue_id.to_string(),
-                comment_id: comment.id,
-                body: comment.body,
-                created_at: comment.created_at,
-                updated_at: comment.updated_at,
-            }))
+        let mut comments_cursor: Option<String> = None;
+        loop {
+            let variables = serde_json::json!({
+                "id": issue_id,
+                "commentsCursor": comments_cursor,
+            });
+            let data = match self
+                .execute::<IssueCommentsData>(ISSUE_COMMENTS_QUERY, Some(variables))
+                .await
+            {
+                Ok(data) => data,
+                Err(TrackerError::NotFound) => return Ok(None),
+                Err(err) => return Err(err),
+            };
+            let Some(issue) = data.issue else {
+                return Ok(None);
+            };
+            let mut comments = issue.comments.nodes;
+            comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            if let Some(comment) = comments
+                .into_iter()
+                .find(|comment| comment.body.trim_start().starts_with("## Symphony Workpad"))
+            {
+                return Ok(Some(WorkpadComment {
+                    issue_id: issue_id.to_string(),
+                    comment_id: comment.id,
+                    body: comment.body,
+                    created_at: comment.created_at,
+                    updated_at: comment.updated_at,
+                }));
+            }
+            if !issue.comments.page_info.has_next_page {
+                return Ok(None);
+            }
+            comments_cursor = issue.comments.page_info.end_cursor;
+            if comments_cursor.is_none() {
+                return Err(TrackerError::Invalid(
+                    "Linear comments pageInfo omitted endCursor".to_string(),
+                ));
+            }
+        }
     }
 }
 
@@ -496,8 +513,17 @@ struct LinearIssueCommentsNode {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LinearCommentConnection {
+    page_info: PageInfo,
     nodes: Vec<LinearComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -717,9 +743,10 @@ const ISSUE_BY_ID_QUERY: &str = r#"
 "#;
 
 const ISSUE_COMMENTS_QUERY: &str = r#"
-  query SymphonyIssueWorkpad($id: String!) {
+  query SymphonyIssueWorkpad($id: String!, $commentsCursor: String) {
     issue(id: $id) {
-      comments(first: 100) {
+      comments(first: 100, after: $commentsCursor) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           body

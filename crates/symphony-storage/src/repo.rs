@@ -1105,6 +1105,26 @@ impl Repository {
         Ok(())
     }
 
+    pub async fn fail_running_retros(&self, error_message: &str) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            r#"
+            update retros
+            set status = 'failed',
+                error_message = ?1,
+                completed_at = ?2
+            where status = 'running'
+            "#,
+        )
+        .bind(error_message)
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            self.changed("retros", "update");
+        }
+        Ok(())
+    }
+
     pub async fn latest_completed_retro(&self) -> Result<Option<RetroRow>, StorageError> {
         Ok(sqlx::query_as::<_, RetroRow>(
             "select * from retros where status = 'completed' order by until_at desc limit 1",
@@ -1582,6 +1602,20 @@ mod tests {
         assert_eq!(latest.status, "completed");
         assert_eq!(latest.run_count, 1);
         assert_eq!(repo.list_retros(10).await.unwrap().len(), 1);
+
+        let stale = repo
+            .create_retro("2099-01-01T00:00:00.000Z", "2099-01-02T00:00:00.000Z")
+            .await
+            .unwrap();
+        repo.fail_running_retros("Retro interrupted before completion.")
+            .await
+            .unwrap();
+        let failed = repo.get_retro(&stale.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("Retro interrupted before completion.")
+        );
     }
 
     #[tokio::test]
