@@ -103,9 +103,46 @@ impl LinearTracker {
         states: &[String],
         assigned_to_me: bool,
     ) -> Result<Vec<Issue>, TrackerError> {
-        if states.is_empty() {
+        let Some(prepared) = self
+            .build_issues_by_state_query(states, assigned_to_me)
+            .await?
+        else {
             return Ok(Vec::new());
+        };
+
+        let data: IssuesByStateData = self
+            .execute(&prepared.query, Some(prepared.variables))
+            .await?;
+        Ok(data.issues.nodes.into_iter().map(normalize).collect())
+    }
+
+    async fn build_issues_by_state_query(
+        &self,
+        states: &[String],
+        assigned_to_me: bool,
+    ) -> Result<Option<PreparedIssuesQuery>, TrackerError> {
+        if states.is_empty() {
+            return Ok(None);
         }
+
+        let assignee_id = if assigned_to_me {
+            Some(self.viewer().await?.id)
+        } else {
+            None
+        };
+
+        Ok(self.build_issues_by_state_query_for_assignee(states, assignee_id.as_deref()))
+    }
+
+    fn build_issues_by_state_query_for_assignee(
+        &self,
+        states: &[String],
+        assignee_id: Option<&str>,
+    ) -> Option<PreparedIssuesQuery> {
+        if states.is_empty() {
+            return None;
+        }
+
         let mut var_decls = Vec::new();
         let mut or_clauses = Vec::new();
         let mut variables = serde_json::Map::new();
@@ -140,33 +177,15 @@ impl LinearTracker {
                 );
             }
         }
-        let filter = filter_parts.join(", ");
-        if assigned_to_me {
-            let query = format!(
-                r#"
-                query SymphonyIssuesByState({}) {{
-                  viewer {{
-                    assignedIssues(filter: {{ {} }}, first: 100) {{
-                      nodes {{ {} }}
-                    }}
-                  }}
-                }}
-                "#,
-                var_decls.join(", "),
-                filter,
-                ISSUE_FIELDS
+        if let Some(assignee_id) = assignee_id {
+            var_decls.push("$assigneeId: ID!".to_string());
+            filter_parts.push("assignee: { id: { eq: $assigneeId } }".to_string());
+            variables.insert(
+                "assigneeId".to_string(),
+                serde_json::Value::String(assignee_id.to_string()),
             );
-            let data: AssignedIssuesByStateData =
-                self.execute(&query, Some(variables.into())).await?;
-            return Ok(data
-                .viewer
-                .assigned_issues
-                .nodes
-                .into_iter()
-                .map(normalize)
-                .collect());
         }
-
+        let filter = filter_parts.join(", ");
         let query = format!(
             r#"
             query SymphonyIssuesByState({}) {{
@@ -179,8 +198,10 @@ impl LinearTracker {
             filter,
             ISSUE_FIELDS
         );
-        let data: IssuesByStateData = self.execute(&query, Some(variables.into())).await?;
-        Ok(data.issues.nodes.into_iter().map(normalize).collect())
+        Some(PreparedIssuesQuery {
+            query,
+            variables: variables.into(),
+        })
     }
 
     async fn fetch_by_id_inner(
@@ -414,15 +435,9 @@ struct IssuesByStateData {
     issues: LinearIssueConnection,
 }
 
-#[derive(Deserialize)]
-struct AssignedIssuesByStateData {
-    viewer: AssignedIssueViewer,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AssignedIssueViewer {
-    assigned_issues: LinearIssueConnection,
+struct PreparedIssuesQuery {
+    query: String,
+    variables: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -591,8 +606,8 @@ const ISSUE_FIELDS: &str = r#"
   state { name }
   project { id slugId }
   assignee { id }
-  labels { nodes { name } }
-  inverseRelations {
+  labels(first: 25) { nodes { name } }
+  inverseRelations(first: 25) {
     nodes {
       type
       issue {
@@ -601,7 +616,7 @@ const ISSUE_FIELDS: &str = r#"
       }
     }
   }
-  attachments { nodes { url } }
+  attachments(first: 25) { nodes { url } }
 "#;
 
 const VIEWER_QUERY: &str = r#"
@@ -622,8 +637,8 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       state { name }
       project { id slugId }
       assignee { id }
-      labels { nodes { name } }
-      inverseRelations {
+      labels(first: 25) { nodes { name } }
+      inverseRelations(first: 25) {
         nodes {
           type
           issue {
@@ -632,7 +647,7 @@ const ISSUE_BY_ID_QUERY: &str = r#"
           }
         }
       }
-      attachments { nodes { url } }
+      attachments(first: 25) { nodes { url } }
     }
   }
 "#;
@@ -724,5 +739,57 @@ mod tests {
                 .and_then(|project| { project.slug_id().map(str::to_string) }),
             Some("phase-1-pre-launch-fixes-00bdaf30dd39".to_string())
         );
+    }
+
+    #[test]
+    fn assigned_query_uses_root_issues_with_assignee_filter() {
+        let tracker = LinearTracker::new(TrackerConfig {
+            identifier_prefix: Some("ENG".to_string()),
+            project_id: Some("project-1".to_string()),
+            ..Default::default()
+        });
+        let states = vec!["Todo".to_string(), "Rework".to_string()];
+
+        let prepared = tracker
+            .build_issues_by_state_query_for_assignee(&states, Some("user-1"))
+            .expect("query");
+
+        assert!(prepared.query.contains("issues(filter:"));
+        assert!(!prepared.query.contains("assignedIssues"));
+        assert!(!prepared.query.contains("viewer {"));
+        assert!(prepared.query.contains("$assigneeId: ID!"));
+        assert!(prepared
+            .query
+            .contains("assignee: { id: { eq: $assigneeId } }"));
+        assert!(prepared.query.contains("team: { key: { eq: $teamKey } }"));
+        assert!(prepared
+            .query
+            .contains("project: { id: { eq: $projectId } }"));
+        assert_eq!(prepared.variables["s0"], serde_json::json!("Todo"));
+        assert_eq!(prepared.variables["s1"], serde_json::json!("Rework"));
+        assert_eq!(prepared.variables["teamKey"], serde_json::json!("ENG"));
+        assert_eq!(
+            prepared.variables["projectId"],
+            serde_json::json!("project-1")
+        );
+        assert_eq!(
+            prepared.variables["assigneeId"],
+            serde_json::json!("user-1")
+        );
+    }
+
+    #[test]
+    fn issue_queries_bound_nested_connections() {
+        let tracker = tracker_with_prefix(None);
+        let states = vec!["Todo".to_string()];
+        let prepared = tracker
+            .build_issues_by_state_query_for_assignee(&states, None)
+            .expect("query");
+
+        for query in [prepared.query.as_str(), ISSUE_BY_ID_QUERY] {
+            assert!(query.contains("labels(first: 25)"));
+            assert!(query.contains("inverseRelations(first: 25)"));
+            assert!(query.contains("attachments(first: 25)"));
+        }
     }
 }
