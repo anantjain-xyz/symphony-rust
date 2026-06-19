@@ -324,14 +324,15 @@ where
         .await
         .map_err(|err| err.to_string())?;
     let mut workpad_by_issue = BTreeMap::new();
+    let mut workpad_input_by_issue = BTreeMap::new();
     let mut found_workpad_issue_ids = BTreeSet::new();
     for workpad in workpads {
-        let hash = hash_body(&workpad.body);
-        found_workpad_issue_ids.insert(workpad.issue_id.clone());
+        let body_hash = hash_body(&workpad.body);
+        let retro_hash = retro_relevant_workpad_hash(&workpad.body);
         repo.upsert_workpad_snapshot(&WorkpadSnapshotRow {
             issue_id: workpad.issue_id.clone(),
             comment_id: workpad.comment_id.clone(),
-            body_hash: hash.clone(),
+            body_hash,
             body: workpad.body.clone(),
             comment_created_at: workpad.created_at.clone(),
             comment_updated_at: workpad.updated_at.clone(),
@@ -339,13 +340,24 @@ where
         })
         .await
         .map_err(|err| err.to_string())?;
+        if !workpad_existed_by(&workpad, &retro.until_at) {
+            continue;
+        }
+        found_workpad_issue_ids.insert(workpad.issue_id.clone());
+        let workpad_hash =
+            workpad_hash_available_in_window(&workpad, &retro.until_at).then(|| retro_hash.clone());
+        workpad_input_by_issue.insert(
+            workpad.issue_id.clone(),
+            (Some(workpad.comment_id.clone()), workpad_hash),
+        );
         if should_inspect_workpad(
             &workpad,
-            &hash,
+            &retro_hash,
             previous_workpad_hashes.get(&workpad.issue_id),
             &retro.since_at,
+            &retro.until_at,
         ) {
-            workpad_by_issue.insert(workpad.issue_id.clone(), (workpad, hash));
+            workpad_by_issue.insert(workpad.issue_id.clone(), (workpad, retro_hash));
         }
     }
 
@@ -360,9 +372,9 @@ where
     let inputs = runs
         .iter()
         .map(|run| {
-            let (workpad_comment_id, workpad_hash) = workpad_by_issue
+            let (workpad_comment_id, workpad_hash) = workpad_input_by_issue
                 .get(&run.issue_id)
-                .map(|(workpad, hash)| (Some(workpad.comment_id.clone()), Some(hash.clone())))
+                .cloned()
                 .unwrap_or((None, None));
             RetroInputRow {
                 retro_id: retro.id.clone(),
@@ -520,18 +532,37 @@ fn should_inspect_workpad(
     hash: &str,
     previous_hash: Option<&String>,
     since_at: &str,
+    until_at: &str,
 ) -> bool {
     if previous_hash.is_some_and(|previous_hash| previous_hash == hash) {
         return false;
     }
-    if previous_hash.is_some() {
-        return true;
-    }
+    workpad_changed_in_window(workpad, since_at, until_at)
+}
+
+fn workpad_changed_in_window(workpad: &WorkpadComment, since_at: &str, until_at: &str) -> bool {
     workpad
         .updated_at
         .as_deref()
         .or(workpad.created_at.as_deref())
-        .map(|changed_at| changed_at > since_at)
+        .map(|changed_at| changed_at > since_at && changed_at <= until_at)
+        .unwrap_or(true)
+}
+
+fn workpad_existed_by(workpad: &WorkpadComment, until_at: &str) -> bool {
+    workpad
+        .created_at
+        .as_deref()
+        .map(|created_at| created_at <= until_at)
+        .unwrap_or(true)
+}
+
+fn workpad_hash_available_in_window(workpad: &WorkpadComment, until_at: &str) -> bool {
+    workpad
+        .updated_at
+        .as_deref()
+        .or(workpad.created_at.as_deref())
+        .map(|changed_at| changed_at <= until_at)
         .unwrap_or(true)
 }
 
@@ -573,7 +604,7 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                 .and_then(|value| value.get("result_summary"))
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            if looks_like_tool_confusion(summary) {
+            if should_report_tool_confusion(value.as_ref(), summary) {
                 let tool = value
                     .as_ref()
                     .and_then(|value| value.get("tool"))
@@ -708,7 +739,7 @@ impl RepoAccumulator {
 }
 
 fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
-    let joined = format!("{} {}", finding.title, finding.detail).to_lowercase();
+    let joined = finding.detail.to_lowercase();
     let (target_type, target_id) = if let Some(skill) = skill_target(&joined) {
         (RetroSuggestionTarget::Skill, skill.to_string())
     } else {
@@ -749,9 +780,7 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
 }
 
 fn skill_target(text: &str) -> Option<&'static str> {
-    if text.contains("workpad") {
-        Some("symphony-workpad")
-    } else if text.contains("screenshot") || text.contains("playwright") {
+    if text.contains("screenshot") || text.contains("playwright") {
         Some("symphony-screenshot")
     } else if text.contains("review") || text.contains("feedback") || text.contains("inline") {
         Some("symphony-pr-feedback")
@@ -763,6 +792,8 @@ fn skill_target(text: &str) -> Option<&'static str> {
         Some("symphony-pull")
     } else if text.contains("commit") {
         Some("symphony-commit")
+    } else if text.contains("workpad") {
+        Some("symphony-workpad")
     } else {
         None
     }
@@ -816,6 +847,22 @@ fn looks_like_tool_confusion(summary: &str) -> bool {
         ]
         .iter()
         .any(|needle| lower.contains(needle))
+}
+
+fn should_report_tool_confusion(value: Option<&serde_json::Value>, summary: &str) -> bool {
+    if !tool_result_failed(value, summary) {
+        return false;
+    }
+    looks_like_tool_confusion(summary)
+}
+
+fn tool_result_failed(value: Option<&serde_json::Value>, summary: &str) -> bool {
+    value
+        .and_then(|value| value.get("is_error"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        || looks_like_nonzero_exit(summary)
+        || summary.trim_start().to_lowercase().starts_with("error:")
 }
 
 fn looks_like_nonzero_exit(summary: &str) -> bool {
@@ -913,6 +960,22 @@ fn hash_body(body: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn retro_relevant_workpad_hash(body: &str) -> String {
+    let mut relevant = Vec::new();
+    relevant.extend(
+        markdown_section_items(body, "Confusions")
+            .into_iter()
+            .map(|line| format!("confusion:{line}")),
+    );
+    relevant.extend(
+        markdown_section_items(body, "Notes")
+            .into_iter()
+            .filter(|line| looks_like_note_confusion(line))
+            .map(|line| format!("note:{line}")),
+    );
+    hash_body(&relevant.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,14 +1022,33 @@ mod tests {
             skill_target("review feedback was unclear"),
             Some("symphony-pr-feedback")
         );
+        assert_eq!(
+            skill_target("workpad confusion unclear whether screenshots are required"),
+            Some("symphony-screenshot")
+        );
         assert_eq!(skill_target("unrelated"), None);
     }
 
     #[test]
     fn treats_nonzero_exits_as_tool_confusion() {
-        assert!(looks_like_tool_confusion("exit 1"));
-        assert!(looks_like_tool_confusion("command exited with exit 127"));
-        assert!(!looks_like_tool_confusion("exit 0"));
+        assert!(should_report_tool_confusion(None, "exit 1"));
+        assert!(should_report_tool_confusion(
+            None,
+            "command exited with exit 127"
+        ));
+        assert!(should_report_tool_confusion(
+            None,
+            "error: permission denied"
+        ));
+        assert!(should_report_tool_confusion(
+            Some(&serde_json::json!({ "is_error": true })),
+            "missing dependency"
+        ));
+        assert!(!should_report_tool_confusion(None, "exit 0"));
+        assert!(!should_report_tool_confusion(
+            None,
+            "read succeeded and source mentioned a missing file"
+        ));
     }
 
     #[test]
@@ -985,11 +1067,12 @@ mod tests {
             &hash,
             Some(&hash),
             "2026-06-18T00:00:00.000Z",
+            "2026-06-20T00:00:00.000Z",
         ));
     }
 
     #[test]
-    fn inspects_changed_or_new_workpads_only_when_the_body_is_new_to_the_window() {
+    fn inspects_changed_or_new_workpads_only_when_the_change_is_in_the_window() {
         let workpad = WorkpadComment {
             issue_id: "lin-1".to_string(),
             comment_id: "comment-1".to_string(),
@@ -1005,18 +1088,104 @@ mod tests {
             &hash,
             Some(&previous_hash),
             "2026-06-18T00:00:00.000Z",
+            "2026-06-20T00:00:00.000Z",
         ));
         assert!(should_inspect_workpad(
             &workpad,
             &hash,
             None,
             "2026-06-18T00:00:00.000Z",
+            "2026-06-20T00:00:00.000Z",
         ));
         assert!(!should_inspect_workpad(
             &workpad,
             &hash,
             None,
             "2026-06-20T00:00:00.000Z",
+            "2026-06-21T00:00:00.000Z",
         ));
+        assert!(!should_inspect_workpad(
+            &workpad,
+            &hash,
+            Some(&previous_hash),
+            "2026-06-18T00:00:00.000Z",
+            "2026-06-18T12:00:00.000Z",
+        ));
+    }
+
+    #[test]
+    fn workpad_existence_and_hashes_do_not_pull_future_edits_into_the_window() {
+        let future_workpad = WorkpadComment {
+            issue_id: "lin-1".to_string(),
+            comment_id: "comment-1".to_string(),
+            body: "## Symphony Workpad".to_string(),
+            created_at: Some("2026-06-21T00:00:00.000Z".to_string()),
+            updated_at: Some("2026-06-21T00:00:00.000Z".to_string()),
+        };
+        assert!(!workpad_existed_by(
+            &future_workpad,
+            "2026-06-20T00:00:00.000Z"
+        ));
+
+        let updated_after_window = WorkpadComment {
+            created_at: Some("2026-06-17T00:00:00.000Z".to_string()),
+            updated_at: Some("2026-06-21T00:00:00.000Z".to_string()),
+            ..future_workpad
+        };
+        assert!(workpad_existed_by(
+            &updated_after_window,
+            "2026-06-20T00:00:00.000Z"
+        ));
+        assert!(!workpad_hash_available_in_window(
+            &updated_after_window,
+            "2026-06-20T00:00:00.000Z"
+        ));
+    }
+
+    #[test]
+    fn workpad_retro_hash_ignores_uninspected_sections() {
+        let base = r#"
+## Symphony Workpad
+
+### Confusions
+
+- unclear screenshots
+
+### Validation
+
+- [ ] cargo test
+"#;
+        let validation_changed = r#"
+## Symphony Workpad
+
+### Confusions
+
+- unclear screenshots
+
+### Validation
+
+- [x] cargo test
+"#;
+        let confusion_changed = r#"
+## Symphony Workpad
+
+### Confusions
+
+- unclear screenshots
+- unclear review state
+
+### Validation
+
+- [x] cargo test
+"#;
+
+        assert_eq!(
+            retro_relevant_workpad_hash(base),
+            retro_relevant_workpad_hash(validation_changed)
+        );
+        assert_ne!(
+            retro_relevant_workpad_hash(base),
+            retro_relevant_workpad_hash(confusion_changed)
+        );
     }
 }
