@@ -74,6 +74,7 @@ struct InnerState {
     stop: Option<CancellationToken>,
     handle: Option<JoinHandle<()>>,
     runtime_config: Option<SharedRuntimeConfig>,
+    reconfigure_generation: u64,
 }
 
 type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
@@ -132,6 +133,7 @@ impl WorkerManager {
                 stop: None,
                 handle: None,
                 runtime_config: None,
+                reconfigure_generation: 0,
             })),
             run_cancellations: RunCancellationRegistry::default(),
             wake: Arc::new(Notify::new()),
@@ -163,6 +165,7 @@ impl WorkerManager {
                 started_at: Some(now_iso()),
                 last_error: None,
             };
+            inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             inner.stop = Some(stop);
             inner.runtime_config = Some(runtime_config.clone());
             inner.handle = Some(tokio::spawn(async move {
@@ -174,6 +177,7 @@ impl WorkerManager {
                 inner.stop = None;
                 inner.handle = None;
                 inner.runtime_config = None;
+                inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             }));
         }
         Ok(self.status().await)
@@ -197,12 +201,13 @@ impl WorkerManager {
     {
         let runtime =
             runtime_config_from_start(config, self.run_cancellations.clone(), self.wake.clone());
-        let runtime_config = {
-            let inner = self.inner.lock().await;
+        let (runtime_config, generation) = {
+            let mut inner = self.inner.lock().await;
             if inner.status.state != WorkerState::Running {
                 return inner.status.clone();
             }
-            inner.runtime_config.clone()
+            inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
+            (inner.runtime_config.clone(), inner.reconfigure_generation)
         };
         if let Some(runtime_config) = runtime_config {
             let current = runtime_config.read().await.clone();
@@ -211,18 +216,24 @@ impl WorkerManager {
                     preflight_tracker(runtime.workflow.front_matter.tracker.clone()).await
                 {
                     let mut inner = self.inner.lock().await;
-                    if inner.status.state == WorkerState::Running {
+                    if inner.status.state == WorkerState::Running
+                        && inner.reconfigure_generation == generation
+                    {
                         inner.status.last_error = Some(err.to_string());
                     }
                     return inner.status.clone();
                 }
             }
-            *runtime_config.write().await = runtime;
             {
                 let mut inner = self.inner.lock().await;
-                if inner.status.state == WorkerState::Running {
-                    inner.status.last_error = None;
+                if inner.status.state != WorkerState::Running {
+                    return inner.status.clone();
                 }
+                if inner.reconfigure_generation != generation {
+                    return inner.status.clone();
+                }
+                *runtime_config.write().await = runtime;
+                inner.status.last_error = None;
             }
             self.wake.notify_one();
         }
@@ -265,9 +276,11 @@ impl WorkerManager {
             inner.status.state = WorkerState::Stopped;
             inner.status.started_at = None;
             inner.runtime_config = None;
+            inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             return inner.status.clone();
         }
         inner.status.state = WorkerState::Stopping;
+        inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
         if let Some(stop) = &inner.stop {
             stop.cancel();
         }
@@ -320,7 +333,6 @@ async fn run_worker(
     let mut tracker_config = initial_config.workflow.front_matter.tracker.clone();
     let mut tracker = LinearTracker::new(tracker_config.clone());
     tracker.preflight().await?;
-    let mut accepted_config = initial_config.clone();
     recover(&repo, &tracker, &initial_config).await?;
     let started_at = now_iso();
     repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
@@ -346,28 +358,9 @@ async fn run_worker(
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
-            let next_tracker = match preflight_reconfigured_tracker(LinearTracker::new(
-                current_tracker_config.clone(),
-            ))
-            .await
-            {
-                Ok(next_tracker) => next_tracker,
-                Err(err) => {
-                    error!(
-                        error = %err,
-                        "worker reconfigure preflight failed; keeping previous runtime config"
-                    );
-                    let mut latest = config.write().await;
-                    if latest.workflow.front_matter.tracker == current_tracker_config {
-                        *latest = accepted_config.clone();
-                    }
-                    continue;
-                }
-            };
             tracker_config = current_tracker_config;
-            tracker = next_tracker;
+            tracker = LinearTracker::new(tracker_config.clone());
         }
-        accepted_config = current_config.clone();
         if let Err(err) = tick(&repo, &tracker, &current_config, Some(&config), &stop).await {
             error!(error = %err, "worker tick failed");
         }
@@ -379,11 +372,6 @@ async fn run_worker(
         }
     }
     Ok(())
-}
-
-async fn preflight_reconfigured_tracker<T: TrackerClient>(tracker: T) -> Result<T, WorkerError> {
-    tracker.preflight().await?;
-    Ok(tracker)
 }
 
 async fn recover<T: TrackerClient>(
@@ -456,6 +444,12 @@ async fn tick<T: TrackerClient>(
     stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
     let active = tracker.fetch_active().await?;
+    if latest_runtime_config_if_tracker_matches(config, latest_config)
+        .await
+        .is_none()
+    {
+        return Ok(());
+    }
     repo.upsert_issues(&active).await?;
 
     let active_ids = active
@@ -523,10 +517,11 @@ async fn tick<T: TrackerClient>(
         if repo.has_active_run(&issue.id).await? {
             continue;
         }
-        let dispatch_config = latest_runtime_config(config, latest_config).await;
-        if dispatch_config.workflow.front_matter.tracker != config.workflow.front_matter.tracker {
+        let Some(dispatch_config) =
+            latest_runtime_config_if_tracker_matches(config, latest_config).await
+        else {
             return Ok(());
-        }
+        };
         let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
@@ -559,10 +554,11 @@ async fn tick<T: TrackerClient>(
         if stop.is_cancelled() {
             return Ok(());
         }
-        let dispatch_config = latest_runtime_config(config, latest_config).await;
-        if dispatch_config.workflow.front_matter.tracker != config.workflow.front_matter.tracker {
+        let Some(dispatch_config) =
+            latest_runtime_config_if_tracker_matches(config, latest_config).await
+        else {
             return Ok(());
-        }
+        };
         if repo.count_running().await?
             >= dispatch_config
                 .workflow
@@ -626,6 +622,18 @@ async fn latest_runtime_config(
     match latest_config {
         Some(config) => config.read().await.clone(),
         None => fallback.clone(),
+    }
+}
+
+async fn latest_runtime_config_if_tracker_matches(
+    fallback: &RuntimeConfig,
+    latest_config: Option<&SharedRuntimeConfig>,
+) -> Option<RuntimeConfig> {
+    let latest = latest_runtime_config(fallback, latest_config).await;
+    if latest.workflow.front_matter.tracker == fallback.workflow.front_matter.tracker {
+        Some(latest)
+    } else {
+        None
     }
 }
 
@@ -2125,6 +2133,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_reconfigure_cannot_overwrite_newer_save_after_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.repos[0].install_cmd = Some("make initial".to_string());
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(initial));
+        {
+            let mut inner = manager.inner.lock().await;
+            inner.status = WorkerStatus {
+                state: WorkerState::Running,
+                started_at: Some(now_iso()),
+                last_error: None,
+            };
+            inner.runtime_config = Some(shared.clone());
+        }
+        let mut older = runtime_config(temp.path());
+        older.workflow.front_matter.tracker.api_key = "older-key".to_string();
+        older.repos[0].install_cmd = Some("make older".to_string());
+        let mut newer = runtime_config(temp.path());
+        newer.workflow.front_matter.tracker.api_key = "newer-key".to_string();
+        newer.repos[0].install_cmd = Some("make newer".to_string());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let first_manager = manager.clone();
+        let first = tokio::spawn(async move {
+            first_manager
+                .reconfigure_with_tracker_preflight(start_config(older), move |_| async move {
+                    started_tx.send(()).ok();
+                    release_rx.await.unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+
+        manager
+            .reconfigure_with_tracker_preflight(start_config(newer), |_| async { Ok(()) })
+            .await;
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+
+        let live = shared.read().await;
+        assert_eq!(live.workflow.front_matter.tracker.api_key, "newer-key");
+        assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make newer"));
+    }
+
+    #[tokio::test]
     async fn stop_run_cancels_only_the_requested_run() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
@@ -2221,6 +2280,41 @@ mod tests {
             repo.pending_retry_issue_ids().await.unwrap(),
             vec!["lin-1".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn tracker_change_preserves_retry_during_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let mut latest = config.clone();
+        latest.workflow.front_matter.tracker.api_key = "new-key".to_string();
+        let shared = std::sync::Arc::new(tokio::sync::RwLock::new(latest));
+        let stop = CancellationToken::new();
+        let ready = issue("todo", vec![]);
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![],
+        };
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+
+        tick(&repo, &tracker, &config, Some(&shared), &stop)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
     }
 
     #[tokio::test]
