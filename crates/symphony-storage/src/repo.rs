@@ -1547,7 +1547,10 @@ mod tests {
         assert_eq!(runs[0].id, run.id);
         assert_ne!(runs[0].id, pending.id);
 
-        let events = repo.events_for_run_ids(&[run.id.clone()]).await.unwrap();
+        let events = repo
+            .events_for_run_ids(std::slice::from_ref(&run.id))
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         repo.upsert_workpad_snapshot(&WorkpadSnapshotRow {
             issue_id: "lin-1".to_string(),
