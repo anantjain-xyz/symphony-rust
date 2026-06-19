@@ -15,8 +15,8 @@ use symphony_core::{
 pub struct AppSettings {
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
-    // Repositories; each issue routes to one by repo:<name> label, project,
-    // team key, or the default flag (symphony_core::route_issue).
+    // Repositories; each issue routes to one by repo:<name> or bare repo-name
+    // label, project, team key, or the default flag (symphony_core::route_issue).
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
     #[serde(default)]
@@ -28,6 +28,8 @@ pub struct AppSettings {
     pub tracker_prefix: Option<String>,
     #[serde(default)]
     pub tracker_project_id: Option<String>,
+    #[serde(default)]
+    pub tracker_assigned_to_me: bool,
     #[serde(default = "default_active_states")]
     pub active_states: Vec<String>,
     #[serde(default = "default_terminal_states")]
@@ -108,6 +110,7 @@ impl Default for AppSettings {
             tracker_workspace: None,
             tracker_prefix: None,
             tracker_project_id: None,
+            tracker_assigned_to_me: false,
             active_states: default_active_states(),
             terminal_states: default_terminal_states(),
             polling_interval_ms: default_polling_interval_ms(),
@@ -280,6 +283,7 @@ pub fn workflow_from_settings(
             terminal_states: settings.terminal_states.clone(),
             identifier_prefix: normalize_opt(&settings.tracker_prefix),
             project_id: normalize_opt(&settings.tracker_project_id),
+            assigned_to_me: settings.tracker_assigned_to_me,
             ..TrackerConfig::default()
         },
         polling: PollingConfig {

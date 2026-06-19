@@ -168,6 +168,8 @@ pub struct TrackerConfig {
     pub terminal_states: Vec<String>,
     pub identifier_prefix: Option<String>,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub assigned_to_me: bool,
 }
 
 impl Default for TrackerConfig {
@@ -179,6 +181,7 @@ impl Default for TrackerConfig {
             terminal_states: Vec::new(),
             identifier_prefix: None,
             project_id: None,
+            assigned_to_me: false,
         }
     }
 }
@@ -446,8 +449,8 @@ pub struct Issue {
 }
 
 /// One repository Symphony can dispatch runs into. `name` doubles as the
-/// routing key (`repo:<name>` labels in Linear) and the workspace namespace,
-/// so it must be unique across the configured repos.
+/// routing key (`repo:<name>` or bare `<name>` labels in Linear) and the
+/// workspace namespace, so it must be unique across the configured repos.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct RepoConfig {
     #[serde(default)]

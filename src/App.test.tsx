@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
   AppSettings,
+  IssueRow,
   Overview,
   SkillsStatus,
   ValidationResult,
@@ -55,6 +56,7 @@ function testSettings(): AppSettings {
     tracker_workspace: "acme",
     tracker_prefix: null,
     tracker_project_id: null,
+    tracker_assigned_to_me: false,
     active_states: ["Todo"],
     terminal_states: ["Done"],
     polling_interval_ms: 60_000,
@@ -139,6 +141,13 @@ function settingsInvoke({
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
+      case "get_linear_viewer":
+        return {
+          id: "user-1",
+          username: "alice",
+          display_name: "Alice",
+          email: "alice@example.com",
+        };
       case "save_settings":
         if (!allowSave) {
           throw new Error("save_settings should not run after failed validation");
@@ -152,6 +161,7 @@ function settingsInvoke({
 
 function dashboardInvoke({
   settings,
+  issues = [],
   overview = {
     active_runs: [],
     retry_queue: [],
@@ -174,6 +184,7 @@ function dashboardInvoke({
   },
 }: {
   settings: AppSettings;
+  issues?: IssueRow[];
   overview?: Overview;
   skillsStatus?: SkillsStatus;
   workerStatus?: WorkerStatus;
@@ -185,8 +196,9 @@ function dashboardInvoke({
       case "get_overview":
         return overview;
       case "list_runs":
-      case "list_issues":
         return [];
+      case "list_issues":
+        return issues;
       case "get_worker_status":
         return workerStatus;
       case "trigger_retry_now":
@@ -207,9 +219,58 @@ function dashboardInvoke({
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
+      case "get_linear_viewer":
+        return {
+          id: "user-1",
+          username: "alice",
+          display_name: "Alice",
+          email: "alice@example.com",
+        };
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
+  };
+}
+
+function issueRow({
+  id,
+  identifier,
+  title,
+  state,
+  blockers = [],
+}: {
+  id: string;
+  identifier: string;
+  title: string;
+  state: string;
+  blockers?: string[];
+}): IssueRow {
+  return {
+    id,
+    identifier,
+    title,
+    description: null,
+    priority: 2,
+    state,
+    branch: null,
+    labels: "[]",
+    blockers: JSON.stringify(blockers),
+    pr_urls: "[]",
+    raw: JSON.stringify({
+      id,
+      identifier,
+      title,
+      description: null,
+      priority: 2,
+      state,
+      branch: null,
+      labels: [],
+      blockers,
+      pr_urls: [],
+      project_id: null,
+      project_slug_id: null,
+    }),
+    last_seen_at: "2026-01-01T00:00:00.000Z",
   };
 }
 
@@ -264,6 +325,48 @@ describe("App settings", () => {
     expectLiteralInput(repoNameInput);
   });
 
+  it("lets the repository default be cleared or moved", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = {
+      ...testSettings(),
+      repos: [
+        testSettings().repos[0],
+        {
+          ...testSettings().repos[0],
+          name: "backend",
+          url: "git@github.com:acme/backend.git",
+          team_prefixes: [],
+          is_default: false,
+        },
+      ],
+    };
+    tauriMocks.invoke.mockImplementation(
+      settingsInvoke({
+        settings,
+        validation: { workflow_ok: true, workflow_blocking: false, workflow_error: null },
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const defaultToggles = (await screen.findAllByLabelText("Default", {
+      selector: "input",
+    })) as HTMLInputElement[];
+
+    expect(defaultToggles).toHaveLength(2);
+    expect(defaultToggles[0].checked).toBe(true);
+    expect(defaultToggles[1].checked).toBe(false);
+
+    fireEvent.click(defaultToggles[0]);
+    expect(defaultToggles[0].checked).toBe(false);
+    expect(defaultToggles[1].checked).toBe(false);
+
+    fireEvent.click(defaultToggles[1]);
+    expect(defaultToggles[0].checked).toBe(false);
+    expect(defaultToggles[1].checked).toBe(true);
+  });
+
   it("uses literal input behavior for settings config fields", () => {
     render(<App />);
 
@@ -295,6 +398,31 @@ describe("App settings", () => {
     for (const field of fields) {
       expectLiteralInput(field);
     }
+  });
+
+  it("shows the Linear user next to the assigned-to-me setting", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /Only pick issues assigned to me/,
+    });
+    fireEvent.click(checkbox);
+
+    const expectedSettings = { ...settings, tracker_assigned_to_me: true };
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_linear_viewer", {
+        request: {
+          settings: expectedSettings,
+          linear_api_key: null,
+        },
+      }),
+    );
+    expect(await screen.findByText("alice")).toBeTruthy();
   });
 
   it("keeps launch commands as literal shell text", async () => {
@@ -404,6 +532,43 @@ describe("App settings", () => {
     fireEvent.click(viewPrButton);
 
     expect(tauriMocks.openUrl).toHaveBeenCalledWith(prUrl);
+  });
+
+  it("shows a dependency graph for watched issue blockers", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const issues = [
+      issueRow({
+        id: "issue-sym-10",
+        identifier: "SYM-10",
+        title: "Create deploy queue",
+        state: "Todo",
+      }),
+      issueRow({
+        id: "issue-sym-11",
+        identifier: "SYM-11",
+        title: "Build deploy dashboard",
+        state: "In Progress",
+        blockers: ["SYM-10", "OPS-1"],
+      }),
+    ];
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings, issues }));
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
+    expect(await screen.findByText("Build deploy dashboard")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
+
+    expect(
+      screen.getByRole("group", { name: /Dependency graph with 3 nodes and 2 blocking links/ }),
+    ).toBeTruthy();
+    expect(screen.getByText("Blocked issues")).toBeTruthy();
+    expect(screen.getByLabelText("OPS-1, external blocker")).toBeTruthy();
+    expect(screen.getByText("Outside current issue filters")).toBeTruthy();
+    expect(screen.getByLabelText("SYM-10 blocks SYM-11")).toBeTruthy();
+    expect(screen.getByLabelText("OPS-1 blocks SYM-11")).toBeTruthy();
   });
 
   it("validates before saving and shows validation errors in the header status", async () => {

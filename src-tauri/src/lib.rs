@@ -54,6 +54,14 @@ pub struct TrackerTestResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct LinearViewerProfile {
+    pub id: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RunDetail {
     pub run: RunWithIssueRow,
     pub events: Vec<AgentEventRow>,
@@ -240,9 +248,10 @@ fn valid_env_key(key: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-/// The repos list must route unambiguously: names are the `repo:<name>`
-/// routing keys (and workspace namespaces), so they have to exist and be
-/// unique, and no team or project may be claimed as the default of two repos.
+/// The repos list must route unambiguously: names are label routing keys
+/// (either `repo:<name>` or bare `<name>`) and workspace namespaces, so they
+/// have to exist and be unique, and no team or project may be claimed as the
+/// default of two repos.
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
     if repos.is_empty() {
         return Some(
@@ -256,7 +265,7 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
         let name = repo.name.trim();
         if name.is_empty() {
             return Some(
-                "Every repository needs a name — it is the key issues route by (repo:<name> labels) and the workspace folder.".to_string(),
+                "Every repository needs a name — it is the key issues route by (repo:<name> or matching bare labels) and the workspace folder.".to_string(),
             );
         }
         if repo.url.trim().is_empty() {
@@ -387,6 +396,40 @@ async fn test_tracker_connection(
             active_issue_count: None,
         }),
     }
+}
+
+#[tauri::command]
+async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerProfile, String> {
+    // Prefer the unsaved form value so checking the box can resolve the user
+    // before the API key has been saved.
+    let api_key = request
+        .linear_api_key
+        .filter(|key| !key.trim().is_empty())
+        .or_else(linear_api_key);
+    let Some(api_key) = api_key else {
+        return Err(
+            "No Linear API key configured. Add one above to show the assigned user.".to_string(),
+        );
+    };
+
+    let workflow = workflow_from_settings(&request.settings, Some(&api_key));
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    let viewer = tracker.viewer().await.map_err(|err| err.to_string())?;
+    let username = viewer
+        .name
+        .as_deref()
+        .or(viewer.display_name.as_deref())
+        .or(viewer.email.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&viewer.id)
+        .to_string();
+    Ok(LinearViewerProfile {
+        id: viewer.id,
+        username,
+        display_name: viewer.display_name,
+        email: viewer.email,
+    })
 }
 
 #[tauri::command]
@@ -612,6 +655,7 @@ pub fn run() {
             save_settings,
             validate_settings,
             test_tracker_connection,
+            get_linear_viewer,
             remove_linear_api_key,
             get_default_prompt,
             get_overview,
@@ -736,6 +780,7 @@ fn export_bindings() {
             specta::ts::export::<SaveSettingsRequest>(&conf),
             specta::ts::export::<ValidationResult>(&conf),
             specta::ts::export::<TrackerTestResult>(&conf),
+            specta::ts::export::<LinearViewerProfile>(&conf),
             specta::ts::export::<Overview>(&conf),
             specta::ts::export::<RunWithIssueRow>(&conf),
             specta::ts::export::<RunDetail>(&conf),
@@ -793,6 +838,7 @@ mod tests {
         let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
         assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
         assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
+        assert!(!workflow.front_matter.tracker.assigned_to_me);
         assert_eq!(
             workflow.front_matter.agent.backend,
             symphony_core::AgentBackend::Codex
@@ -808,6 +854,16 @@ mod tests {
         assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
         assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
         assert!(validate_workflow_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn assigned_to_me_setting_flows_to_tracker_config() {
+        let settings = AppSettings {
+            tracker_assigned_to_me: true,
+            ..configured_settings()
+        };
+        let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
+        assert!(workflow.front_matter.tracker.assigned_to_me);
     }
 
     #[test]

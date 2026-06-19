@@ -289,9 +289,16 @@ async fn run_worker(
     let heartbeat_repo = repo.clone();
     let heartbeat_stop = stop.clone();
     tokio::spawn(async move {
-        while !heartbeat_stop.is_cancelled() {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let _ = heartbeat_repo.beat_worker_heartbeat().await;
+        loop {
+            tokio::select! {
+                _ = heartbeat_stop.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    if heartbeat_stop.is_cancelled() {
+                        break;
+                    }
+                    let _ = heartbeat_repo.beat_worker_heartbeat().await;
+                }
+            }
         }
     });
 
@@ -299,8 +306,11 @@ async fn run_worker(
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
-            let next_tracker = LinearTracker::new(current_tracker_config.clone());
-            next_tracker.preflight().await?;
+            let next_tracker = preflight_reconfigured_tracker(
+                LinearTracker::new(current_tracker_config.clone()),
+                &stop,
+            )
+            .await?;
             tracker_config = current_tracker_config;
             tracker = next_tracker;
         }
@@ -315,6 +325,17 @@ async fn run_worker(
         }
     }
     Ok(())
+}
+
+async fn preflight_reconfigured_tracker<T: TrackerClient>(
+    tracker: T,
+    stop: &CancellationToken,
+) -> Result<T, WorkerError> {
+    if let Err(err) = tracker.preflight().await {
+        stop.cancel();
+        return Err(err.into());
+    }
+    Ok(tracker)
 }
 
 async fn recover<T: TrackerClient>(
@@ -461,7 +482,7 @@ async fn tick<T: TrackerClient>(
         let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
-                "no repository matches this issue; skipping (mark a repo as default or add a repo:<name> label)"
+                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, add a matching repo rule, or mark a default)"
             );
             continue;
         };
@@ -503,7 +524,7 @@ async fn tick<T: TrackerClient>(
         {
             break;
         }
-        if let Some(issue) = tracker.fetch_by_id(&retry.issue_id).await? {
+        if let Some(issue) = tracker.fetch_by_id_for_dispatch(&retry.issue_id).await? {
             // The issue may have left the active set since the failed run
             // (e.g. moved to Done); drop the retry rather than keep it queued
             // or dispatch a run nobody asked for.
@@ -523,13 +544,15 @@ async fn tick<T: TrackerClient>(
             if !issue.blockers.is_empty() {
                 continue;
             }
-            // Unroutable issues stay queued, like blocked ones: routing rules
-            // only change with a worker restart, which re-enters this loop.
+            // If the issue is still active but no longer routes anywhere
+            // (e.g. the default repo was cleared), drop the retry. Otherwise
+            // retry_ids suppresses the normal active-dispatch path forever.
             let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
                 warn!(
                     issue = %issue.identifier,
-                    "no repository matches this retry; keeping it queued"
+                    "no repository matches this retry; clearing it"
                 );
+                repo.clear_retry(&retry.issue_id).await?;
                 continue;
             };
             reserve_and_dispatch(
@@ -1343,6 +1366,60 @@ mod tests {
         }
     }
 
+    struct DispatchFilteringTracker {
+        by_id: Option<Issue>,
+        by_id_for_dispatch: Option<Issue>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for DispatchFilteringTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(self.by_id.as_ref().filter(|issue| issue.id == id).cloned())
+        }
+
+        async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(self
+                .by_id_for_dispatch
+                .as_ref()
+                .filter(|issue| issue.id == id)
+                .cloned())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingPreflightTracker;
+
+    #[async_trait::async_trait]
+    impl TrackerClient for FailingPreflightTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Err(TrackerError::Auth("bad key".to_string()))
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+    }
+
     fn mock_driver(outcome: AgentOutcome) -> symphony_agents::MockAgentDriver {
         let failed = outcome == AgentOutcome::Failure;
         symphony_agents::MockAgentDriver {
@@ -1613,6 +1690,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refreshes_departed_issue_even_when_dispatch_lookup_hides_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+
+        let todo = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&todo))
+            .await
+            .unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+        let done = Issue {
+            state: "done".to_string(),
+            ..todo
+        };
+        let tracker = DispatchFilteringTracker {
+            by_id: Some(done),
+            by_id_for_dispatch: None,
+        };
+
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
+
+        let row = repo.get_issue("lin-1").await.unwrap().unwrap();
+        assert_eq!(row.state, "done");
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn keeps_last_known_state_when_departed_issue_is_gone_from_tracker() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
@@ -1685,6 +1796,39 @@ mod tests {
             terminal: vec![done.clone()],
         };
         repo.upsert_issues(&[done]).await.unwrap();
+        repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
+            .await
+            .unwrap();
+
+        tick(&repo, &tracker, &config, None, &stop).await.unwrap();
+
+        assert_eq!(repo.last_run_number("lin-1").await.unwrap(), 0);
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clears_due_retry_when_issue_loses_its_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        // No default and no matching team/project rule: a retry created before
+        // this route change should not suppress active dispatch forever.
+        config.repos = vec![RepoConfig {
+            name: "web".to_string(),
+            team_prefixes: vec!["WEB".to_string()],
+            ..RepoConfig::default()
+        }];
+        let stop = CancellationToken::new();
+
+        let ready = issue("todo", vec![]);
+        let tracker = StaticTracker {
+            active: vec![ready.clone()],
+            terminal: vec![],
+        };
+        repo.upsert_issues(&[ready]).await.unwrap();
         repo.schedule_retry("lin-1", 1, "2000-01-01T00:00:00Z", None, None)
             .await
             .unwrap();
@@ -1909,6 +2053,21 @@ mod tests {
         );
         assert!(!err.to_string().contains("storage error"));
         assert!(!err.to_string().contains("database error"));
+    }
+
+    #[tokio::test]
+    async fn failed_reconfigure_preflight_cancels_worker_token() {
+        let stop = CancellationToken::new();
+
+        let err = preflight_reconfigured_tracker(FailingPreflightTracker, &stop)
+            .await
+            .unwrap_err();
+
+        assert!(stop.is_cancelled());
+        assert_eq!(
+            err.to_string(),
+            "tracker error: Linear auth failed: bad key"
+        );
     }
 
     #[tokio::test]

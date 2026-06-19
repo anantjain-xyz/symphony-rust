@@ -454,6 +454,39 @@ small {
   max-width: 560px;
 }
 
+.issue-view-toggle {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+}
+
+.issue-view-toggle button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted-foreground);
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.issue-view-toggle button:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.issue-view-toggle button.active,
+.issue-view-toggle button[aria-selected="true"] {
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+  color: var(--foreground);
+}
+
 .kpis,
 .actions {
   display: flex;
@@ -553,6 +586,223 @@ td {
 
 tbody tr:hover {
   background: var(--muted);
+}
+
+.dependency-view {
+  display: grid;
+  min-width: 0;
+}
+
+.dependency-summary {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dependency-stat {
+  border-right: 1px solid var(--border);
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 15px;
+}
+
+.dependency-stat:last-child {
+  border-right: 0;
+}
+
+.dependency-stat strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.dependency-stat span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dependency-graph-shell {
+  background:
+    linear-gradient(var(--muted) 1px, transparent 1px),
+    linear-gradient(90deg, var(--muted) 1px, transparent 1px);
+  background-size: 28px 28px;
+  min-height: 280px;
+  overflow: auto;
+}
+
+.dependency-graph-canvas {
+  position: relative;
+}
+
+.dependency-edges {
+  color: var(--border);
+  display: block;
+  height: 100%;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  position: absolute;
+  width: 100%;
+}
+
+.dependency-edges marker path {
+  fill: currentColor;
+}
+
+.dependency-edge {
+  fill: none;
+  opacity: 0.9;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.8;
+}
+
+.dependency-edge.external {
+  color: var(--warning-solid);
+  opacity: 0.95;
+}
+
+.dependency-node {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  display: grid;
+  gap: 6px;
+  height: 86px;
+  left: 0;
+  min-width: 0;
+  padding: 10px;
+  position: absolute;
+  top: 0;
+  width: 216px;
+}
+
+.dependency-node.blocker {
+  border-color: color-mix(in srgb, var(--info-foreground) 35%, var(--border));
+}
+
+.dependency-node.blocked {
+  box-shadow:
+    inset 3px 0 0 var(--warning-solid),
+    var(--shadow-sm);
+}
+
+.dependency-node.external {
+  background: var(--warning);
+  border-color: color-mix(in srgb, var(--warning-solid) 34%, var(--border));
+}
+
+.dependency-node-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.dependency-node-head strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.25;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependency-node-head > span {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--warning-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 2px 7px;
+}
+
+.dependency-node-title {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--muted-foreground);
+  display: -webkit-box;
+  line-height: 1.25;
+  overflow: hidden;
+}
+
+.dependency-node.external .dependency-node-title {
+  color: var(--warning-foreground);
+}
+
+.dependency-node-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dependency-node-meta span {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.3;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.dependency-node.external .dependency-node-meta span {
+  background: color-mix(in srgb, var(--warning-foreground) 12%, var(--card));
+  color: var(--warning-foreground);
+}
+
+.dependency-links {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+  padding: 13px 15px 15px;
+}
+
+.dependency-links h4 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.dependency-links ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dependency-links li {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.dependency-links li strong {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .clickable-row {
@@ -1199,6 +1449,7 @@ pre {
   gap: 5px;
 }
 
+.repo-default input[type="checkbox"],
 .repo-default input[type="radio"] {
   accent-color: var(--foreground);
   margin: 0;
@@ -1629,6 +1880,11 @@ textarea.mono-input {
   flex-basis: 100%;
 }
 
+.inline-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .hooks-details {
   display: grid;
   gap: 12px;
@@ -1720,6 +1976,10 @@ textarea.mono-input {
   .page-header {
     display: grid;
     gap: 14px;
+  }
+
+  .issue-view-toggle {
+    justify-self: start;
   }
 
   .kpis,
@@ -1842,10 +2102,35 @@ textarea.mono-input {
     font-size: 24px;
   }
 
+  .issue-view-toggle {
+    width: 100%;
+  }
+
+  .issue-view-toggle button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
   .kpis {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     width: 100%;
+  }
+
+  .dependency-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dependency-stat:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .dependency-stat:nth-child(n + 3) {
+    border-top: 1px solid var(--border);
+  }
+
+  .dependency-graph-shell {
+    margin-inline: -1px;
   }
 
   .kpi {
