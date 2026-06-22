@@ -751,6 +751,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>(
     runtimeAvailable ? {} : previewSkillsStatuses,
@@ -1023,12 +1024,28 @@ function App() {
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
+    let refreshedWorker: WorkerStatus | null = null;
+    try {
+      refreshedWorker = await invoke<WorkerStatus>("get_worker_status");
+      setWorker(refreshedWorker);
+    } catch {
+      // Settings are saved even if this status refresh fails; the next dashboard
+      // refresh will reconcile worker state.
+    }
+    const liveWorkerState = refreshedWorker?.state ?? worker.state;
+    setSavedLiveConfigKept(
+      liveWorkerState === "running" &&
+        (!result.workflow_ok || refreshedWorker?.last_error !== null),
+    );
     refreshSkillsStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
     }
-    savedFlashTimer.current = window.setTimeout(() => setSavedFlash(false), 2500);
+    savedFlashTimer.current = window.setTimeout(() => {
+      setSavedFlash(false);
+      setSavedLiveConfigKept(false);
+    }, 2500);
   }
 
   async function validate() {
@@ -1331,6 +1348,10 @@ function App() {
     settings !== null &&
     savedSnapshot !== null &&
     (formSnapshot(settings) !== savedSnapshot || linearKey.trim() !== "");
+  const liveReconfigureSkipped =
+    worker.state === "running" &&
+    ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
+      (savedFlash && savedLiveConfigKept));
 
   // Revalidate when entering Settings (or once settings finish loading there),
   // so CLI detection and workflow status are visible without a manual click.
@@ -1406,6 +1427,9 @@ function App() {
               validation={validation}
               dirty={dirty}
               savedFlash={savedFlash}
+              workerRunning={worker.state === "running"}
+              workerConfigError={worker.state === "running" && worker.last_error !== null}
+              liveReconfigureSkipped={liveReconfigureSkipped}
               busy={busy}
               runtimeAvailable={runtimeAvailable}
             />
@@ -1459,7 +1483,9 @@ function App() {
         {error ? <div className="banner error">{error}</div> : null}
         {worker.last_error ? (
           <div className="banner error">
-            <strong>Worker stopped</strong>
+            <strong>
+              {worker.state === "running" ? "Worker configuration" : "Worker stopped"}
+            </strong>
             <span>{friendlyError(worker.last_error)}</span>
           </div>
         ) : null}
@@ -1524,6 +1550,10 @@ function App() {
             skillsStatuses={skillsStatuses}
             skillsChecking={skillsChecking}
             skillsInstall={skillsInstall}
+            workerRunning={worker.state === "running"}
+            workerConfigError={worker.state === "running" && worker.last_error !== null}
+            liveReconfigureSkipped={liveReconfigureSkipped}
+            activeRunCount={overview.active_runs.length}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
             appVersion={appVersion}
@@ -1544,12 +1574,18 @@ function SettingsHeaderActions({
   validation,
   dirty,
   savedFlash,
+  workerRunning,
+  workerConfigError,
+  liveReconfigureSkipped,
   busy,
   runtimeAvailable,
 }: {
   validation: ValidationResult | null;
   dirty: boolean;
   savedFlash: boolean;
+  workerRunning: boolean;
+  workerConfigError: boolean;
+  liveReconfigureSkipped: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
 }) {
@@ -1557,8 +1593,19 @@ function SettingsHeaderActions({
   // (e.g. no repo configured yet) are shown by the setup checklist, not flagged
   // red next to Save while the user is still working through setup.
   const validationError = validation?.workflow_blocking ? validation.workflow_error : null;
-  const status = validationError ?? (savedFlash ? "Saved" : dirty ? "Unsaved changes" : "");
-  const statusClass = validationError
+  const status =
+    validationError ??
+    (savedFlash
+      ? workerRunning
+        ? workerConfigError || liveReconfigureSkipped
+          ? "Saved; worker kept previous config"
+          : "Saved; future runs use changes"
+        : "Saved"
+      : dirty
+        ? "Unsaved changes"
+        : "");
+  const statusClass =
+    validationError || (savedFlash && (workerConfigError || liveReconfigureSkipped))
     ? "save-status invalid"
     : savedFlash
       ? "save-status ok"
@@ -2880,6 +2927,10 @@ function SettingsView({
   skillsStatuses,
   skillsChecking,
   skillsInstall,
+  workerRunning,
+  workerConfigError,
+  liveReconfigureSkipped,
+  activeRunCount,
   busy,
   runtimeAvailable,
   appVersion,
@@ -2902,6 +2953,10 @@ function SettingsView({
   skillsStatuses: Record<string, SkillsStatus>;
   skillsChecking: Record<string, boolean>;
   skillsInstall: SkillsInstallStatus | null;
+  workerRunning: boolean;
+  workerConfigError: boolean;
+  liveReconfigureSkipped: boolean;
+  activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
   appVersion: string | null;
@@ -2965,6 +3020,28 @@ function SettingsView({
       {!runtimeAvailable ? (
         <div className="banner info">
           Settings are shown in preview mode. Open Symphony as a Tauri desktop app to edit, validate, and save configuration.
+        </div>
+      ) : null}
+      {runtimeAvailable && workerRunning ? (
+        <div className="banner info">
+          <strong>
+            {workerConfigError || liveReconfigureSkipped
+              ? "Worker configuration"
+              : "Live worker"}
+          </strong>
+          <span>
+            {workerConfigError
+              ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
+              : liveReconfigureSkipped
+                ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
+              : `Saved settings apply to future dispatches without restarting the worker. ${
+                  activeRunCount > 0
+                    ? `${activeRunCount} active ${
+                        activeRunCount === 1 ? "run keeps" : "runs keep"
+                      } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                    : "No active runs are using an older config."
+                }`}
+          </span>
         </div>
       ) : null}
 
@@ -3651,7 +3728,10 @@ function SettingsView({
                   setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) });
               }}
             />
-            <small className="hint">How often Linear is polled for issues.</small>
+            <small className="hint">
+              How often Linear is polled for issues. Applies after Save; the live
+              worker wakes and uses the new interval on its next loop.
+            </small>
           </label>
           <label>
             Max concurrent agents
@@ -3666,7 +3746,10 @@ function SettingsView({
                   setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) });
               }}
             />
-            <small className="hint">Issues worked on in parallel.</small>
+            <small className="hint">
+              Issues worked on in parallel. Applies to future dispatch decisions;
+              already-running agents continue.
+            </small>
           </label>
           <label>
             Max retry backoff (seconds)
@@ -3700,7 +3783,10 @@ function SettingsView({
                   setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) });
               }}
             />
-            <small className="hint">Max time for each hook script.</small>
+            <small className="hint">
+              Max time for each hook script. Applies to hooks that start after
+              Save; a hook already running keeps its current timeout.
+            </small>
           </label>
           <details className="hooks-details">
             <summary>Hooks (advanced)</summary>
@@ -3708,7 +3794,9 @@ function SettingsView({
               Shell scripts run at workspace lifecycle points. They receive{" "}
               <code>$REPO_URL</code>, <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>,{" "}
               <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as{" "}
-              <code>$SYMPHONY_HOOK</code>.
+              <code>$SYMPHONY_HOOK</code>. <code>after_create</code> only runs for
+              fresh workspaces, so existing ready workspaces are not reinitialized
+              by saving hook changes.
             </small>
             <label>
               After create
@@ -3723,7 +3811,8 @@ function SettingsView({
                 }
               />
               <small className="hint">
-                Runs once per fresh workspace — clone, branch, install.
+                Runs once per fresh workspace — clone, branch, install. Changes affect
+                the next new workspace, not an existing ready workspace.
               </small>
             </label>
             <label>
