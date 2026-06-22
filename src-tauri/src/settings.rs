@@ -430,6 +430,7 @@ fn repos_from_single(repo_url: &str, install_cmd: Option<String>) -> Vec<RepoCon
         team_prefixes: Vec::new(),
         project_ids: Vec::new(),
         is_default: true,
+        skills_marked_installed: false,
     }]
 }
 

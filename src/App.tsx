@@ -125,6 +125,7 @@ const previewSettings: AppSettings = {
       team_prefixes: ["ENG"],
       project_ids: [],
       is_default: true,
+      skills_marked_installed: false,
     },
   ],
   workspace_root: null,
@@ -2930,6 +2931,7 @@ function SettingsView({
           project_ids: [],
           // The first repo starts as the fallback, but users can clear it.
           is_default: settings.repos.length === 0,
+          skills_marked_installed: false,
         },
       ],
     });
@@ -3071,6 +3073,7 @@ function SettingsView({
               <SkillsBlock
                 status={skillsStatuses[repo.url.trim()] ?? null}
                 checking={skillsChecking[repo.url.trim()] ?? false}
+                manuallyInstalled={repo.skills_marked_installed}
                 install={
                   skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
                 }
@@ -3080,6 +3083,13 @@ function SettingsView({
                 repoConfigured={repo.url.trim() !== ""}
                 onRefresh={() => onRefreshSkills(repo.url)}
                 onInstall={() => onInstallSkills(repo.url)}
+                onMarkInstalled={() =>
+                  updateRepo(index, { skills_marked_installed: true })
+                }
+                onUseAutomaticCheck={() => {
+                  updateRepo(index, { skills_marked_installed: false });
+                  onRefreshSkills(repo.url);
+                }}
               />
             </fieldset>
           ))}
@@ -4183,6 +4193,7 @@ function PromptEditor({
 function SkillsBlock({
   status,
   checking,
+  manuallyInstalled,
   install,
   installRunning,
   busy,
@@ -4190,11 +4201,14 @@ function SkillsBlock({
   repoConfigured,
   onRefresh,
   onInstall,
+  onMarkInstalled,
+  onUseAutomaticCheck,
 }: {
   /// Status and install are this card's repo only; installRunning is true
   /// while ANY repo's install session runs (the installer is one-at-a-time).
   status: SkillsStatus | null;
   checking: boolean;
+  manuallyInstalled: boolean;
   install: SkillsInstallStatus | null;
   installRunning: boolean;
   busy: boolean;
@@ -4202,10 +4216,13 @@ function SkillsBlock({
   repoConfigured: boolean;
   onRefresh: () => void;
   onInstall: () => void;
+  onMarkInstalled: () => void;
+  onUseAutomaticCheck: () => void;
 }) {
   const installing = install?.state === "running";
   const otherInstallRunning = installRunning && !installing;
   const actionsDisabled = busy || installRunning || !runtimeAvailable || !repoConfigured;
+  const manualActionsDisabled = busy || !runtimeAvailable || !repoConfigured;
   // A just-finished install knows the PR URL before the next status check does.
   const prUrl =
     (install?.state === "completed" ? install.pr_url : null) ??
@@ -4229,8 +4246,28 @@ function SkillsBlock({
       Check again
     </button>
   );
+  const markInstalledButton = (
+    <button type="button" disabled={manualActionsDisabled} onClick={onMarkInstalled}>
+      Mark installed
+    </button>
+  );
 
-  if (installing) {
+  if (manuallyInstalled) {
+    tone = "success";
+    headline = "Agent skills are marked installed.";
+    detail =
+      "Symphony will not require this repo to match the exact bundled skill set.";
+    meta = "Use automatic check to compare the default branch against the bundled manifests again.";
+    actions = (
+      <button
+        type="button"
+        disabled={manualActionsDisabled}
+        onClick={onUseAutomaticCheck}
+      >
+        Use automatic check
+      </button>
+    );
+  } else if (installing) {
     tone = "info";
     headline = "Creating an install PR.";
     detail =
@@ -4279,6 +4316,7 @@ function SkillsBlock({
         >
           View PR
         </button>
+        {markInstalledButton}
         {checkAgainButton}
       </>
     );
@@ -4297,6 +4335,7 @@ function SkillsBlock({
         >
           Create install PR
         </button>
+        {markInstalledButton}
         {checkAgainButton}
       </>
     );
@@ -4304,12 +4343,22 @@ function SkillsBlock({
     tone = "error";
     headline = "Symphony could not check this repo.";
     detail = status.detail ?? "Check the repository URL, GitHub CLI, and authentication.";
-    actions = checkButton;
+    actions = (
+      <>
+        {checkButton}
+        {markInstalledButton}
+      </>
+    );
   } else if (!repoConfigured) {
     headline = "Add a repository URL first.";
     detail = "Skill detection and install PR creation run against the repo URL above.";
   } else {
-    actions = checkButton;
+    actions = (
+      <>
+        {checkButton}
+        {markInstalledButton}
+      </>
+    );
   }
 
   if (otherInstallRunning) {

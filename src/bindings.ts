@@ -31,6 +31,7 @@ export type RepoConfig = {
   team_prefixes: string[];
   project_ids: string[];
   is_default: boolean;
+  skills_marked_installed: boolean;
 };
 
 export type AppSettings = {
