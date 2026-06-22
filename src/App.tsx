@@ -1023,7 +1023,12 @@ function App() {
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
-    invoke<WorkerStatus>("get_worker_status").then(setWorker).catch(() => undefined);
+    try {
+      setWorker(await invoke<WorkerStatus>("get_worker_status"));
+    } catch {
+      // Settings are saved even if this status refresh fails; the next dashboard
+      // refresh will reconcile worker state.
+    }
     refreshSkillsStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
@@ -1408,6 +1413,7 @@ function App() {
               dirty={dirty}
               savedFlash={savedFlash}
               workerRunning={worker.state === "running"}
+              workerConfigError={worker.state === "running" && worker.last_error !== null}
               busy={busy}
               runtimeAvailable={runtimeAvailable}
             />
@@ -1529,6 +1535,7 @@ function App() {
             skillsChecking={skillsChecking}
             skillsInstall={skillsInstall}
             workerRunning={worker.state === "running"}
+            workerConfigError={worker.state === "running" && worker.last_error !== null}
             activeRunCount={overview.active_runs.length}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
@@ -1551,6 +1558,7 @@ function SettingsHeaderActions({
   dirty,
   savedFlash,
   workerRunning,
+  workerConfigError,
   busy,
   runtimeAvailable,
 }: {
@@ -1558,6 +1566,7 @@ function SettingsHeaderActions({
   dirty: boolean;
   savedFlash: boolean;
   workerRunning: boolean;
+  workerConfigError: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
 }) {
@@ -1569,12 +1578,14 @@ function SettingsHeaderActions({
     validationError ??
     (savedFlash
       ? workerRunning
-        ? "Saved; future runs use changes"
+        ? workerConfigError
+          ? "Saved; worker kept previous config"
+          : "Saved; future runs use changes"
         : "Saved"
       : dirty
         ? "Unsaved changes"
         : "");
-  const statusClass = validationError
+  const statusClass = validationError || (savedFlash && workerConfigError)
     ? "save-status invalid"
     : savedFlash
       ? "save-status ok"
@@ -2897,6 +2908,7 @@ function SettingsView({
   skillsChecking,
   skillsInstall,
   workerRunning,
+  workerConfigError,
   activeRunCount,
   busy,
   runtimeAvailable,
@@ -2921,6 +2933,7 @@ function SettingsView({
   skillsChecking: Record<string, boolean>;
   skillsInstall: SkillsInstallStatus | null;
   workerRunning: boolean;
+  workerConfigError: boolean;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -2989,14 +3002,17 @@ function SettingsView({
       ) : null}
       {runtimeAvailable && workerRunning ? (
         <div className="banner info">
-          <strong>Live worker</strong>
+          <strong>{workerConfigError ? "Worker configuration" : "Live worker"}</strong>
           <span>
-            Saved settings apply to future dispatches without restarting the worker.{" "}
-            {activeRunCount > 0
-              ? `${activeRunCount} active ${
-                  activeRunCount === 1 ? "run keeps" : "runs keep"
-                } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
-              : "No active runs are using an older config."}
+            {workerConfigError
+              ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
+              : `Saved settings apply to future dispatches without restarting the worker. ${
+                  activeRunCount > 0
+                    ? `${activeRunCount} active ${
+                        activeRunCount === 1 ? "run keeps" : "runs keep"
+                      } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                    : "No active runs are using an older config."
+                }`}
           </span>
         </div>
       ) : null}

@@ -578,6 +578,56 @@ describe("App settings", () => {
     );
   });
 
+  it("does not promise live settings after a worker reconfigure error", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        overview: {
+          active_runs: [runRow()],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        },
+        workerStatus: {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: "tracker configuration rejected",
+        },
+      }),
+    );
+
+    const { container } = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByText(/Settings save to disk/)).toBeTruthy();
+    expect(
+      screen.queryByText(/Saved settings apply to future dispatches without restarting/),
+    ).toBeNull();
+
+    const hookTimeout = await screen.findByLabelText(/^Hook timeout/, {
+      selector: "input",
+    });
+    fireEvent.change(hookTimeout, { target: { value: "45" } });
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(container.querySelector(".topbar")?.textContent).toContain(
+        "Saved; worker kept previous config",
+      ),
+    );
+    expect(container.querySelector(".topbar")?.textContent).not.toContain(
+      "Saved; future runs use changes",
+    );
+  });
+
   it("shows actionable agent skills install guidance in preview settings", () => {
     render(<App />);
 
