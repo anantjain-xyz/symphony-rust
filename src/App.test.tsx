@@ -190,6 +190,11 @@ function dashboardInvoke({
     pr_url: null,
     detail: null,
   },
+  validation = {
+    workflow_ok: true,
+    workflow_blocking: false,
+    workflow_error: null,
+  },
   workerStatus = {
     state: "running",
     started_at: "2026-01-01T00:00:00.000Z",
@@ -200,6 +205,7 @@ function dashboardInvoke({
   issues?: IssueRow[];
   overview?: Overview;
   skillsStatus?: SkillsStatus;
+  validation?: Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
   workerStatus?: WorkerStatus;
 }) {
   return async (command: string, args?: { request?: { settings: AppSettings } }) => {
@@ -232,9 +238,7 @@ function dashboardInvoke({
         return skillsStatus;
       case "validate_settings":
         return {
-          workflow_ok: true,
-          workflow_blocking: false,
-          workflow_error: null,
+          ...validation,
           codex_found: true,
           claude_found: true,
           cursor_found: true,
@@ -605,6 +609,61 @@ describe("App settings", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     expect(await screen.findByText(/Settings save to disk/)).toBeTruthy();
+    expect(
+      screen.queryByText(/Saved settings apply to future dispatches without restarting/),
+    ).toBeNull();
+
+    const hookTimeout = await screen.findByLabelText(/^Hook timeout/, {
+      selector: "input",
+    });
+    fireEvent.change(hookTimeout, { target: { value: "45" } });
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(container.querySelector(".topbar")?.textContent).toContain(
+        "Saved; worker kept previous config",
+      ),
+    );
+    expect(container.querySelector(".topbar")?.textContent).not.toContain(
+      "Saved; future runs use changes",
+    );
+  });
+
+  it("does not promise live settings when save skips reconfigure", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true, repos: [] };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        validation: {
+          workflow_ok: false,
+          workflow_blocking: false,
+          workflow_error: "No repository configured.",
+        },
+        overview: {
+          active_runs: [runRow()],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        },
+        workerStatus: {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: null,
+        },
+      }),
+    );
+
+    const { container } = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByText(/this configuration is incomplete/)).toBeTruthy();
     expect(
       screen.queryByText(/Saved settings apply to future dispatches without restarting/),
     ).toBeNull();

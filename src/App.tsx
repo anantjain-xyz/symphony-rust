@@ -1414,6 +1414,11 @@ function App() {
               savedFlash={savedFlash}
               workerRunning={worker.state === "running"}
               workerConfigError={worker.state === "running" && worker.last_error !== null}
+              liveReconfigureSkipped={
+                worker.state === "running" &&
+                validation?.workflow_ok === false &&
+                !validation.workflow_blocking
+              }
               busy={busy}
               runtimeAvailable={runtimeAvailable}
             />
@@ -1536,6 +1541,11 @@ function App() {
             skillsInstall={skillsInstall}
             workerRunning={worker.state === "running"}
             workerConfigError={worker.state === "running" && worker.last_error !== null}
+            liveReconfigureSkipped={
+              worker.state === "running" &&
+              validation?.workflow_ok === false &&
+              !validation.workflow_blocking
+            }
             activeRunCount={overview.active_runs.length}
             busy={busy}
             runtimeAvailable={runtimeAvailable}
@@ -1559,6 +1569,7 @@ function SettingsHeaderActions({
   savedFlash,
   workerRunning,
   workerConfigError,
+  liveReconfigureSkipped,
   busy,
   runtimeAvailable,
 }: {
@@ -1567,6 +1578,7 @@ function SettingsHeaderActions({
   savedFlash: boolean;
   workerRunning: boolean;
   workerConfigError: boolean;
+  liveReconfigureSkipped: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
 }) {
@@ -1578,14 +1590,15 @@ function SettingsHeaderActions({
     validationError ??
     (savedFlash
       ? workerRunning
-        ? workerConfigError
+        ? workerConfigError || liveReconfigureSkipped
           ? "Saved; worker kept previous config"
           : "Saved; future runs use changes"
         : "Saved"
       : dirty
         ? "Unsaved changes"
         : "");
-  const statusClass = validationError || (savedFlash && workerConfigError)
+  const statusClass =
+    validationError || (savedFlash && (workerConfigError || liveReconfigureSkipped))
     ? "save-status invalid"
     : savedFlash
       ? "save-status ok"
@@ -2909,6 +2922,7 @@ function SettingsView({
   skillsInstall,
   workerRunning,
   workerConfigError,
+  liveReconfigureSkipped,
   activeRunCount,
   busy,
   runtimeAvailable,
@@ -2934,6 +2948,7 @@ function SettingsView({
   skillsInstall: SkillsInstallStatus | null;
   workerRunning: boolean;
   workerConfigError: boolean;
+  liveReconfigureSkipped: boolean;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -3002,10 +3017,16 @@ function SettingsView({
       ) : null}
       {runtimeAvailable && workerRunning ? (
         <div className="banner info">
-          <strong>{workerConfigError ? "Worker configuration" : "Live worker"}</strong>
+          <strong>
+            {workerConfigError || liveReconfigureSkipped
+              ? "Worker configuration"
+              : "Live worker"}
+          </strong>
           <span>
             {workerConfigError
               ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
+              : liveReconfigureSkipped
+                ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
               : `Saved settings apply to future dispatches without restarting the worker. ${
                   activeRunCount > 0
                     ? `${activeRunCount} active ${
