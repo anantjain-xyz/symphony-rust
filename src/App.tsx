@@ -751,6 +751,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>(
     runtimeAvailable ? {} : previewSkillsStatuses,
@@ -1023,18 +1024,28 @@ function App() {
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
     setLinearKey("");
+    let refreshedWorker: WorkerStatus | null = null;
     try {
-      setWorker(await invoke<WorkerStatus>("get_worker_status"));
+      refreshedWorker = await invoke<WorkerStatus>("get_worker_status");
+      setWorker(refreshedWorker);
     } catch {
       // Settings are saved even if this status refresh fails; the next dashboard
       // refresh will reconcile worker state.
     }
+    const liveWorkerState = refreshedWorker?.state ?? worker.state;
+    setSavedLiveConfigKept(
+      liveWorkerState === "running" &&
+        (!result.workflow_ok || refreshedWorker?.last_error !== null),
+    );
     refreshSkillsStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
     }
-    savedFlashTimer.current = window.setTimeout(() => setSavedFlash(false), 2500);
+    savedFlashTimer.current = window.setTimeout(() => {
+      setSavedFlash(false);
+      setSavedLiveConfigKept(false);
+    }, 2500);
   }
 
   async function validate() {
@@ -1337,6 +1348,10 @@ function App() {
     settings !== null &&
     savedSnapshot !== null &&
     (formSnapshot(settings) !== savedSnapshot || linearKey.trim() !== "");
+  const liveReconfigureSkipped =
+    worker.state === "running" &&
+    ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
+      (savedFlash && savedLiveConfigKept));
 
   // Revalidate when entering Settings (or once settings finish loading there),
   // so CLI detection and workflow status are visible without a manual click.
@@ -1414,11 +1429,7 @@ function App() {
               savedFlash={savedFlash}
               workerRunning={worker.state === "running"}
               workerConfigError={worker.state === "running" && worker.last_error !== null}
-              liveReconfigureSkipped={
-                worker.state === "running" &&
-                validation?.workflow_ok === false &&
-                !validation.workflow_blocking
-              }
+              liveReconfigureSkipped={liveReconfigureSkipped}
               busy={busy}
               runtimeAvailable={runtimeAvailable}
             />
@@ -1541,11 +1552,7 @@ function App() {
             skillsInstall={skillsInstall}
             workerRunning={worker.state === "running"}
             workerConfigError={worker.state === "running" && worker.last_error !== null}
-            liveReconfigureSkipped={
-              worker.state === "running" &&
-              validation?.workflow_ok === false &&
-              !validation.workflow_blocking
-            }
+            liveReconfigureSkipped={liveReconfigureSkipped}
             activeRunCount={overview.active_runs.length}
             busy={busy}
             runtimeAvailable={runtimeAvailable}

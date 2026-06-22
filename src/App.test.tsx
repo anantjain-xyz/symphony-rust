@@ -256,7 +256,7 @@ function dashboardInvoke({
           email: "alice@example.com",
         };
       case "save_settings":
-        return args?.request?.settings ?? settings;
+        return { ...(args?.request?.settings ?? settings) };
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
