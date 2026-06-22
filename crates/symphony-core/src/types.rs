@@ -468,6 +468,10 @@ pub struct RepoConfig {
     /// Fallback when no label, project, or team rule matches an issue.
     #[serde(default)]
     pub is_default: bool,
+    /// User override for repos that intentionally do not use Symphony's exact
+    /// bundled skill set.
+    #[serde(default)]
+    pub skills_marked_installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

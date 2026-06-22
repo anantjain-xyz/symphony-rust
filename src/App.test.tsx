@@ -50,6 +50,7 @@ function testSettings(): AppSettings {
         team_prefixes: ["ENG"],
         project_ids: [],
         is_default: true,
+        skills_marked_installed: false,
       },
     ],
     workspace_root: null,
@@ -200,7 +201,7 @@ function dashboardInvoke({
   skillsStatus?: SkillsStatus;
   workerStatus?: WorkerStatus;
 }) {
-  return async (command: string) => {
+  return async (command: string, args?: { request?: { settings: AppSettings } }) => {
     switch (command) {
       case "load_settings":
         return settings;
@@ -249,6 +250,8 @@ function dashboardInvoke({
           display_name: "Alice",
           email: "alice@example.com",
         };
+      case "save_settings":
+        return args?.request?.settings ?? settings;
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
@@ -518,6 +521,94 @@ describe("App settings", () => {
     expect(screen.getByText("7 of 7 bundled skills are missing.")).toBeTruthy();
     const createPrButton = screen.getByRole("button", { name: "Create install PR" });
     expect(createPrButton.getAttribute("disabled")).not.toBeNull();
+  });
+
+  it("lets users mark repo skills as installed without installing the bundled set", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        skillsStatus: {
+          state: "missing",
+          missing: ["symphony-workpad", "symphony-commit"],
+          pr_url: null,
+          detail: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url.trim(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByText("Agent skills are not installed.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Mark installed" }));
+
+    expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use automatic check" })).toBeTruthy();
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(
+      saveCall()?.[1].request.settings.repos[0].skills_marked_installed,
+    ).toBe(true);
+  });
+
+  it("clears the manual skills mark when the repository URL changes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        skillsStatus: {
+          state: "missing",
+          missing: ["symphony-workpad"],
+          pr_url: null,
+          detail: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url.trim(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mark installed" }));
+    expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
+
+    const repoUrl = screen.getByLabelText(/^Repo URL/, {
+      selector: "input",
+    }) as HTMLInputElement;
+    fireEvent.change(repoUrl, { target: { value: "git@github.com:acme/api.git" } });
+
+    expect(screen.queryByText("Agent skills are marked installed.")).toBeNull();
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings.repos[0]).toMatchObject({
+      url: "git@github.com:acme/api.git",
+      skills_marked_installed: false,
+    });
   });
 
   it("shows PR links as standard view actions when an install PR is open", async () => {
