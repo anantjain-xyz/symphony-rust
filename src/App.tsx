@@ -3021,7 +3021,16 @@ function SettingsView({
                   {...literalInputProps}
                   value={repo.url}
                   disabled={!runtimeAvailable}
-                  onChange={(e) => updateRepo(index, { url: e.currentTarget.value })}
+                  onChange={(e) => {
+                    const url = e.currentTarget.value;
+                    updateRepo(index, {
+                      url,
+                      skills_marked_installed:
+                        url.trim() === repo.url.trim()
+                          ? repo.skills_marked_installed
+                          : false,
+                    });
+                  }}
                   placeholder="git@github.com:org/repo.git"
                 />
                 <small className="hint">

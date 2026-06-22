@@ -565,6 +565,52 @@ describe("App settings", () => {
     ).toBe(true);
   });
 
+  it("clears the manual skills mark when the repository URL changes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        skillsStatus: {
+          state: "missing",
+          missing: ["symphony-workpad"],
+          pr_url: null,
+          detail: null,
+        },
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url.trim(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mark installed" }));
+    expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
+
+    const repoUrl = screen.getByLabelText(/^Repo URL/, {
+      selector: "input",
+    }) as HTMLInputElement;
+    fireEvent.change(repoUrl, { target: { value: "git@github.com:acme/api.git" } });
+
+    expect(screen.queryByText("Agent skills are marked installed.")).toBeNull();
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings.repos[0]).toMatchObject({
+      url: "git@github.com:acme/api.git",
+      skills_marked_installed: false,
+    });
+  });
+
   it("shows PR links as standard view actions when an install PR is open", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
