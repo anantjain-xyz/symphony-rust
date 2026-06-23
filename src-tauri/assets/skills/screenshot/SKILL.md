@@ -7,13 +7,13 @@ description: Capture Playwright screenshots of a user-facing change and embed th
 
 The PR description is the home for proof-of-testing screenshots. They are hosted as raw GitHub blobs at a commit SHA that is force-pushed away after the URL is captured — the blob keeps serving until GitHub GC.
 
-Capture runs through a small Node script (`capture.mjs`) driven from the shell, **not** the Playwright MCP. The MCP's `browser_run_code_unsafe` runs in a sandbox with no `process`, `require`, or `context`, so it cannot read an environment variable or inject a session cookie — authenticated dev captures are impossible there. A plain Node script gets a normal `process.env`, so a session cookie can be injected while the secret stays in the environment and never appears in a tool call / transcript. The script also bypasses self-signed dev certs and handles SPAs that never reach network-idle.
+Capture runs through a small Node script (`capture.mjs`) driven from the shell, **not** the Playwright MCP. The MCP's `browser_run_code_unsafe` runs in a sandbox with no `process`, `require`, or `context`, so it cannot read an environment variable or inject a session cookie — authenticated dev captures are impossible there. A plain Node script gets a normal `process.env`, so a session cookie can be injected while the secret stays in the environment and never appears in a tool call / transcript. The script also bypasses self-signed dev certs, handles SPAs that never reach network-idle, fails on unexpected HTTP statuses, and can run interactions (hover/click/…) to reach states that aren't a bare URL.
 
 ## Preconditions
 
 - A PR exists for the current branch (use the `symphony-push` skill first if not).
 - `gh auth status` succeeds against the repo's host.
-- **Node + Playwright are resolvable from the repo.** `capture.mjs` does `import { chromium } from 'playwright'`; run it from inside the repo tree so Node resolves a `playwright` install in the repo's `node_modules` (or make one available via `npx playwright`). If the repo has no Playwright, surface that as a blocker rather than guessing.
+- **Playwright is installed in the repo's `node_modules`.** `capture.mjs` does `import { chromium } from 'playwright'`, resolved from the repo tree. If the repo doesn't already depend on Playwright, install it first (`npm install --no-save playwright`, or the repo's package manager) — `npx playwright` does **not** make the bare `import` resolvable for a plain `node .symphony/capture.mjs`. If it can't be installed, surface a blocker rather than guessing.
 - **For authenticated targets only** (anything behind a login wall, e.g. a dev server): the session cookie *value* must be present in an environment variable (do not hardcode it). You pass the env var's *name* and the cookie's name/domain in the spec — never the value. If the var is unset, stop and surface a blocker; do not capture the auth wall.
 
 ## Capture script
@@ -30,13 +30,27 @@ Write this verbatim to `.symphony/capture.mjs` before capturing (inside the repo
 // spec.json:
 //   {
 //     "outDir": ".symphony/screenshots",
-//     "cookie": { "env": "SESSION_COOKIE", "name": "session", "domain": "localhost" },  // optional
+//     // optional auth cookie. Only `value` comes from the env var named in
+//     // `env`; every other field is passed through to Playwright unchanged so
+//     // the real session cookie is replayed faithfully. Provide `url` OR
+//     // `domain`(+`path`). Omit secure/httpOnly/sameSite to use Playwright
+//     // defaults; set them to match the real cookie when it matters.
+//     "cookie": { "env": "SESSION_COOKIE", "name": "session", "domain": "localhost",
+//                 "path": "/", "secure": true, "sameSite": "Lax" },
 //     "shots": [
 //       { "name": "01-default", "url": "https://localhost:3000/path" },
-//       { "name": "04-mobile",  "url": "https://localhost:3000/path", "width": 390, "height": 844 }
+//       { "name": "04-mobile",  "url": "https://localhost:3000/path", "width": 390, "height": 844 },
+//       // interactions before the shot (states that aren't a bare URL):
+//       { "name": "05-menu", "url": "https://localhost:3000/path",
+//         "actions": [{ "hover": "nav .menu" }, { "waitFor": ".menu-popover" }] },
+//       // intentionally capturing a non-2xx page: opt in via expectStatus
+//       { "name": "06-not-found", "url": "https://localhost:3000/missing", "expectStatus": 404 }
 //     ]
 //   }
-// Prints a JSON report (name, requested, landed, http, path) per shot.
+// Per-shot knobs: width/height (viewport), fullPage (default true), settleMs
+// (default 2500), expectStatus (number | number[]; default: any < 400),
+// actions (run after settle, before the shot).
+// Prints a JSON report (name, requested, landed, http, path | error) per shot.
 // Exit 0 = all ok, 2 = a shot failed, 1 = bad invocation/env.
 import { chromium } from 'playwright';
 import { readFileSync, mkdirSync } from 'node:fs';
@@ -55,28 +69,53 @@ if (shots.length === 0) {
   process.exit(1);
 }
 
+// Optional auth cookie: only the value comes from the env; all attributes are
+// passthrough so the real session cookie is replayed faithfully.
 let cookie = null;
 if (spec.cookie) {
-  const value = process.env[spec.cookie.env];
+  const c = spec.cookie;
+  const value = process.env[c.env];
   if (!value) {
-    console.error(`${spec.cookie.env} not set — cannot capture authenticated screenshots`);
+    console.error(`${c.env} not set — cannot capture authenticated screenshots`);
     process.exit(1);
   }
-  cookie = {
-    name: spec.cookie.name,
-    value,
-    domain: spec.cookie.domain ?? 'localhost',
-    path: '/',
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Lax',
-  };
+  cookie = { name: c.name, value };
+  if (c.url) cookie.url = c.url;
+  else {
+    cookie.domain = c.domain ?? 'localhost';
+    cookie.path = c.path ?? '/';
+  }
+  // Pass through only attributes the spec sets — don't force defaults that
+  // change which cookie is replayed (httpOnly hides it from document.cookie;
+  // secure/sameSite affect when it's sent).
+  for (const k of ['secure', 'httpOnly', 'sameSite', 'expires']) {
+    if (c[k] !== undefined) cookie[k] = c[k];
+  }
 }
 
 const browser = await chromium.launch();
 // ignoreHTTPSErrors handles dev servers behind a self-signed cert.
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 if (cookie) await context.addCookies([cookie]);
+
+// Pre-screenshot interactions so states only reachable via interaction (menus,
+// dialogs, loading/error UI) can be captured. A failing action fails the shot.
+async function runActions(page, actions) {
+  for (const a of actions ?? []) {
+    if (a.click) await page.click(a.click);
+    else if (a.hover) await page.hover(a.hover);
+    else if (a.fill) await page.fill(a.fill, a.value ?? '');
+    else if (a.press) await (a.selector ? page.locator(a.selector).press(a.press) : page.keyboard.press(a.press));
+    else if (a.waitFor) await page.waitForSelector(a.waitFor);
+    else if (a.wait) await page.waitForTimeout(a.wait);
+    else throw new Error(`unknown action: ${JSON.stringify(a)}`);
+  }
+}
+
+function statusOk(status, expect) {
+  if (expect === undefined) return status > 0 && status < 400; // default: 2xx/3xx
+  return Array.isArray(expect) ? expect.includes(status) : status === expect;
+}
 
 const results = [];
 let failed = 0;
@@ -89,18 +128,19 @@ for (const shot of shots) {
     // 'domcontentloaded', not 'networkidle': many SPAs hold persistent
     // connections and never go idle, so networkidle would always time out.
     const resp = await page.goto(shot.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const status = resp ? resp.status() : 0;
+    // A stale cookie / typoed URL often returns a 4xx/5xx page at the same URL;
+    // goto resolves anyway, so fail unless the shot opts into the status.
+    if (!statusOk(status, shot.expectStatus)) {
+      throw new Error(`unexpected HTTP ${status} (set "expectStatus" to allow)`);
+    }
     await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(shot.settleMs ?? 2500);
+    await runActions(page, shot.actions);
     const outPath = isAbsolute(shot.name) ? shot.name : join(outDir, `${shot.name}.png`);
     mkdirSync(dirname(outPath), { recursive: true });
     await page.screenshot({ path: outPath, fullPage: shot.fullPage !== false });
-    results.push({
-      name: shot.name,
-      requested: shot.url,
-      landed: page.url(),
-      http: resp ? resp.status() : null,
-      path: outPath,
-    });
+    results.push({ name: shot.name, requested: shot.url, landed: page.url(), http: status, path: outPath });
   } catch (e) {
     failed += 1;
     results.push({ name: shot.name, requested: shot.url, error: e.message });
@@ -116,7 +156,7 @@ process.exit(failed ? 2 : 0);
 
 1. **Build a spec and capture comprehensively.** Write a spec JSON (e.g. to `/tmp/symphony-shots.json`) listing every state worth a reviewer's eye, then run the script.
 
-   **Capture every state that matters to a reviewer**, not just the happy path — e.g. `01-default`, `02-loading`, `03-error`, `04-mobile`, `05-hover`. Set `width`/`height` on a shot for responsive/mobile states. Err on the side of more screenshots: the commit is force-pushed away so size doesn't matter, and a missing state is the most common reviewer ask. Number `name`s so they sort and embed in a deterministic order. Shots default to `fullPage`; set `"fullPage": false` only when the page is impractically tall (infinite scroll, very long forms).
+   **Capture every state that matters to a reviewer**, not just the happy path — e.g. `01-default`, `02-loading`, `03-error`, `04-mobile`, `05-hover`. Set `width`/`height` for responsive/mobile states. For states that aren't a bare URL (hover menus, opened dialogs, click-triggered loading/error UI), drive them with a shot `actions` list. Err on the side of more screenshots: the commit is force-pushed away so size doesn't matter, and a missing state is the most common reviewer ask. Number `name`s so they sort deterministically. Shots default to `fullPage`; set `"fullPage": false` only when the page is impractically tall.
 
    Spec example (no auth):
 
@@ -125,15 +165,16 @@ process.exit(failed ? 2 : 0);
      "outDir": ".symphony/screenshots",
      "shots": [
        { "name": "01-default", "url": "https://localhost:3000/path" },
-       { "name": "04-mobile", "url": "https://localhost:3000/path", "width": 390, "height": 844 }
+       { "name": "04-mobile", "url": "https://localhost:3000/path", "width": 390, "height": 844 },
+       { "name": "05-menu", "url": "https://localhost:3000/path", "actions": [{ "hover": "nav .menu" }, { "waitFor": ".menu-popover" }] }
      ]
    }
    ```
 
-   For an **authenticated** target, add a `cookie` block (env var name + cookie name/domain) and ensure the env var holds the session value — never put the value in the spec, in `argv`, or in any `echo`:
+   For an **authenticated** target, add a `cookie` block. Only `value` comes from the env var named in `env`; every other field is passed through to Playwright so the real session cookie is replayed faithfully (provide `url` or `domain`+`path`; set `secure`/`httpOnly`/`sameSite` to match the real cookie when it matters). Never put the value in the spec, in `argv`, or in any `echo`:
 
    ```json
-   "cookie": { "env": "SESSION_COOKIE", "name": "session", "domain": "localhost" }
+   "cookie": { "env": "SESSION_COOKIE", "name": "session", "domain": "localhost", "path": "/", "secure": true, "sameSite": "Lax" }
    ```
 
    Then run it:
@@ -142,7 +183,7 @@ process.exit(failed ? 2 : 0);
    node .symphony/capture.mjs /tmp/symphony-shots.json
    ```
 
-   The script prints a JSON report. **Check `landed`**: if it differs from the requested URL (redirected to a login wall or elsewhere), the cookie is stale or the account lacks access — surface that as a blocker rather than embedding a wrong-page shot. The PNGs land under `.symphony/screenshots/` (the spec's `outDir`, repo-relative); the spec JSON itself may live in `/tmp`.
+   The script exits non-zero if any shot fails (navigation error, failed action, or an unexpected HTTP status — by default anything ≥ 400; opt a shot into a known status with `expectStatus`). It prints a JSON report per shot; also **check `landed`**: if it differs from the requested URL (redirected to a login wall or elsewhere), the cookie is stale or the account lacks access — fix that rather than embedding a wrong-page shot. PNGs land under `.symphony/screenshots/` (the spec's `outDir`, repo-relative); the spec JSON itself may live in `/tmp`.
 
 2. **Stage and commit** all the screenshots together:
    ```sh
@@ -205,5 +246,6 @@ process.exit(failed ? 2 : 0);
 - Don't skip step 6 (visual verification). A broken URL in the PR body is harder to fix than re-capturing.
 - Don't ship a single happy-path screenshot when the change has multiple states. If the diff touches loading / error / empty / mobile, capture each — reviewers will ask for them anyway.
 - Don't crop or element-scope when full-page works. `capture.mjs` shoots `fullPage: true` by default; set `"fullPage": false` only when the page is impractically tall. Tight crops hide regressions in the surrounding chrome.
+- Don't embed a wrong-page or error shot. A redirect (`landed` ≠ requested) or an unexpected status fails the run for a reason — fix the cause or opt in with `expectStatus`; don't force it through.
 - Don't reuse this skill for screenshots that need to live longer than the PR — see "Caveats".
 - Don't carry the `--no-verify` exception into other skills; it's specific to this throwaway commit.
