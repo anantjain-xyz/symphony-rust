@@ -330,8 +330,8 @@ async fn run_worker(
 ) -> Result<(), WorkerError> {
     let initial_config = config.read().await.clone();
     repo.upsert_workflow(&initial_config.workflow).await?;
-    let mut tracker_config = initial_config.workflow.front_matter.tracker.clone();
-    let mut tracker = LinearTracker::new(tracker_config.clone());
+    let tracker_config = initial_config.workflow.front_matter.tracker.clone();
+    let tracker = LinearTracker::new(tracker_config.clone());
     tracker.preflight().await?;
     recover(&repo, &tracker, &initial_config).await?;
     let started_at = now_iso();
@@ -354,14 +354,49 @@ async fn run_worker(
         }
     });
 
+    run_loop(&repo, &config, &stop, tracker, tracker_config, |cfg| {
+        LinearTracker::new(cfg.clone())
+    })
+    .await;
+    Ok(())
+}
+
+/// The worker's poll loop: tick, then wait for the next wake/interval/stop,
+/// rebuilding the tracker whenever live reconfiguration changes its settings.
+///
+/// A stop must take effect promptly rather than waiting out an in-flight Linear
+/// request — each GraphQL call can block for ~15s per attempt (~47s across
+/// retries) and takes no cancellation token. We get that responsiveness from
+/// `tick` itself, which bails at its tracker calls when `stop` fires (see
+/// [`cancellable`]) and already checks `stop.is_cancelled()` between dispatches.
+/// We deliberately do *not* race the whole tick future against cancellation:
+/// dropping it at an arbitrary await is not cancellation-safe, because
+/// `reserve_and_dispatch` commits a `pending` run before spawning the task that
+/// owns its lifecycle, so a drop in that window would strand the run until the
+/// next restart sweep. Letting `tick` unwind through its own early returns keeps
+/// that reserve → spawn handoff atomic.
+///
+/// `make_tracker` builds a tracker from a tracker config; in production it
+/// constructs a [`LinearTracker`], while tests inject a stub.
+async fn run_loop<T, F>(
+    repo: &Repository,
+    config: &SharedRuntimeConfig,
+    stop: &CancellationToken,
+    mut tracker: T,
+    mut tracker_config: symphony_core::TrackerConfig,
+    mut make_tracker: F,
+) where
+    T: TrackerClient,
+    F: FnMut(&symphony_core::TrackerConfig) -> T,
+{
     while !stop.is_cancelled() {
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
             tracker_config = current_tracker_config;
-            tracker = LinearTracker::new(tracker_config.clone());
+            tracker = make_tracker(&tracker_config);
         }
-        if let Err(err) = tick(&repo, &tracker, &current_config, Some(&config), &stop).await {
+        if let Err(err) = tick(repo, &tracker, &current_config, Some(config), stop).await {
             error!(error = %err, "worker tick failed");
         }
         let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
@@ -371,7 +406,6 @@ async fn run_worker(
             _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
         }
     }
-    Ok(())
 }
 
 async fn recover<T: TrackerClient>(
@@ -436,6 +470,24 @@ async fn recover<T: TrackerClient>(
     Ok(())
 }
 
+/// Await `fut`, but bail the moment `stop` is cancelled, returning `None`.
+///
+/// The tracker's Linear calls take no cancellation token and can block for
+/// ~15s per attempt (~47s across retries), so a stop issued mid-tick would
+/// otherwise have to wait them out. Wrapping each tracker call lets `tick`
+/// abandon the network wait and unwind through its normal early returns instead
+/// of being force-dropped at an arbitrary await — which would not be
+/// cancellation-safe across [`reserve_and_dispatch`]'s reserve → spawn handoff.
+async fn cancellable<F>(stop: &CancellationToken, fut: F) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::select! {
+        _ = stop.cancelled() => None,
+        output = fut => Some(output),
+    }
+}
+
 async fn tick<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
@@ -443,7 +495,10 @@ async fn tick<T: TrackerClient>(
     latest_config: Option<&SharedRuntimeConfig>,
     stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
-    let active = tracker.fetch_active().await?;
+    let active = match cancellable(stop, tracker.fetch_active()).await {
+        Some(result) => result?,
+        None => return Ok(()),
+    };
     if latest_runtime_config_if_tracker_matches(config, latest_config)
         .await
         .is_none()
@@ -460,7 +515,10 @@ async fn tick<T: TrackerClient>(
         if active_ids.contains(&retry_id) {
             continue;
         }
-        if matches!(tracker.fetch_by_id(&retry_id).await, Ok(None)) {
+        let Some(fetched) = cancellable(stop, tracker.fetch_by_id(&retry_id)).await else {
+            return Ok(());
+        };
+        if matches!(fetched, Ok(None)) {
             repo.clear_retry(&retry_id).await?;
         }
     }
@@ -478,7 +536,10 @@ async fn tick<T: TrackerClient>(
         if active_ids.contains(&issue_id) {
             continue;
         }
-        match tracker.fetch_by_id(&issue_id).await {
+        let Some(fetched) = cancellable(stop, tracker.fetch_by_id(&issue_id)).await else {
+            return Ok(());
+        };
+        match fetched {
             Ok(Some(issue)) => repo.upsert_issues(&[issue]).await?,
             Ok(None) => warn!(
                 issue_id = %issue_id,
@@ -568,7 +629,12 @@ async fn tick<T: TrackerClient>(
         {
             break;
         }
-        if let Some(issue) = tracker.fetch_by_id_for_dispatch(&retry.issue_id).await? {
+        let fetched =
+            match cancellable(stop, tracker.fetch_by_id_for_dispatch(&retry.issue_id)).await {
+                Some(result) => result?,
+                None => return Ok(()),
+            };
+        if let Some(issue) = fetched {
             // The issue may have left the active set since the failed run
             // (e.g. moved to Done); drop the retry rather than keep it queued
             // or dispatch a run nobody asked for.
@@ -2188,6 +2254,89 @@ mod tests {
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "newer-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make newer"));
+    }
+
+    /// A tracker whose `fetch_active` never resolves, standing in for a Linear
+    /// request hung past its timeout.
+    struct BlockingTracker;
+
+    #[async_trait::async_trait]
+    impl TrackerClient for BlockingTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            std::future::pending().await
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_stops_promptly_while_a_tick_is_blocked_on_the_tracker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let tracker_config = config.workflow.front_matter.tracker.clone();
+        let shared: SharedRuntimeConfig = Arc::new(RwLock::new(config));
+        let stop = CancellationToken::new();
+
+        let loop_repo = repo.clone();
+        let loop_config = shared.clone();
+        let loop_stop = stop.clone();
+        let handle = tokio::spawn(async move {
+            run_loop(
+                &loop_repo,
+                &loop_config,
+                &loop_stop,
+                BlockingTracker,
+                tracker_config,
+                |_| BlockingTracker,
+            )
+            .await;
+        });
+
+        // Let the loop enter the tick and park on fetch_active.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        stop.cancel();
+
+        // The tick abandons the never-resolving fetch_active when stop fires
+        // (via `cancellable`) and unwinds, so run_loop returns promptly. Without
+        // that, it would stay parked on fetch_active and this would time out.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("run_loop did not return promptly after stop")
+            .expect("run_loop task panicked");
+    }
+
+    #[tokio::test]
+    async fn cancellable_resolves_until_stop_then_yields_none() {
+        let stop = CancellationToken::new();
+        // Before cancellation it forwards the future's output.
+        assert_eq!(cancellable(&stop, async { 7 }).await, Some(7));
+        stop.cancel();
+        // After cancellation it abandons even a future that never resolves.
+        assert_eq!(
+            cancellable(&stop, std::future::pending::<i32>()).await,
+            None
+        );
     }
 
     #[tokio::test]
