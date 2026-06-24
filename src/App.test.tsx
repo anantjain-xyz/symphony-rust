@@ -503,6 +503,55 @@ describe("App settings", () => {
     });
   });
 
+  it("commits empty settings number fields to zero on blur", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = {
+      ...testSettings(),
+      polling_interval_ms: 60_000,
+      max_concurrent_agents: 3,
+      max_retry_backoff_ms: 300_000,
+      hook_timeout_ms: 30_000,
+      turn_timeout_ms: 3_600_000,
+      linear_api_key_set: true,
+    };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    for (const label of [
+      /^Turn timeout/,
+      /^Polling interval/,
+      /^Max concurrent agents/,
+      /^Max retry backoff/,
+      /^Hook timeout/,
+    ]) {
+      const input = (await screen.findByLabelText(label, {
+        selector: "input",
+      })) as HTMLInputElement;
+      expect(input.required).toBe(true);
+      fireEvent.change(input, { target: { value: "" } });
+      expect(input.value).toBe("");
+      fireEvent.blur(input);
+      await waitFor(() => expect(input.value).toBe("0"));
+    }
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
+    fireEvent.click(saveButton);
+
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings).toMatchObject({
+      turn_timeout_ms: 0,
+      polling_interval_ms: 0,
+      max_concurrent_agents: 0,
+      max_retry_backoff_ms: 0,
+      hook_timeout_ms: 0,
+    });
+  });
+
   it("shows the Linear user next to the assigned-to-me setting", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true };

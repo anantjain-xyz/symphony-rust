@@ -69,6 +69,7 @@ type SettingsNumberInputProps = Omit<
   InputHTMLAttributes<HTMLInputElement>,
   "onChange" | "type" | "value"
 > & {
+  emptyValue?: number;
   minValue: number;
   value: number;
   onValidChange: (value: number) => void;
@@ -76,6 +77,7 @@ type SettingsNumberInputProps = Omit<
 
 function SettingsNumberInput({
   value,
+  emptyValue = 0,
   minValue,
   onValidChange,
   onBlur,
@@ -90,7 +92,13 @@ function SettingsNumberInput({
     if (!focused) setDraft(formattedValue);
   }, [focused, formattedValue]);
 
-  const commitIfValid = (input: HTMLInputElement) => {
+  const commitIfValid = (input: HTMLInputElement, { allowEmpty = false } = {}) => {
+    if (input.value.trim() === "") {
+      if (!allowEmpty) return false;
+      onValidChange(emptyValue);
+      setDraft(String(emptyValue));
+      return true;
+    }
     const n = input.valueAsNumber;
     if (!Number.isFinite(n) || n < minValue) return false;
     onValidChange(n);
@@ -102,6 +110,7 @@ function SettingsNumberInput({
       {...literalInputProps}
       {...inputProps}
       type="number"
+      required
       value={draft}
       onFocus={(event) => {
         setFocused(true);
@@ -113,7 +122,9 @@ function SettingsNumberInput({
       }}
       onBlur={(event) => {
         setFocused(false);
-        if (!commitIfValid(event.currentTarget)) setDraft(formattedValue);
+        if (!commitIfValid(event.currentTarget, { allowEmpty: true })) {
+          setDraft(formattedValue);
+        }
         onBlur?.(event);
       }}
     />
@@ -3499,7 +3510,7 @@ function SettingsView({
           <label>
             Turn timeout (seconds)
             <SettingsNumberInput
-              min={1}
+              min={0}
               minValue={0}
               step="any"
               value={settings.turn_timeout_ms / 1000}
@@ -3771,7 +3782,7 @@ function SettingsView({
           <label>
             Polling interval (seconds)
             <SettingsNumberInput
-              min={1}
+              min={0}
               minValue={0}
               step="any"
               value={settings.polling_interval_ms / 1000}
@@ -3788,8 +3799,8 @@ function SettingsView({
           <label>
             Max concurrent agents
             <SettingsNumberInput
-              min={1}
-              minValue={1}
+              min={0}
+              minValue={0}
               value={settings.max_concurrent_agents}
               disabled={!runtimeAvailable}
               onValidChange={(n) =>
@@ -3820,7 +3831,7 @@ function SettingsView({
           <label>
             Hook timeout (seconds)
             <SettingsNumberInput
-              min={1}
+              min={0}
               minValue={0}
               step="any"
               value={settings.hook_timeout_ms / 1000}
