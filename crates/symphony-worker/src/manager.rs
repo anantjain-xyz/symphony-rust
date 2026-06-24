@@ -330,8 +330,8 @@ async fn run_worker(
 ) -> Result<(), WorkerError> {
     let initial_config = config.read().await.clone();
     repo.upsert_workflow(&initial_config.workflow).await?;
-    let mut tracker_config = initial_config.workflow.front_matter.tracker.clone();
-    let mut tracker = LinearTracker::new(tracker_config.clone());
+    let tracker_config = initial_config.workflow.front_matter.tracker.clone();
+    let tracker = LinearTracker::new(tracker_config.clone());
     tracker.preflight().await?;
     recover(&repo, &tracker, &initial_config).await?;
     let started_at = now_iso();
@@ -354,15 +354,52 @@ async fn run_worker(
         }
     });
 
+    run_loop(&repo, &config, &stop, tracker, tracker_config, |cfg| {
+        LinearTracker::new(cfg.clone())
+    })
+    .await;
+    Ok(())
+}
+
+/// The worker's poll loop: tick, then wait for the next wake/interval/stop,
+/// rebuilding the tracker whenever live reconfiguration changes its settings.
+///
+/// Each iteration races the tick against cancellation so a stop takes effect
+/// immediately rather than waiting out an in-flight Linear request. Each
+/// GraphQL call can block for up to ~15s per attempt (~47s across retries),
+/// and the tracker calls take no cancellation token, so without this race a
+/// stop issued mid-tick leaves the worker stuck in `Stopping` until the network
+/// work returns. Dropping the tick future aborts whatever await it is parked
+/// on; any run it already reserved runs on as its own task under a child of
+/// `stop` and is cancelled alongside the worker.
+///
+/// `make_tracker` builds a tracker from a tracker config; in production it
+/// constructs a [`LinearTracker`], while tests inject a stub.
+async fn run_loop<T, F>(
+    repo: &Repository,
+    config: &SharedRuntimeConfig,
+    stop: &CancellationToken,
+    mut tracker: T,
+    mut tracker_config: symphony_core::TrackerConfig,
+    mut make_tracker: F,
+) where
+    T: TrackerClient,
+    F: FnMut(&symphony_core::TrackerConfig) -> T,
+{
     while !stop.is_cancelled() {
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
             tracker_config = current_tracker_config;
-            tracker = LinearTracker::new(tracker_config.clone());
+            tracker = make_tracker(&tracker_config);
         }
-        if let Err(err) = tick(&repo, &tracker, &current_config, Some(&config), &stop).await {
-            error!(error = %err, "worker tick failed");
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            result = tick(repo, &tracker, &current_config, Some(config), stop) => {
+                if let Err(err) = result {
+                    error!(error = %err, "worker tick failed");
+                }
+            }
         }
         let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
         tokio::select! {
@@ -371,7 +408,6 @@ async fn run_worker(
             _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
         }
     }
-    Ok(())
 }
 
 async fn recover<T: TrackerClient>(
@@ -2188,6 +2224,75 @@ mod tests {
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "newer-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make newer"));
+    }
+
+    /// A tracker whose `fetch_active` never resolves, standing in for a Linear
+    /// request hung past its timeout.
+    struct BlockingTracker;
+
+    #[async_trait::async_trait]
+    impl TrackerClient for BlockingTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            std::future::pending().await
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_stops_promptly_while_a_tick_is_blocked_on_the_tracker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let tracker_config = config.workflow.front_matter.tracker.clone();
+        let shared: SharedRuntimeConfig = Arc::new(RwLock::new(config));
+        let stop = CancellationToken::new();
+
+        let loop_repo = repo.clone();
+        let loop_config = shared.clone();
+        let loop_stop = stop.clone();
+        let handle = tokio::spawn(async move {
+            run_loop(
+                &loop_repo,
+                &loop_config,
+                &loop_stop,
+                BlockingTracker,
+                tracker_config,
+                |_| BlockingTracker,
+            )
+            .await;
+        });
+
+        // Let the loop enter the tick and park on fetch_active.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        stop.cancel();
+
+        // Without racing the tick against cancellation, run_loop would stay
+        // parked on the never-resolving fetch_active and this would time out.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("run_loop did not return promptly after stop")
+            .expect("run_loop task panicked");
     }
 
     #[tokio::test]
