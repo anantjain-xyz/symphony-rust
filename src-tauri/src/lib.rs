@@ -17,10 +17,11 @@ mod path_env;
 mod retro;
 mod settings;
 
+use retro::{parse_report, RetroDetail, RetroManager, RetroStatus};
+#[cfg(debug_assertions)]
 use retro::{
-    parse_report, RetroConfidence, RetroDetail, RetroEvidence, RetroFinding, RetroManager,
-    RetroRepoReport, RetroReport, RetroRunState, RetroSeverity, RetroStatus, RetroSuggestion,
-    RetroSuggestionTarget,
+    RetroConfidence, RetroEvidence, RetroFinding, RetroRepoReport, RetroReport, RetroRunState,
+    RetroSeverity, RetroSuggestion, RetroSuggestionTarget,
 };
 pub use settings::AppSettings;
 use settings::{default_prompt_template, parse_settings, workflow_from_settings};
