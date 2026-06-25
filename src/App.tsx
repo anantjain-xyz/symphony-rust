@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type { InputHTMLAttributes } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -63,6 +64,72 @@ const literalInputProps = {
   autoCapitalize: "none",
   spellCheck: false,
 } as const;
+
+type SettingsNumberInputProps = Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "onChange" | "type" | "value"
+> & {
+  emptyValue?: number;
+  minValue: number;
+  value: number;
+  onValidChange: (value: number) => void;
+};
+
+function SettingsNumberInput({
+  value,
+  emptyValue = 0,
+  minValue,
+  onValidChange,
+  onBlur,
+  onFocus,
+  ...inputProps
+}: SettingsNumberInputProps) {
+  const formattedValue = String(value);
+  const [draft, setDraft] = useState(formattedValue);
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setDraft(formattedValue);
+  }, [focused, formattedValue]);
+
+  const commitIfValid = (input: HTMLInputElement, { allowEmpty = false } = {}) => {
+    if (input.value.trim() === "") {
+      if (!allowEmpty) return false;
+      onValidChange(emptyValue);
+      setDraft(String(emptyValue));
+      return true;
+    }
+    const n = input.valueAsNumber;
+    if (!Number.isFinite(n) || n < minValue) return false;
+    onValidChange(n);
+    return true;
+  };
+
+  return (
+    <input
+      {...literalInputProps}
+      {...inputProps}
+      type="number"
+      required
+      value={draft}
+      onFocus={(event) => {
+        setFocused(true);
+        onFocus?.(event);
+      }}
+      onChange={(event) => {
+        setDraft(event.currentTarget.value);
+        commitIfValid(event.currentTarget);
+      }}
+      onBlur={(event) => {
+        setFocused(false);
+        if (!commitIfValid(event.currentTarget, { allowEmpty: true })) {
+          setDraft(formattedValue);
+        }
+        onBlur?.(event);
+      }}
+    />
+  );
+}
 const BUNDLED_SKILL_NAMES = [
   "symphony-commit",
   "symphony-land",
@@ -3442,17 +3509,15 @@ function SettingsView({
           ) : null}
           <label>
             Turn timeout (seconds)
-            <input
-              type="number"
-              min={1}
+            <SettingsNumberInput
+              min={0}
+              minValue={0}
               step="any"
               value={settings.turn_timeout_ms / 1000}
               disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const n = e.currentTarget.valueAsNumber;
-                if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) });
-              }}
+              onValidChange={(n) =>
+                setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) })
+              }
             />
             <small className="hint">
               Max time for one agent turn. 3600 = 1 hour.
@@ -3716,17 +3781,15 @@ function SettingsView({
           <h3>Worker</h3>
           <label>
             Polling interval (seconds)
-            <input
-              type="number"
-              min={1}
+            <SettingsNumberInput
+              min={0}
+              minValue={0}
               step="any"
               value={settings.polling_interval_ms / 1000}
               disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const n = e.currentTarget.valueAsNumber;
-                if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) });
-              }}
+              onValidChange={(n) =>
+                setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) })
+              }
             />
             <small className="hint">
               How often Linear is polled for issues. Applies after Save; the live
@@ -3735,16 +3798,14 @@ function SettingsView({
           </label>
           <label>
             Max concurrent agents
-            <input
-              type="number"
-              min={1}
+            <SettingsNumberInput
+              min={0}
+              minValue={0}
               value={settings.max_concurrent_agents}
               disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const n = e.currentTarget.valueAsNumber;
-                if (Number.isFinite(n) && n >= 1)
-                  setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) });
-              }}
+              onValidChange={(n) =>
+                setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) })
+              }
             />
             <small className="hint">
               Issues worked on in parallel. Applies to future dispatch decisions;
@@ -3753,17 +3814,15 @@ function SettingsView({
           </label>
           <label>
             Max retry backoff (seconds)
-            <input
-              type="number"
+            <SettingsNumberInput
               min={0}
+              minValue={0}
               step="any"
               value={settings.max_retry_backoff_ms / 1000}
               disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const n = e.currentTarget.valueAsNumber;
-                if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, max_retry_backoff_ms: Math.round(n * 1000) });
-              }}
+              onValidChange={(n) =>
+                setSettings({ ...settings, max_retry_backoff_ms: Math.round(n * 1000) })
+              }
             />
             <small className="hint">
               Cap on the delay between retries of a failed run. 300 = 5 min.
@@ -3771,17 +3830,15 @@ function SettingsView({
           </label>
           <label>
             Hook timeout (seconds)
-            <input
-              type="number"
-              min={1}
+            <SettingsNumberInput
+              min={0}
+              minValue={0}
               step="any"
               value={settings.hook_timeout_ms / 1000}
               disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const n = e.currentTarget.valueAsNumber;
-                if (Number.isFinite(n) && n >= 0)
-                  setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) });
-              }}
+              onValidChange={(n) =>
+                setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) })
+              }
             />
             <small className="hint">
               Max time for each hook script. Applies to hooks that start after
