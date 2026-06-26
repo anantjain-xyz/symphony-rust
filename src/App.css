@@ -573,9 +573,11 @@ small {
 .retro-repo-card > header {
   align-items: baseline;
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: space-between;
   margin-bottom: 14px;
+  min-width: 0;
 }
 
 .retro-repo-title {
@@ -608,12 +610,14 @@ small {
   display: grid;
   gap: 0;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
 }
 
 .retro-columns > section {
   display: grid;
   align-content: start;
   gap: 12px;
+  min-width: 0;
   padding: 0;
 }
 
@@ -635,12 +639,14 @@ small {
 .retro-list {
   display: grid;
   gap: 0;
+  min-width: 0;
 }
 
 .retro-item {
   border-bottom: 1px solid var(--border);
   display: grid;
   gap: 7px;
+  min-width: 0;
   padding: 0 0 14px;
 }
 
@@ -656,28 +662,43 @@ small {
 .retro-item-head {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .retro-item-head strong {
+  flex: 1 1 180px;
   font-size: 13px;
   line-height: 1.35;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .retro-item p {
   color: var(--foreground);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.retro-item small {
+  overflow-wrap: anywhere;
 }
 
 .retro-target {
   background: var(--muted);
   border-radius: 999px;
   color: var(--muted-foreground);
-  flex: 0 0 auto;
+  display: inline-block;
+  flex: 0 1 auto;
   font-size: 11px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 2px 8px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -694,12 +715,14 @@ small {
   border-radius: 6px;
   display: grid;
   gap: 3px;
+  min-width: 0;
   padding: 7px;
 }
 
 .retro-evidence code {
   font-family: var(--font-mono);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .retro-evidence span {
@@ -2196,6 +2219,23 @@ textarea.mono-input {
   .content-viewport .panel-scroll,
   .content-viewport .events {
     max-height: 60vh;
+  }
+}
+
+@media (max-width: 720px) {
+  .retro-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .retro-columns > section:first-child {
+    padding-right: 0;
+  }
+
+  .retro-columns > section + section {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding-left: 0;
+    padding-top: 16px;
   }
 }
 
