@@ -932,10 +932,18 @@ impl Repository {
               ls.input_tokens,
               ls.output_tokens,
               ls.total_tokens,
-              max(ls.last_event_at, coalesce(latest.created_at, ls.last_event_at)) as last_event_at,
+              max(
+                ls.last_event_at,
+                coalesce((
+                  select e.created_at
+                  from agent_events e
+                  where e.run_id = ls.run_id
+                  order by e.id desc
+                  limit 1
+                ), ls.last_event_at)
+              ) as last_event_at,
               ls.started_at
             from live_sessions ls
-            left join agent_events_latest latest on latest.run_id = ls.run_id
             "#,
         )
         .fetch_all(&self.pool)
