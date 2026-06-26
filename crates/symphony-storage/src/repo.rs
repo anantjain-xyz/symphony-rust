@@ -922,9 +922,32 @@ impl Repository {
                 Some(20),
             )
             .await?;
-        let live_sessions = sqlx::query_as::<_, LiveSessionRow>("select * from live_sessions")
-            .fetch_all(&self.pool)
-            .await?;
+        let live_sessions = sqlx::query_as::<_, LiveSessionRow>(
+            r#"
+            select
+              ls.run_id,
+              ls.session_id,
+              ls.thread_id,
+              ls.turn_id,
+              ls.input_tokens,
+              ls.output_tokens,
+              ls.total_tokens,
+              max(
+                ls.last_event_at,
+                coalesce((
+                  select e.created_at
+                  from agent_events e
+                  where e.run_id = ls.run_id
+                  order by e.id desc
+                  limit 1
+                ), ls.last_event_at)
+              ) as last_event_at,
+              ls.started_at
+            from live_sessions ls
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
         let worker_heartbeat = sqlx::query_as::<_, WorkerHeartbeatRow>(
             "select * from worker_heartbeat where id = 'worker'",
         )
@@ -1843,5 +1866,53 @@ mod tests {
                 session.run_id
             );
         }
+    }
+
+    #[tokio::test]
+    async fn overview_last_activity_uses_latest_agent_event() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        repo.upsert_live_session(
+            &run.id,
+            "sess",
+            "thread",
+            "turn",
+            &TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("update live_sessions set last_event_at = ?1 where run_id = ?2")
+            .bind("2026-01-01T00:00:00.000Z")
+            .bind(&run.id)
+            .execute(repo.pool())
+            .await
+            .unwrap();
+
+        let event = repo
+            .append_event(
+                &run.id,
+                AgentEventKind::Status,
+                &serde_json::json!({ "message": "still working" }),
+            )
+            .await
+            .unwrap();
+
+        let overview = repo.overview().await.unwrap();
+        let session = overview
+            .live_sessions
+            .iter()
+            .find(|session| session.run_id == run.id)
+            .expect("live session should be present");
+        assert_eq!(session.last_event_at, event.created_at);
     }
 }
