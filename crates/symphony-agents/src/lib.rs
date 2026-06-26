@@ -1189,9 +1189,42 @@ fn spawn_shell_command(
     for (key, value) in envs {
         cmd.env(key, value);
     }
+    // Put the agent in its own process group (the /bin/sh leader becomes the
+    // group leader). The agent CLI spawns its own tree -- MCP servers, language
+    // servers, bash subshells -- and on cancel/timeout we kill the whole group
+    // by negative PID. Without this, killing only the shell reparents the agent
+    // tree to init, leaving an orphaned run that keeps mutating the workspace.
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.spawn().map_err(AgentError::Spawn)
 }
 
+#[cfg(unix)]
+async fn kill_pid(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    // The pid is the /bin/sh leader of the agent's process group (see
+    // spawn_shell_command). A negative target signals the whole group, so the
+    // agent CLI and every process it spawned receive the signal -- not just the
+    // shell, whose children would otherwise be reparented to init and survive.
+    let group = format!("-{pid}");
+    let _ = Command::new("/bin/kill")
+        .arg("-TERM")
+        .arg(&group)
+        .status()
+        .await;
+    // Give the group a moment to exit gracefully, then force-kill survivors
+    // (e.g. an agent wedged in a tool call that ignores SIGTERM).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = Command::new("/bin/kill")
+        .arg("-KILL")
+        .arg(&group)
+        .status()
+        .await;
+}
+
+#[cfg(not(unix))]
 async fn kill_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -1884,5 +1917,40 @@ mod tests {
             detect_cursor_rate_limit("Updated the rate limit docs and tests; all passing.")
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_pid_terminates_whole_process_group() {
+        // A shell leader that ignores TERM and backgrounds a stubborn child
+        // that also ignores TERM -- modelling a wedged agent whose subprocess
+        // tree would otherwise be reparented to init when only the leader is
+        // signalled. kill_pid must take down the whole group.
+        let script = r#"trap "" TERM
+(trap "" TERM; while true; do /bin/sleep 0.05; done) &
+echo started
+wait"#;
+        let mut child = spawn_shell_command(script, &[], &std::env::temp_dir(), &[])
+            .expect("spawn stubborn group");
+        let pid = child.id().expect("leader pid");
+
+        // Wait until the group is fully up before signalling it.
+        let stdout = child.stdout.take().expect("stdout");
+        let mut lines = BufReader::new(stdout).lines();
+        lines.next_line().await.expect("read marker");
+
+        kill_pid(Some(pid)).await;
+        // Reap the leader so the group is fully torn down before we assert.
+        let _ = child.wait().await;
+
+        // A negative pid targets the whole group; with it gone, kill -0 fails.
+        let alive = Command::new("/bin/kill")
+            .arg("-0")
+            .arg(format!("-{pid}"))
+            .status()
+            .await
+            .expect("kill -0")
+            .success();
+        assert!(!alive, "process group {pid} should be dead after kill_pid");
     }
 }
