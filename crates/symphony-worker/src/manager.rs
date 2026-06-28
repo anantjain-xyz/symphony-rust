@@ -8,6 +8,7 @@ use std::{
 };
 use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+    OpencodeRunOptions,
 };
 use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
@@ -1051,6 +1052,7 @@ where
             AgentBackend::Codex => config.workflow.front_matter.codex.command.clone(),
             AgentBackend::Claude => config.workflow.front_matter.claude.command.clone(),
             AgentBackend::Cursor => config.workflow.front_matter.cursor.command.clone(),
+            AgentBackend::Opencode => config.workflow.front_matter.opencode.command.clone(),
         },
         cwd: workspace.path.clone(),
         prompt,
@@ -1066,6 +1068,7 @@ where
             AgentBackend::Codex => config.workflow.front_matter.codex.turn_timeout_ms,
             AgentBackend::Claude => config.workflow.front_matter.claude.turn_timeout_ms,
             AgentBackend::Cursor => config.workflow.front_matter.cursor.turn_timeout_ms,
+            AgentBackend::Opencode => config.workflow.front_matter.opencode.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: config.workflow.front_matter.claude.permission_mode.clone(),
@@ -1081,6 +1084,10 @@ where
             approve_mcps: config.workflow.front_matter.cursor.approve_mcps,
             sandbox: config.workflow.front_matter.cursor.sandbox.clone(),
             model: config.workflow.front_matter.cursor.model.clone(),
+        },
+        opencode: OpencodeRunOptions {
+            model: config.workflow.front_matter.opencode.model.clone(),
+            agent: config.workflow.front_matter.opencode.agent.clone(),
         },
         env: agent_env(&env, &config.session_env),
     };

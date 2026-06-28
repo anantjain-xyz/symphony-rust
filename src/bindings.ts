@@ -1,6 +1,6 @@
 // Initial bindings. In dev builds, src-tauri rewrites this file from Rust Specta types.
 
-export type AgentBackend = "codex" | "claude" | "cursor";
+export type AgentBackend = "codex" | "claude" | "cursor" | "opencode";
 
 export type ApprovalPolicy = "never" | "on-request" | "on-failure" | "always";
 
@@ -72,6 +72,9 @@ export type AppSettings = {
   cursor_approve_mcps: boolean;
   cursor_sandbox: CursorSandboxMode;
   cursor_model: string | null;
+  opencode_command: string | null;
+  opencode_model: string | null;
+  opencode_agent: string | null;
   linear_api_key_set: boolean;
 };
 
@@ -100,9 +103,11 @@ export type ValidationResult = {
   codex_found: boolean;
   claude_found: boolean;
   cursor_found: boolean;
+  opencode_found: boolean;
   codex_command: string;
   claude_command: string;
   cursor_command: string;
+  opencode_command: string;
   app_data_dir: string;
   database_path: string;
 };

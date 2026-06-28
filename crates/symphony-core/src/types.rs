@@ -9,6 +9,7 @@ pub enum AgentBackend {
     Codex,
     Claude,
     Cursor,
+    Opencode,
 }
 
 impl AgentBackend {
@@ -19,6 +20,7 @@ impl AgentBackend {
             AgentBackend::Codex => "codex",
             AgentBackend::Claude => "claude",
             AgentBackend::Cursor => "cursor",
+            AgentBackend::Opencode => "opencode",
         }
     }
 }
@@ -396,6 +398,33 @@ fn default_cursor_command() -> String {
     "agent".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+pub struct OpencodeConfig {
+    #[serde(default = "default_opencode_command")]
+    pub command: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default = "default_turn_timeout_ms")]
+    pub turn_timeout_ms: u64,
+}
+
+impl Default for OpencodeConfig {
+    fn default() -> Self {
+        Self {
+            command: default_opencode_command(),
+            model: None,
+            agent: None,
+            turn_timeout_ms: default_turn_timeout_ms(),
+        }
+    }
+}
+
+fn default_opencode_command() -> String {
+    "opencode".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -417,6 +446,8 @@ pub struct WorkflowFrontMatter {
     pub claude: ClaudeConfig,
     #[serde(default)]
     pub cursor: CursorConfig,
+    #[serde(default)]
+    pub opencode: OpencodeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

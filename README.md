@@ -1,6 +1,6 @@
 # Symphony
 
-**An autonomous engineering team for your Linear project.** Symphony is a desktop app that watches your Linear board and dispatches coding agents — [Codex](https://github.com/openai/codex), [Claude Code](https://claude.com/claude-code), or [Cursor](https://cursor.com/docs/cli/overview) — to work on issues, each in its own freshly cloned workspace. You triage and review; Symphony orchestrates. Based on the [spec](https://github.com/openai/symphony/blob/main/SPEC.md) from OpenAI.
+**An autonomous engineering team for your Linear project.** Symphony is a desktop app that watches your Linear board and dispatches coding agents — [Codex](https://github.com/openai/codex), [Claude Code](https://claude.com/claude-code), [Cursor](https://cursor.com/docs/cli/overview), or [OpenCode](https://opencode.ai/docs/cli/) — to work on issues, each in its own freshly cloned workspace. You triage and review; Symphony orchestrates. Based on the [spec](https://github.com/openai/symphony/blob/main/SPEC.md) from OpenAI.
 
 **[⬇ Download for macOS](https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/Symphony.dmg)** (Apple Silicon) · [![Latest release](https://img.shields.io/github/v/release/anantjain-xyz/symphony-rust)](https://github.com/anantjain-xyz/symphony-rust/releases/latest)
 
@@ -13,7 +13,7 @@
 
 1. **Poll** — a local worker polls Linear for issues in the states you mark as active (e.g. `Todo`, `In Progress`, `Rework`).
 2. **Prepare** — for each issue, Symphony creates an isolated workspace and runs your `after_create` hook (typically `git clone` + dependency install).
-3. **Dispatch** — it renders your prompt template with the issue's identifier, title, state, and description, then drives a Codex, Claude Code, or Cursor agent session natively over their structured event streams.
+3. **Dispatch** — it renders your prompt template with the issue's identifier, title, state, and description, then drives a Codex, Claude Code, Cursor, or OpenCode agent session natively over their structured event streams.
 4. **Track** — agent events, token counts, retries, failures, and provider rate-limit signals are recorded in a local SQLite database and streamed live to the dashboard.
 5. **Retry** — failed runs are retried with exponential backoff, and the retry prompt includes the previous run's error context.
 
@@ -27,6 +27,7 @@ Everything runs on your machine. The only network calls are to Linear's API and 
   - `codex` — OpenAI Codex CLI
   - `claude` — Claude Code CLI
   - `agent` — Cursor Agent CLI (`cursor-agent` also works)
+  - `opencode` — OpenCode CLI
 - `git`, plus whatever your repository's install step needs
 
 ## Getting started
@@ -58,7 +59,7 @@ Symphony's behavior is configured entirely in *Settings* — no config file to e
 
 - **Repositories** — the Git repos runs clone, each with its own install command, plus where per-run workspaces are created (one folder per repo, then per issue). Every issue routes to exactly one repo, first match wins: a `repo:<name>` label or bare `<name>` label on the issue in Linear, then the repo claiming the issue's Linear project, then the repo claiming its team key (e.g. `ENG`), then the repo marked *default*. The default is optional; without a matching label, project rule, team rule, or default, the issue is skipped. An issue whose `repo:` label matches no configured repo is skipped — an explicit label is never silently rerouted. Every run records the repo it was dispatched to; with several repos configured the dashboard tags runs with it and the Runs view can filter by repo.
 - **Linear** — API key (keychain), optional workspace/project/team filters, and the workflow states that drive dispatch: issues in an *active state* (e.g. `Todo`, `In Progress`, `Rework`, `Merging`) get an agent; issues in a *terminal state* (e.g. `Done`, `Canceled`) are left alone.
-- **Agent** — which CLI runs issues (`codex`, `claude`, or `cursor`), an optional launch command (wrappers with arguments like `mycode --agent claude` are fine; Symphony appends its own flags), the per-turn timeout, custom session environment variables (e.g. `CURSOR_API_KEY` for Cursor), and the backend's options: approval policy, thread sandbox, and network access for Codex; permission mode and allowed/disallowed tool rules for Claude Code; mode, force/trust, sandbox, and optional model for Cursor.
+- **Agent** — which CLI runs issues (`codex`, `claude`, `cursor`, or `opencode`), an optional launch command (wrappers with arguments like `mycode --agent claude` are fine; Symphony appends its own flags), the per-turn timeout, custom session environment variables (e.g. `CURSOR_API_KEY` for Cursor), and the backend's options: approval policy, thread sandbox, and network access for Codex; permission mode and allowed/disallowed tool rules for Claude Code; mode, force/trust, sandbox, and optional model for Cursor; optional model and OpenCode agent for OpenCode.
 - **Worker** — polling interval, max concurrent agents, retry backoff cap, and the lifecycle hooks (under *Hooks (advanced)*): `after_create`, `before_run`, `after_run`, `before_remove`. Hooks are shell scripts that run in the workspace with `$REPO_URL`, `$REPO_NAME`, `$ISSUE_ID`, `$ISSUE_IDENTIFIER`, `$ISSUE_TITLE`, `$ISSUE_STATE`, `$ISSUE_BRANCH`, `$RUN_NUMBER`, `$SYMPHONY_INSTALL_CMD`, and `$SYMPHONY_HOOK` in their environment; the repo variables reflect the repo the issue routed to.
 
 The **prompt template** at the bottom of Settings is the instruction document sent to the agent for each issue. Placeholders in `{{...}}` form are rendered from the Linear issue when a run starts; the reference panel next to the editor lists them and inserts one at the cursor on click:
@@ -83,7 +84,7 @@ Retried runs automatically get a `## Retry context` section appended with the pr
 - Your Linear API key lives in the **OS keychain**, not in a file.
 - Custom session environment variables are saved in `settings.json` and injected into agent sessions alongside Symphony's runtime variables like `$LINEAR_API_KEY`, `$REPO_URL`, and `$REPO_NAME`.
 - Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/xyz.anantjain.symphony` on macOS), alongside daily-rotated logs and per-run workspaces.
-- Agents run with the sandbox/permission settings you give them under *Settings → Agent*. The defaults (`approval_policy: never`, `permission_mode: auto`, network access on for Codex, `force` + `trust` on for Cursor) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
+- Agents run with the sandbox/permission settings you give them under *Settings → Agent*. The defaults (`approval_policy: never`, `permission_mode: auto`, network access on for Codex, `force` + `trust` on for Cursor, and auto-approved OpenCode permissions) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
 
 ## Architecture
 
@@ -92,7 +93,7 @@ Retried runs automatically get a `## Retry context` section appended with the pr
 - `crates/symphony-core` — domain types, workflow config, prompt rendering
 - `crates/symphony-storage` — SQLite schema, repository, broadcast event bus
 - `crates/symphony-tracker` — Linear GraphQL client and issue normalization
-- `crates/symphony-agents` — native Codex, Claude, and Cursor process drivers
+- `crates/symphony-agents` — native Codex, Claude, Cursor, and OpenCode process drivers
 - `crates/symphony-worker` — recovery, polling loop, retries, hooks, workspace lifecycle
 
 ## Building

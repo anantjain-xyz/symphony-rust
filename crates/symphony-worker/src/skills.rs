@@ -16,6 +16,7 @@ use std::{
 };
 use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+    OpencodeRunOptions,
 };
 use symphony_core::{
     AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
@@ -583,6 +584,7 @@ fn install_run_request(
             AgentBackend::Codex => front.codex.command.clone(),
             AgentBackend::Claude => front.claude.command.clone(),
             AgentBackend::Cursor => front.cursor.command.clone(),
+            AgentBackend::Opencode => front.opencode.command.clone(),
         },
         cwd: workspace.to_path_buf(),
         prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
@@ -593,6 +595,7 @@ fn install_run_request(
             AgentBackend::Codex => front.codex.turn_timeout_ms,
             AgentBackend::Claude => front.claude.turn_timeout_ms,
             AgentBackend::Cursor => front.cursor.turn_timeout_ms,
+            AgentBackend::Opencode => front.opencode.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: ClaudePermissionMode::Auto,
@@ -614,6 +617,10 @@ fn install_run_request(
             // Honor the user's configured model so installs behave like
             // ordinary Cursor runs.
             model: front.cursor.model.clone(),
+        },
+        opencode: OpencodeRunOptions {
+            model: front.opencode.model.clone(),
+            agent: front.opencode.agent.clone(),
         },
         env: config
             .session_env
@@ -783,7 +790,7 @@ fn install_prompt(repo_url: &str, default_branch: &str, skills: &[SkillFile]) ->
     format!(
         r#"You are bootstrapping Symphony's agent skills in this repository so Symphony-dispatched agents can use them.
 
-This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it. Cursor loads skills from `{skills_dir}` automatically and does not need a separate discovery path.
+This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch}`. The skill files have already been written to `{skills_dir}/<name>/SKILL.md`: {names}. Claude Code discovery uses `{claude_dir}` — fresh installs link that path to `{skills_dir}`, while repos that already had a real `{claude_dir}` directory receive per-skill compatibility entries inside it. Cursor and OpenCode load skills from `{skills_dir}` automatically and do not need a separate discovery path.
 
 Do the following, in order:
 
@@ -1030,6 +1037,11 @@ mod tests {
                     model: Some("sonnet-4-thinking".to_string()),
                     ..Default::default()
                 },
+                opencode: symphony_core::OpencodeConfig {
+                    model: Some("anthropic/claude-sonnet-4-5".to_string()),
+                    agent: Some("build".to_string()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             "body".to_string(),
@@ -1068,6 +1080,11 @@ mod tests {
         assert_eq!(request.cursor.model.as_deref(), Some("sonnet-4-thinking"));
         // The Cursor sandbox is pinned open so the install can reach the remote.
         assert_eq!(request.cursor.sandbox, CursorSandboxMode::Disabled);
+        assert_eq!(
+            request.opencode.model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(request.opencode.agent.as_deref(), Some("build"));
         assert!(request.prompt.contains("targeting `master`"));
     }
 

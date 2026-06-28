@@ -7,7 +7,7 @@ Thanks for your interest in improving Symphony! This guide covers the developmen
 - **Rust** (stable) — `rustup` recommended
 - **Node.js** ≥ 20 and **pnpm**
 - macOS: Xcode Command Line Tools (`xcode-select --install`)
-- Optional, for end-to-end runs: the `codex` and/or `claude` CLIs, authenticated
+- Optional, for end-to-end runs: one or more supported agent CLIs (`codex`, `claude`, `agent`/`cursor-agent`, or `opencode`), authenticated
 
 ## Development
 

@@ -41,6 +41,7 @@ pub struct AgentRunRequest {
     pub turn_timeout_ms: u64,
     pub claude: ClaudeRunOptions,
     pub cursor: CursorRunOptions,
+    pub opencode: OpencodeRunOptions,
     /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
     /// which lives in the OS keychain and is absent from the inherited env).
     pub env: Vec<(String, String)>,
@@ -63,6 +64,12 @@ pub struct CursorRunOptions {
     pub approve_mcps: bool,
     pub sandbox: CursorSandboxMode,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OpencodeRunOptions {
+    pub model: Option<String>,
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,7 @@ impl AgentDriver for NativeAgentDriver {
             AgentBackend::Codex => run_codex(request, events, cancel).await,
             AgentBackend::Claude => run_claude(request, events, cancel).await,
             AgentBackend::Cursor => run_cursor(request, events, cancel).await,
+            AgentBackend::Opencode => run_opencode(request, events, cancel).await,
         }
     }
 }
@@ -1154,6 +1162,333 @@ fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
     })
 }
 
+async fn run_opencode(
+    request: AgentRunRequest,
+    events: AgentEventSender,
+    cancel: CancellationToken,
+) -> Result<AgentRunResult, AgentError> {
+    let fallback_session_id = format!("oc_{}", Uuid::new_v4());
+    let turn_id = format!("ot_{}", Uuid::new_v4());
+    let mut args = vec![
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        "--dir".to_string(),
+        request.cwd.display().to_string(),
+        "--dangerously-skip-permissions".to_string(),
+    ];
+    if let Some(model) = &request.opencode.model {
+        let model = model.trim();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    if let Some(agent) = &request.opencode.agent {
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            args.push("--agent".to_string());
+            args.push(agent.to_string());
+        }
+    }
+
+    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
+    let pid = child.id();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(request.prompt.as_bytes()).await?;
+    }
+    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut stream = OpencodeStreamState::new(
+        fallback_session_id,
+        turn_id,
+        request.opencode.model.clone(),
+        request.opencode.agent.clone(),
+    );
+
+    let run = async {
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&line)?;
+            stream.push(value, &events).await?;
+        }
+        child.wait().await.map_err(AgentError::Io)
+    };
+
+    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
+    tokio::pin!(timeout);
+    let status = tokio::select! {
+        outcome = run => outcome?,
+        _ = &mut timeout => {
+            kill_pid(pid).await;
+            return Err(AgentError::Timeout(request.turn_timeout_ms));
+        }
+        _ = cancel.cancelled() => {
+            kill_pid(pid).await;
+            return Ok(AgentRunResult {
+                thread_id: stream.session_id.clone(),
+                turn_id: stream.turn_id.clone(),
+                outcome: AgentOutcome::Cancelled,
+                error_class: Some("cancelled".to_string()),
+                error_message: Some("run cancelled".to_string()),
+            });
+        }
+    };
+
+    let failed = !status.success() || stream.error_class.is_some();
+    Ok(AgentRunResult {
+        thread_id: stream.session_id.clone(),
+        turn_id: stream.turn_id.clone(),
+        outcome: if failed {
+            AgentOutcome::Failure
+        } else {
+            AgentOutcome::Success
+        },
+        error_class: if !status.success() {
+            Some("nonzero_exit".to_string())
+        } else {
+            stream.error_class
+        },
+        error_message: if !status.success() {
+            Some(format!("opencode exit {status}"))
+        } else {
+            stream.error_message
+        },
+    })
+}
+
+struct OpencodeStreamState {
+    session_id: String,
+    turn_id: String,
+    started: bool,
+    model: Option<String>,
+    agent: Option<String>,
+    error_class: Option<String>,
+    error_message: Option<String>,
+}
+
+impl OpencodeStreamState {
+    fn new(
+        fallback_session_id: String,
+        turn_id: String,
+        model: Option<String>,
+        agent: Option<String>,
+    ) -> Self {
+        Self {
+            session_id: fallback_session_id,
+            turn_id,
+            started: false,
+            model,
+            agent,
+            error_class: None,
+            error_message: None,
+        }
+    }
+
+    async fn push(&mut self, ev: Value, events: &AgentEventSender) -> Result<(), AgentError> {
+        self.note_session(&ev, events).await;
+        match ev["type"].as_str().unwrap_or_default() {
+            "text" => {
+                let text = ev["part"]["text"].as_str().unwrap_or_default().trim();
+                if !text.is_empty() {
+                    send_status(events, truncate(text, 2000)).await;
+                }
+            }
+            "reasoning" => {
+                let text = ev["part"]["text"].as_str().unwrap_or_default().trim();
+                if !text.is_empty() {
+                    send_status(events, format!("Thinking: {}", truncate(text, 2000))).await;
+                }
+            }
+            "tool_use" => {
+                let (tool, args, call_id, summary) = opencode_tool_call_fields(&ev);
+                let payload = serde_json::to_value(ToolCallPayload {
+                    tool,
+                    args,
+                    call_id,
+                    result_summary: summary.clone(),
+                })?;
+                send_mapped(
+                    events,
+                    MappedAgentEvent {
+                        kind: AgentEventKind::ToolCall,
+                        payload,
+                        humanized: summary,
+                        tokens: None,
+                        rate_limit: None,
+                        session_info: None,
+                    },
+                )
+                .await;
+            }
+            "step_start" => send_status(events, "Step started").await,
+            "step_finish" => {
+                if let Some(tokens) = opencode_token_count(&ev) {
+                    send_token_count(events, tokens).await?;
+                }
+            }
+            "error" => {
+                let (class, message) =
+                    opencode_error_fields(ev.get("error").unwrap_or(&Value::Null));
+                if let Some(limit) = detect_opencode_rate_limit(&message) {
+                    send_rate_limit(events, limit).await?;
+                    self.error_class = Some("rate_limited".to_string());
+                    self.error_message = Some(truncate(&message, 1000));
+                } else {
+                    self.error_class = Some(class.clone());
+                    self.error_message = Some(truncate(&message, 1000));
+                }
+                send_error(events, &class, &message).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn note_session(&mut self, ev: &Value, events: &AgentEventSender) {
+        if let Some(session_id) = ev["sessionID"].as_str() {
+            self.session_id = session_id.to_string();
+        }
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let mut message = format!("OpenCode session {} started", self.session_id);
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            message.push_str(&format!(" · {model}"));
+        }
+        if let Some(agent) = self
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            message.push_str(&format!(" · {agent}"));
+        }
+        let session_info = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|model| SessionInfoPayload {
+                model: Some(model.to_string()),
+                ..Default::default()
+            });
+        send_mapped(
+            events,
+            MappedAgentEvent {
+                kind: AgentEventKind::Status,
+                payload: json!({ "message": message }),
+                humanized: Some(message),
+                tokens: None,
+                rate_limit: None,
+                session_info,
+            },
+        )
+        .await;
+    }
+}
+
+fn opencode_tool_call_fields(
+    ev: &Value,
+) -> (String, Option<Value>, Option<String>, Option<String>) {
+    let part = ev.get("part").unwrap_or(ev);
+    let state = part.get("state").unwrap_or(&Value::Null);
+    let tool = part["tool"].as_str().unwrap_or("tool").to_string();
+    let call_id = part["callID"].as_str().map(ToOwned::to_owned);
+    let args = state.get("input").cloned();
+    let status = state["status"].as_str().unwrap_or_default();
+    let summary = match status {
+        "completed" => state["title"]
+            .as_str()
+            .filter(|title| !title.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                state["output"]
+                    .as_str()
+                    .filter(|output| !output.trim().is_empty())
+                    .map(|output| truncate(output, 1000))
+            })
+            .or_else(|| Some(format!("{tool} completed"))),
+        "error" => Some(format!(
+            "error: {}",
+            state["error"].as_str().unwrap_or("tool failed")
+        )),
+        "running" => state["title"]
+            .as_str()
+            .filter(|title| !title.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| Some(format!("{tool} running"))),
+        "pending" => Some(format!("{tool} pending")),
+        _ => None,
+    };
+    (tool, args, call_id, summary)
+}
+
+fn opencode_token_count(ev: &Value) -> Option<TokenCountPayload> {
+    let tokens = ev.get("part")?.get("tokens")?;
+    let input = number_field(tokens, "input")?;
+    let output = number_field(tokens, "output")?;
+    let reasoning = number_field(tokens, "reasoning").unwrap_or(0);
+    let total = number_field(tokens, "total").unwrap_or(input + output + reasoning);
+    Some(TokenCountPayload {
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+    })
+    .filter(|tokens| tokens.input_tokens > 0 || tokens.output_tokens > 0 || tokens.total_tokens > 0)
+}
+
+fn number_field(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|n| n.round() as i64))
+    })
+}
+
+fn opencode_error_fields(error: &Value) -> (String, String) {
+    let class = error["name"]
+        .as_str()
+        .or_else(|| error["type"].as_str())
+        .unwrap_or("opencode_error")
+        .to_string();
+    let message = error
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| error["data"]["message"].as_str().map(ToOwned::to_owned))
+        .or_else(|| error["message"].as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| {
+            if error.is_null() {
+                "OpenCode error".to_string()
+            } else {
+                error.to_string()
+            }
+        });
+    (class, message)
+}
+
+fn detect_opencode_rate_limit(text: &str) -> Option<RateLimitPayload> {
+    let lower = text.trim().to_lowercase();
+    let hit = lower.starts_with("api error: 429")
+        || (lower.starts_with("api error:") && lower.contains("rate_limit"))
+        || lower.starts_with("rate limit exceeded")
+        || lower.starts_with("usage limit reached")
+        || lower.starts_with("you've reached your usage limit");
+    hit.then(|| RateLimitPayload {
+        source: "opencode".to_string(),
+        remaining: None,
+        reset_at: None,
+    })
+}
+
 fn spawn_shell_command(
     command: &str,
     args: &[String],
@@ -1917,6 +2252,144 @@ mod tests {
             detect_cursor_rate_limit("Updated the rate limit docs and tests; all passing.")
                 .is_none()
         );
+    }
+
+    fn opencode_stream() -> (
+        OpencodeStreamState,
+        mpsc::Sender<MappedAgentEvent>,
+        mpsc::Receiver<MappedAgentEvent>,
+    ) {
+        let (tx, rx) = mpsc::channel(64);
+        (
+            OpencodeStreamState::new(
+                "sess-opencode".to_string(),
+                "turn-opencode".to_string(),
+                Some("anthropic/claude-sonnet-4-5".to_string()),
+                Some("build".to_string()),
+            ),
+            tx,
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn opencode_text_starts_session_and_maps_status() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "text",
+                    "sessionID": "ses_123",
+                    "part": { "text": "Done" }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        let started = rx.recv().await.expect("session status");
+        assert_eq!(stream.session_id, "ses_123");
+        assert!(started
+            .humanized
+            .as_deref()
+            .is_some_and(|message| message.contains("OpenCode session ses_123 started")));
+        assert_eq!(
+            started.session_info.and_then(|info| info.model),
+            Some("anthropic/claude-sonnet-4-5".to_string())
+        );
+        let text = rx.recv().await.expect("text status");
+        assert_eq!(text.humanized.as_deref(), Some("Done"));
+    }
+
+    #[tokio::test]
+    async fn opencode_tool_use_maps_completed_tool() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "tool_use",
+                    "sessionID": "ses_123",
+                    "part": {
+                        "type": "tool",
+                        "callID": "call_1",
+                        "tool": "read",
+                        "state": {
+                            "status": "completed",
+                            "input": { "path": "README.md" },
+                            "output": "contents",
+                            "title": "Read README.md"
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        let _started = rx.recv().await.expect("session status");
+        let event = rx.recv().await.expect("tool event");
+        assert!(matches!(event.kind, AgentEventKind::ToolCall));
+        let payload: ToolCallPayload = serde_json::from_value(event.payload).unwrap();
+        assert_eq!(payload.tool, "read");
+        assert_eq!(payload.call_id.as_deref(), Some("call_1"));
+        assert_eq!(payload.result_summary.as_deref(), Some("Read README.md"));
+    }
+
+    #[tokio::test]
+    async fn opencode_step_finish_maps_tokens() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "step_finish",
+                    "sessionID": "ses_123",
+                    "part": {
+                        "type": "step-finish",
+                        "tokens": {
+                            "input": 120,
+                            "output": 45,
+                            "reasoning": 10,
+                            "total": 175
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        let _started = rx.recv().await.expect("session status");
+        let event = rx.recv().await.expect("token event");
+        assert!(matches!(event.kind, AgentEventKind::TokenCount));
+        let tokens = event.tokens.expect("token payload");
+        assert_eq!(tokens.input_tokens, 120);
+        assert_eq!(tokens.output_tokens, 45);
+        assert_eq!(tokens.total_tokens, 175);
+    }
+
+    #[tokio::test]
+    async fn opencode_error_records_rate_limit_hit() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "error",
+                    "sessionID": "ses_123",
+                    "error": {
+                        "name": "APIError",
+                        "data": { "message": "API Error: 429 rate_limit" }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stream.error_class.as_deref(), Some("rate_limited"));
+        let _started = rx.recv().await.expect("session status");
+        let limit = rx.recv().await.expect("rate-limit event");
+        assert!(matches!(limit.kind, AgentEventKind::RateLimit));
+        assert_eq!(limit.rate_limit.expect("payload").source, "opencode");
     }
 
     #[cfg(unix)]

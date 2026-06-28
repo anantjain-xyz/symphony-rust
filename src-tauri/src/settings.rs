@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use symphony_core::{
     build_parsed_workflow, strip_front_matter, AgentBackend, AgentConfig, ApprovalPolicy,
     ClaudeConfig, ClaudePermissionMode, CodexConfig, CursorAgentMode, CursorConfig,
-    CursorSandboxMode, HooksConfig, ParsedWorkflow, PollingConfig, RepoConfig, ThreadSandbox,
-    TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
+    CursorSandboxMode, HooksConfig, OpencodeConfig, ParsedWorkflow, PollingConfig, RepoConfig,
+    ThreadSandbox, TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
 };
 
 /// Structured app settings — the single source of truth for worker, tracker,
@@ -96,6 +96,13 @@ pub struct AppSettings {
     pub cursor_sandbox: CursorSandboxMode,
     #[serde(default)]
     pub cursor_model: Option<String>,
+    // OpenCode options
+    #[serde(default)]
+    pub opencode_command: Option<String>,
+    #[serde(default)]
+    pub opencode_model: Option<String>,
+    #[serde(default)]
+    pub opencode_agent: Option<String>,
     // Derived from the OS keychain; never user-edited.
     #[serde(default)]
     pub linear_api_key_set: bool,
@@ -141,6 +148,9 @@ impl Default for AppSettings {
             cursor_approve_mcps: false,
             cursor_sandbox: CursorSandboxMode::Enabled,
             cursor_model: None,
+            opencode_command: None,
+            opencode_model: None,
+            opencode_agent: None,
             linear_api_key_set: false,
         }
     }
@@ -330,6 +340,12 @@ pub fn workflow_from_settings(
             model: normalize_opt(&settings.cursor_model),
             turn_timeout_ms: settings.turn_timeout_ms,
         },
+        opencode: OpencodeConfig {
+            command: effective_command(&settings.opencode_command, "opencode"),
+            model: normalize_opt(&settings.opencode_model),
+            agent: normalize_opt(&settings.opencode_agent),
+            turn_timeout_ms: settings.turn_timeout_ms,
+        },
     };
     build_parsed_workflow(front_matter, settings.prompt_template.clone())
 }
@@ -482,6 +498,9 @@ mod tests {
         let settings = AppSettings {
             codex_command: Some("  ".to_string()),
             claude_command: Some("mycode --agent claude".to_string()),
+            opencode_command: Some("mycode --agent opencode".to_string()),
+            opencode_model: Some(" anthropic/claude-sonnet-4-5 ".to_string()),
+            opencode_agent: Some(" build ".to_string()),
             turn_timeout_ms: 1234,
             ..AppSettings::default()
         };
@@ -494,9 +513,22 @@ mod tests {
             workflow.front_matter.claude.command,
             "mycode --agent claude"
         );
+        assert_eq!(
+            workflow.front_matter.opencode.command,
+            "mycode --agent opencode"
+        );
+        assert_eq!(
+            workflow.front_matter.opencode.model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            workflow.front_matter.opencode.agent.as_deref(),
+            Some("build")
+        );
         // One shared turn timeout fans out to both backends.
         assert_eq!(workflow.front_matter.codex.turn_timeout_ms, 1234);
         assert_eq!(workflow.front_matter.claude.turn_timeout_ms, 1234);
+        assert_eq!(workflow.front_matter.opencode.turn_timeout_ms, 1234);
         assert_eq!(workflow.prompt_template, settings.prompt_template);
     }
 

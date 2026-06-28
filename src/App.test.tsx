@@ -89,6 +89,9 @@ function testSettings(): AppSettings {
     cursor_approve_mcps: false,
     cursor_sandbox: "enabled",
     cursor_model: null,
+    opencode_command: null,
+    opencode_model: null,
+    opencode_agent: null,
     linear_api_key_set: false,
   };
 }
@@ -148,9 +151,11 @@ function settingsInvoke({
           codex_found: true,
           claude_found: true,
           cursor_found: true,
+          opencode_found: true,
           codex_command: "codex",
           claude_command: "claude",
           cursor_command: "agent",
+          opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
@@ -242,9 +247,11 @@ function dashboardInvoke({
           codex_found: true,
           claude_found: true,
           cursor_found: true,
+          opencode_found: true,
           codex_command: "codex",
           claude_command: "claude",
           cursor_command: "agent",
+          opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
@@ -607,6 +614,19 @@ describe("App settings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
     expectLiteralInput(await screen.findByLabelText(/^Model/, { selector: "input" }));
+  });
+
+  it("uses literal input behavior for OpenCode model and agent names", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({ settings: { ...testSettings(), agent_backend: "opencode" } }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    expectLiteralInput(await screen.findByLabelText(/^Model/, { selector: "input" }));
+    expectLiteralInput(await screen.findByLabelText(/^OpenCode agent/, { selector: "input" }));
   });
 
   it("shows the mycode launch wrapper in the launch command helper", () => {

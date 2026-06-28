@@ -231,6 +231,9 @@ const previewSettings: AppSettings = {
   cursor_approve_mcps: false,
   cursor_sandbox: "enabled",
   cursor_model: null,
+  opencode_command: null,
+  opencode_model: null,
+  opencode_agent: null,
   linear_api_key_set: true,
 };
 
@@ -1961,7 +1964,8 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          Symphony watches your Linear project and dispatches Codex, Claude Code, or Cursor
+          Symphony watches your Linear project and dispatches Codex, Claude Code, Cursor, or
+          OpenCode
           agents to work on issues in isolated workspaces. Finish the first two
           setup steps to start the worker.
         </p>
@@ -3461,7 +3465,9 @@ function SettingsView({
                   ? (settings.codex_command ?? "")
                   : settings.agent_backend === "claude"
                     ? (settings.claude_command ?? "")
-                    : (settings.cursor_command ?? "")
+                    : settings.agent_backend === "cursor"
+                      ? (settings.cursor_command ?? "")
+                      : (settings.opencode_command ?? "")
               }
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -3470,8 +3476,10 @@ function SettingsView({
                   setSettings({ ...settings, codex_command: value });
                 } else if (settings.agent_backend === "claude") {
                   setSettings({ ...settings, claude_command: value });
-                } else {
+                } else if (settings.agent_backend === "cursor") {
                   setSettings({ ...settings, cursor_command: value });
+                } else {
+                  setSettings({ ...settings, opencode_command: value });
                 }
               }}
               placeholder={
@@ -3504,6 +3512,15 @@ function SettingsView({
               {validation.cursor_command === "agent" ? "" : ` (${validation.cursor_command})`}:{" "}
               <span className={validation.cursor_found ? "detect ok" : "detect missing"}>
                 {validation.cursor_found ? "found" : "not found"}
+              </span>
+              {" · "}
+              OpenCode CLI
+              {validation.opencode_command === "opencode"
+                ? ""
+                : ` (${validation.opencode_command})`}
+              :{" "}
+              <span className={validation.opencode_found ? "detect ok" : "detect missing"}>
+                {validation.opencode_found ? "found" : "not found"}
               </span>
             </small>
           ) : null}
@@ -3677,7 +3694,7 @@ function SettingsView({
                 </small>
               </label>
             </>
-          ) : (
+          ) : settings.agent_backend === "cursor" ? (
             <>
               <label>
                 Mode
@@ -3772,6 +3789,43 @@ function SettingsView({
                   }
                 />
                 <small className="hint">Leave blank for the CLI default.</small>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Model
+                <input
+                  {...literalInputProps}
+                  value={settings.opencode_model ?? ""}
+                  disabled={!runtimeAvailable}
+                  placeholder="Optional, e.g. anthropic/claude-sonnet-4-5"
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      opencode_model: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">Leave blank for the OpenCode default.</small>
+              </label>
+              <label>
+                OpenCode agent
+                <input
+                  {...literalInputProps}
+                  value={settings.opencode_agent ?? ""}
+                  disabled={!runtimeAvailable}
+                  placeholder="Optional, e.g. build"
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      opencode_agent: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">
+                  Maps to <code>--agent</code>. Leave blank for the default OpenCode agent.
+                </small>
               </label>
             </>
           )}
@@ -4098,6 +4152,7 @@ const BACKEND_OPTIONS: Array<{ value: AppSettings["agent_backend"]; label: strin
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude Code" },
   { value: "cursor", label: "Cursor" },
+  { value: "opencode", label: "OpenCode" },
 ];
 
 function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
@@ -4137,6 +4192,16 @@ function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
         <path
           fill="white"
           d="M919.184 431.192L799.202 500.466C798.694 499.577 797.949 498.827 797.028 498.291L682.054 431.91C680.688 431.128 681.251 429.05 682.82 429.05H915.467C917.117 429.05 918.461 429.944 919.179 431.198H919.184V431.192Z"
+        />
+      </svg>
+    );
+  }
+  if (backend === "opencode") {
+    return (
+      <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          fill="currentColor"
+          d="M8.2 4.4 1.9 10.7a1.8 1.8 0 0 0 0 2.6l6.3 6.3 1.6-1.6L3.8 12l6-6-1.6-1.6Zm7.6 0L14.2 6l6 6-6 6 1.6 1.6 6.3-6.3a1.8 1.8 0 0 0 0-2.6l-6.3-6.3ZM13.8 3l-5.2 18h2.3L16.1 3h-2.3Z"
         />
       </svg>
     );
