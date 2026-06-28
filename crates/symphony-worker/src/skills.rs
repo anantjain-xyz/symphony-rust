@@ -16,6 +16,7 @@ use std::{
 };
 use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
+    OpencodeRunOptions,
 };
 use symphony_core::{
     AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
@@ -583,6 +584,7 @@ fn install_run_request(
             AgentBackend::Codex => front.codex.command.clone(),
             AgentBackend::Claude => front.claude.command.clone(),
             AgentBackend::Cursor => front.cursor.command.clone(),
+            AgentBackend::Opencode => front.opencode.command.clone(),
         },
         cwd: workspace.to_path_buf(),
         prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
@@ -593,6 +595,7 @@ fn install_run_request(
             AgentBackend::Codex => front.codex.turn_timeout_ms,
             AgentBackend::Claude => front.claude.turn_timeout_ms,
             AgentBackend::Cursor => front.cursor.turn_timeout_ms,
+            AgentBackend::Opencode => front.opencode.turn_timeout_ms,
         },
         claude: ClaudeRunOptions {
             permission_mode: ClaudePermissionMode::Auto,
@@ -614,6 +617,18 @@ fn install_run_request(
             // Honor the user's configured model so installs behave like
             // ordinary Cursor runs.
             model: front.cursor.model.clone(),
+        },
+        opencode: OpencodeRunOptions {
+            model: front.opencode.model.clone(),
+            // Don't inherit the user's primary agent: a read-only one (plan)
+            // can't edit .agents/skills, commit, push, or open the PR. None
+            // falls back to opencode's default writable agent, so installs work
+            // regardless of the configured run agent.
+            agent: None,
+            // Bootstrap installs must run tools unattended (clone, push, open
+            // the PR), so always skip permissions regardless of the user's
+            // configured run setting.
+            skip_permissions: true,
         },
         env: config
             .session_env

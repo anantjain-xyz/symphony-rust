@@ -17,6 +17,9 @@ target
 # Playwright MCP screenshot/snapshot artifacts
 .playwright-mcp
 
+# OhMyOpenCode agent working directory
+.omo
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
