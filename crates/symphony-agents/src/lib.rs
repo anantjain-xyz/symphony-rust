@@ -41,6 +41,7 @@ pub struct AgentRunRequest {
     pub turn_timeout_ms: u64,
     pub claude: ClaudeRunOptions,
     pub cursor: CursorRunOptions,
+    pub opencode: OpencodeRunOptions,
     /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
     /// which lives in the OS keychain and is absent from the inherited env).
     pub env: Vec<(String, String)>,
@@ -63,6 +64,13 @@ pub struct CursorRunOptions {
     pub approve_mcps: bool,
     pub sandbox: CursorSandboxMode,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OpencodeRunOptions {
+    pub model: Option<String>,
+    pub agent: Option<String>,
+    pub skip_permissions: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +109,7 @@ impl AgentDriver for NativeAgentDriver {
             AgentBackend::Codex => run_codex(request, events, cancel).await,
             AgentBackend::Claude => run_claude(request, events, cancel).await,
             AgentBackend::Cursor => run_cursor(request, events, cancel).await,
+            AgentBackend::Opencode => run_opencode(request, events, cancel).await,
         }
     }
 }
@@ -1154,6 +1163,253 @@ fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
     })
 }
 
+async fn run_opencode(
+    request: AgentRunRequest,
+    events: AgentEventSender,
+    cancel: CancellationToken,
+) -> Result<AgentRunResult, AgentError> {
+    let session_id = format!("oc_{}", Uuid::new_v4());
+    let mut args = vec![
+        "run".to_string(),
+        "--dir".to_string(),
+        request.cwd.display().to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+        // opencode logs to stdout by default; route them to stderr so stdout
+        // carries only the JSONL event stream this parser consumes.
+        "--print-logs".to_string(),
+    ];
+    if request.opencode.skip_permissions {
+        // Non-interactive opencode auto-rejects every permission request
+        // without this; an unattended run could never edit a file.
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Some(model) = &request.opencode.model {
+        let model = model.trim();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    if let Some(agent) = &request.opencode.agent {
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            args.push("--agent".to_string());
+            args.push(agent.to_string());
+        }
+    }
+
+    // Stream the prompt over stdin: opencode appends piped stdin to the
+    // message, and large issue prompts can exceed the OS argv limit (which is
+    // also visible to other processes while the agent runs).
+    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
+    let pid = child.id();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(request.prompt.as_bytes()).await?;
+    }
+    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
+    let mut lines = BufReader::new(stdout).lines();
+    let mut stream = OpencodeStreamState::new(session_id.clone());
+    let mut result: Option<AgentRunResult> = None;
+
+    let run = async {
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&line)?;
+            if let Some(done) = stream.push(value, &events).await? {
+                result = Some(done);
+            }
+        }
+        let status = child.wait().await?;
+        Ok::<_, AgentError>((status, result))
+    };
+
+    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
+    tokio::pin!(timeout);
+    let (status, parsed_result) = tokio::select! {
+        outcome = run => outcome?,
+        _ = &mut timeout => {
+            kill_pid(pid).await;
+            return Err(AgentError::Timeout(request.turn_timeout_ms));
+        }
+        _ = cancel.cancelled() => {
+            kill_pid(pid).await;
+            return Ok(AgentRunResult {
+                thread_id: stream.session_id.clone(),
+                turn_id: stream.session_id.clone(),
+                outcome: AgentOutcome::Cancelled,
+                error_class: Some("cancelled".to_string()),
+                error_message: Some("run cancelled".to_string()),
+            });
+        }
+    };
+
+    // opencode has no terminal event in `--format json`; completion is the
+    // process exiting. An `error` event flips the exit code to 1 and records
+    // the failure on the stream, so a clean exit with no error is success.
+    if let Some(done) = parsed_result {
+        return Ok(done);
+    }
+    let sid = stream.session_id.clone();
+    Ok(AgentRunResult {
+        thread_id: sid.clone(),
+        turn_id: sid,
+        outcome: if status.success() {
+            AgentOutcome::Success
+        } else {
+            AgentOutcome::Failure
+        },
+        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
+        error_message: (!status.success()).then(|| format!("opencode exit {status}")),
+    })
+}
+
+struct OpencodeStreamState {
+    session_id: String,
+    last_assistant_text: String,
+    failure: Option<AgentRunResult>,
+}
+
+impl OpencodeStreamState {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            last_assistant_text: String::new(),
+            failure: None,
+        }
+    }
+
+    async fn push(
+        &mut self,
+        ev: Value,
+        events: &AgentEventSender,
+    ) -> Result<Option<AgentRunResult>, AgentError> {
+        if let Some(sid) = ev["sessionID"].as_str() {
+            self.session_id = sid.to_string();
+        }
+        match ev["type"].as_str().unwrap_or_default() {
+            "text" => {
+                let text = ev["part"]["text"].as_str().unwrap_or_default().trim();
+                if !text.is_empty() {
+                    self.last_assistant_text = text.to_string();
+                    send_status(events, truncate(text, 2000)).await;
+                }
+            }
+            "reasoning" => {
+                let text = ev["part"]["text"].as_str().unwrap_or_default().trim();
+                if !text.is_empty() {
+                    send_status(events, truncate(text, 2000)).await;
+                }
+            }
+            "tool_use" => {
+                let part = &ev["part"];
+                let tool = part["tool"].as_str().unwrap_or("tool").to_string();
+                let call_id = part["callID"].as_str().map(ToOwned::to_owned);
+                let state = &part["state"];
+                let status = state["status"].as_str().unwrap_or_default();
+                let summary = if status == "error" {
+                    let err = state["error"].as_str().unwrap_or("failed");
+                    format!("error: {}", truncate(err, 900))
+                } else {
+                    match state["title"].as_str() {
+                        Some(title) if !title.is_empty() => title.to_string(),
+                        _ => format!("{tool} completed"),
+                    }
+                };
+                let payload = serde_json::to_value(ToolCallPayload {
+                    tool: tool.clone(),
+                    args: state.get("input").cloned(),
+                    call_id,
+                    result_summary: Some(summary.clone()),
+                })?;
+                send_mapped(
+                    events,
+                    MappedAgentEvent {
+                        kind: AgentEventKind::ToolCall,
+                        payload,
+                        humanized: Some(summary),
+                        tokens: None,
+                        rate_limit: None,
+                        session_info: None,
+                    },
+                )
+                .await;
+            }
+            "step_finish" => {
+                let tokens = &ev["part"]["tokens"];
+                let input = tokens["input"].as_i64().unwrap_or(0)
+                    + tokens["cache"]["read"].as_i64().unwrap_or(0)
+                    + tokens["cache"]["write"].as_i64().unwrap_or(0);
+                let output = tokens["output"].as_i64().unwrap_or(0)
+                    + tokens["reasoning"].as_i64().unwrap_or(0);
+                if input > 0 || output > 0 {
+                    send_token_count(
+                        events,
+                        TokenCountPayload {
+                            input_tokens: input,
+                            output_tokens: output,
+                            total_tokens: input + output,
+                        },
+                    )
+                    .await?;
+                }
+            }
+            "error" => {
+                let data = &ev["error"]["data"];
+                let name = ev["error"]["name"].as_str().unwrap_or("opencode_error");
+                let message = data["message"]
+                    .as_str()
+                    .or_else(|| ev["error"]["message"].as_str())
+                    .unwrap_or("opencode error");
+                if let Some(limit) = detect_opencode_rate_limit(data, message) {
+                    send_rate_limit(events, limit).await?;
+                    self.failure = Some(AgentRunResult {
+                        thread_id: self.session_id.clone(),
+                        turn_id: self.session_id.clone(),
+                        outcome: AgentOutcome::Failure,
+                        error_class: Some("rate_limited".to_string()),
+                        error_message: Some(truncate(message, 1000)),
+                    });
+                } else {
+                    send_error(events, name, message).await?;
+                    self.failure = Some(AgentRunResult {
+                        thread_id: self.session_id.clone(),
+                        turn_id: self.session_id.clone(),
+                        outcome: AgentOutcome::Failure,
+                        error_class: Some(name.to_string()),
+                        error_message: Some(truncate(message, 1000)),
+                    });
+                }
+            }
+            _ => {}
+        }
+        // Errors arrive mid-stream, but the process keeps running until it
+        // exits; surface the recorded failure once stdout drains by handing it
+        // to the caller as the terminal result.
+        Ok(self.failure.clone())
+    }
+}
+
+/// A rate-limit hit reported on opencode's `error` event: a 429 status code or
+/// a provider message that leads with a usage-limit notice. Anchored to the
+/// start of the message like the Claude/Cursor detectors so prose that merely
+/// mentions rate limits is not misread as a hit.
+fn detect_opencode_rate_limit(data: &Value, message: &str) -> Option<RateLimitPayload> {
+    let lower = message.trim().to_lowercase();
+    let hit = data["statusCode"].as_i64() == Some(429)
+        || lower.starts_with("api error: 429")
+        || lower.starts_with("rate limit exceeded")
+        || lower.starts_with("usage limit reached")
+        || lower.starts_with("you've reached your usage limit");
+    hit.then(|| RateLimitPayload {
+        source: "opencode".to_string(),
+        remaining: None,
+        reset_at: None,
+    })
+}
+
 fn spawn_shell_command(
     command: &str,
     args: &[String],
@@ -1952,5 +2208,157 @@ wait"#;
             .expect("kill -0")
             .success();
         assert!(!alive, "process group {pid} should be dead after kill_pid");
+    }
+
+    fn opencode_stream() -> (
+        OpencodeStreamState,
+        mpsc::Sender<MappedAgentEvent>,
+        mpsc::Receiver<MappedAgentEvent>,
+    ) {
+        let (tx, rx) = mpsc::channel(64);
+        (OpencodeStreamState::new("oc-sess".to_string()), tx, rx)
+    }
+
+    #[tokio::test]
+    async fn opencode_text_event_emits_status() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        assert!(stream
+            .push(
+                json!({
+                    "type": "text",
+                    "sessionID": "sess-real",
+                    "part": { "type": "text", "text": "Implementing the fix" }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(stream.session_id, "sess-real");
+        let event = rx.recv().await.expect("status event");
+        assert!(matches!(event.kind, AgentEventKind::Status));
+    }
+
+    #[tokio::test]
+    async fn opencode_tool_use_maps_to_tool_call() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "tool_use",
+                    "sessionID": "oc-sess",
+                    "part": {
+                        "type": "tool",
+                        "tool": "edit",
+                        "callID": "call_1",
+                        "state": {
+                            "status": "completed",
+                            "input": { "filePath": "src/bar.rs" },
+                            "title": "Edit src/bar.rs"
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let event = rx.recv().await.expect("tool call event");
+        assert!(matches!(event.kind, AgentEventKind::ToolCall));
+        assert_eq!(event.humanized.as_deref(), Some("Edit src/bar.rs"));
+    }
+
+    #[tokio::test]
+    async fn opencode_step_finish_sums_token_buckets() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "step_finish",
+                    "sessionID": "oc-sess",
+                    "part": {
+                        "type": "step-finish",
+                        "tokens": {
+                            "input": 1200,
+                            "output": 332,
+                            "reasoning": 8,
+                            "cache": { "read": 800, "write": 400 }
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        let event = rx.recv().await.expect("token count event");
+        assert!(matches!(event.kind, AgentEventKind::TokenCount));
+        let tokens = event.tokens.expect("token payload");
+        assert_eq!(tokens.input_tokens, 2400);
+        assert_eq!(tokens.output_tokens, 340);
+        assert_eq!(tokens.total_tokens, 2740);
+    }
+
+    #[tokio::test]
+    async fn opencode_error_event_fails_the_run() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        let done = stream
+            .push(
+                json!({
+                    "type": "error",
+                    "sessionID": "oc-sess",
+                    "error": {
+                        "name": "ProviderAuthError",
+                        "data": { "message": "missing API key", "statusCode": 401 }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("error event ends the run");
+        assert!(matches!(done.outcome, AgentOutcome::Failure));
+        assert_eq!(done.error_class.as_deref(), Some("ProviderAuthError"));
+        let event = rx.recv().await.expect("error event");
+        assert!(matches!(event.kind, AgentEventKind::Error));
+    }
+
+    #[tokio::test]
+    async fn opencode_rate_limit_error_is_classified() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        let done = stream
+            .push(
+                json!({
+                    "type": "error",
+                    "sessionID": "oc-sess",
+                    "error": {
+                        "name": "APIError",
+                        "data": { "message": "Rate limit exceeded", "statusCode": 429 }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap()
+            .expect("rate-limit error ends the run");
+        assert!(matches!(done.outcome, AgentOutcome::Failure));
+        assert_eq!(done.error_class.as_deref(), Some("rate_limited"));
+        let event = rx.recv().await.expect("rate-limit event");
+        assert_eq!(event.rate_limit.expect("payload").source, "opencode");
+    }
+
+    #[test]
+    fn detects_opencode_rate_limit_hits() {
+        assert!(
+            detect_opencode_rate_limit(&json!({ "statusCode": 429 }), "Too many requests")
+                .is_some()
+        );
+        assert!(
+            detect_opencode_rate_limit(&json!({}), "Rate limit exceeded for this model").is_some()
+        );
+        assert!(detect_opencode_rate_limit(&json!({}), "All tests passing").is_none());
+        assert!(detect_opencode_rate_limit(
+            &json!({ "statusCode": 200 }),
+            "I updated how the rate limit exceeded path is handled"
+        )
+        .is_none());
     }
 }

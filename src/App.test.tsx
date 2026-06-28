@@ -89,6 +89,10 @@ function testSettings(): AppSettings {
     cursor_approve_mcps: false,
     cursor_sandbox: "enabled",
     cursor_model: null,
+    opencode_command: null,
+    opencode_model: null,
+    opencode_agent: null,
+    opencode_skip_permissions: true,
     linear_api_key_set: false,
   };
 }
@@ -148,9 +152,11 @@ function settingsInvoke({
           codex_found: true,
           claude_found: true,
           cursor_found: true,
+          opencode_found: true,
           codex_command: "codex",
           claude_command: "claude",
           cursor_command: "agent",
+          opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };
@@ -242,9 +248,11 @@ function dashboardInvoke({
           codex_found: true,
           claude_found: true,
           cursor_found: true,
+          opencode_found: true,
           codex_command: "codex",
           claude_command: "claude",
           cursor_command: "agent",
+          opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
         };

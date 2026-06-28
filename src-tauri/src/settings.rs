@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use symphony_core::{
     build_parsed_workflow, strip_front_matter, AgentBackend, AgentConfig, ApprovalPolicy,
     ClaudeConfig, ClaudePermissionMode, CodexConfig, CursorAgentMode, CursorConfig,
-    CursorSandboxMode, HooksConfig, ParsedWorkflow, PollingConfig, RepoConfig, ThreadSandbox,
-    TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
+    CursorSandboxMode, HooksConfig, OpencodeConfig, ParsedWorkflow, PollingConfig, RepoConfig,
+    ThreadSandbox, TrackerConfig, TurnSandboxPolicy, WorkflowFrontMatter, WorkspaceConfig,
 };
 
 /// Structured app settings — the single source of truth for worker, tracker,
@@ -96,6 +96,15 @@ pub struct AppSettings {
     pub cursor_sandbox: CursorSandboxMode,
     #[serde(default)]
     pub cursor_model: Option<String>,
+    // Opencode options
+    #[serde(default)]
+    pub opencode_command: Option<String>,
+    #[serde(default)]
+    pub opencode_model: Option<String>,
+    #[serde(default)]
+    pub opencode_agent: Option<String>,
+    #[serde(default = "default_true")]
+    pub opencode_skip_permissions: bool,
     // Derived from the OS keychain; never user-edited.
     #[serde(default)]
     pub linear_api_key_set: bool,
@@ -141,6 +150,10 @@ impl Default for AppSettings {
             cursor_approve_mcps: false,
             cursor_sandbox: CursorSandboxMode::Enabled,
             cursor_model: None,
+            opencode_command: None,
+            opencode_model: None,
+            opencode_agent: None,
+            opencode_skip_permissions: true,
             linear_api_key_set: false,
         }
     }
@@ -328,6 +341,13 @@ pub fn workflow_from_settings(
             approve_mcps: settings.cursor_approve_mcps,
             sandbox: settings.cursor_sandbox.clone(),
             model: normalize_opt(&settings.cursor_model),
+            turn_timeout_ms: settings.turn_timeout_ms,
+        },
+        opencode: OpencodeConfig {
+            command: effective_command(&settings.opencode_command, "opencode"),
+            model: normalize_opt(&settings.opencode_model),
+            agent: normalize_opt(&settings.opencode_agent),
+            skip_permissions: settings.opencode_skip_permissions,
             turn_timeout_ms: settings.turn_timeout_ms,
         },
     };

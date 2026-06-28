@@ -30,6 +30,7 @@ const PROVIDERS = [
   { key: "claude", label: "Claude" },
   { key: "codex", label: "Codex" },
   { key: "cursor", label: "Cursor" },
+  { key: "opencode", label: "opencode" },
 ];
 
 export type ProviderRateLimit = {

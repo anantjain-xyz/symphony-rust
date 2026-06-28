@@ -231,6 +231,10 @@ const previewSettings: AppSettings = {
   cursor_approve_mcps: false,
   cursor_sandbox: "enabled",
   cursor_model: null,
+  opencode_command: null,
+  opencode_model: null,
+  opencode_agent: null,
+  opencode_skip_permissions: true,
   linear_api_key_set: true,
 };
 
@@ -3461,7 +3465,9 @@ function SettingsView({
                   ? (settings.codex_command ?? "")
                   : settings.agent_backend === "claude"
                     ? (settings.claude_command ?? "")
-                    : (settings.cursor_command ?? "")
+                    : settings.agent_backend === "cursor"
+                      ? (settings.cursor_command ?? "")
+                      : (settings.opencode_command ?? "")
               }
               disabled={!runtimeAvailable}
               onChange={(e) => {
@@ -3470,8 +3476,10 @@ function SettingsView({
                   setSettings({ ...settings, codex_command: value });
                 } else if (settings.agent_backend === "claude") {
                   setSettings({ ...settings, claude_command: value });
-                } else {
+                } else if (settings.agent_backend === "cursor") {
                   setSettings({ ...settings, cursor_command: value });
+                } else {
+                  setSettings({ ...settings, opencode_command: value });
                 }
               }}
               placeholder={
@@ -3504,6 +3512,15 @@ function SettingsView({
               {validation.cursor_command === "agent" ? "" : ` (${validation.cursor_command})`}:{" "}
               <span className={validation.cursor_found ? "detect ok" : "detect missing"}>
                 {validation.cursor_found ? "found" : "not found"}
+              </span>
+              {" · "}
+              opencode CLI
+              {validation.opencode_command === "opencode"
+                ? ""
+                : ` (${validation.opencode_command})`}
+              :{" "}
+              <span className={validation.opencode_found ? "detect ok" : "detect missing"}>
+                {validation.opencode_found ? "found" : "not found"}
               </span>
             </small>
           ) : null}
@@ -3677,7 +3694,7 @@ function SettingsView({
                 </small>
               </label>
             </>
-          ) : (
+          ) : settings.agent_backend === "cursor" ? (
             <>
               <label>
                 Mode
@@ -3772,6 +3789,64 @@ function SettingsView({
                   }
                 />
                 <small className="hint">Leave blank for the CLI default.</small>
+              </label>
+            </>
+          ) : (
+            <>
+              <label>
+                Model
+                <input
+                  {...literalInputProps}
+                  value={settings.opencode_model ?? ""}
+                  disabled={!runtimeAvailable}
+                  placeholder="Optional, e.g. anthropic/claude-sonnet-4-5"
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      opencode_model: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">
+                  <code>provider/model</code> passed to <code>--model</code>. Leave blank for the
+                  CLI default.
+                </small>
+              </label>
+              <label>
+                Agent
+                <input
+                  {...literalInputProps}
+                  value={settings.opencode_agent ?? ""}
+                  disabled={!runtimeAvailable}
+                  placeholder="Optional, e.g. build"
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      opencode_agent: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">
+                  Primary agent passed to <code>--agent</code>. Leave blank for the default.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.opencode_skip_permissions}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      opencode_skip_permissions: e.currentTarget.checked,
+                    })
+                  }
+                />
+                Skip permissions
+                <small className="hint">
+                  Maps to <code>--dangerously-skip-permissions</code>. Required for unattended runs —
+                  without it opencode auto-rejects every tool call.
+                </small>
               </label>
             </>
           )}
@@ -4098,6 +4173,7 @@ const BACKEND_OPTIONS: Array<{ value: AppSettings["agent_backend"]; label: strin
   { value: "codex", label: "Codex" },
   { value: "claude", label: "Claude Code" },
   { value: "cursor", label: "Cursor" },
+  { value: "opencode", label: "opencode" },
 ];
 
 function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
@@ -4137,6 +4213,21 @@ function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
         <path
           fill="white"
           d="M919.184 431.192L799.202 500.466C798.694 499.577 797.949 498.827 797.028 498.291L682.054 431.91C680.688 431.128 681.251 429.05 682.82 429.05H915.467C917.117 429.05 918.461 429.944 919.179 431.198H919.184V431.192Z"
+        />
+      </svg>
+    );
+  }
+  if (backend === "opencode") {
+    return (
+      <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="3" width="20" height="18" rx="3" fill="none" stroke="currentColor" strokeWidth="1.6" />
+        <path
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9 9l-3 3 3 3M15 9l3 3-3 3"
         />
       </svg>
     );

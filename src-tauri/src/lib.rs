@@ -46,9 +46,11 @@ pub struct ValidationResult {
     pub codex_found: bool,
     pub claude_found: bool,
     pub cursor_found: bool,
+    pub opencode_found: bool,
     pub codex_command: String,
     pub claude_command: String,
     pub cursor_command: String,
+    pub opencode_command: String,
     pub app_data_dir: String,
     pub database_path: String,
 }
@@ -157,6 +159,7 @@ async fn validate_settings(
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
     let cursor_command = settings::effective_cursor_command(&settings.cursor_command);
+    let opencode_command = effective_command(settings.opencode_command.as_deref(), "opencode");
     Ok(ValidationResult {
         workflow_ok: workflow_error.is_none(),
         workflow_blocking,
@@ -164,9 +167,11 @@ async fn validate_settings(
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
         cursor_found: command_found(&cursor_command),
+        opencode_found: command_found(&opencode_command),
         codex_command,
         claude_command,
         cursor_command,
+        opencode_command,
         app_data_dir: state.app_data_dir.display().to_string(),
         database_path: state.database_path.display().to_string(),
     })
