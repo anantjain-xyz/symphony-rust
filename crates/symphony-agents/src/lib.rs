@@ -1208,11 +1208,7 @@ async fn run_opencode(
 
     let run = async {
         while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: Value = serde_json::from_str(&line)?;
-            stream.push(value, &events).await?;
+            handle_opencode_stdout_line(&line, &mut stream, &events).await?;
         }
         child.wait().await.map_err(AgentError::Io)
     };
@@ -1237,26 +1233,7 @@ async fn run_opencode(
         }
     };
 
-    let failed = !status.success() || stream.error_class.is_some();
-    Ok(AgentRunResult {
-        thread_id: stream.session_id.clone(),
-        turn_id: stream.turn_id.clone(),
-        outcome: if failed {
-            AgentOutcome::Failure
-        } else {
-            AgentOutcome::Success
-        },
-        error_class: if !status.success() {
-            Some("nonzero_exit".to_string())
-        } else {
-            stream.error_class
-        },
-        error_message: if !status.success() {
-            Some(format!("opencode exit {status}"))
-        } else {
-            stream.error_message
-        },
-    })
+    Ok(finish_opencode_result(status, stream))
 }
 
 struct OpencodeStreamState {
@@ -1396,6 +1373,61 @@ impl OpencodeStreamState {
     }
 }
 
+async fn handle_opencode_stdout_line(
+    line: &str,
+    stream: &mut OpencodeStreamState,
+    events: &AgentEventSender,
+) -> Result<(), AgentError> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+    if !line.starts_with('{') {
+        send_status(events, format!("OpenCode: {}", truncate(line, 1000))).await;
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(line)?;
+    stream.push(value, events).await
+}
+
+fn finish_opencode_result(
+    status: std::process::ExitStatus,
+    stream: OpencodeStreamState,
+) -> AgentRunResult {
+    let status_failed = !status.success();
+    let missing_events = !stream.started;
+    let failed = status_failed || missing_events || stream.error_class.is_some();
+    let error_class = stream.error_class.or_else(|| {
+        if status_failed {
+            Some("nonzero_exit".to_string())
+        } else if missing_events {
+            Some("missing_result".to_string())
+        } else {
+            None
+        }
+    });
+    let error_message = stream.error_message.or_else(|| {
+        if status_failed {
+            Some(format!("opencode exit {status}"))
+        } else if missing_events {
+            Some("opencode exited without emitting JSON events".to_string())
+        } else {
+            None
+        }
+    });
+    AgentRunResult {
+        thread_id: stream.session_id,
+        turn_id: stream.turn_id,
+        outcome: if failed {
+            AgentOutcome::Failure
+        } else {
+            AgentOutcome::Success
+        },
+        error_class,
+        error_message,
+    }
+}
+
 fn opencode_tool_call_fields(
     ev: &Value,
 ) -> (String, Option<Value>, Option<String>, Option<String>) {
@@ -1434,7 +1466,13 @@ fn opencode_tool_call_fields(
 
 fn opencode_token_count(ev: &Value) -> Option<TokenCountPayload> {
     let tokens = ev.get("part")?.get("tokens")?;
-    let input = number_field(tokens, "input")?;
+    let input = number_field(tokens, "input")?
+        + tokens
+            .get("cache")
+            .map(|cache| {
+                number_field(cache, "read").unwrap_or(0) + number_field(cache, "write").unwrap_or(0)
+            })
+            .unwrap_or(0);
     let output = number_field(tokens, "output")?;
     let reasoning = number_field(tokens, "reasoning").unwrap_or(0);
     let total = number_field(tokens, "total").unwrap_or(input + output + reasoning);
@@ -2272,6 +2310,14 @@ mod tests {
         )
     }
 
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .expect("exit status")
+    }
+
     #[tokio::test]
     async fn opencode_text_starts_session_and_maps_status() {
         let (mut stream, tx, mut rx) = opencode_stream();
@@ -2368,6 +2414,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_step_finish_adds_cache_tokens_without_total() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "step_finish",
+                    "sessionID": "ses_123",
+                    "part": {
+                        "type": "step-finish",
+                        "tokens": {
+                            "input": 120,
+                            "output": 45,
+                            "reasoning": 10,
+                            "cache": { "read": 7, "write": 3 }
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        let _started = rx.recv().await.expect("session status");
+        let event = rx.recv().await.expect("token event");
+        let tokens = event.tokens.expect("token payload");
+        assert_eq!(tokens.input_tokens, 130);
+        assert_eq!(tokens.output_tokens, 45);
+        assert_eq!(tokens.total_tokens, 185);
+    }
+
+    #[tokio::test]
+    async fn opencode_step_finish_preserves_reported_total_with_cache() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "step_finish",
+                    "sessionID": "ses_123",
+                    "part": {
+                        "type": "step-finish",
+                        "tokens": {
+                            "input": 120,
+                            "output": 45,
+                            "reasoning": 10,
+                            "cache": { "read": 7, "write": 3 },
+                            "total": 999
+                        }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        let _started = rx.recv().await.expect("session status");
+        let event = rx.recv().await.expect("token event");
+        let tokens = event.tokens.expect("token payload");
+        assert_eq!(tokens.input_tokens, 130);
+        assert_eq!(tokens.total_tokens, 999);
+    }
+
+    #[tokio::test]
     async fn opencode_error_records_rate_limit_hit() {
         let (mut stream, tx, mut rx) = opencode_stream();
         stream
@@ -2390,6 +2498,71 @@ mod tests {
         let limit = rx.recv().await.expect("rate-limit event");
         assert!(matches!(limit.kind, AgentEventKind::RateLimit));
         assert_eq!(limit.rate_limit.expect("payload").source, "opencode");
+    }
+
+    #[tokio::test]
+    async fn opencode_non_json_stdout_is_status_not_parse_failure() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        handle_opencode_stdout_line(
+            r#"agent "missing" not found. Falling back to default agent"#,
+            &mut stream,
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!stream.started);
+        let event = rx.recv().await.expect("warning status");
+        assert_eq!(
+            event.humanized.as_deref(),
+            Some(r#"OpenCode: agent "missing" not found. Falling back to default agent"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_nonzero_exit_preserves_structured_error() {
+        let (mut stream, tx, mut rx) = opencode_stream();
+        stream
+            .push(
+                json!({
+                    "type": "error",
+                    "sessionID": "ses_123",
+                    "error": {
+                        "name": "APIError",
+                        "data": { "message": "API Error: 429 rate_limit" }
+                    }
+                }),
+                &tx,
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let result = finish_opencode_result(exit_status(7), stream);
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("API Error: 429 rate_limit")
+        );
+    }
+
+    #[test]
+    fn opencode_empty_successful_stream_is_failure() {
+        let stream = OpencodeStreamState::new(
+            "sess-opencode".to_string(),
+            "turn-opencode".to_string(),
+            None,
+            None,
+        );
+
+        let result = finish_opencode_result(exit_status(0), stream);
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("missing_result"));
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("opencode exited without emitting JSON events")
+        );
     }
 
     #[cfg(unix)]
