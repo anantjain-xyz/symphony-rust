@@ -620,7 +620,11 @@ fn install_run_request(
         },
         opencode: OpencodeRunOptions {
             model: front.opencode.model.clone(),
-            agent: front.opencode.agent.clone(),
+            // Don't inherit the user's primary agent: a read-only one (plan)
+            // can't edit .agents/skills, commit, push, or open the PR. None
+            // falls back to opencode's default writable agent, so installs work
+            // regardless of the configured run agent.
+            agent: None,
             // Bootstrap installs must run tools unattended (clone, push, open
             // the PR), so always skip permissions regardless of the user's
             // configured run setting.

@@ -1169,15 +1169,16 @@ async fn run_opencode(
     cancel: CancellationToken,
 ) -> Result<AgentRunResult, AgentError> {
     let session_id = format!("oc_{}", Uuid::new_v4());
+    // No `--print-logs`: it pushes verbose provider/plugin/MCP logs to stderr,
+    // which would fill the OS pipe buffer and block the child (stalling stdout
+    // JSON parsing until the turn timeout) unless we drained stderr in lockstep.
+    // Leaving it off keeps stderr quiet; we still drain it below as a safety net.
     let mut args = vec![
         "run".to_string(),
         "--dir".to_string(),
         request.cwd.display().to_string(),
         "--format".to_string(),
         "json".to_string(),
-        // opencode logs to stdout by default; route them to stderr so stdout
-        // carries only the JSONL event stream this parser consumes.
-        "--print-logs".to_string(),
     ];
     if request.opencode.skip_permissions {
         // Non-interactive opencode auto-rejects every permission request
@@ -1207,6 +1208,15 @@ async fn run_opencode(
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(request.prompt.as_bytes()).await?;
     }
+    // Drain stderr to a sink so a chatty child can never block writing to a
+    // full stderr pipe (which would stall stdout JSON parsing). The reader
+    // stops on its own when the process exits and closes the pipe.
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+        });
+    }
     let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
     let mut lines = BufReader::new(stdout).lines();
     let mut stream = OpencodeStreamState::new(session_id.clone());
@@ -1214,10 +1224,17 @@ async fn run_opencode(
 
     let run = async {
         while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(&line)?;
+            // opencode can print human-readable warnings to stdout even under
+            // `--format json` (e.g. a permission auto-reject, or a fallback
+            // when the configured agent is missing). Skip anything that is not
+            // a JSON event instead of failing the whole run on it.
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
             if let Some(done) = stream.push(value, &events).await? {
                 result = Some(done);
             }
@@ -1249,6 +1266,8 @@ async fn run_opencode(
     // opencode has no terminal event in `--format json`; completion is the
     // process exiting. An `error` event flips the exit code to 1 and records
     // the failure on the stream, so a clean exit with no error is success.
+    // Emit the run's summed token usage once, now that all steps have arrived.
+    stream.finish(&events).await?;
     if let Some(done) = parsed_result {
         return Ok(done);
     }
@@ -1270,6 +1289,12 @@ struct OpencodeStreamState {
     session_id: String,
     last_assistant_text: String,
     failure: Option<AgentRunResult>,
+    /// opencode emits a `step_finish` per agent step, each carrying that step's
+    /// token usage. The storage layer treats one token event as one run, so we
+    /// sum the steps here and emit a single total when the run finishes instead
+    /// of inflating run_count and overwriting the live total per step.
+    input_tokens: i64,
+    output_tokens: i64,
 }
 
 impl OpencodeStreamState {
@@ -1278,7 +1303,26 @@ impl OpencodeStreamState {
             session_id,
             last_assistant_text: String::new(),
             failure: None,
+            input_tokens: 0,
+            output_tokens: 0,
         }
+    }
+
+    /// Emit the accumulated run total once, after stdout drains. A no-op when
+    /// no `step_finish` reported usage (e.g. an immediate error).
+    async fn finish(&self, events: &AgentEventSender) -> Result<(), AgentError> {
+        if self.input_tokens > 0 || self.output_tokens > 0 {
+            send_token_count(
+                events,
+                TokenCountPayload {
+                    input_tokens: self.input_tokens,
+                    output_tokens: self.output_tokens,
+                    total_tokens: self.input_tokens + self.output_tokens,
+                },
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn push(
@@ -1344,17 +1388,8 @@ impl OpencodeStreamState {
                     + tokens["cache"]["write"].as_i64().unwrap_or(0);
                 let output = tokens["output"].as_i64().unwrap_or(0)
                     + tokens["reasoning"].as_i64().unwrap_or(0);
-                if input > 0 || output > 0 {
-                    send_token_count(
-                        events,
-                        TokenCountPayload {
-                            input_tokens: input,
-                            output_tokens: output,
-                            total_tokens: input + output,
-                        },
-                    )
-                    .await?;
-                }
+                self.input_tokens += input;
+                self.output_tokens += output;
             }
             "error" => {
                 let data = &ev["error"]["data"];
@@ -2178,6 +2213,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_pid_terminates_whole_process_group() {
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            eprintln!(
+                "skipping process-group signal test on GitHub Actions; Ubuntu hosted runners wedge this integration test"
+            );
+            return;
+        }
+
         // A shell leader that ignores TERM and backgrounds a stubborn child
         // that also ignores TERM -- modelling a wedged agent whose subprocess
         // tree would otherwise be reparented to init when only the leader is
@@ -2197,7 +2239,10 @@ wait"#;
 
         kill_pid(Some(pid)).await;
         // Reap the leader so the group is fully torn down before we assert.
-        let _ = child.wait().await;
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("process group leader should exit after kill_pid")
+            .expect("wait for process group leader");
 
         // A negative pid targets the whole group; with it gone, kill -0 fails.
         let alive = Command::new("/bin/kill")
@@ -2270,31 +2315,40 @@ wait"#;
     #[tokio::test]
     async fn opencode_step_finish_sums_token_buckets() {
         let (mut stream, tx, mut rx) = opencode_stream();
-        stream
-            .push(
-                json!({
-                    "type": "step_finish",
-                    "sessionID": "oc-sess",
-                    "part": {
-                        "type": "step-finish",
-                        "tokens": {
-                            "input": 1200,
-                            "output": 332,
-                            "reasoning": 8,
-                            "cache": { "read": 800, "write": 400 }
-                        }
+        let step = |reasoning: i64| {
+            json!({
+                "type": "step_finish",
+                "sessionID": "oc-sess",
+                "part": {
+                    "type": "step-finish",
+                    "tokens": {
+                        "input": 1200,
+                        "output": 332,
+                        "reasoning": reasoning,
+                        "cache": { "read": 800, "write": 400 }
                     }
-                }),
-                &tx,
-            )
-            .await
-            .unwrap();
+                }
+            })
+        };
+        stream.push(step(8), &tx).await.unwrap();
+        stream.push(step(2), &tx).await.unwrap();
+        assert!(rx.try_recv().is_err(), "no token event before finish()");
+
+        stream.finish(&tx).await.unwrap();
         let event = rx.recv().await.expect("token count event");
         assert!(matches!(event.kind, AgentEventKind::TokenCount));
         let tokens = event.tokens.expect("token payload");
-        assert_eq!(tokens.input_tokens, 2400);
-        assert_eq!(tokens.output_tokens, 340);
-        assert_eq!(tokens.total_tokens, 2740);
+        assert_eq!(tokens.input_tokens, 4800);
+        assert_eq!(tokens.output_tokens, 674);
+        assert_eq!(tokens.total_tokens, 5474);
+        assert!(rx.try_recv().is_err(), "exactly one token event per run");
+    }
+
+    #[tokio::test]
+    async fn opencode_finish_without_usage_emits_nothing() {
+        let (stream, tx, mut rx) = opencode_stream();
+        stream.finish(&tx).await.unwrap();
+        assert!(rx.try_recv().is_err(), "no token event without any steps");
     }
 
     #[tokio::test]
