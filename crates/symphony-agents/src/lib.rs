@@ -1233,6 +1233,22 @@ async fn run_opencode(
             // when the configured agent is missing). Skip anything that is not
             // a JSON event instead of failing the whole run on it.
             let Ok(value) = serde_json::from_str::<Value>(line) else {
+                // The agent-fallback notice is the one diagnostic we must not
+                // swallow: silently running the writable default agent in place
+                // of a misconfigured restricted one would defeat the user's
+                // intent under skip-permissions. Fail the run instead.
+                if is_opencode_agent_fallback(line) {
+                    send_error(&events, "agent_not_found", line).await?;
+                    result = Some(AgentRunResult {
+                        thread_id: stream.session_id.clone(),
+                        turn_id: stream.session_id.clone(),
+                        outcome: AgentOutcome::Failure,
+                        error_class: Some("agent_not_found".to_string()),
+                        error_message: Some(truncate(line, 1000)),
+                    });
+                    kill_pid(pid).await;
+                    break;
+                }
                 continue;
             };
             if let Some(done) = stream.push(value, &events).await? {
@@ -1425,6 +1441,16 @@ impl OpencodeStreamState {
         // to the caller as the terminal result.
         Ok(self.failure.clone())
     }
+}
+
+/// True when a non-JSON stdout line is opencode's agent-fallback diagnostic
+/// ("agent \"x\" not found. Falling back to ..."). With skip-permissions on, a
+/// misconfigured restricted agent would otherwise silently run as the writable
+/// default agent, so the driver must surface this as a failure rather than skip
+/// it like benign output.
+fn is_opencode_agent_fallback(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("not found") && lower.contains("falling back")
 }
 
 /// A rate-limit hit reported on opencode's `error` event: a 429 status code or
@@ -2414,5 +2440,19 @@ wait"#;
             "I updated how the rate limit exceeded path is handled"
         )
         .is_none());
+    }
+
+    #[test]
+    fn detects_opencode_agent_fallback() {
+        assert!(is_opencode_agent_fallback(
+            r#"agent "reviewer" not found. Falling back to default agent"#
+        ));
+        assert!(is_opencode_agent_fallback(
+            "Agent NOT FOUND, falling back to build"
+        ));
+        assert!(!is_opencode_agent_fallback("All tests passing"));
+        assert!(!is_opencode_agent_fallback(
+            "the file was not found in the repo"
+        ));
     }
 }
