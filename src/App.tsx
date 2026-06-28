@@ -4218,17 +4218,15 @@ function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
     );
   }
   if (backend === "opencode") {
+    // Official OpenCode logomark (opencode.ai/brand). Two-tone square glyph:
+    // the inner fill uses currentColor so it adapts to light/dark like the
+    // other backend icons, with the frame in a muted currentColor. The brand
+    // paths span x:0-24, y:6-36; the viewBox crops that 24x30 content and
+    // centers it in a square so the mark sits centered in the 16x16 icon box.
     return (
-      <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="2" y="3" width="20" height="18" rx="3" fill="none" stroke="currentColor" strokeWidth="1.6" />
-        <path
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          d="M9 9l-3 3 3 3M15 9l3 3-3 3"
-        />
+      <svg className="backend-icon" viewBox="-3 6 30 30" aria-hidden="true">
+        <path fill="currentColor" fillOpacity="0.55" d="M18 30H6V18H18V30Z" />
+        <path fill="currentColor" d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z" />
       </svg>
     );
   }
