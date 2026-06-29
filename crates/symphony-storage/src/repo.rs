@@ -898,12 +898,15 @@ impl Repository {
     }
 
     pub async fn overview(&self) -> Result<Overview, StorageError> {
-        // Running runs are bounded by agent.max_concurrent_agents (no hard cap),
-        // and every live_session belongs to one of them — the Overview's
-        // last-activity column joins the two by run_id. Don't truncate, or a
-        // streaming run past an arbitrary limit would vanish from Overview.
+        // Pending and running rows are both active from the user's perspective:
+        // `try_reserve_run` commits a pending run before setup/claim work
+        // promotes it to running. Running runs are bounded by
+        // agent.max_concurrent_agents (no hard cap), and every live_session
+        // belongs to one of them — the Overview's last-activity column joins
+        // the two by run_id. Don't truncate, or a streaming run past an
+        // arbitrary limit would vanish from Overview.
         let active_runs = self
-            .runs_with_issue("where r.status = 'running'", None)
+            .runs_with_issue("where r.status in ('pending', 'running')", None)
             .await?;
         let retry_queue = sqlx::query_as::<_, RetryWithIssueRow>(
             r#"
@@ -1550,6 +1553,23 @@ mod tests {
         assert_eq!(overview.active_runs[0].id, run.id);
         assert!(overview.retry_queue.is_empty());
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overview_includes_pending_runs_waiting_for_claim() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let overview = repo.overview().await.unwrap();
+
+        assert_eq!(overview.active_runs.len(), 1);
+        assert_eq!(overview.active_runs[0].id, run.id);
+        assert_eq!(overview.active_runs[0].status, "pending");
     }
 
     #[tokio::test]
