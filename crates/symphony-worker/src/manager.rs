@@ -1,4 +1,7 @@
-use crate::{backoff_ms, run_hook, sanitize_key, HookInvocation, WorkspaceManager};
+use crate::{
+    backoff_ms, run_hook, sanitize_key, skills::ensure_workspace_skills, HookInvocation, SkillFile,
+    WorkspaceManager,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
@@ -48,6 +51,8 @@ pub struct WorkerStartConfig {
     pub workflow: ParsedWorkflow,
     /// Configured repositories; each issue is routed to one of them.
     pub repos: Vec<RepoConfig>,
+    /// Bundled Symphony skills copied into issue workspaces when missing.
+    pub skills: Vec<SkillFile>,
     pub env: BTreeMap<String, String>,
     /// User-configured variables explicitly injected into each agent session.
     pub session_env: BTreeMap<String, String>,
@@ -293,6 +298,7 @@ impl WorkerManager {
 struct RuntimeConfig {
     workflow: ParsedWorkflow,
     repos: Vec<RepoConfig>,
+    skills: Vec<SkillFile>,
     env: BTreeMap<String, String>,
     session_env: BTreeMap<String, String>,
     app_data_dir: PathBuf,
@@ -308,6 +314,7 @@ fn runtime_config_from_start(
     RuntimeConfig {
         workflow: config.workflow,
         repos: config.repos,
+        skills: config.skills,
         env: config.env,
         session_env: config.session_env,
         app_data_dir: config.app_data_dir,
@@ -960,6 +967,16 @@ where
         if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
             return Ok(());
         }
+    }
+
+    ensure_workspace_skills(&workspace.path, &config.skills)
+        .await
+        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
+        return Ok(());
+    }
+
+    if workspace.needs_init {
         workspaces
             .mark_ready(&issue)
             .await
@@ -1009,6 +1026,13 @@ where
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
+    ensure_workspace_skills(&workspace.path, &config.skills)
+        .await
+        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
+        return Ok(());
+    }
+
     let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
     if let Some(prior) = repo.prior_run(&issue.id, &run.id).await? {
         let recent_events = repo
@@ -1461,6 +1485,7 @@ mod tests {
                 is_default: true,
                 ..RepoConfig::default()
             }],
+            skills: Vec::new(),
             env: BTreeMap::new(),
             session_env: BTreeMap::new(),
             app_data_dir: root.to_path_buf(),
@@ -1473,6 +1498,7 @@ mod tests {
         WorkerStartConfig {
             workflow: config.workflow,
             repos: config.repos,
+            skills: config.skills,
             env: config.env,
             session_env: config.session_env,
             app_data_dir: config.app_data_dir,
@@ -2092,6 +2118,161 @@ mod tests {
 
         assert!(tokio::fs::metadata(&other_path).await.is_ok());
         assert!(tokio::fs::metadata(&new_path).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn injects_missing_skills_before_marking_fresh_workspace_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        config.workflow.front_matter.hooks.after_create = Some(
+            r#"git init
+printf cloned > hook-ran
+"#
+            .to_string(),
+        );
+        config.skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "workpad skill".to_string(),
+        }];
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(
+                workspace_path.join(".agents/skills/symphony-workpad/SKILL.md")
+            )
+            .await
+            .unwrap(),
+            "workpad skill"
+        );
+        assert!(
+            tokio::fs::metadata(workspace_path.join(crate::WORKSPACE_READY_SENTINEL))
+                .await
+                .is_ok()
+        );
+        let exclude = tokio::fs::read_to_string(workspace_path.join(".git/info/exclude"))
+            .await
+            .unwrap();
+        assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "success"
+        );
+    }
+
+    #[tokio::test]
+    async fn injects_missing_skills_into_ready_reused_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        config.workflow.front_matter.hooks.after_create =
+            Some("echo should not run >&2\nexit 99\n".to_string());
+        config.workflow.front_matter.hooks.before_run =
+            Some("rm -rf .agents .claude\nrm -f .git/info/exclude\n".to_string());
+        config.skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "workpad skill".to_string(),
+        }];
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        tokio::fs::create_dir_all(&workspace_path).await.unwrap();
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace_path)
+            .arg("init")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        tokio::fs::write(workspace_path.join(crate::WORKSPACE_READY_SENTINEL), "")
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(
+                workspace_path.join(".agents/skills/symphony-workpad/SKILL.md")
+            )
+            .await
+            .unwrap(),
+            "workpad skill"
+        );
+        let exclude = tokio::fs::read_to_string(workspace_path.join(".git/info/exclude"))
+            .await
+            .unwrap();
+        assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "success"
+        );
     }
 
     #[test]

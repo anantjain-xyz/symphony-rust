@@ -3341,8 +3341,9 @@ function SettingsView({
           <small className="hint">
             Agent skills are procedural guides (symphony-workpad,
             symphony-commit, symphony-push, …) that Symphony agents follow. Each
-            card above shows whether its repo has them; installing starts an
-            agent session that opens a PR adding them under{" "}
+            run gets bundled fallback copies locally when a repo does not ship
+            them. Each card above shows whether its repo has checked-in skills;
+            installing starts an agent session that opens a PR adding them under{" "}
             <code>.agents/skills/</code>, with validation commands adapted to
             that repo's toolchain.
           </small>
@@ -4540,7 +4541,7 @@ function SkillsBlock({
   let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
   let headline = "Check this repo for Symphony skills.";
   let detail: React.ReactNode =
-    "Symphony can detect whether this repo already ships the bundled agent skills.";
+    "Symphony can detect whether this repo already ships the bundled agent skills; missing skills are injected locally for issue runs.";
   let meta: React.ReactNode = null;
   let actions: React.ReactNode = null;
 
@@ -4564,7 +4565,7 @@ function SkillsBlock({
     tone = "success";
     headline = "Agent skills are marked installed.";
     detail =
-      "Symphony will not require this repo to match the exact bundled skill set.";
+      "Symphony will stop warning when this repo does not match the exact bundled skill set.";
     meta = "Use automatic check to compare the default branch against the bundled manifests again.";
     actions = (
       <button
@@ -4615,7 +4616,7 @@ function SkillsBlock({
     tone = "warning";
     headline = "An install PR is waiting for review.";
     detail =
-      "Merge the install PR, then refresh this status. Symphony marks the step complete once the skills land on the default branch.";
+      "Symphony will inject local fallback skills until the PR lands on the default branch.";
     actions = (
       <>
         <button
@@ -4630,8 +4631,8 @@ function SkillsBlock({
     );
   } else if (status?.state === "missing") {
     tone = "warning";
-    headline = "Agent skills are not installed.";
-    detail = `Create an install PR for ${BUNDLED_SKILL_EXAMPLES}, and the rest of the bundled workflow skills.`;
+    headline = "Repository does not ship all agent skills.";
+    detail = `Issue runs will get local fallback copies. Create an install PR for ${BUNDLED_SKILL_EXAMPLES}, and the rest of the bundled workflow skills, if this repo should check them in.`;
     meta = `${status.missing.length} of ${BUNDLED_SKILL_COUNT} bundled skills are missing.`;
     actions = (
       <>

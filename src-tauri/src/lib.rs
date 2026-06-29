@@ -94,7 +94,8 @@ struct AppState {
 
 const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
 
-/// The agent skills shipped with the app, installed into target repos under
+/// The agent skills shipped with the app, copied into issue workspaces when
+/// missing and used by the optional install-PR flow under
 /// `.agents/skills/symphony-<name>/SKILL.md`. Source of truth: symphony-ts.
 fn bundled_skills() -> Vec<SkillFile> {
     macro_rules! skill {
@@ -557,6 +558,7 @@ fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartC
     WorkerStartConfig {
         workflow: workflow_from_settings(settings, api_key.as_deref()),
         repos: settings.repos.clone(),
+        skills: bundled_skills(),
         env: build_env(),
         session_env: settings.session_env.clone(),
         app_data_dir: state.app_data_dir.clone(),

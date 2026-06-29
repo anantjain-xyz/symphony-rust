@@ -21,7 +21,7 @@ You are working on issue **{{issue.identifier}}: {{issue.title}}**.
 
 ## Skills (progressive disclosure)
 
-Repeatable mechanics live under `.agents/skills/symphony-<name>/SKILL.md` in the target repo (the canonical, runner-agnostic location; `.claude/skills` points there for Claude Code auto-discovery when the repo did not already have a Claude skills directory). Reach for them by name — your runner will surface the right one on demand:
+Repeatable mechanics live under `.agents/skills/symphony-<name>/SKILL.md` in this workspace (the canonical, runner-agnostic location; `.claude/skills` points there for Claude Code auto-discovery when the repo did not already have a Claude skills directory). Symphony injects bundled fallback copies after setup when the repo does not ship them. Reach for them by name — your runner will surface the right one on demand:
 
 | Skill | Use when |
 |---|---|
@@ -33,7 +33,7 @@ Repeatable mechanics live under `.agents/skills/symphony-<name>/SKILL.md` in the
 | `symphony-screenshot` | capturing Playwright screenshots and embedding them in the PR description (commit + force-push pattern) |
 | `symphony-land` | squash-merging the PR once approved and green (entered via `Merging`) |
 
-This workflow tells you *which* skill applies at each step; the skill body has the exact commands and gotchas. Don't re-derive what's already in a skill. If the target repo does not ship a skill, fall back to plain `git`/`gh`/Linear-API equivalents — the workflow steps below still apply.
+This workflow tells you *which* skill applies at each step; the skill body has the exact commands and gotchas. Don't re-derive what's already in a skill.
 
 ## Environment
 
@@ -42,7 +42,7 @@ Facts about this run — do not waste turns rediscovering them.
 - **Linear**: `$LINEAR_API_KEY` is exported into your environment by Symphony. If Linear MCP tools (`mcp__linear-server__*`) appear in your environment (e.g. configured by the target repo), use them; otherwise call the HTTP API directly: `curl -fsS -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" https://api.linear.app/graphql -d '{"query":"..."}'`. Do not spend turns probing — the HTTP path always works.
 - **Linear MCP gotchas** (when MCP tools are present): `save_comment` with a `commentId` creates a NEW comment instead of updating in place — see the `symphony-workpad` skill for the GraphQL `commentUpdate` workaround. `create_attachment` only accepts file uploads (base64); for URL attachments (e.g., a PR link), the auto-link from `git push` usually suffices, otherwise use `attachmentLinkCreate` / `attachmentLinkGitHubPR` via GraphQL.
 - **GitHub**: the `gh` CLI inherits the host's authentication. If `gh pr edit --add-label` 500s (a known Projects-classic GraphQL deprecation), apply labels via the REST API instead — the `symphony-push` skill covers this.
-- **Workspace**: already `cd`'d into `<workspace root>/<IDENTIFIER>/`; the branch is checked out and the install command already ran via `after_create`. The `.symphony-workspace-ready` file at the workspace root is the init sentinel — ignore it in `git status` and never `git add` it.
+- **Workspace**: already `cd`'d into `<workspace root>/<IDENTIFIER>/`; the branch is checked out and the install command already ran via `after_create`. The `.symphony-workspace-ready` file at the workspace root is the init sentinel. Locally injected fallback skills under `.agents/skills/symphony-*` and `.claude/skills` may also be present. Ignore these runtime files in `git status` and never `git add` them unless the issue explicitly asks to install or change Symphony skills.
 - **Deferred tools** (Claude backend): most runs need none. If you need `TodoWrite` or `WebFetch` for fresh implementation work, load them in a single call — `ToolSearch("select:TodoWrite,WebFetch")`. Skip this entirely on pickup / no-op redispatch runs; do not load `ScheduleWakeup` or `Monitor` — Symphony manages re-dispatch cadence and those tools are no-ops here.
 
 ## Attempt N > 1 fast-path
