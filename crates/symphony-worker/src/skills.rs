@@ -696,7 +696,7 @@ pub(crate) async fn ensure_workspace_skills(
 
     for skill in skills {
         let manifest_rel = Path::new(SKILLS_DIR).join(&skill.name).join("SKILL.md");
-        if git_path_tracked(workspace, &manifest_rel).await? {
+        if git_path_in_head(workspace, &manifest_rel).await? {
             continue;
         }
         ensure_real_dir_all(workspace, Path::new(SKILLS_DIR)).await?;
@@ -705,6 +705,7 @@ pub(crate) async fn ensure_workspace_skills(
         let manifest = dir.join("SKILL.md");
         remove_existing(&manifest).await?;
         tokio::fs::write(&manifest, &skill.content).await?;
+        git_unstage_path(workspace, &manifest_rel).await?;
         update.injected.push(skill.name.clone());
         update
             .excluded_paths
@@ -718,14 +719,13 @@ pub(crate) async fn ensure_workspace_skills(
     Ok(update)
 }
 
-async fn git_path_tracked(workspace: &Path, relative: &Path) -> std::io::Result<bool> {
+async fn git_path_in_head(workspace: &Path, relative: &Path) -> std::io::Result<bool> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .arg("ls-files")
-        .arg("--error-unmatch")
-        .arg("--")
-        .arg(relative)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("HEAD:{}", git_tree_path(relative)))
         .output()
         .await;
     match output {
@@ -735,43 +735,73 @@ async fn git_path_tracked(workspace: &Path, relative: &Path) -> std::io::Result<
     }
 }
 
-async fn accessible_skill_manifest_exists(path: &Path) -> std::io::Result<bool> {
-    match tokio::fs::metadata(path.join("SKILL.md")).await {
-        Ok(meta) => Ok(meta.is_file()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+async fn git_unstage_path(workspace: &Path, relative: &Path) -> std::io::Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("rm")
+        .arg("--cached")
+        .arg("--force")
+        .arg("-q")
+        .arg("--ignore-unmatch")
+        .arg("--")
+        .arg(relative)
+        .output()
+        .await;
+    match output {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+fn git_tree_path(relative: &Path) -> String {
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 async fn ensure_missing_claude_discovery(
     workspace: &Path,
     skills: &[SkillFile],
 ) -> std::io::Result<Vec<String>> {
+    let claude = workspace.join(CLAUDE_DIR);
+    if let Ok(meta) = tokio::fs::symlink_metadata(&claude).await {
+        if !meta.is_dir() && git_path_in_head(workspace, Path::new(CLAUDE_DIR)).await? {
+            return Ok(Vec::new());
+        }
+    }
     ensure_real_dir_all(workspace, Path::new(CLAUDE_DIR)).await?;
     let discovery = workspace.join(CLAUDE_SKILLS_DIR);
     match tokio::fs::symlink_metadata(&discovery).await {
         Ok(meta) if meta.is_dir() => {
-            ensure_missing_per_skill_claude_entries(&discovery, skills).await
+            ensure_missing_per_skill_claude_entries(workspace, &discovery, skills).await
         }
         Ok(meta) if meta.file_type().is_symlink() => {
             #[cfg(unix)]
             {
                 let target = tokio::fs::read_link(&discovery).await?;
                 if is_expected_claude_skills_link(&target, workspace) {
-                    return Ok(Vec::new());
+                    git_unstage_path(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
+                    return Ok(vec![format!("/{CLAUDE_SKILLS_DIR}")]);
                 }
             }
             remove_existing(&discovery).await?;
             create_claude_skills_discovery(&discovery, skills).await?;
+            git_unstage_path(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
             Ok(vec![format!("/{CLAUDE_SKILLS_DIR}")])
         }
         Ok(_) => {
             remove_existing(&discovery).await?;
             create_claude_skills_discovery(&discovery, skills).await?;
+            git_unstage_path(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
             Ok(vec![format!("/{CLAUDE_SKILLS_DIR}")])
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             create_claude_skills_discovery(&discovery, skills).await?;
+            git_unstage_path(workspace, Path::new(CLAUDE_SKILLS_DIR)).await?;
             Ok(vec![format!("/{CLAUDE_SKILLS_DIR}")])
         }
         Err(err) => Err(err),
@@ -779,13 +809,16 @@ async fn ensure_missing_claude_discovery(
 }
 
 async fn ensure_missing_per_skill_claude_entries(
+    workspace: &Path,
     discovery: &Path,
     skills: &[SkillFile],
 ) -> std::io::Result<Vec<String>> {
     let mut excluded = Vec::new();
     for skill in skills {
         let link = discovery.join(&skill.name);
-        if accessible_skill_manifest_exists(&link).await? {
+        let link_rel = Path::new(CLAUDE_SKILLS_DIR).join(&skill.name);
+        let manifest_rel = link_rel.join("SKILL.md");
+        if git_path_in_head(workspace, &manifest_rel).await? {
             continue;
         }
         remove_existing(&link).await?;
@@ -799,6 +832,7 @@ async fn ensure_missing_per_skill_claude_entries(
             tokio::fs::create_dir_all(&link).await?;
             tokio::fs::write(link.join("SKILL.md"), &skill.content).await?;
         }
+        git_unstage_path(workspace, &link_rel).await?;
         excluded.push(format!("/{CLAUDE_SKILLS_DIR}/{}", skill.name));
     }
     Ok(excluded)
@@ -1063,6 +1097,39 @@ mod tests {
         );
     }
 
+    fn commit_staged(workspace: &Path, message: &str) {
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "user.email=symphony@example.com",
+                "-c",
+                "user.name=Symphony Test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    fn git_stdout(workspace: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed: {}",
+            workspace.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
     #[test]
     fn parses_github_urls() {
         for url in [
@@ -1247,6 +1314,7 @@ mod tests {
             temp.path(),
             &["add", ".agents/skills/symphony-commit/SKILL.md"],
         );
+        commit_staged(temp.path(), "track repo skill");
         let stale = temp.path().join(SKILLS_DIR).join("symphony-workpad");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("SKILL.md"), "stale fallback").unwrap();
@@ -1297,8 +1365,13 @@ mod tests {
         std::os::unix::fs::symlink("../../../docs/commit.md", existing.join("SKILL.md")).unwrap();
         run_git(
             temp.path(),
-            &["add", ".agents/skills/symphony-commit/SKILL.md"],
+            &[
+                "add",
+                "docs/commit.md",
+                ".agents/skills/symphony-commit/SKILL.md",
+            ],
         );
+        commit_staged(temp.path(), "track symlink skill");
         let skills = vec![SkillFile {
             name: "symphony-commit".to_string(),
             content: "bundled commit".to_string(),
@@ -1334,6 +1407,8 @@ mod tests {
         let existing_discovery = temp.path().join(CLAUDE_SKILLS_DIR).join("symphony-commit");
         std::fs::create_dir_all(&existing_discovery).unwrap();
         std::fs::write(existing_discovery.join("SKILL.md"), "custom discovery").unwrap();
+        run_git(temp.path(), &["add", ".agents/skills", CLAUDE_SKILLS_DIR]);
+        commit_staged(temp.path(), "track repo skills and claude entry");
         let skills = vec![
             SkillFile {
                 name: "symphony-commit".to_string(),
@@ -1364,6 +1439,155 @@ mod tests {
         let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
         assert!(exclude.contains("/.claude/skills/symphony-workpad"));
         assert!(!exclude.contains("/.claude/skills/symphony-commit\n"));
+    }
+
+    #[tokio::test]
+    async fn local_injection_refreshes_and_unstages_staged_fallback_files() {
+        let temp = tempfile::tempdir().unwrap();
+        run_git(temp.path(), &["init"]);
+        commit_staged(temp.path(), "base");
+        let staged = temp.path().join(SKILLS_DIR).join("symphony-workpad");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("SKILL.md"), "staged stale fallback").unwrap();
+        run_git(
+            temp.path(),
+            &["add", ".agents/skills/symphony-workpad/SKILL.md"],
+        );
+        let skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "bundled workpad".to_string(),
+        }];
+
+        let update = ensure_workspace_skills(temp.path(), &skills).await.unwrap();
+
+        assert_eq!(update.injected, vec!["symphony-workpad"]);
+        assert_eq!(
+            std::fs::read_to_string(staged.join("SKILL.md")).unwrap(),
+            "bundled workpad"
+        );
+        assert_eq!(
+            git_stdout(
+                temp.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-only",
+                    "--",
+                    ".agents/skills/symphony-workpad/SKILL.md"
+                ]
+            )
+            .trim(),
+            ""
+        );
+        assert_eq!(
+            git_stdout(
+                temp.path(),
+                &[
+                    "status",
+                    "--short",
+                    "--",
+                    ".agents/skills/symphony-workpad/SKILL.md"
+                ]
+            )
+            .trim(),
+            ""
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_injection_preserves_tracked_top_level_claude_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        run_git(temp.path(), &["init"]);
+        let shared = temp.path().join("shared-claude");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("settings.json"), "{}").unwrap();
+        std::os::unix::fs::symlink("shared-claude", temp.path().join(CLAUDE_DIR)).unwrap();
+        run_git(
+            temp.path(),
+            &["add", "shared-claude/settings.json", CLAUDE_DIR],
+        );
+        commit_staged(temp.path(), "track claude symlink");
+        let skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "bundled workpad".to_string(),
+        }];
+
+        let update = ensure_workspace_skills(temp.path(), &skills).await.unwrap();
+
+        assert_eq!(update.injected, vec!["symphony-workpad"]);
+        assert_eq!(
+            std::fs::read_link(temp.path().join(CLAUDE_DIR)).unwrap(),
+            PathBuf::from("shared-claude")
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                temp.path()
+                    .join(SKILLS_DIR)
+                    .join("symphony-workpad/SKILL.md")
+            )
+            .unwrap(),
+            "bundled workpad"
+        );
+        let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
+        assert!(!exclude.contains("/.claude"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_injection_unstages_existing_claude_discovery_link() {
+        let temp = tempfile::tempdir().unwrap();
+        run_git(temp.path(), &["init"]);
+        commit_staged(temp.path(), "base");
+        std::fs::create_dir_all(temp.path().join(CLAUDE_DIR)).unwrap();
+        std::os::unix::fs::symlink(
+            claude_skills_symlink_target(),
+            temp.path().join(CLAUDE_SKILLS_DIR),
+        )
+        .unwrap();
+        run_git(temp.path(), &["add", CLAUDE_SKILLS_DIR]);
+        let skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "bundled workpad".to_string(),
+        }];
+
+        let update = ensure_workspace_skills(temp.path(), &skills).await.unwrap();
+
+        assert!(update
+            .excluded_paths
+            .contains(&format!("/{CLAUDE_SKILLS_DIR}")));
+        assert_eq!(
+            git_stdout(
+                temp.path(),
+                &["diff", "--cached", "--name-only", "--", CLAUDE_SKILLS_DIR]
+            )
+            .trim(),
+            ""
+        );
+    }
+
+    #[tokio::test]
+    async fn local_injection_refreshes_untracked_claude_discovery_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        run_git(temp.path(), &["init"]);
+        commit_staged(temp.path(), "base");
+        let stale = temp.path().join(CLAUDE_SKILLS_DIR).join("symphony-workpad");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("SKILL.md"), "stale discovery").unwrap();
+        let skills = vec![SkillFile {
+            name: "symphony-workpad".to_string(),
+            content: "bundled workpad".to_string(),
+        }];
+
+        let update = ensure_workspace_skills(temp.path(), &skills).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(stale.join("SKILL.md")).unwrap(),
+            "bundled workpad"
+        );
+        assert!(update
+            .excluded_paths
+            .contains(&"/.claude/skills/symphony-workpad".to_string()));
     }
 
     #[tokio::test]
