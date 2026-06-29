@@ -428,6 +428,57 @@ describe("App settings", () => {
     expect(defaultToggles[1].checked).toBe(true);
   });
 
+  it("expands only the repository being edited", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = {
+      ...testSettings(),
+      repos: [
+        testSettings().repos[0],
+        {
+          ...testSettings().repos[0],
+          name: "backend",
+          url: "git@github.com:acme/backend.git",
+          team_prefixes: ["API"],
+          is_default: false,
+        },
+      ],
+    };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    const widgetsToggle = await screen.findByRole("button", {
+      name: "Collapse widgets repository",
+    });
+    expect(widgetsToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByDisplayValue("git@github.com:acme/widgets.git")).toBeTruthy();
+    expect(screen.queryByDisplayValue("git@github.com:acme/backend.git")).toBeNull();
+
+    const backendToggle = await screen.findByRole("button", {
+      name: "Edit backend repository",
+    });
+    expect(backendToggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(backendToggle);
+
+    expect(await screen.findByDisplayValue("git@github.com:acme/backend.git")).toBeTruthy();
+    expect(screen.queryByDisplayValue("git@github.com:acme/widgets.git")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Edit widgets repository" }).getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("false");
+
+    const repoName = screen.getByLabelText(/^Name/, { selector: "input" });
+    fireEvent.change(repoName, { target: { value: "api" } });
+
+    expect(
+      screen.getByRole("button", { name: "Collapse api repository" }).getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("true");
+  });
+
   it("uses literal input behavior for settings config fields", () => {
     render(<App />);
 

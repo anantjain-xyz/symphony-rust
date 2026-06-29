@@ -1597,7 +1597,7 @@ pre {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   display: grid;
-  gap: 14px;
+  gap: 12px;
   margin: 0;
   padding: 12px;
 }
@@ -1609,15 +1609,62 @@ pre {
   justify-content: space-between;
 }
 
-.repo-card-head strong {
+.repo-card-toggle {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  min-width: 0;
+  padding: 0 4px 0 0;
+  text-align: left;
+}
+
+.repo-card-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.repo-card-toggle .chevron {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  transition: transform 120ms ease;
+}
+
+.repo-card.expanded .repo-card-toggle .chevron {
+  transform: rotate(90deg);
+}
+
+.repo-card-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.repo-card-title strong {
   font-size: 13px;
   font-weight: 600;
 }
 
+.repo-card-title small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .repo-card-actions {
   align-items: center;
+  flex: 0 0 auto;
   display: flex;
   gap: 12px;
+}
+
+.repo-card-body {
+  display: grid;
+  gap: 14px;
 }
 
 .repo-default {
