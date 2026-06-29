@@ -799,7 +799,7 @@ describe("App settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(screen.getByText("Agent skills are not installed.")).toBeTruthy();
+    expect(screen.getByText("Repository does not ship all agent skills.")).toBeTruthy();
     expect(screen.getByText("7 of 7 bundled skills are missing.")).toBeTruthy();
     const createPrButton = screen.getByRole("button", { name: "Create install PR" });
     expect(createPrButton.getAttribute("disabled")).not.toBeNull();
@@ -829,7 +829,9 @@ describe("App settings", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByText("Agent skills are not installed.")).toBeTruthy();
+    expect(
+      await screen.findByText("Repository does not ship all agent skills."),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Mark installed" }));
 
     expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
@@ -1080,7 +1082,9 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByText("Agent skills are not installed.")).toBeTruthy();
+    expect(
+      await screen.findByText("Repository does not ship all agent skills."),
+    ).toBeTruthy();
     expect(screen.getByText("1 of 7 bundled skills are missing.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
