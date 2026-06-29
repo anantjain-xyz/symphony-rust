@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bump Version"
+  short_description: "Safely bump repo release versions"
+  default_prompt: "Use $bump-version to bump this repo to the next patch version."
