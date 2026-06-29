@@ -2130,7 +2130,7 @@ mod tests {
         let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
         let mut config = runtime_config(&workspace_root);
         config.workflow.front_matter.hooks.after_create = Some(
-            r#"mkdir -p .git/info
+            r#"git init
 printf cloned > hook-ran
 "#
             .to_string(),
@@ -2218,9 +2218,19 @@ printf cloned > hook-ran
         let workspace_path = workspace_manager(&config, &repo_config)
             .path_for(&ready.identifier)
             .unwrap();
-        tokio::fs::create_dir_all(workspace_path.join(".git/info"))
+        tokio::fs::create_dir_all(&workspace_path).await.unwrap();
+        let output = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace_path)
+            .arg("init")
+            .output()
             .await
             .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         tokio::fs::write(workspace_path.join(crate::WORKSPACE_READY_SENTINEL), "")
             .await
             .unwrap();
