@@ -3039,12 +3039,27 @@ function SettingsView({
   onInstallSkills: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
-  const updateRepo = (index: number, patch: Partial<RepoConfig>) =>
+  const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(
+    settings.repos.length > 0 ? 0 : null,
+  );
+
+  useEffect(() => {
+    setExpandedRepoIndex((index) => {
+      if (settings.repos.length === 0) return null;
+      if (index === null) return 0;
+      return Math.min(index, settings.repos.length - 1);
+    });
+  }, [settings.repos.length]);
+
+  const updateRepo = (index: number, patch: Partial<RepoConfig>) => {
+    setExpandedRepoIndex(index);
     setSettings({
       ...settings,
       repos: settings.repos.map((repo, i) => (i === index ? { ...repo, ...patch } : repo)),
     });
-  const addRepo = () =>
+  };
+  const addRepo = () => {
+    setExpandedRepoIndex(settings.repos.length);
     setSettings({
       ...settings,
       repos: [
@@ -3061,9 +3076,20 @@ function SettingsView({
         },
       ],
     });
-  const removeRepo = (index: number) =>
+  };
+  const removeRepo = (index: number) => {
+    setExpandedRepoIndex((current) => {
+      const nextLength = settings.repos.length - 1;
+      if (nextLength <= 0) return null;
+      if (current === null) return 0;
+      if (current === index) return Math.min(index, nextLength - 1);
+      if (current > index) return current - 1;
+      return Math.min(current, nextLength - 1);
+    });
     setSettings({ ...settings, repos: settings.repos.filter((_, i) => i !== index) });
-  const setDefaultRepo = (index: number, enabled: boolean) =>
+  };
+  const setDefaultRepo = (index: number, enabled: boolean) => {
+    setExpandedRepoIndex(index);
     setSettings({
       ...settings,
       repos: settings.repos.map((repo, i) => ({
@@ -3071,6 +3097,7 @@ function SettingsView({
         is_default: enabled && i === index,
       })),
     });
+  };
   return (
     <form
       className="settings-form"
@@ -3125,131 +3152,168 @@ function SettingsView({
             then its team, then the default. Clear the default to require an
             explicit route.
           </small>
-          {settings.repos.map((repo, index) => (
-            <fieldset className="repo-card" key={index}>
-              <div className="repo-card-head">
-                <strong>{repo.name.trim() || `Repository ${index + 1}`}</strong>
-                <div className="repo-card-actions">
-                  <label className="repo-default">
-                    <input
-                      type="checkbox"
-                      checked={repo.is_default}
-                      disabled={!runtimeAvailable}
-                      onChange={(event) => setDefaultRepo(index, event.currentTarget.checked)}
-                    />
-                    Default
-                  </label>
+          {settings.repos.map((repo, index) => {
+            const repoTitle = repo.name.trim() || `Repository ${index + 1}`;
+            const repoSummary = repo.url.trim() || "No URL configured";
+            const expanded = expandedRepoIndex === index;
+            const bodyId = `repo-card-body-${index}`;
+            const toggleLabel = `${expanded ? "Collapse" : "Edit"} ${repoTitle} repository`;
+            return (
+              <fieldset
+                className={expanded ? "repo-card expanded" : "repo-card collapsed"}
+                key={index}
+              >
+                <div className="repo-card-head">
                   <button
                     type="button"
-                    className="link-button"
-                    disabled={!runtimeAvailable}
-                    onClick={() => removeRepo(index)}
+                    className="repo-card-toggle"
+                    aria-expanded={expanded}
+                    aria-controls={expanded ? bodyId : undefined}
+                    aria-label={toggleLabel}
+                    title={toggleLabel}
+                    onClick={() => setExpandedRepoIndex(index)}
                   >
-                    Remove
+                    <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                      <path
+                        d="M6 4l4 4-4 4"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="repo-card-title">
+                      <strong>{repoTitle}</strong>
+                      <small>{repoSummary}</small>
+                    </span>
                   </button>
+                  <div className="repo-card-actions">
+                    <label className="repo-default">
+                      <input
+                        type="checkbox"
+                        checked={repo.is_default}
+                        disabled={!runtimeAvailable}
+                        onChange={(event) => setDefaultRepo(index, event.currentTarget.checked)}
+                      />
+                      Default
+                    </label>
+                    <button
+                      type="button"
+                      className="link-button"
+                      disabled={!runtimeAvailable}
+                      onClick={() => removeRepo(index)}
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <label>
-                Name
-                <input
-                  {...literalInputProps}
-                  value={repo.name}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
-                  placeholder="widgets"
-                />
-                <small className="hint">
-                  Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear
-                  to send it here.
-                </small>
-              </label>
-              <label>
-                Repo URL
-                <input
-                  {...literalInputProps}
-                  value={repo.url}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) => {
-                    const url = e.currentTarget.value;
-                    updateRepo(index, {
-                      url,
-                      skills_marked_installed:
-                        url.trim() === repo.url.trim()
-                          ? repo.skills_marked_installed
-                          : false,
-                    });
-                  }}
-                  placeholder="git@github.com:org/repo.git"
-                />
-                <small className="hint">
-                  SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
-                </small>
-              </label>
-              <label>
-                Install command
-                <input
-                  {...literalInputProps}
-                  value={repo.install_cmd ?? ""}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
-                  }
-                  placeholder="npm ci"
-                />
-                <small className="hint">
-                  Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
-                </small>
-              </label>
-              <label>
-                Linear teams
-                <ListInput
-                  value={repo.team_prefixes}
-                  disabled={!runtimeAvailable}
-                  separator="comma"
-                  placeholder="ENG, WAL"
-                  onChange={(next) => updateRepo(index, { team_prefixes: next })}
-                />
-                <small className="hint">
-                  Optional. Issues from these team keys land here unless a label or
-                  project rule says otherwise.
-                </small>
-              </label>
-              <label>
-                Linear projects
-                <ListInput
-                  value={repo.project_ids}
-                  disabled={!runtimeAvailable}
-                  separator="comma"
-                  placeholder="Project URLs or IDs"
-                  onChange={(next) => updateRepo(index, { project_ids: next })}
-                />
-                <small className="hint">
-                  Optional. Paste Linear project URLs or IDs; beats the team rule.
-                </small>
-              </label>
-              <SkillsBlock
-                status={skillsStatuses[repo.url.trim()] ?? null}
-                checking={skillsChecking[repo.url.trim()] ?? false}
-                manuallyInstalled={repo.skills_marked_installed}
-                install={
-                  skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
-                }
-                installRunning={skillsInstall?.state === "running"}
-                busy={busy}
-                runtimeAvailable={runtimeAvailable}
-                repoConfigured={repo.url.trim() !== ""}
-                onRefresh={() => onRefreshSkills(repo.url)}
-                onInstall={() => onInstallSkills(repo.url)}
-                onMarkInstalled={() =>
-                  updateRepo(index, { skills_marked_installed: true })
-                }
-                onUseAutomaticCheck={() => {
-                  updateRepo(index, { skills_marked_installed: false });
-                  onRefreshSkills(repo.url);
-                }}
-              />
-            </fieldset>
-          ))}
+                {expanded ? (
+                  <div className="repo-card-body" id={bodyId}>
+                    <label>
+                      Name
+                      <input
+                        {...literalInputProps}
+                        value={repo.name}
+                        disabled={!runtimeAvailable}
+                        onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
+                        placeholder="widgets"
+                      />
+                      <small className="hint">
+                        Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear
+                        to send it here.
+                      </small>
+                    </label>
+                    <label>
+                      Repo URL
+                      <input
+                        {...literalInputProps}
+                        value={repo.url}
+                        disabled={!runtimeAvailable}
+                        onChange={(e) => {
+                          const url = e.currentTarget.value;
+                          updateRepo(index, {
+                            url,
+                            skills_marked_installed:
+                              url.trim() === repo.url.trim()
+                                ? repo.skills_marked_installed
+                                : false,
+                          });
+                        }}
+                        placeholder="git@github.com:org/repo.git"
+                      />
+                      <small className="hint">
+                        SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
+                      </small>
+                    </label>
+                    <label>
+                      Install command
+                      <input
+                        {...literalInputProps}
+                        value={repo.install_cmd ?? ""}
+                        disabled={!runtimeAvailable}
+                        onChange={(e) =>
+                          updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
+                        }
+                        placeholder="npm ci"
+                      />
+                      <small className="hint">
+                        Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
+                      </small>
+                    </label>
+                    <label>
+                      Linear teams
+                      <ListInput
+                        value={repo.team_prefixes}
+                        disabled={!runtimeAvailable}
+                        separator="comma"
+                        placeholder="ENG, WAL"
+                        onChange={(next) => updateRepo(index, { team_prefixes: next })}
+                      />
+                      <small className="hint">
+                        Optional. Issues from these team keys land here unless a label or
+                        project rule says otherwise.
+                      </small>
+                    </label>
+                    <label>
+                      Linear projects
+                      <ListInput
+                        value={repo.project_ids}
+                        disabled={!runtimeAvailable}
+                        separator="comma"
+                        placeholder="Project URLs or IDs"
+                        onChange={(next) => updateRepo(index, { project_ids: next })}
+                      />
+                      <small className="hint">
+                        Optional. Paste Linear project URLs or IDs; beats the team rule.
+                      </small>
+                    </label>
+                    <SkillsBlock
+                      status={skillsStatuses[repo.url.trim()] ?? null}
+                      checking={skillsChecking[repo.url.trim()] ?? false}
+                      manuallyInstalled={repo.skills_marked_installed}
+                      install={
+                        skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
+                      }
+                      installRunning={skillsInstall?.state === "running"}
+                      busy={busy}
+                      runtimeAvailable={runtimeAvailable}
+                      repoConfigured={repo.url.trim() !== ""}
+                      onRefresh={() => onRefreshSkills(repo.url)}
+                      onInstall={() => onInstallSkills(repo.url)}
+                      onMarkInstalled={() =>
+                        updateRepo(index, { skills_marked_installed: true })
+                      }
+                      onUseAutomaticCheck={() => {
+                        updateRepo(index, { skills_marked_installed: false });
+                        onRefreshSkills(repo.url);
+                      }}
+                    />
+                  </div>
+                ) : null}
+              </fieldset>
+            );
+          })}
           <button
             type="button"
             className="self-start"
