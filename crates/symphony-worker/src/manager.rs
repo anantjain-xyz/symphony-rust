@@ -1026,6 +1026,13 @@ where
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
+    ensure_workspace_skills(&workspace.path, &config.skills)
+        .await
+        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
+        return Ok(());
+    }
+
     let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
     if let Some(prior) = repo.prior_run(&issue.id, &run.id).await? {
         let recent_events = repo
@@ -2197,6 +2204,8 @@ printf cloned > hook-ran
         let mut config = runtime_config(&workspace_root);
         config.workflow.front_matter.hooks.after_create =
             Some("echo should not run >&2\nexit 99\n".to_string());
+        config.workflow.front_matter.hooks.before_run =
+            Some("rm -rf .agents .claude\nrm -f .git/info/exclude\n".to_string());
         config.skills = vec![SkillFile {
             name: "symphony-workpad".to_string(),
             content: "workpad skill".to_string(),
@@ -2246,6 +2255,10 @@ printf cloned > hook-ran
             .unwrap(),
             "workpad skill"
         );
+        let exclude = tokio::fs::read_to_string(workspace_path.join(".git/info/exclude"))
+            .await
+            .unwrap();
+        assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
         assert_eq!(
             repo.get_run(&run.id).await.unwrap().unwrap().status,
             "success"
