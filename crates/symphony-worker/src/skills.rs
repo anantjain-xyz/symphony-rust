@@ -343,6 +343,10 @@ pub struct SkillsInstallConfig {
     /// Parsed workflow supplying the agent backend and its CLI options.
     pub workflow: ParsedWorkflow,
     pub skills: Vec<SkillFile>,
+    /// Base environment captured after app-level fixes such as login-shell PATH
+    /// repair. Install sessions do not go through per-issue run_env, so they
+    /// need this explicitly.
+    pub env: BTreeMap<String, String>,
     /// Custom session env from settings (e.g. `CURSOR_API_KEY`).
     pub session_env: BTreeMap<String, String>,
 }
@@ -639,12 +643,21 @@ fn install_run_request(
             // configured run setting.
             skip_permissions: true,
         },
-        env: config
-            .session_env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
+        env: install_agent_env(&config.env, &config.session_env),
     }
+}
+
+fn install_agent_env(
+    env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut injected = env.clone();
+    injected.extend(
+        session_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    injected.into_iter().collect()
 }
 
 /// Remove whatever exists at `path` — file, directory, or symlink — without
@@ -1921,6 +1934,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             workflow,
             skills: Vec::new(),
+            env: BTreeMap::new(),
             session_env: BTreeMap::new(),
         };
 
@@ -1972,7 +1986,14 @@ mod tests {
             workspace_root: PathBuf::from("/tmp"),
             workflow,
             skills: Vec::new(),
-            session_env: BTreeMap::from([("CURSOR_API_KEY".to_string(), "test-key".to_string())]),
+            env: BTreeMap::from([
+                ("PATH".to_string(), "/opt/homebrew/bin:/usr/bin:/bin".to_string()),
+                ("GH_TOKEN".to_string(), "from-env".to_string()),
+            ]),
+            session_env: BTreeMap::from([
+                ("CURSOR_API_KEY".to_string(), "test-key".to_string()),
+                ("GH_TOKEN".to_string(), "from-session".to_string()),
+            ]),
         };
 
         let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
@@ -1980,6 +2001,14 @@ mod tests {
             .env
             .iter()
             .any(|(key, value)| key == "CURSOR_API_KEY" && value == "test-key"));
+        assert!(request
+            .env
+            .iter()
+            .any(|(key, value)| key == "PATH" && value == "/opt/homebrew/bin:/usr/bin:/bin"));
+        assert!(request
+            .env
+            .iter()
+            .any(|(key, value)| key == "GH_TOKEN" && value == "from-session"));
     }
 
     #[tokio::test]
@@ -2121,6 +2150,7 @@ mod tests {
                 "body".to_string(),
             ),
             skills: Vec::new(),
+            env: BTreeMap::new(),
             session_env: BTreeMap::new(),
         };
         assert!(matches!(

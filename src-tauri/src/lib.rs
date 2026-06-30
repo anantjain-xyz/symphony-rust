@@ -665,6 +665,7 @@ async fn install_skills(
             workspace_root,
             workflow,
             skills: bundled_skills(),
+            env: build_env(),
             session_env: settings.session_env.clone(),
         })
         .await
