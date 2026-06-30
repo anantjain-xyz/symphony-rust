@@ -191,6 +191,32 @@ tr:focus-visible {
   height: 100vh;
 }
 
+.dev-environment-banner {
+  align-items: center;
+  background: var(--warning);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning-solid) 32%, var(--border));
+  color: var(--warning-foreground);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 7px 28px;
+  text-align: center;
+}
+
+.dev-environment-banner strong {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.dev-environment-banner span {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
 .topbar {
   align-items: center;
   background: var(--background);
@@ -248,6 +274,26 @@ tr:focus-visible {
   font-weight: 600;
   letter-spacing: 0;
   margin: 0;
+}
+
+.brand-title-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dev-brand-badge {
+  background: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning-solid) 38%, var(--border));
+  border-radius: 999px;
+  color: var(--warning-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 7px;
+  text-transform: uppercase;
 }
 
 small {
@@ -2287,6 +2333,13 @@ textarea.mono-input {
 }
 
 @media (max-width: 520px) {
+  .dev-environment-banner {
+    align-items: center;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 14px;
+  }
+
   .topbar {
     align-items: stretch;
     gap: 10px;
