@@ -1987,7 +1987,10 @@ mod tests {
             workflow,
             skills: Vec::new(),
             env: BTreeMap::from([
-                ("PATH".to_string(), "/opt/homebrew/bin:/usr/bin:/bin".to_string()),
+                (
+                    "PATH".to_string(),
+                    "/opt/homebrew/bin:/usr/bin:/bin".to_string(),
+                ),
                 ("GH_TOKEN".to_string(), "from-env".to_string()),
             ]),
             session_env: BTreeMap::from([
