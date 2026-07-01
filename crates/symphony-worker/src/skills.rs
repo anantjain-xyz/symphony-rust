@@ -148,13 +148,21 @@ const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
     "GITHUB_ENTERPRISE_TOKEN",
 ];
 
-fn github_token_for_host(host: &str) -> Option<String> {
-    let vars = if host == "github.com" {
-        ["GH_TOKEN", "GITHUB_TOKEN"].as_slice()
+const GITHUB_DOTCOM_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+const GITHUB_ENTERPRISE_TOKEN_ENV_VARS: &[&str] =
+    &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
+    if host == "github.com" {
+        GITHUB_DOTCOM_TOKEN_ENV_VARS
     } else {
-        GITHUB_TOKEN_ENV_VARS
-    };
-    vars.iter()
+        GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+    }
+}
+
+fn github_token_for_host(host: &str) -> Option<String> {
+    github_token_env_vars_for_host(host)
+        .iter()
         .find_map(|key| env::var(key).ok())
         .and_then(|value| (!value.trim().is_empty()).then_some(value))
 }
@@ -1424,6 +1432,18 @@ mod tests {
     fn omits_github_com_from_gh_repo_arg() {
         let remote = parse_github_remote("https://github.com/acme/widgets").unwrap();
         assert_eq!(remote.gh_repo_arg(), "acme/widgets");
+    }
+
+    #[test]
+    fn enterprise_hosts_use_enterprise_token_envs_only() {
+        assert_eq!(
+            github_token_env_vars_for_host("github.com"),
+            GITHUB_DOTCOM_TOKEN_ENV_VARS
+        );
+        assert_eq!(
+            github_token_env_vars_for_host("octocorp.ghe.com"),
+            GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+        );
     }
 
     #[test]
