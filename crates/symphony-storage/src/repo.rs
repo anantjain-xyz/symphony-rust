@@ -845,11 +845,35 @@ impl Repository {
             .bind(issue_id)
             .execute(&self.pool)
             .await?;
-        let updated = result.rows_affected() > 0;
-        if updated {
+        let retry_due = result.rows_affected() > 0;
+        if retry_due {
             self.changed("retry_queue", "update");
         }
-        Ok(updated)
+        // A run the user stopped (not one that failed) has no retry_queue row --
+        // finish_if_cancelled clears it and instead records an
+        // issue_dispatch_suppressions row keyed to the issue's fingerprint, so
+        // the dispatcher skips it until the issue changes upstream. "Retry now"
+        // means "dispatch this again right now" regardless of which path
+        // stopped it, so clear any suppression too; otherwise the button is a
+        // silent no-op for a user-stopped run and there is no way to resume one
+        // short of editing the issue in the tracker.
+        let unsuppressed = self.clear_all_issue_dispatch_suppressions(issue_id).await?;
+        Ok(retry_due || unsuppressed)
+    }
+
+    async fn clear_all_issue_dispatch_suppressions(
+        &self,
+        issue_id: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query("delete from issue_dispatch_suppressions where issue_id = ?1")
+            .bind(issue_id)
+            .execute(&self.pool)
+            .await?;
+        let cleared = result.rows_affected() > 0;
+        if cleared {
+            self.changed("issue_dispatch_suppressions", "delete");
+        }
+        Ok(cleared)
     }
 
     pub async fn pending_retry_issue_ids(&self) -> Result<Vec<String>, StorageError> {
@@ -1525,6 +1549,26 @@ mod tests {
             "lin-1"
         );
         assert!(!repo.trigger_retry_now("missing").await.unwrap());
+    }
+
+    // A user-stopped (not failed) run has no retry_queue row -- it leaves an
+    // issue_dispatch_suppressions row instead, which silently blocks the
+    // dispatcher until the issue's fingerprint changes upstream. "Retry now"
+    // must also clear that, or the button does nothing for a stopped run.
+    #[tokio::test]
+    async fn trigger_retry_now_clears_user_cancelled_suppression() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        repo.suppress_issue_dispatch("lin-1", "user_cancelled", "fingerprint-at-cancel-time")
+            .await
+            .unwrap();
+
+        assert!(repo.trigger_retry_now("lin-1").await.unwrap());
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", "user_cancelled")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

@@ -96,13 +96,20 @@ impl WorkspaceManager {
     }
 
     fn assert_safe_path(&self, key: &str) -> Result<PathBuf, WorkspaceError> {
-        let resolved = self.root.join(key);
+        // Canonicalize the root *before* joining the key. `canonicalize` resolves
+        // symlinks and (on case-insensitive volumes like macOS APFS) returns the
+        // real on-disk casing — e.g. `.../workspaces/alligrator` comes back as
+        // `.../workspaces/Alligrator`. Building `resolved` from the raw root and
+        // then comparing against the canonical root made `starts_with` fail on
+        // any such mismatch, raising a spurious EscapedRoot that aborts the
+        // worker tick. Joining onto the canonical root keeps both sides
+        // consistent, so the guard only fires on a genuine `..` escape.
         let root = self
             .root
             .canonicalize()
             .unwrap_or_else(|_| self.root.clone());
-        let normalized = normalize(&resolved);
-        if normalized != root && !normalized.starts_with(&root) {
+        let resolved = normalize(&root.join(key));
+        if resolved != root && !resolved.starts_with(&root) {
             return Err(WorkspaceError::EscapedRoot(key.to_string()));
         }
         Ok(resolved)
@@ -159,5 +166,45 @@ mod tests {
         assert_eq!(sanitize_key("SYM-1"), "SYM-1");
         assert_eq!(sanitize_key("../bad"), "___bad");
         assert_eq!(sanitize_key(""), "_");
+    }
+
+    // A root reached through a symlink (and, on case-insensitive volumes, a
+    // case-differing root) canonicalizes to a different string than the raw
+    // path. The old assert_safe_path compared a raw-joined path against the
+    // canonical root and raised a spurious EscapedRoot, which aborted the
+    // worker tick and stalled all dispatch. path_for must succeed here.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_resolves_through_symlinked_root() {
+        use std::fs;
+        let base = std::env::temp_dir().join("symphony-ws-symlink-test");
+        let real = base.join("real-root");
+        let link = base.join("linked-root");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mgr = WorkspaceManager::new(&link);
+        let path = mgr
+            .path_for("SYM-1")
+            .expect("a key under a symlinked root must be allowed");
+
+        let canon_real = real.canonicalize().unwrap();
+        assert!(
+            path.starts_with(&canon_real),
+            "{path:?} should resolve under {canon_real:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // The guard must still reject a key that climbs out of the root.
+    #[cfg(unix)]
+    #[test]
+    fn safe_path_rejects_parent_escape() {
+        let mgr = WorkspaceManager::new("/tmp");
+        assert!(matches!(
+            mgr.assert_safe_path("../../etc"),
+            Err(WorkspaceError::EscapedRoot(_))
+        ));
     }
 }

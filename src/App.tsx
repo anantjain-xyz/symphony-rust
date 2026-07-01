@@ -1595,6 +1595,9 @@ function App() {
             multiRepo={multiRepo}
             onOpenRun={openRun}
             onStopRun={stopRun}
+            canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
+            onTriggerRetryNow={triggerRetryNow}
+            triggeringRetryIds={triggeringRetryIds}
             stoppingRunIds={stoppingRunIds}
           />
         ) : null}
@@ -2075,6 +2078,9 @@ function RunsView({
   multiRepo,
   onOpenRun,
   onStopRun,
+  canTriggerRetry,
+  onTriggerRetryNow,
+  triggeringRetryIds,
   stoppingRunIds,
 }: {
   runs: RunWithIssueRow[];
@@ -2083,6 +2089,9 @@ function RunsView({
   multiRepo: boolean;
   onOpenRun: (id: string) => void;
   onStopRun: (id: string) => void;
+  canTriggerRetry: boolean;
+  onTriggerRetryNow: (issueId: string) => void;
+  triggeringRetryIds: Set<string>;
   stoppingRunIds: Set<string>;
 }) {
   const [repoFilter, setRepoFilter] = useState("");
@@ -2158,16 +2167,37 @@ function RunsView({
                     ) : null}
                     <span>{selected.run.issue_title}</span>
                   </div>
-                  {selected.run.status === "pending" || selected.run.status === "running" ? (
-                    <button
-                      type="button"
-                      className="link-button danger outlined"
-                      disabled={stoppingRunIds.has(selected.run.id)}
-                      onClick={() => onStopRun(selected.run.id)}
-                    >
-                      {stoppingRunIds.has(selected.run.id) ? "Stopping..." : "Stop run"}
-                    </button>
-                  ) : null}
+                  <div className="run-meta-actions">
+                    {selected.run.status === "cancelled" ? (
+                      <button
+                        type="button"
+                        className="link-button outlined"
+                        disabled={
+                          !canTriggerRetry || triggeringRetryIds.has(selected.run.issue_id)
+                        }
+                        title={
+                          canTriggerRetry
+                            ? "Dispatch this issue again"
+                            : "Start the worker to retry this run"
+                        }
+                        onClick={() => onTriggerRetryNow(selected.run.issue_id)}
+                      >
+                        {triggeringRetryIds.has(selected.run.issue_id)
+                          ? "Retrying..."
+                          : "Retry run"}
+                      </button>
+                    ) : null}
+                    {selected.run.status === "pending" || selected.run.status === "running" ? (
+                      <button
+                        type="button"
+                        className="link-button danger outlined"
+                        disabled={stoppingRunIds.has(selected.run.id)}
+                        onClick={() => onStopRun(selected.run.id)}
+                      >
+                        {stoppingRunIds.has(selected.run.id) ? "Stopping..." : "Stop run"}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="run-meta-row muted">
                   <span>Created {shortTime(selected.run.created_at)}</span>
