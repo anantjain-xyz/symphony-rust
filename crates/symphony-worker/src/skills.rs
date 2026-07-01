@@ -10,10 +10,12 @@
 //! skills so a repo does not need to accept the install PR before agents can
 //! use Symphony's procedures.
 
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -111,13 +113,139 @@ impl GithubRemote {
         }
     }
 
-    fn auth_hint(&self) -> String {
+    fn api_base(&self) -> String {
         if self.host == "github.com" {
-            "`gh auth status`".to_string()
+            "https://api.github.com".to_string()
         } else {
-            format!("`gh auth status --hostname {}`", self.host)
+            format!("https://{}/api/v3", self.host)
         }
     }
+
+    fn graphql_endpoint(&self) -> String {
+        if self.host == "github.com" {
+            "https://api.github.com/graphql".to_string()
+        } else {
+            format!("https://{}/api/graphql", self.host)
+        }
+    }
+
+    fn auth_hint(&self) -> String {
+        if self.host == "github.com" {
+            "`gh auth status` or set `GITHUB_TOKEN`/`GH_TOKEN`".to_string()
+        } else {
+            format!(
+                "`gh auth status --hostname {}` or set `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN`",
+                self.host
+            )
+        }
+    }
+}
+
+const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+fn github_token_for_host(host: &str) -> Option<String> {
+    let vars = if host == "github.com" {
+        ["GH_TOKEN", "GITHUB_TOKEN"].as_slice()
+    } else {
+        GITHUB_TOKEN_ENV_VARS
+    };
+    vars.iter()
+        .find_map(|key| env::var(key).ok())
+        .and_then(|value| (!value.trim().is_empty()).then_some(value))
+}
+
+async fn gh_auth_available(host: &str) -> bool {
+    let command = format!("gh auth status --hostname {}", shell_quote(host));
+    run_shell(None, &command)
+        .await
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+async fn github_graphql(remote: &GithubRemote, token: &str, query: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("symphony-rust")
+        .build()
+        .map_err(|err| format!("could not build GitHub client: {err}"))?;
+    let response = client
+        .post(remote.graphql_endpoint())
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|err| format!("GitHub GraphQL request failed: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("could not read GitHub GraphQL response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "GitHub GraphQL request failed with {status}: {}",
+            tail(&body, 200)
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|err| format!("could not parse GitHub GraphQL response: {err}"))?;
+    if let Some(errors) = value.get("errors").and_then(|errors| errors.as_array()) {
+        if !errors.is_empty() {
+            let errors = serde_json::to_string(errors).unwrap_or_else(|_| "[]".to_string());
+            return Err(format!(
+                "GitHub GraphQL returned errors: {}",
+                tail(&errors, 200)
+            ));
+        }
+    }
+    Ok(body)
+}
+
+async fn github_open_pr_url(remote: &GithubRemote, token: &str) -> Result<Option<String>, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("symphony-rust")
+        .build()
+        .map_err(|err| format!("could not build GitHub client: {err}"))?;
+    let mut url = Url::parse(&format!(
+        "{}/repos/{}/{}/pulls",
+        remote.api_base(),
+        remote.owner,
+        remote.name
+    ))
+    .map_err(|err| format!("could not build GitHub PR URL: {err}"))?;
+    url.query_pairs_mut()
+        .append_pair("head", &format!("{}:{}", remote.owner, INSTALL_BRANCH))
+        .append_pair("state", "open")
+        .append_pair("per_page", "1");
+
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| format!("GitHub PR lookup failed: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("could not read GitHub PR response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "GitHub PR lookup failed with {status}: {}",
+            tail(&body, 200)
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|err| format!("could not parse GitHub PR response: {err}"))?;
+    Ok(value
+        .as_array()
+        .and_then(|prs| prs.first())
+        .and_then(|pr| pr.get("html_url"))
+        .and_then(|url| url.as_str())
+        .map(ToOwned::to_owned))
 }
 
 #[cfg(test)]
@@ -185,50 +313,73 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         );
     };
     let repo_arg = remote.gh_repo_arg();
+    let gh_authenticated = gh_auth_available(&remote.host).await;
+    let token = github_token_for_host(&remote.host);
 
     let query = format!(
         r#"query {{ repository(owner: "{}", name: "{}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#,
         remote.owner, remote.name
     );
-    let listing = run_shell(
-        None,
-        &format!(
-            "gh api graphql --hostname {} -f query={}",
-            shell_quote(&remote.host),
-            shell_quote(&query)
-        ),
-    )
-    .await;
-    let present: Vec<String> = match listing {
-        Ok(output) if output.status.success() => {
-            match skills_with_manifest(&String::from_utf8_lossy(&output.stdout)) {
-                Ok(present) => present,
-                Err(err) => {
-                    return SkillsStatus::unavailable(format!(
-                        "Could not parse the GitHub response: {err}"
-                    ))
+    let listing = if gh_authenticated {
+        match run_shell(
+            None,
+            &format!(
+                "gh api graphql --hostname {} -f query={}",
+                shell_quote(&remote.host),
+                shell_quote(&query)
+            ),
+        )
+        .await
+        {
+            Ok(output) if output.status.success() => {
+                Some(String::from_utf8_lossy(&output.stdout).to_string())
+            }
+            Ok(output) => {
+                if output.status.code() == Some(127) {
+                    return SkillsStatus::unavailable(
+                        "GitHub CLI (gh) not found. Install it to enable skill detection.",
+                    );
                 }
-            }
-        }
-        Ok(output) => {
-            if output.status.code() == Some(127) {
-                return SkillsStatus::unavailable(
-                    "GitHub CLI (gh) not found. Install it to enable skill detection.",
-                );
-            }
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("Could not resolve to a Repository") {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("Could not resolve to a Repository") {
+                    return SkillsStatus::unavailable(format!(
+                        "Could not access {repo_arg}. Check the repo URL and {}.",
+                        remote.auth_hint()
+                    ));
+                }
                 return SkillsStatus::unavailable(format!(
-                    "Could not access {repo_arg}. Check the repo URL and {}.",
-                    remote.auth_hint()
+                    "Could not check {repo_arg}: {}",
+                    tail(&stderr, 200)
                 ));
             }
-            return SkillsStatus::unavailable(format!(
-                "Could not check {repo_arg}: {}",
-                tail(&stderr, 200)
-            ));
+            Err(err) => return SkillsStatus::unavailable(format!("Could not run gh: {err}")),
         }
-        Err(err) => return SkillsStatus::unavailable(format!("Could not run gh: {err}")),
+    } else if let Some(token) = token.as_deref() {
+        match github_graphql(&remote, token, &query).await {
+            Ok(body) => Some(body),
+            Err(err) => {
+                return SkillsStatus::unavailable(format!(
+                    "Could not access {repo_arg}. Check the repo URL and {}. GitHub API fallback failed: {err}",
+                    remote.auth_hint()
+                ))
+            }
+        }
+    } else {
+        return SkillsStatus::unavailable(format!(
+            "Could not access {repo_arg}. Check the repo URL and {}.",
+            remote.auth_hint()
+        ));
+    };
+    let present: Vec<String> = match listing {
+        Some(raw) => match skills_with_manifest(&raw) {
+            Ok(present) => present,
+            Err(err) => {
+                return SkillsStatus::unavailable(format!(
+                    "Could not parse the GitHub response: {err}"
+                ))
+            }
+        },
+        None => unreachable!("listing is always present in the branch above"),
     };
 
     let missing: Vec<String> = skill_names
@@ -245,26 +396,37 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         };
     }
 
-    let pr = run_shell(
-        None,
-        &format!(
-            "gh pr list --repo {} --head {} --state open --json url --jq '.[0].url'",
-            shell_quote(&repo_arg),
-            shell_quote(INSTALL_BRANCH)
-        ),
-    )
-    .await;
-    if let Ok(output) = pr {
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
-                return SkillsStatus {
-                    state: SkillsState::PrOpen,
-                    missing,
-                    pr_url: Some(url),
-                    detail: None,
-                };
+    if gh_authenticated {
+        let pr = run_shell(
+            None,
+            &format!(
+                "gh pr list --repo {} --head {} --state open --json url --jq '.[0].url'",
+                shell_quote(&repo_arg),
+                shell_quote(INSTALL_BRANCH)
+            ),
+        )
+        .await;
+        if let Ok(output) = pr {
+            if output.status.success() {
+                let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !url.is_empty() {
+                    return SkillsStatus {
+                        state: SkillsState::PrOpen,
+                        missing,
+                        pr_url: Some(url),
+                        detail: None,
+                    };
+                }
             }
+        }
+    } else if let Some(token) = token.as_deref() {
+        if let Ok(Some(url)) = github_open_pr_url(&remote, token).await {
+            return SkillsStatus {
+                state: SkillsState::PrOpen,
+                missing,
+                pr_url: Some(url),
+                detail: None,
+            };
         }
     }
 
@@ -639,11 +801,21 @@ fn install_run_request(
             // configured run setting.
             skip_permissions: true,
         },
-        env: config
-            .session_env
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
+        env: {
+            let mut forwarded_env = config
+                .session_env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>();
+            for key in GITHUB_TOKEN_ENV_VARS {
+                if let Ok(value) = env::var(key) {
+                    if !value.trim().is_empty() {
+                        forwarded_env.insert((*key).to_string(), value);
+                    }
+                }
+            }
+            forwarded_env.into_iter().collect()
+        },
     }
 }
 

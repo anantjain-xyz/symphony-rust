@@ -7,7 +7,7 @@ description: Push the current branch to origin and ensure a PR exists for it (cr
 
 ## Preconditions
 
-- `gh auth status` succeeds.
+- `gh auth status` succeeds, or `GITHUB_TOKEN`/`GH_TOKEN` is available for the repo host.
 - Working tree is committed (use the `symphony-commit` skill first).
 - Validation gate has been run for the latest commit (`pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`).
 

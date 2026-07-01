@@ -8,7 +8,7 @@ description: Squash-merge the issue's PR once it's approved and green. Use only 
 ## Preconditions
 
 - Issue state is `Merging`.
-- `gh auth status` succeeds.
+- `gh auth status` succeeds, or `GITHUB_TOKEN`/`GH_TOKEN` is available for the repo host.
 - A PR is attached to the issue and is `OPEN` (not `CLOSED`/`MERGED`).
 
 If the PR is already `MERGED` when entering this skill, skip the merge: record the merge SHA in the workpad and move the issue to `Done`.

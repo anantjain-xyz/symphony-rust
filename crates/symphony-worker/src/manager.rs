@@ -1435,6 +1435,13 @@ fn agent_env(
     env: &BTreeMap<String, String>,
     session_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
+    const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+    ];
+
     let mut injected = [
         "LINEAR_API_KEY",
         "REPO_URL",
@@ -1448,6 +1455,11 @@ fn agent_env(
             .map(|value| (key.to_string(), value.clone()))
     })
     .collect::<BTreeMap<_, _>>();
+    for key in GITHUB_TOKEN_ENV_VARS {
+        if let Some(value) = env.get(*key).filter(|value| !value.trim().is_empty()) {
+            injected.insert((*key).to_string(), value.clone());
+        }
+    }
     injected.extend(
         session_env
             .iter()
@@ -2314,6 +2326,7 @@ printf cloned > hook-ran
                 "REPO_URL".to_string(),
                 "git@github.com:acme/widgets.git".to_string(),
             ),
+            ("GH_TOKEN".to_string(), "gh-token".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
         ]);
         let custom = BTreeMap::from([
@@ -2334,6 +2347,7 @@ printf cloned > hook-ran
             env.get("OPENAI_API_KEY").map(String::as_str),
             Some("sk-test")
         );
+        assert_eq!(env.get("GH_TOKEN").map(String::as_str), Some("gh-token"));
         assert_eq!(env.get("EMPTY_ALLOWED").map(String::as_str), Some(""));
         assert_eq!(env.get("REPO_URL").map(String::as_str), Some("override"));
         assert!(!env.contains_key("PATH"));
