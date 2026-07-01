@@ -58,6 +58,7 @@ const DEPENDENCY_PADDING = 24;
 const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
+const IS_LOCAL_DEV = import.meta.env.DEV;
 const literalInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -1467,6 +1468,12 @@ function App() {
 
   return (
     <main className="app">
+      {IS_LOCAL_DEV ? (
+        <div className="dev-environment-banner" role="status">
+          <strong>Local development instance</strong>
+          <span>Connected to this checkout, not the installed Symphony app.</span>
+        </div>
+      ) : null}
       <header className="topbar">
         <div className="topbar-primary">
           <div className="brand">
@@ -1474,7 +1481,10 @@ function App() {
               <WaveMark />
             </div>
             <div>
-              <h1>Symphony</h1>
+              <div className="brand-title-row">
+                <h1>Symphony</h1>
+                {IS_LOCAL_DEV ? <span className="dev-brand-badge">Local dev</span> : null}
+              </div>
             </div>
           </div>
 

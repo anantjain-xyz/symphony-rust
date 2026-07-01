@@ -665,6 +665,7 @@ async fn install_skills(
             workspace_root,
             workflow,
             skills: bundled_skills(),
+            env: build_install_env(),
             session_env: settings.session_env.clone(),
         })
         .await
@@ -808,6 +809,21 @@ fn build_env() -> BTreeMap<String, String> {
     env
 }
 
+/// Install bootstrap agents only need the app's repaired PATH from the base
+/// environment. Do not forward keychain-derived secrets such as LINEAR_API_KEY
+/// into target-repo package scripts or validation commands.
+fn build_install_env() -> BTreeMap<String, String> {
+    build_install_env_from(std::env::vars())
+}
+
+fn build_install_env_from(
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> BTreeMap<String, String> {
+    vars.into_iter()
+        .filter(|(key, value)| key == "PATH" && !value.trim().is_empty())
+        .collect()
+}
+
 fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
     keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_LINEAR_USER)
 }
@@ -935,6 +951,23 @@ mod tests {
         assert!(after_create.contains("${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"));
         assert!(after_create.contains("${SYMPHONY_INSTALL_CMD:-npm ci}"));
         assert!(validate_workflow_settings(&settings).is_none());
+    }
+
+    #[test]
+    fn install_env_only_forwards_repaired_path() {
+        let env = build_install_env_from([
+            ("PATH".to_string(), "/opt/homebrew/bin:/usr/bin".to_string()),
+            ("LINEAR_API_KEY".to_string(), "lin_secret".to_string()),
+            ("GH_TOKEN".to_string(), "gh_secret".to_string()),
+        ]);
+
+        assert_eq!(env.len(), 1);
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        assert!(!env.contains_key("LINEAR_API_KEY"));
+        assert!(!env.contains_key("GH_TOKEN"));
     }
 
     #[test]

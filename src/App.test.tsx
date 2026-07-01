@@ -377,6 +377,13 @@ describe("App settings", () => {
     });
   });
 
+  it("marks local development builds distinctly", () => {
+    render(<App />);
+
+    expect(screen.getByText("Local development instance")).toBeTruthy();
+    expect(screen.getByText("Local dev")).toBeTruthy();
+  });
+
   it("does not auto-capitalize repository names", () => {
     render(<App />);
 
