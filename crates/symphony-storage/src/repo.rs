@@ -858,6 +858,11 @@ impl Repository {
         // silent no-op for a user-stopped run and there is no way to resume one
         // short of editing the issue in the tracker.
         let unsuppressed = self.clear_all_issue_dispatch_suppressions(issue_id).await?;
+        if !retry_due && unsuppressed {
+            let run_number = self.last_run_number(issue_id).await? + 1;
+            self.schedule_retry(issue_id, run_number, &now_iso(), None, None)
+                .await?;
+        }
         Ok(retry_due || unsuppressed)
     }
 
@@ -1559,6 +1564,19 @@ mod tests {
     async fn trigger_retry_now_clears_user_cancelled_suppression() {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
         repo.suppress_issue_dispatch("lin-1", "user_cancelled", "fingerprint-at-cancel-time")
             .await
             .unwrap();
@@ -1569,6 +1587,11 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
+        assert_eq!(repo.due_retries(&now_iso()).await.unwrap()[0].run_number, 2);
     }
 
     #[tokio::test]
