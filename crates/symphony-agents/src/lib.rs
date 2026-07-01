@@ -255,7 +255,10 @@ async fn map_codex_event(
                             .map_or("?".to_string(), |v| v.to_string())
                     )
                 } else {
-                    "running".to_string()
+                    ev["item"]["command"]
+                        .as_str()
+                        .map(|command| command.to_string())
+                        .unwrap_or_else(|| "running".to_string())
                 };
                 let payload = serde_json::to_value(ToolCallPayload {
                     tool: "bash".to_string(),
@@ -277,7 +280,11 @@ async fn map_codex_event(
                 .await;
             } else if ev["type"].as_str() == Some("item.completed") {
                 if let Some(kind) = ev["item"]["type"].as_str() {
-                    send_status(events, format!("{kind} completed")).await;
+                    if let Some(summary) = codex_item_summary(&ev["item"]) {
+                        send_status(events, summary).await;
+                    } else {
+                        send_status(events, format!("{kind} completed")).await;
+                    }
                 }
             }
         }
@@ -346,6 +353,55 @@ async fn map_codex_event(
         _ => {}
     }
     Ok(None)
+}
+
+fn codex_item_summary(item: &Value) -> Option<String> {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    };
+
+    if let Some(summary) = text(item.get("text")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("summary")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("message")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("result")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("content")) {
+        return Some(summary);
+    }
+
+    let content = item.get("content")?.as_array()?;
+    let mut lines = Vec::new();
+    for block in content {
+        if let Some(text) = block.get("text").and_then(Value::as_str).map(str::trim) {
+            if !text.is_empty() {
+                lines.push(text);
+            }
+        }
+        if let Some(text) = block
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            lines.push(text);
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 async fn run_claude(
@@ -1845,6 +1901,53 @@ mod tests {
 
         assert_eq!(truncate(&value, 1000), format!("{}é...", "a".repeat(999)));
         assert_eq!(truncate("shorté", 1000), "shorté");
+    }
+
+    #[tokio::test]
+    async fn codex_command_execution_started_uses_the_actual_command() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd-1",
+                "command": "/bin/zsh -lc 'gh auth token'"
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::ToolCall));
+        assert_eq!(
+            mapped.humanized.as_deref(),
+            Some("bash: /bin/zsh -lc 'gh auth token'")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_agent_message_uses_the_message_text() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Let's verify the images render correctly."
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert_eq!(
+            mapped.humanized.as_deref(),
+            Some("Let's verify the images render correctly.")
+        );
     }
 
     #[test]
