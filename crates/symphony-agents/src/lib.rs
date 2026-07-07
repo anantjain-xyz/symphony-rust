@@ -1,6 +1,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Command as StdCommand,
+    time::Duration,
+};
 use symphony_core::{
     AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CursorAgentMode,
     CursorSandboxMode, MappedAgentEvent, RateLimitPayload, SessionInfoPayload, ThreadSandbox,
@@ -155,28 +160,7 @@ async fn run_codex(
 ) -> Result<AgentRunResult, AgentError> {
     let thread_id = format!("th_{}", Uuid::new_v4());
     let turn_id = format!("tn_{}", Uuid::new_v4());
-    let sandbox = normalize_sandbox(&request.thread_sandbox, &request.turn_sandbox_policy);
-    let mut args = vec![
-        "exec".to_string(),
-        "--json".to_string(),
-        "--skip-git-repo-check".to_string(),
-        "-C".to_string(),
-        request.cwd.display().to_string(),
-    ];
-    match sandbox.as_str() {
-        "danger-full-access" => args.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
-        "workspace-write" => {
-            args.push("--full-auto".to_string());
-            if request.network_access {
-                args.push("-c".to_string());
-                args.push("sandbox_workspace_write.network_access=true".to_string());
-            }
-        }
-        _ => {
-            args.push("-s".to_string());
-            args.push("read-only".to_string());
-        }
-    }
+    let args = codex_args(&request);
 
     let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
     let pid = child.id();
@@ -232,6 +216,104 @@ async fn run_codex(
         error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
         error_message: (!status.success()).then(|| format!("codex exit {status}")),
     }))
+}
+
+fn codex_args(request: &AgentRunRequest) -> Vec<String> {
+    codex_args_with_git_metadata_dirs(request, git_metadata_dirs(&request.cwd))
+}
+
+fn codex_args_with_git_metadata_dirs(
+    request: &AgentRunRequest,
+    git_metadata_dirs: Vec<PathBuf>,
+) -> Vec<String> {
+    let sandbox = normalize_sandbox(&request.thread_sandbox, &request.turn_sandbox_policy);
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "-C".to_string(),
+        request.cwd.display().to_string(),
+    ];
+    match sandbox.as_str() {
+        "danger-full-access" => args.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
+        "workspace-write" => {
+            args.push("--full-auto".to_string());
+            for dir in git_metadata_dirs {
+                args.push("--add-dir".to_string());
+                args.push(dir.display().to_string());
+            }
+            if request.network_access {
+                args.push("-c".to_string());
+                args.push("sandbox_workspace_write.network_access=true".to_string());
+            }
+        }
+        _ => {
+            args.push("-s".to_string());
+            args.push("read-only".to_string());
+        }
+    }
+    args
+}
+
+fn git_metadata_dirs(workspace: &Path) -> Vec<PathBuf> {
+    let workspace_root = normalize_path(workspace.to_path_buf());
+    match git_repo_root(&workspace_root) {
+        Some(repo_root) if repo_root == workspace_root => {}
+        Some(_) => return Vec::new(),
+        None => {
+            let dot_git = workspace_root.join(".git");
+            return dot_git
+                .is_dir()
+                .then(|| normalize_path(dot_git))
+                .into_iter()
+                .collect();
+        }
+    }
+
+    let mut dirs = Vec::new();
+    for flag in ["--git-dir", "--git-common-dir"] {
+        if let Some(path) = git_rev_parse_path(&workspace_root, flag) {
+            push_unique_path(&mut dirs, normalize_path(path));
+        }
+    }
+    dirs
+}
+
+fn git_repo_root(workspace: &Path) -> Option<PathBuf> {
+    git_rev_parse_path(workspace, "--show-toplevel").map(normalize_path)
+}
+
+fn git_rev_parse_path(workspace: &Path, flag: &str) -> Option<PathBuf> {
+    let output = StdCommand::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("rev-parse")
+        .arg(flag)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        workspace.join(path)
+    })
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 async fn map_codex_event(
@@ -1854,6 +1936,206 @@ mod tests {
             "OPENAI_API_KEY".to_string(),
             "sk-test".to_string(),
         )]));
+    }
+
+    fn codex_test_request(
+        cwd: PathBuf,
+        thread_sandbox: ThreadSandbox,
+        turn_sandbox_policy: TurnSandboxPolicy,
+        network_access: bool,
+    ) -> AgentRunRequest {
+        AgentRunRequest {
+            backend: AgentBackend::Codex,
+            command: "codex".to_string(),
+            cwd,
+            prompt: String::new(),
+            thread_sandbox,
+            turn_sandbox_policy,
+            network_access,
+            turn_timeout_ms: 1_000,
+            claude: ClaudeRunOptions::default(),
+            cursor: CursorRunOptions::default(),
+            opencode: OpencodeRunOptions::default(),
+            env: Vec::new(),
+        }
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_path_stdout(cwd: &Path, args: &[&str]) -> PathBuf {
+        let output = StdCommand::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    }
+
+    #[test]
+    fn codex_workspace_write_args_allow_git_metadata_writes() {
+        let cwd = PathBuf::from("/tmp/symphony/OP-272");
+        let git_dir = PathBuf::from("/tmp/symphony/.git/worktrees/OP-272");
+        let common_dir = PathBuf::from("/tmp/symphony/.git");
+        let args = codex_args_with_git_metadata_dirs(
+            &codex_test_request(
+                cwd,
+                ThreadSandbox::WorkspaceWrite,
+                TurnSandboxPolicy::Inherit,
+                true,
+            ),
+            vec![git_dir.clone(), common_dir.clone()],
+        );
+        let git_dir = git_dir.display().to_string();
+        let common_dir = common_dir.display().to_string();
+
+        assert!(args.iter().any(|arg| arg == "--full-auto"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == common_dir));
+        assert!(args.windows(2).any(
+            |pair| pair[0] == "-c" && pair[1] == "sandbox_workspace_write.network_access=true"
+        ));
+    }
+
+    #[test]
+    fn codex_read_only_args_do_not_allow_git_metadata_writes() {
+        let cwd = PathBuf::from("/tmp/symphony/OP-272");
+        let git_dir = PathBuf::from("/tmp/symphony/.git/worktrees/OP-272");
+        let args = codex_args_with_git_metadata_dirs(
+            &codex_test_request(
+                cwd,
+                ThreadSandbox::WorkspaceWrite,
+                TurnSandboxPolicy::ReadOnly,
+                true,
+            ),
+            vec![git_dir.clone()],
+        );
+        let git_dir = git_dir.display().to_string();
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-s" && pair[1] == "read-only"));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
+    }
+
+    #[test]
+    fn codex_danger_full_access_args_do_not_need_git_add_dir() {
+        let cwd = PathBuf::from("/tmp/symphony/OP-272");
+        let git_dir = PathBuf::from("/tmp/symphony/.git/worktrees/OP-272");
+        let args = codex_args_with_git_metadata_dirs(
+            &codex_test_request(
+                cwd,
+                ThreadSandbox::WorkspaceWrite,
+                TurnSandboxPolicy::DangerFullAccess,
+                true,
+            ),
+            vec![git_dir.clone()],
+        );
+        let git_dir = git_dir.display().to_string();
+
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
+    }
+
+    #[test]
+    fn git_metadata_dirs_resolves_linked_worktree_dirs() {
+        let root = std::env::temp_dir().join(format!("symphony-agents-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let worktree = root.join("worktree");
+        std::fs::create_dir_all(&repo).expect("create temp repo");
+
+        run_git(&repo, &["init"]);
+        std::fs::write(repo.join("README.md"), "hello\n").expect("write readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Symphony Test",
+                "-c",
+                "user.email=symphony@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+
+        let dirs = git_metadata_dirs(&worktree);
+        let git_dir = normalize_path(git_path_stdout(&worktree, &["rev-parse", "--git-dir"]));
+        let common_dir = normalize_path(git_path_stdout(
+            &worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+
+        assert!(dirs.contains(&git_dir), "missing git dir: {dirs:?}");
+        assert!(dirs.contains(&common_dir), "missing common dir: {dirs:?}");
+        assert_ne!(git_dir, worktree.join(".git"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_metadata_dirs_does_not_walk_above_workspace() {
+        let root = std::env::temp_dir().join(format!("symphony-agents-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let child_workspace = repo.join("child-workspace");
+        std::fs::create_dir_all(&child_workspace).expect("create child workspace");
+
+        run_git(&repo, &["init"]);
+
+        let dirs = git_metadata_dirs(&child_workspace);
+
+        assert!(
+            dirs.is_empty(),
+            "child workspace should not inherit parent repo metadata dirs: {dirs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
