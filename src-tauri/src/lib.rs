@@ -623,18 +623,24 @@ async fn get_retro_detail(
 }
 
 // Both skills commands take the repo URL straight from the caller's form
-// (and install_skills the caller's settings, like validate_settings) rather
-// than reloading from disk, so unsaved edits — a just-typed repo URL in
-// particular — are what gets checked and installed against. Each configured
-// repo is checked and installed individually; the UI shows one status per
-// repo card.
+// (and the session environment/settings the caller is editing, like
+// validate_settings) rather than reloading from disk, so unsaved edits -- a
+// just-typed repo URL or token in Session environment -- are what gets checked
+// and installed against. Each configured repo is checked and installed
+// individually; the UI shows one status per repo card.
 #[tauri::command]
-async fn get_skills_status(repo_url: String) -> Result<SkillsStatus, String> {
+async fn get_skills_status(
+    repo_url: String,
+    session_env: BTreeMap<String, String>,
+) -> Result<SkillsStatus, String> {
+    if let Some(error) = validate_session_env(&session_env) {
+        return Err(error);
+    }
     let names: Vec<String> = bundled_skills()
         .into_iter()
         .map(|skill| skill.name)
         .collect();
-    Ok(check_skills(&repo_url, &names).await)
+    Ok(check_skills(&repo_url, &names, &session_env).await)
 }
 
 #[tauri::command]

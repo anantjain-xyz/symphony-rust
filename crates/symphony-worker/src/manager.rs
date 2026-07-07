@@ -1,6 +1,10 @@
 use crate::{
-    backoff_ms, run_hook, sanitize_key, skills::ensure_workspace_skills, HookInvocation, SkillFile,
-    WorkspaceManager,
+    backoff_ms, run_hook, sanitize_key,
+    skills::{
+        ensure_workspace_skills, github_token_env_has_token_for_repo_url,
+        github_token_env_vars_for_repo_url,
+    },
+    HookInvocation, SkillFile, WorkspaceManager,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -1448,6 +1452,15 @@ fn agent_env(
             .map(|value| (key.to_string(), value.clone()))
     })
     .collect::<BTreeMap<_, _>>();
+    if let Some(repo_url) = env.get("REPO_URL").map(String::as_str) {
+        if !github_token_env_has_token_for_repo_url(repo_url, session_env) {
+            for key in github_token_env_vars_for_repo_url(repo_url) {
+                if let Some(value) = env.get(*key).filter(|value| !value.trim().is_empty()) {
+                    injected.insert((*key).to_string(), value.clone());
+                }
+            }
+        }
+    }
     injected.extend(
         session_env
             .iter()
@@ -2314,6 +2327,11 @@ printf cloned > hook-ran
                 "REPO_URL".to_string(),
                 "git@github.com:acme/widgets.git".to_string(),
             ),
+            ("GH_TOKEN".to_string(), "gh-token".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "enterprise-token".to_string(),
+            ),
             ("PATH".to_string(), "/usr/bin".to_string()),
         ]);
         let custom = BTreeMap::from([
@@ -2334,9 +2352,56 @@ printf cloned > hook-ran
             env.get("OPENAI_API_KEY").map(String::as_str),
             Some("sk-test")
         );
+        assert_eq!(env.get("GH_TOKEN").map(String::as_str), Some("gh-token"));
+        assert!(!env.contains_key("GH_ENTERPRISE_TOKEN"));
         assert_eq!(env.get("EMPTY_ALLOWED").map(String::as_str), Some(""));
         assert_eq!(env.get("REPO_URL").map(String::as_str), Some("override"));
         assert!(!env.contains_key("PATH"));
+    }
+
+    #[test]
+    fn agent_env_does_not_forward_github_tokens_for_unsupported_repo() {
+        let run = BTreeMap::from([
+            (
+                "REPO_URL".to_string(),
+                "git@gitlab.com:acme/widgets.git".to_string(),
+            ),
+            ("GH_TOKEN".to_string(), "dotcom-token".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "enterprise-token".to_string(),
+            ),
+        ]);
+        let env = agent_env(&run, &BTreeMap::new())
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(!env.contains_key("GH_TOKEN"));
+        assert!(!env.contains_key("GH_ENTERPRISE_TOKEN"));
+    }
+
+    #[test]
+    fn agent_env_session_token_suppresses_runtime_precedence_tokens() {
+        let run = BTreeMap::from([
+            (
+                "REPO_URL".to_string(),
+                "git@github.com:acme/widgets.git".to_string(),
+            ),
+            ("GH_TOKEN".to_string(), "stale-process".to_string()),
+        ]);
+        let session = BTreeMap::from([(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]);
+        let env = agent_env(&run, &session)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(!env.contains_key("GH_TOKEN"));
+        assert_eq!(
+            env.get("GITHUB_TOKEN").map(String::as_str),
+            Some("repo-scoped-session")
+        );
     }
 
     #[test]

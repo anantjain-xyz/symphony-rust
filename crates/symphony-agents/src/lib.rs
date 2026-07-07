@@ -84,6 +84,13 @@ pub struct AgentRunResult {
 
 pub type AgentEventSender = mpsc::Sender<MappedAgentEvent>;
 
+const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
 #[async_trait]
 pub trait AgentDriver: Send + Sync {
     async fn run(
@@ -255,7 +262,10 @@ async fn map_codex_event(
                             .map_or("?".to_string(), |v| v.to_string())
                     )
                 } else {
-                    "running".to_string()
+                    ev["item"]["command"]
+                        .as_str()
+                        .map(|command| command.to_string())
+                        .unwrap_or_else(|| "running".to_string())
                 };
                 let payload = serde_json::to_value(ToolCallPayload {
                     tool: "bash".to_string(),
@@ -277,7 +287,15 @@ async fn map_codex_event(
                 .await;
             } else if ev["type"].as_str() == Some("item.completed") {
                 if let Some(kind) = ev["item"]["type"].as_str() {
-                    send_status(events, format!("{kind} completed")).await;
+                    if kind == "agent_message" {
+                        if let Some(summary) = codex_item_summary(&ev["item"]) {
+                            send_status(events, truncate(&summary, 2000)).await;
+                        } else {
+                            send_status(events, format!("{kind} completed")).await;
+                        }
+                    } else {
+                        send_status(events, format!("{kind} completed")).await;
+                    }
                 }
             }
         }
@@ -346,6 +364,55 @@ async fn map_codex_event(
         _ => {}
     }
     Ok(None)
+}
+
+fn codex_item_summary(item: &Value) -> Option<String> {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+    };
+
+    if let Some(summary) = text(item.get("text")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("summary")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("message")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("result")) {
+        return Some(summary);
+    }
+    if let Some(summary) = text(item.get("content")) {
+        return Some(summary);
+    }
+
+    let content = item.get("content")?.as_array()?;
+    let mut lines = Vec::new();
+    for block in content {
+        if let Some(text) = block.get("text").and_then(Value::as_str).map(str::trim) {
+            if !text.is_empty() {
+                lines.push(text);
+            }
+        }
+        if let Some(text) = block
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            lines.push(text);
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 async fn run_claude(
@@ -1503,6 +1570,11 @@ fn spawn_shell_command(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if request_env_has_github_token(envs) {
+        for key in GITHUB_TOKEN_ENV_VARS {
+            cmd.env_remove(key);
+        }
+    }
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -1514,6 +1586,12 @@ fn spawn_shell_command(
     #[cfg(unix)]
     cmd.process_group(0);
     cmd.spawn().map_err(AgentError::Spawn)
+}
+
+fn request_env_has_github_token(envs: &[(String, String)]) -> bool {
+    envs.iter().any(|(key, value)| {
+        GITHUB_TOKEN_ENV_VARS.contains(&key.as_str()) && !value.trim().is_empty()
+    })
 }
 
 #[cfg(unix)]
@@ -1762,6 +1840,22 @@ mod tests {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
+    #[test]
+    fn request_env_detects_github_tokens() {
+        assert!(request_env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]));
+        assert!(!request_env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            " ".to_string(),
+        )]));
+        assert!(!request_env_has_github_token(&[(
+            "OPENAI_API_KEY".to_string(),
+            "sk-test".to_string(),
+        )]));
+    }
+
     #[tokio::test]
     async fn captures_session_info_from_init_and_result() {
         let (tx, mut rx) = mpsc::channel(16);
@@ -1845,6 +1939,94 @@ mod tests {
 
         assert_eq!(truncate(&value, 1000), format!("{}é...", "a".repeat(999)));
         assert_eq!(truncate("shorté", 1000), "shorté");
+    }
+
+    #[tokio::test]
+    async fn codex_command_execution_started_uses_the_actual_command() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd-1",
+                "command": "/bin/zsh -lc 'gh auth token'"
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::ToolCall));
+        assert_eq!(
+            mapped.humanized.as_deref(),
+            Some("bash: /bin/zsh -lc 'gh auth token'")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_agent_message_uses_the_message_text() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "Let's verify the images render correctly."
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert_eq!(
+            mapped.humanized.as_deref(),
+            Some("Let's verify the images render correctly.")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_user_message_uses_generic_label() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "user_message",
+                "text": "Prompt text that should not be persisted."
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert_eq!(mapped.humanized.as_deref(), Some("user_message completed"));
+    }
+
+    #[tokio::test]
+    async fn codex_completed_item_summary_is_truncated() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": format!("{}tail", "a".repeat(2000))
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        let expected = format!("{}...", "a".repeat(2000));
+        assert_eq!(mapped.humanized.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

@@ -777,6 +777,19 @@ function configuredRepoUrls(settings: AppSettings): string[] {
   );
 }
 
+function stableSessionEnvKey(env: AppSettings["session_env"]): string {
+  return JSON.stringify(
+    Object.entries(env).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function skillsCheckContextKey(
+  repoUrl: string,
+  sessionEnv: AppSettings["session_env"],
+): string {
+  return `${repoUrl}\n${stableSessionEnvKey(sessionEnv)}`;
+}
+
 // linear_api_key_set is server-derived, not part of the editable form.
 function formSnapshot(settings: AppSettings) {
   const { linear_api_key_set: _ignored, ...form } = settings;
@@ -850,6 +863,7 @@ function App() {
   );
   const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
+  const skillsCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
@@ -1149,17 +1163,25 @@ function App() {
   // asked about, so out-of-order responses cannot mislabel another repo's
   // status — and a per-URL sequence guards overlapping checks for the SAME
   // repo: only the newest one may apply, or a slow pre-install check could
-  // overwrite the post-install refresh that already saw the PR (and a stale
-  // failure could delete a good status from the catch path).
-  function checkRepoSkills(url: string) {
+  // overwrite the post-install refresh that already saw the PR. The session
+  // env is part of the context because token edits change the auth outcome for
+  // the same repo URL.
+  function checkRepoSkills(url: string, sessionEnv = settings?.session_env ?? {}) {
     const repoUrl = url.trim();
     if (!runtimeAvailable || repoUrl === "") return;
+    const contextKey = skillsCheckContextKey(repoUrl, sessionEnv);
     const seq = (skillsCheckSeq.current[repoUrl] ?? 0) + 1;
     skillsCheckSeq.current[repoUrl] = seq;
+    skillsCheckContext.current[repoUrl] = contextKey;
     setSkillsChecking((prev) => ({ ...prev, [repoUrl]: true }));
-    invoke<SkillsStatus>("get_skills_status", { repoUrl })
+    invoke<SkillsStatus>("get_skills_status", { repoUrl, sessionEnv })
       .then((status) => {
-        if (skillsCheckSeq.current[repoUrl] !== seq) return;
+        if (
+          skillsCheckSeq.current[repoUrl] !== seq ||
+          skillsCheckContext.current[repoUrl] !== contextKey
+        ) {
+          return;
+        }
         setSkillsStatuses((prev) => ({ ...prev, [repoUrl]: status }));
         // A fresh check supersedes a finished install for the same repo —
         // without this, a completed install keeps showing its PR forever.
@@ -1168,7 +1190,12 @@ function App() {
         );
       })
       .catch(() => {
-        if (skillsCheckSeq.current[repoUrl] !== seq) return;
+        if (
+          skillsCheckSeq.current[repoUrl] !== seq ||
+          skillsCheckContext.current[repoUrl] !== contextKey
+        ) {
+          return;
+        }
         setSkillsStatuses((prev) => {
           const next = { ...prev };
           delete next[repoUrl];
@@ -1176,7 +1203,12 @@ function App() {
         });
       })
       .finally(() => {
-        if (skillsCheckSeq.current[repoUrl] !== seq) return;
+        if (
+          skillsCheckSeq.current[repoUrl] !== seq ||
+          skillsCheckContext.current[repoUrl] !== contextKey
+        ) {
+          return;
+        }
         setSkillsChecking((prev) => ({ ...prev, [repoUrl]: false }));
       });
   }
@@ -1184,7 +1216,7 @@ function App() {
   function refreshSkillsStatus(forSettings?: AppSettings) {
     const target = forSettings ?? settings;
     if (!target) return;
-    for (const url of configuredRepoUrls(target)) checkRepoSkills(url);
+    for (const url of configuredRepoUrls(target)) checkRepoSkills(url, target.session_env);
   }
 
   async function startSkillsInstall(url: string) {
@@ -1199,17 +1231,34 @@ function App() {
   }
 
   // Check every configured URL once edits settle (covers the initial settings
-  // load, a newly added card, and an edited URL). Debounced so typing doesn't
-  // spam gh; URLs that drop out of the config simply leave unused cache keys.
+  // load, a newly added card, an edited URL, and Session env auth changes).
+  // Debounced so typing doesn't spam gh; URLs that drop out of the config
+  // simply leave unused cache keys.
   const repoUrlsKey = settings === null ? null : configuredRepoUrls(settings).join("\n");
+  const sessionEnvKey = settings === null ? null : stableSessionEnvKey(settings.session_env);
   useEffect(() => {
     if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
+    const sessionEnv = settings?.session_env ?? {};
+    const urls = repoUrlsKey.split("\n");
+    for (const url of urls) {
+      skillsCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
+    }
+    setSkillsStatuses((prev) => {
+      const next = { ...prev };
+      for (const url of urls) delete next[url];
+      return next;
+    });
+    setSkillsChecking((prev) => {
+      const next = { ...prev };
+      for (const url of urls) next[url] = true;
+      return next;
+    });
     const handle = window.setTimeout(() => {
-      for (const url of repoUrlsKey.split("\n")) checkRepoSkills(url);
+      for (const url of urls) checkRepoSkills(url, sessionEnv);
     }, 600);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrlsKey, runtimeAvailable]);
+  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
 
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
