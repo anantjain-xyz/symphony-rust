@@ -84,6 +84,13 @@ pub struct AgentRunResult {
 
 pub type AgentEventSender = mpsc::Sender<MappedAgentEvent>;
 
+const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
 #[async_trait]
 pub trait AgentDriver: Send + Sync {
     async fn run(
@@ -280,8 +287,12 @@ async fn map_codex_event(
                 .await;
             } else if ev["type"].as_str() == Some("item.completed") {
                 if let Some(kind) = ev["item"]["type"].as_str() {
-                    if let Some(summary) = codex_item_summary(&ev["item"]) {
-                        send_status(events, truncate(&summary, 2000)).await;
+                    if kind == "agent_message" {
+                        if let Some(summary) = codex_item_summary(&ev["item"]) {
+                            send_status(events, truncate(&summary, 2000)).await;
+                        } else {
+                            send_status(events, format!("{kind} completed")).await;
+                        }
                     } else {
                         send_status(events, format!("{kind} completed")).await;
                     }
@@ -1559,6 +1570,11 @@ fn spawn_shell_command(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if request_env_has_github_token(envs) {
+        for key in GITHUB_TOKEN_ENV_VARS {
+            cmd.env_remove(key);
+        }
+    }
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -1570,6 +1586,12 @@ fn spawn_shell_command(
     #[cfg(unix)]
     cmd.process_group(0);
     cmd.spawn().map_err(AgentError::Spawn)
+}
+
+fn request_env_has_github_token(envs: &[(String, String)]) -> bool {
+    envs.iter().any(|(key, value)| {
+        GITHUB_TOKEN_ENV_VARS.contains(&key.as_str()) && !value.trim().is_empty()
+    })
 }
 
 #[cfg(unix)]
@@ -1818,6 +1840,22 @@ mod tests {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
+    #[test]
+    fn request_env_detects_github_tokens() {
+        assert!(request_env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]));
+        assert!(!request_env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            " ".to_string(),
+        )]));
+        assert!(!request_env_has_github_token(&[(
+            "OPENAI_API_KEY".to_string(),
+            "sk-test".to_string(),
+        )]));
+    }
+
     #[tokio::test]
     async fn captures_session_info_from_init_and_result() {
         let (tx, mut rx) = mpsc::channel(16);
@@ -1948,6 +1986,26 @@ mod tests {
             mapped.humanized.as_deref(),
             Some("Let's verify the images render correctly.")
         );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_user_message_uses_generic_label() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "user_message",
+                "text": "Prompt text that should not be persisted."
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert_eq!(mapped.humanized.as_deref(), Some("user_message completed"));
     }
 
     #[tokio::test]

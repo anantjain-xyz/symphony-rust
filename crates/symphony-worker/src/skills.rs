@@ -151,6 +151,12 @@ impl GithubRemote {
 }
 
 const GITHUB_DOTCOM_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GhAuthStatus {
@@ -178,6 +184,15 @@ pub(crate) fn github_token_env_vars_for_repo_url(repo_url: &str) -> &'static [&'
         .as_deref()
         .map(github_token_env_vars_for_host)
         .unwrap_or(&[])
+}
+
+pub(crate) fn github_token_env_has_token_for_repo_url(
+    repo_url: &str,
+    env: &BTreeMap<String, String>,
+) -> bool {
+    github_token_env_vars_for_repo_url(repo_url)
+        .iter()
+        .any(|key| env.get(*key).is_some_and(|value| !value.trim().is_empty()))
 }
 
 fn github_token_for_host(host: &str, session_env: &BTreeMap<String, String>) -> Option<String> {
@@ -729,6 +744,7 @@ async fn run_install(
 
     set_message(inner, "Agent is adapting the skills and opening a PR…").await;
     let request = install_run_request(&config, &workspace, &default_branch);
+    let verification_env = request.env.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let driver = NativeAgentDriver;
@@ -751,7 +767,7 @@ async fn run_install(
         // An agent can exit "successfully" while merely summarizing why it
         // could not push or open the PR — completion is only real if the PR
         // exists.
-        AgentOutcome::Success => match find_pr_url(&workspace).await {
+        AgentOutcome::Success => match find_pr_url(&workspace, &verification_env).await {
             Some(url) => Ok(url),
             None => Err(format!(
                 "the agent finished but no open PR exists for {INSTALL_BRANCH} — \
@@ -927,17 +943,25 @@ fn install_agent_env_from(
 ) -> Vec<(String, String)> {
     let process_env = process_env.into_iter().collect::<BTreeMap<_, _>>();
     let mut injected = env.clone();
-    for key in github_token_env_vars_for_repo_url(repo_url) {
-        if let Some(value) = env
-            .get(*key)
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                process_env
-                    .get(*key)
-                    .filter(|value| !value.trim().is_empty())
-            })
-        {
-            injected.insert((*key).to_string(), value.clone());
+    let token_keys = github_token_env_vars_for_repo_url(repo_url);
+    let session_has_token = github_token_env_has_token_for_repo_url(repo_url, session_env);
+    if session_has_token {
+        for key in token_keys {
+            injected.remove(*key);
+        }
+    } else {
+        for key in token_keys {
+            if let Some(value) = env
+                .get(*key)
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    process_env
+                        .get(*key)
+                        .filter(|value| !value.trim().is_empty())
+                })
+            {
+                injected.insert((*key).to_string(), value.clone());
+            }
         }
     }
     injected.extend(
@@ -1359,13 +1383,14 @@ fn is_expected_claude_skills_link(target: &Path, workspace: &Path) -> bool {
 }
 
 /// Best-effort PR URL lookup for the branch the agent pushed.
-async fn find_pr_url(workspace: &Path) -> Option<String> {
-    let output = run_shell(
+async fn find_pr_url(workspace: &Path, env: &[(String, String)]) -> Option<String> {
+    let output = run_shell_with_env(
         Some(workspace),
         &format!(
             "gh pr list --head {} --state open --json url --jq '.[0].url'",
             shell_quote(INSTALL_BRANCH)
         ),
+        env,
     )
     .await
     .ok()?;
@@ -1408,12 +1433,37 @@ Rules:
 }
 
 async fn run_shell(dir: Option<&Path>, script: &str) -> std::io::Result<std::process::Output> {
+    shell_command(dir, script).output().await
+}
+
+async fn run_shell_with_env(
+    dir: Option<&Path>,
+    script: &str,
+    env: &[(String, String)],
+) -> std::io::Result<std::process::Output> {
+    let mut cmd = shell_command(dir, script);
+    if env_has_github_token(env) {
+        for key in GITHUB_TOKEN_ENV_VARS {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.envs(env.iter().map(|(key, value)| (key, value)));
+    cmd.output().await
+}
+
+fn env_has_github_token(env: &[(String, String)]) -> bool {
+    env.iter().any(|(key, value)| {
+        GITHUB_TOKEN_ENV_VARS.contains(&key.as_str()) && !value.trim().is_empty()
+    })
+}
+
+fn shell_command(dir: Option<&Path>, script: &str) -> Command {
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-lc").arg(script);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
-    cmd.output().await
+    cmd
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1627,6 +1677,22 @@ mod tests {
             github_token_for_host_from_sources("github.com", process_env, &session_env),
             Some("repo-scoped-session".to_string())
         );
+    }
+
+    #[test]
+    fn shell_env_detects_github_tokens() {
+        assert!(env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]));
+        assert!(!env_has_github_token(&[(
+            "GITHUB_TOKEN".to_string(),
+            " ".to_string(),
+        )]));
+        assert!(!env_has_github_token(&[(
+            "OPENAI_API_KEY".to_string(),
+            "sk-test".to_string(),
+        )]));
     }
 
     #[test]
@@ -2463,6 +2529,67 @@ mod tests {
             Some("test-key")
         );
         assert!(!env.contains_key("LINEAR_API_KEY"));
+    }
+
+    #[test]
+    fn install_agent_env_session_token_suppresses_process_precedence_tokens() {
+        let base = BTreeMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("GH_TOKEN".to_string(), "stale-base".to_string()),
+        ]);
+        let session = BTreeMap::from([(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]);
+        let env = install_agent_env_from(
+            "git@github.com:acme/widgets.git",
+            &base,
+            &session,
+            [("GH_TOKEN".to_string(), "stale-process".to_string())],
+        )
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert!(!env.contains_key("GH_TOKEN"));
+        assert_eq!(
+            env.get("GITHUB_TOKEN").map(String::as_str),
+            Some("repo-scoped-session")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn find_pr_url_uses_install_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n[ \"$GITHUB_TOKEN\" = repo-scoped-session ] || exit 42\nprintf 'https://github.com/acme/widgets/pull/7\\n'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&gh, perms).unwrap();
+        let env = vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", bin.display()),
+            ),
+            (
+                "GITHUB_TOKEN".to_string(),
+                "repo-scoped-session".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            find_pr_url(temp.path(), &env).await.as_deref(),
+            Some("https://github.com/acme/widgets/pull/7")
+        );
     }
 
     #[tokio::test]
