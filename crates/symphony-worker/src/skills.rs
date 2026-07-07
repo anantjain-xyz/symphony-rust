@@ -176,8 +176,23 @@ pub(crate) fn github_token_env_vars_for_repo_url(repo_url: &str) -> &'static [&'
         .unwrap_or(&[])
 }
 
-fn github_token_for_host(host: &str) -> Option<String> {
-    github_token_for_host_from(host, env::vars())
+fn github_token_for_host(host: &str, session_env: &BTreeMap<String, String>) -> Option<String> {
+    github_token_for_host_from_sources(host, env::vars(), session_env)
+}
+
+fn github_token_for_host_from_sources(
+    host: &str,
+    process_env: impl IntoIterator<Item = (String, String)>,
+    session_env: &BTreeMap<String, String>,
+) -> Option<String> {
+    github_token_for_host_from(
+        host,
+        process_env.into_iter().chain(
+            session_env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        ),
+    )
 }
 
 fn github_token_for_host_from(
@@ -352,7 +367,11 @@ fn is_ghe_dotcom_host(host: &str) -> bool {
 /// directory listing alone would accept partial or corrupt installs. It also
 /// keeps "repo not accessible" (bad URL, missing gh auth) distinct from
 /// "skills missing": only the latter should offer the install PR.
-pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatus {
+pub async fn check_skills(
+    repo_url: &str,
+    skill_names: &[String],
+    session_env: &BTreeMap<String, String>,
+) -> SkillsStatus {
     if repo_url.trim().is_empty() {
         return SkillsStatus::unavailable("No repository configured.");
     }
@@ -369,7 +388,7 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         );
     }
     let gh_authenticated = gh_auth == GhAuthStatus::Authenticated;
-    let token = github_token_for_host(&remote.host);
+    let token = github_token_for_host(&remote.host, session_env);
 
     let query = format!(
         r#"query {{ repository(owner: "{}", name: "{}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#,
@@ -1544,6 +1563,33 @@ mod tests {
         assert_eq!(
             github_token_env_vars_for_host("ghe.example.com"),
             GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+        );
+    }
+
+    #[test]
+    fn token_lookup_includes_session_env_values() {
+        let process_env = [
+            ("GITHUB_TOKEN".to_string(), "from-process".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "enterprise-process".to_string(),
+            ),
+        ];
+        let session_env = BTreeMap::from([
+            ("GH_TOKEN".to_string(), "from-session".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "enterprise-session".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            github_token_for_host_from_sources("github.com", process_env.clone(), &session_env),
+            Some("from-session".to_string())
+        );
+        assert_eq!(
+            github_token_for_host_from_sources("enterprise.internal", process_env, &session_env),
+            Some("enterprise-session".to_string())
         );
     }
 

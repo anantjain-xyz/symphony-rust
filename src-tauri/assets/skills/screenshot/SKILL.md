@@ -12,7 +12,11 @@ Capture runs through a small Node script (`capture.mjs`) driven from the shell, 
 ## Preconditions
 
 - A PR exists for the current branch (use the `symphony-push` skill first if not).
-- `gh auth status` succeeds against the repo's host, or `GITHUB_TOKEN`/`GH_TOKEN` is available for that host.
+- `gh auth status` succeeds against the repo's host, and plain `git push` has credentials for that host.
+  If relying on GitHub CLI for HTTPS git credentials, run `gh auth setup-git` first
+  (`gh auth setup-git --hostname <host>` for a non-default host). `GITHUB_TOKEN`/`GH_TOKEN`
+  alone can authenticate `gh pr ...` commands but is not enough for the `git push origin ...`
+  and `git push --force-with-lease ...` commands this workflow runs.
 - **Playwright is installed in the repo's `node_modules`.** `capture.mjs` does `import { chromium } from 'playwright'`, resolved from the repo tree. If the repo doesn't already depend on Playwright, install it first (`npm install --no-save playwright`, or the repo's package manager) — `npx playwright` does **not** make the bare `import` resolvable for a plain `node .symphony/capture.mjs`. If it can't be installed, surface a blocker rather than guessing.
 - **For authenticated targets only** (anything behind a login wall, e.g. a dev server): the session cookie *value* must be present in an environment variable (do not hardcode it). You pass the env var's *name* and the cookie's name/domain in the spec — never the value. If the var is unset, stop and surface a blocker; do not capture the auth wall.
 

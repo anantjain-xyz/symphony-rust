@@ -1151,13 +1151,13 @@ function App() {
   // repo: only the newest one may apply, or a slow pre-install check could
   // overwrite the post-install refresh that already saw the PR (and a stale
   // failure could delete a good status from the catch path).
-  function checkRepoSkills(url: string) {
+  function checkRepoSkills(url: string, sessionEnv = settings?.session_env ?? {}) {
     const repoUrl = url.trim();
     if (!runtimeAvailable || repoUrl === "") return;
     const seq = (skillsCheckSeq.current[repoUrl] ?? 0) + 1;
     skillsCheckSeq.current[repoUrl] = seq;
     setSkillsChecking((prev) => ({ ...prev, [repoUrl]: true }));
-    invoke<SkillsStatus>("get_skills_status", { repoUrl })
+    invoke<SkillsStatus>("get_skills_status", { repoUrl, sessionEnv })
       .then((status) => {
         if (skillsCheckSeq.current[repoUrl] !== seq) return;
         setSkillsStatuses((prev) => ({ ...prev, [repoUrl]: status }));
@@ -1184,7 +1184,7 @@ function App() {
   function refreshSkillsStatus(forSettings?: AppSettings) {
     const target = forSettings ?? settings;
     if (!target) return;
-    for (const url of configuredRepoUrls(target)) checkRepoSkills(url);
+    for (const url of configuredRepoUrls(target)) checkRepoSkills(url, target.session_env);
   }
 
   async function startSkillsInstall(url: string) {
@@ -1205,7 +1205,7 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
     const handle = window.setTimeout(() => {
-      for (const url of repoUrlsKey.split("\n")) checkRepoSkills(url);
+      for (const url of repoUrlsKey.split("\n")) checkRepoSkills(url, settings?.session_env ?? {});
     }, 600);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps

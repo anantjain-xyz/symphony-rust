@@ -865,7 +865,10 @@ describe("App settings", () => {
 
   it("lets users mark repo skills as installed without installing the bundled set", async () => {
     tauriMocks.runtimeAvailable = true;
-    const settings = testSettings();
+    const settings = {
+      ...testSettings(),
+      session_env: { GH_TOKEN: "from-settings" },
+    };
     tauriMocks.invoke.mockImplementation(
       dashboardInvoke({
         settings,
@@ -883,6 +886,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -927,6 +931,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -975,6 +980,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url.trim(),
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
@@ -1137,6 +1143,7 @@ describe("App settings", () => {
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl,
+        sessionEnv: settings.session_env,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
