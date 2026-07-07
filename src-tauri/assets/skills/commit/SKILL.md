@@ -21,7 +21,7 @@ description: Create a well-formed git commit from the current changes. Use when 
 
 1. Inspect: `git status`, `git diff`, `git diff --staged`.
 2. Stage intended changes by name (`git add <paths>`). Avoid `git add -A` / `git add .` — they sweep in `.env`, credentials, large binaries, or artifacts you didn't mean to ship.
-3. Sanity-check newly staged files. Build artifacts, logs, screenshots, `.symphony-workspace-ready`, and locally injected fallback skills under `.agents/skills/symphony-*` or `.claude/skills` must stay unstaged unless the issue explicitly asks to install or change Symphony skills. Exception: `.symphony/screenshots/<name>.png` is intentionally staged by the `symphony-screenshot` skill's throwaway commit (which also `--no-verify`s, the only place that's allowed) and is removed by the same skill's force-push step.
+3. Sanity-check newly staged files. Build artifacts, logs, screenshots, `.symphony-workspace-ready`, and locally injected fallback skills under `.agents/skills/symphony-*` or `.claude/skills` must stay unstaged unless the issue explicitly asks to install or change Symphony skills. Exception: `.symphony/screenshots/<name>.png` is intentionally staged only by the `symphony-screenshot` skill's temporary evidence commit (which also `--no-verify`s, the only place that's allowed); that skill then creates a cleanup revert commit so the files do not remain in the latest tree while the evidence commit remains in branch history.
 4. Pick a subject (≤ 72 chars, imperative mood, no trailing period). Match the dominant style on the branch — usually `<TYPE>(<scope>): <summary>` or `<IDENTIFIER>: <summary>`.
 5. Write the body via heredoc so newlines are literal:
    - One short paragraph (the *why*, plus tradeoffs if non-obvious).

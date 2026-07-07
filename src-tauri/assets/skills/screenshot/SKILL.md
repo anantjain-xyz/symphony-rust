@@ -1,11 +1,11 @@
 ---
 name: symphony-screenshot
-description: Capture Playwright screenshots of a user-facing change and embed them in the GitHub PR description via a temporary commit + force-push. Use whenever the workflow asks for proof-of-testing screenshots on a user-facing change.
+description: Capture Playwright screenshots of a user-facing change and embed them in the GitHub PR description via a temporary screenshot commit followed by a cleanup revert commit. Use whenever the workflow asks for proof-of-testing screenshots on a user-facing change.
 ---
 
 # Screenshot
 
-The PR description is the home for proof-of-testing screenshots. They are hosted as raw GitHub blobs at a commit SHA that is force-pushed away after the URL is captured — the blob keeps serving until GitHub GC.
+The PR description is the home for proof-of-testing screenshots. They are hosted as raw GitHub blobs at the screenshot commit SHA. After the PR body is updated, create a follow-up revert commit that removes the screenshot files from the branch tip while keeping the original screenshot commit reachable in branch history.
 
 Capture runs through a small Node script (`capture.mjs`) driven from the shell, **not** the Playwright MCP. The MCP's `browser_run_code_unsafe` runs in a sandbox with no `process`, `require`, or `context`, so it cannot read an environment variable or inject a session cookie — authenticated dev captures are impossible there. A plain Node script gets a normal `process.env`, so a session cookie can be injected while the secret stays in the environment and never appears in a tool call / transcript. The script also bypasses self-signed dev certs, handles SPAs that never reach network-idle, fails on unexpected HTTP statuses, and can run interactions (hover/click/…) to reach states that aren't a bare URL.
 
@@ -156,7 +156,7 @@ process.exit(failed ? 2 : 0);
 
 1. **Build a spec and capture comprehensively.** Write a spec JSON (e.g. to `/tmp/symphony-shots.json`) listing every state worth a reviewer's eye, then run the script.
 
-   **Capture every state that matters to a reviewer**, not just the happy path — e.g. `01-default`, `02-loading`, `03-error`, `04-mobile`, `05-hover`. Set `width`/`height` for responsive/mobile states. For states that aren't a bare URL (hover menus, opened dialogs, click-triggered loading/error UI), drive them with a shot `actions` list. Err on the side of more screenshots: the commit is force-pushed away so size doesn't matter, and a missing state is the most common reviewer ask. Number `name`s so they sort deterministically. Shots default to `fullPage`; set `"fullPage": false` only when the page is impractically tall.
+   **Capture every state that matters to a reviewer**, not just the happy path — e.g. `01-default`, `02-loading`, `03-error`, `04-mobile`, `05-hover`. Set `width`/`height` for responsive/mobile states. For states that aren't a bare URL (hover menus, opened dialogs, click-triggered loading/error UI), drive them with a shot `actions` list. Err on the side of complete reviewer evidence; the cleanup revert keeps the files out of the branch tip, and a missing state is the most common reviewer ask. Number `name`s so they sort deterministically. Shots default to `fullPage`; set `"fullPage": false` only when the page is impractically tall.
 
    Spec example (no auth):
 
@@ -188,61 +188,66 @@ process.exit(failed ? 2 : 0);
 2. **Stage and commit** all the screenshots together:
    ```sh
    git add .symphony/screenshots/
-   git commit -m "chore: temporary screenshots for PR description (will be removed)" --no-verify
+   git commit -m "chore: temporary screenshots for PR description (will be reverted)" --no-verify
    ```
-   `--no-verify` is allowed here because this commit is throwaway and lint/format hooks would reject the binary paths. This is the *only* skill that bypasses hooks. Do **not** stage `.symphony/capture.mjs` — it's teardown plumbing, removed in the cleanup step.
+   `--no-verify` is allowed here because this temporary evidence commit contains binary paths that lint/format hooks would reject. This is the *only* skill that bypasses hooks. Do **not** stage `.symphony/capture.mjs` — it's teardown plumbing, removed in the cleanup step.
 
-3. **Push.** If the remote is ahead, rebase the screenshot commit onto it first (`git fetch && git rebase origin/<branch>`); a merge commit pollutes the throwaway history.
+3. **Push.** If the remote is ahead, rebase the screenshot commit onto it first (`git fetch && git rebase origin/<branch>`); a merge commit pollutes the screenshot evidence sequence.
    ```sh
    git push origin "$(git branch --show-current)"
    ```
 
-4. **Build the raw URLs** at the new commit SHA — one base, one URL per file.
+4. **Build the raw URLs** at the new screenshot commit SHA — one base, one URL per file.
    ```sh
-   sha=$(git log -1 --format=%H)
+   screenshot_sha=$(git log -1 --format=%H)
+   printf '%s\n' "$screenshot_sha" > /tmp/symphony-screenshot-sha
    repo_url=$(gh repo view --json url -q .url)
    for f in .symphony/screenshots/*.png; do
      name=$(basename "$f")
-     echo "${repo_url}/raw/${sha}/.symphony/screenshots/${name}"
+     echo "${repo_url}/raw/${screenshot_sha}/.symphony/screenshots/${name}"
    done
    ```
 
 5. **Update PR body.** Read the current body, append (or replace) a `## Screenshots` section, write back. Never clobber existing sections. Embed every captured screenshot — one image per state — with a short caption derived from the filename so reviewers can scan them.
    ```sh
+   screenshot_sha=$(cat /tmp/symphony-screenshot-sha)
+   repo_url=$(gh repo view --json url -q .url)
    pr=$(gh pr view --json number -q .number)
    body=$(gh pr view --json body -q .body)
    block=$(printf '\n\n## Screenshots\n\n')
    for f in .symphony/screenshots/*.png; do
      name=$(basename "$f" .png)
-     url="${repo_url}/raw/${sha}/.symphony/screenshots/${name}.png"
+     url="${repo_url}/raw/${screenshot_sha}/.symphony/screenshots/${name}.png"
      block+=$(printf '**%s**\n\n![%s](%s)\n\n' "$name" "$name" "$url")
    done
    gh pr edit "$pr" --body "${body}${block}"
    ```
    Use a heredoc or a built-up shell variable for the `--body` arg so newlines stay literal. Group related captures (e.g. mobile vs desktop) under sub-headings if it makes the PR easier to scan.
 
-6. **Verify the images render** in the PR (visual confirmation by the operator, or a `curl -I "$raw_url"` returning 200 if running unattended). Do not proceed to step 7 without confirmation — once the commit is force-pushed away, the URLs still work but you can no longer regenerate them from history.
+6. **Verify the images render** in the PR (visual confirmation by the operator, or a `curl -I "$raw_url"` returning 200 if running unattended). Do not proceed to step 7 without confirmation — the cleanup revert removes the screenshot files from the branch tip, so fixing bad URLs is harder after this point.
 
-7. **Reset and force-push** to drop the screenshot commit from branch history:
+7. **Revert the screenshot commit** to remove the screenshot files from the branch tip while preserving the original screenshot commit in branch history:
    ```sh
-   git reset --hard HEAD~1
-   git push --force-with-lease origin "$(git branch --show-current)"
+   screenshot_sha=$(cat /tmp/symphony-screenshot-sha)
+   test "$(git log -1 --format=%H)" = "$screenshot_sha"
+   git revert --no-edit "$screenshot_sha"
+   git push origin "$(git branch --show-current)"
    ```
-   Always `--force-with-lease`, never `--force`. If the lease check fails, someone pushed in the meantime — fetch, re-rebase, and retry from step 3 (the new SHA invalidates the URLs captured in step 4, so re-do the PR-body update too).
+   Do not reset or force-push to remove the screenshot commit. If the `test` fails, something else changed `HEAD`; stop, inspect `git log --oneline -5`, and only continue once you know which commit contains the screenshots. If the normal push is rejected because the remote moved, fetch and rebase with care; if the screenshot commit SHA changes, rebuild the raw URLs and update the PR body before pushing.
 
-8. **Cleanup workspace artifacts**: `rm -rf .symphony/screenshots .symphony/capture.mjs .playwright-mcp` and `rm -f /tmp/symphony-shots.json` (those should not appear in `git status` afterward). If the skill started a dev server, stop it.
+8. **Cleanup workspace artifacts**: `rm -rf .symphony/screenshots .symphony/capture.mjs .playwright-mcp` and `rm -f /tmp/symphony-shots.json /tmp/symphony-screenshot-sha` (those should not appear in `git status` afterward). If the skill started a dev server, stop it.
 
 ## Caveats
 
-- **Orphaned-blob TTL.** GitHub serves the URL by SHA until it garbage-collects unreachable objects — typically weeks, sometimes longer. Adequate for normal PR review windows, not for permanent documentation. If the change requires an enduring screenshot (e.g., a runbook), commit it to a real path on main via a separate PR.
-- **Force-push scope.** This skill force-pushes the issue's PR branch. It will *not* run on `main` or any protected branch — `git push --force-with-lease` to a protected branch is rejected by the remote.
+- **Review-window evidence.** GitHub serves the raw URL from the screenshot commit SHA while that commit remains reachable through the PR branch. This is adequate for normal PR review windows, not permanent documentation. If the change requires an enduring screenshot (e.g., a runbook), commit it to a real path on main via a separate PR.
+- **No history rewrite.** Screenshot cleanup is a normal revert commit. The original screenshot commit must stay in branch history so reviewers can audit the evidence source used by the PR description.
 
 ## Don't
 
 - Don't put the cookie value in the spec JSON, in `argv`, or in any `echo`/log. It must come from the env var named in `spec.cookie.env` — that's the whole reason for the Bash-driven script.
 - Don't use the Playwright MCP for authenticated dev captures. Its sandbox can't read env vars or inject cookies; `capture.mjs` is the contract.
-- Don't `git push --force` without `--with-lease` — you'll silently overwrite a teammate's push.
-- Don't commit screenshots to a path that survives — the commit must be the immediate `HEAD~1` so the reset is a single hop. Don't stage `.symphony/capture.mjs`.
+- Don't reset or force-push to remove the screenshot commit. Use a cleanup revert commit so the original screenshot commit remains in branch history.
+- Don't commit screenshots to a path that survives in the branch tip. The screenshot commit should be the immediate `HEAD` when URLs are built, and the cleanup revert should remove `.symphony/screenshots/` afterward. Don't stage `.symphony/capture.mjs`.
 - Don't skip step 6 (visual verification). A broken URL in the PR body is harder to fix than re-capturing.
 - Don't ship a single happy-path screenshot when the change has multiple states. If the diff touches loading / error / empty / mobile, capture each — reviewers will ask for them anyway.
 - Don't crop or element-scope when full-page works. `capture.mjs` shoots `fullPage: true` by default; set `"fullPage": false` only when the page is impractically tall. Tight crops hide regressions in the surrounding chrome.
