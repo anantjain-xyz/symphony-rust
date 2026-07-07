@@ -840,6 +840,10 @@ impl Repository {
     }
 
     pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, StorageError> {
+        if self.has_active_run(issue_id).await? {
+            return Ok(false);
+        }
+
         let result = sqlx::query("update retry_queue set due_at = ?1 where issue_id = ?2")
             .bind(now_iso())
             .bind(issue_id)
@@ -1637,6 +1641,38 @@ mod tests {
             vec!["lin-1".to_string()]
         );
         assert_eq!(repo.due_retries(&now_iso()).await.unwrap()[0].run_number, 2);
+    }
+
+    #[tokio::test]
+    async fn trigger_retry_now_noops_when_issue_already_has_active_run() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let cancelled = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &cancelled.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        let active = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!repo.trigger_retry_now("lin-1").await.unwrap());
+        assert!(repo.has_active_run("lin-1").await.unwrap());
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+        assert_eq!(
+            repo.get_run(&active.id).await.unwrap().unwrap().status,
+            "pending"
+        );
     }
 
     #[tokio::test]
