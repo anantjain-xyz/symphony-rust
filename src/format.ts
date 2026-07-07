@@ -138,6 +138,17 @@ export type EventSummary = {
   tone?: "error";
 };
 
+function isGenericToolLifecycle(summary: string) {
+  return summary === "running" || /^exit (?:-?\d+|\?)$/.test(summary);
+}
+
+function toolCallDetail(resultSummary: string | null, command: string | null) {
+  if (!resultSummary) return command ?? "";
+  if (!command || resultSummary === command) return resultSummary;
+  if (!isGenericToolLifecycle(resultSummary)) return resultSummary;
+  return resultSummary === "running" ? command : `${command} (${resultSummary})`;
+}
+
 export function describeEvent(kind: string, payload: string): EventSummary {
   let data: Record<string, unknown> | null = null;
   try {
@@ -157,7 +168,7 @@ export function describeEvent(kind: string, payload: string): EventSummary {
     case "tool_call": {
       const tool = text(data?.tool) ?? "tool";
       const args = data?.args as Record<string, unknown> | undefined;
-      const detail = text(data?.result_summary) ?? text(args?.command) ?? "";
+      const detail = toolCallDetail(text(data?.result_summary), text(args?.command));
       return { label: "Tool call", summary: detail ? `${tool}: ${detail}` : tool };
     }
     case "approval":

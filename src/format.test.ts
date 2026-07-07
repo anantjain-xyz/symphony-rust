@@ -160,10 +160,28 @@ describe("format helpers", () => {
         "tool_call",
         '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"exit 0"}',
       ),
-    ).toEqual({ label: "Tool call", summary: "bash: exit 0" });
+    ).toEqual({ label: "Tool call", summary: "bash: pnpm test (exit 0)" });
+    expect(
+      describeEvent(
+        "tool_call",
+        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"exit 1"}',
+      ),
+    ).toEqual({ label: "Tool call", summary: "bash: pnpm test (exit 1)" });
+    expect(
+      describeEvent(
+        "tool_call",
+        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"running"}',
+      ),
+    ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
     expect(
       describeEvent("tool_call", '{"tool":"bash","args":{"command":"pnpm test"}}'),
     ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
+    expect(
+      describeEvent(
+        "tool_call",
+        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"custom output"}',
+      ),
+    ).toEqual({ label: "Tool call", summary: "bash: custom output" });
     expect(
       describeEvent("token_count", '{"input_tokens":184223,"output_tokens":9281}'),
     ).toEqual({ label: "Tokens", summary: "184k in · 9.3k out" });
