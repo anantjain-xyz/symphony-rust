@@ -1520,7 +1520,6 @@ function App() {
       {IS_LOCAL_DEV ? (
         <div className="dev-environment-banner" role="status">
           <strong>Local development instance</strong>
-          <span>Connected to this checkout, not the installed Symphony app.</span>
         </div>
       ) : null}
       <header className="topbar">
@@ -1529,12 +1528,7 @@ function App() {
             <div className="brand-mark" aria-hidden="true">
               <WaveMark />
             </div>
-            <div>
-              <div className="brand-title-row">
-                <h1>Symphony</h1>
-                {IS_LOCAL_DEV ? <span className="dev-brand-badge">Local dev</span> : null}
-              </div>
-            </div>
+            <h1>Symphony</h1>
           </div>
 
           <nav className="topnav" aria-label="Primary">
