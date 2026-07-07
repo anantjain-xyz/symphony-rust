@@ -151,8 +151,6 @@ impl GithubRemote {
 }
 
 const GITHUB_DOTCOM_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
-const GITHUB_ENTERPRISE_TOKEN_ENV_VARS: &[&str] =
-    &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GhAuthStatus {
@@ -161,11 +159,17 @@ enum GhAuthStatus {
     Unauthenticated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillsListingSource {
+    Gh,
+    Token,
+}
+
 fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
     if host == "github.com" || is_ghe_dotcom_host(host) {
         GITHUB_DOTCOM_TOKEN_ENV_VARS
     } else {
-        GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+        &[]
     }
 }
 
@@ -217,6 +221,12 @@ fn gh_auth_status_from_output(output: std::io::Result<std::process::Output>) -> 
         Ok(output) if output.status.code() == Some(127) => GhAuthStatus::MissingCli,
         _ => GhAuthStatus::Unauthenticated,
     }
+}
+
+fn gh_repo_access_error(stderr: &str) -> bool {
+    stderr.contains("Could not resolve to a Repository")
+        || stderr.contains("Repository not found")
+        || stderr.contains("HTTP 404")
 }
 
 async fn github_graphql(remote: &GithubRemote, token: &str, query: &str) -> Result<String, String> {
@@ -394,7 +404,7 @@ pub async fn check_skills(
         r#"query {{ repository(owner: "{}", name: "{}") {{ object(expression: "HEAD:{SKILLS_DIR}") {{ ... on Tree {{ entries {{ name type object {{ ... on Tree {{ entries {{ name type }} }} }} }} }} }} }} }}"#,
         remote.owner, remote.name
     );
-    let listing = if gh_authenticated {
+    let (listing, listing_source) = if gh_authenticated {
         match run_shell(
             None,
             &format!(
@@ -405,9 +415,10 @@ pub async fn check_skills(
         )
         .await
         {
-            Ok(output) if output.status.success() => {
-                Some(String::from_utf8_lossy(&output.stdout).to_string())
-            }
+            Ok(output) if output.status.success() => (
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                SkillsListingSource::Gh,
+            ),
             Ok(output) => {
                 if output.status.code() == Some(127) {
                     return SkillsStatus::unavailable(
@@ -415,22 +426,35 @@ pub async fn check_skills(
                     );
                 }
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                if stderr.contains("Could not resolve to a Repository") {
+                if gh_repo_access_error(&stderr) {
+                    if let Some(token) = token.as_deref() {
+                        match github_graphql(&remote, token, &query).await {
+                            Ok(body) => (body, SkillsListingSource::Token),
+                            Err(err) => {
+                                return SkillsStatus::unavailable(format!(
+                                    "Could not access {repo_arg}. Check the repo URL and {}. GitHub API fallback failed: {err}",
+                                    remote.auth_hint()
+                                ))
+                            }
+                        }
+                    } else {
+                        return SkillsStatus::unavailable(format!(
+                            "Could not access {repo_arg}. Check the repo URL and {}.",
+                            remote.auth_hint()
+                        ));
+                    }
+                } else {
                     return SkillsStatus::unavailable(format!(
-                        "Could not access {repo_arg}. Check the repo URL and {}.",
-                        remote.auth_hint()
+                        "Could not check {repo_arg}: {}",
+                        tail(&stderr, 200)
                     ));
                 }
-                return SkillsStatus::unavailable(format!(
-                    "Could not check {repo_arg}: {}",
-                    tail(&stderr, 200)
-                ));
             }
             Err(err) => return SkillsStatus::unavailable(format!("Could not run gh: {err}")),
         }
     } else if let Some(token) = token.as_deref() {
         match github_graphql(&remote, token, &query).await {
-            Ok(body) => Some(body),
+            Ok(body) => (body, SkillsListingSource::Token),
             Err(err) => {
                 return SkillsStatus::unavailable(format!(
                     "Could not access {repo_arg}. Check the repo URL and {}. GitHub API fallback failed: {err}",
@@ -444,16 +468,11 @@ pub async fn check_skills(
             remote.auth_hint()
         ));
     };
-    let present: Vec<String> = match listing {
-        Some(raw) => match skills_with_manifest(&raw) {
-            Ok(present) => present,
-            Err(err) => {
-                return SkillsStatus::unavailable(format!(
-                    "Could not parse the GitHub response: {err}"
-                ))
-            }
-        },
-        None => unreachable!("listing is always present in the branch above"),
+    let present: Vec<String> = match skills_with_manifest(&listing) {
+        Ok(present) => present,
+        Err(err) => {
+            return SkillsStatus::unavailable(format!("Could not parse the GitHub response: {err}"))
+        }
     };
 
     let missing: Vec<String> = skill_names
@@ -470,7 +489,7 @@ pub async fn check_skills(
         };
     }
 
-    if gh_authenticated {
+    if listing_source == SkillsListingSource::Gh {
         let pr = run_shell(
             None,
             &format!(
@@ -493,7 +512,8 @@ pub async fn check_skills(
                 }
             }
         }
-    } else if let Some(token) = token.as_deref() {
+    }
+    if let Some(token) = token.as_deref() {
         if let Ok(Some(url)) = github_open_pr_url(&remote, token).await {
             return SkillsStatus {
                 state: SkillsState::PrOpen,
@@ -501,6 +521,15 @@ pub async fn check_skills(
                 pr_url: Some(url),
                 detail: None,
             };
+        }
+    }
+
+    if listing_source == SkillsListingSource::Token {
+        if let Err(err) = resolve_default_branch(repo_url).await {
+            return SkillsStatus::unavailable(format!(
+                "Could not offer an install PR for {repo_arg}: the GitHub API token can read the repo, but skills installation also needs plain git credentials for clone and push. Run `gh auth setup-git` for the repo host or configure SSH credentials, then retry. Git check failed: {}",
+                tail(&err, 300)
+            ));
         }
     }
 
@@ -1560,10 +1589,8 @@ mod tests {
             github_token_for_host_from("octocorp.ghe.com", vars),
             Some("github-token".to_string())
         );
-        assert_eq!(
-            github_token_env_vars_for_host("ghe.example.com"),
-            GITHUB_ENTERPRISE_TOKEN_ENV_VARS
-        );
+        let empty: &[&str] = &[];
+        assert_eq!(github_token_env_vars_for_host("gitlab.com"), empty);
     }
 
     #[test]
@@ -1588,8 +1615,8 @@ mod tests {
             Some("from-session".to_string())
         );
         assert_eq!(
-            github_token_for_host_from_sources("enterprise.internal", process_env, &session_env),
-            Some("enterprise-session".to_string())
+            github_token_for_host_from_sources("gitlab.com", process_env, &session_env),
+            None
         );
     }
 
@@ -1603,10 +1630,24 @@ mod tests {
             github_token_env_vars_for_repo_url("https://octocorp.ghe.com/acme/widgets"),
             GITHUB_DOTCOM_TOKEN_ENV_VARS
         );
+        let empty: &[&str] = &[];
         assert_eq!(
             github_token_env_vars_for_repo_url("git@enterprise.internal:acme/widgets.git"),
-            GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+            empty
         );
+        assert_eq!(
+            github_token_env_vars_for_repo_url("git@gitlab.com:acme/widgets.git"),
+            empty
+        );
+    }
+
+    #[test]
+    fn classifies_gh_repository_access_errors() {
+        assert!(gh_repo_access_error(
+            "GraphQL: Could not resolve to a Repository with the name 'acme/widgets'."
+        ));
+        assert!(gh_repo_access_error("HTTP 404: Repository not found"));
+        assert!(!gh_repo_access_error("network timed out"));
     }
 
     #[cfg(unix)]

@@ -8,7 +8,11 @@ description: Squash-merge the issue's PR once it's approved and green. Use only 
 ## Preconditions
 
 - Issue state is `Merging`.
-- `gh auth status` succeeds, or `GITHUB_TOKEN`/`GH_TOKEN` is available for the repo host.
+- `gh auth status` succeeds, and plain `git push` has credentials for the repo host.
+  If relying on GitHub CLI for HTTPS git credentials, run `gh auth setup-git` first
+  (`gh auth setup-git --hostname <host>` for a non-default host). `GITHUB_TOKEN`/`GH_TOKEN`
+  alone can authenticate `gh pr ...` commands but is not enough for the `symphony-push`
+  step's `git push -u origin HEAD`.
 - A PR is attached to the issue and is `OPEN` (not `CLOSED`/`MERGED`).
 
 If the PR is already `MERGED` when entering this skill, skip the merge: record the merge SHA in the workpad and move the issue to `Done`.

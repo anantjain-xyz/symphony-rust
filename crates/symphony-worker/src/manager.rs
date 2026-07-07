@@ -2355,11 +2355,11 @@ printf cloned > hook-ran
     }
 
     #[test]
-    fn agent_env_injects_only_enterprise_tokens_for_enterprise_repo() {
+    fn agent_env_does_not_forward_github_tokens_for_unsupported_repo() {
         let run = BTreeMap::from([
             (
                 "REPO_URL".to_string(),
-                "git@enterprise.internal:acme/widgets.git".to_string(),
+                "git@gitlab.com:acme/widgets.git".to_string(),
             ),
             ("GH_TOKEN".to_string(), "dotcom-token".to_string()),
             (
@@ -2372,10 +2372,7 @@ printf cloned > hook-ran
             .collect::<BTreeMap<_, _>>();
 
         assert!(!env.contains_key("GH_TOKEN"));
-        assert_eq!(
-            env.get("GH_ENTERPRISE_TOKEN").map(String::as_str),
-            Some("enterprise-token")
-        );
+        assert!(!env.contains_key("GH_ENTERPRISE_TOKEN"));
     }
 
     #[test]
