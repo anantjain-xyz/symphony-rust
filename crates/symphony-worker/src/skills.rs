@@ -150,16 +150,16 @@ impl GithubRemote {
     }
 }
 
-const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "GH_ENTERPRISE_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN",
-];
-
 const GITHUB_DOTCOM_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
 const GITHUB_ENTERPRISE_TOKEN_ENV_VARS: &[&str] =
     &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhAuthStatus {
+    Authenticated,
+    MissingCli,
+    Unauthenticated,
+}
 
 fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
     if host == "github.com" || is_ghe_dotcom_host(host) {
@@ -167,6 +167,13 @@ fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
     } else {
         GITHUB_ENTERPRISE_TOKEN_ENV_VARS
     }
+}
+
+pub(crate) fn github_token_env_vars_for_repo_url(repo_url: &str) -> &'static [&'static str] {
+    remote_host(repo_url)
+        .as_deref()
+        .map(github_token_env_vars_for_host)
+        .unwrap_or(&[])
 }
 
 fn github_token_for_host(host: &str) -> Option<String> {
@@ -184,12 +191,17 @@ fn github_token_for_host_from(
         .cloned()
 }
 
-async fn gh_auth_available(host: &str) -> bool {
+async fn gh_auth_status(host: &str) -> GhAuthStatus {
     let command = format!("gh auth status --hostname {}", shell_quote(host));
-    run_shell(None, &command)
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    gh_auth_status_from_output(run_shell(None, &command).await)
+}
+
+fn gh_auth_status_from_output(output: std::io::Result<std::process::Output>) -> GhAuthStatus {
+    match output {
+        Ok(output) if output.status.success() => GhAuthStatus::Authenticated,
+        Ok(output) if output.status.code() == Some(127) => GhAuthStatus::MissingCli,
+        _ => GhAuthStatus::Unauthenticated,
+    }
 }
 
 async fn github_graphql(remote: &GithubRemote, token: &str, query: &str) -> Result<String, String> {
@@ -281,6 +293,25 @@ fn parse_github_repo(url: &str) -> Option<String> {
 /// Extract the GitHub host and `owner/repo` from github.com or GHE.com remote
 /// URL forms users paste into Settings.
 fn parse_github_remote(url: &str) -> Option<GithubRemote> {
+    let (host, rest) = remote_host_and_path(url)?;
+    if !is_supported_github_host(&host) {
+        return None;
+    }
+    let rest = rest.trim_end_matches(".git");
+    let mut parts = rest.split('/');
+    let owner = parts.next().filter(|part| !part.is_empty())?.to_string();
+    let name = parts.next().filter(|part| !part.is_empty())?.to_string();
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(GithubRemote { host, owner, name })
+}
+
+fn remote_host(url: &str) -> Option<String> {
+    remote_host_and_path(url).map(|(host, _)| host)
+}
+
+fn remote_host_and_path(url: &str) -> Option<(String, &str)> {
     let trimmed = url.trim().trim_end_matches('/');
     let (host, rest) = if let Some((host, rest)) = parse_scp_like_remote(trimmed) {
         (host, rest)
@@ -297,18 +328,7 @@ fn parse_github_remote(url: &str) -> Option<GithubRemote> {
     } else {
         trimmed.split_once('/')?
     };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    if !is_supported_github_host(&host) {
-        return None;
-    }
-    let rest = rest.trim_end_matches(".git");
-    let mut parts = rest.split('/');
-    let owner = parts.next().filter(|part| !part.is_empty())?.to_string();
-    let name = parts.next().filter(|part| !part.is_empty())?.to_string();
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(GithubRemote { host, owner, name })
+    Some((host.trim_end_matches('.').to_ascii_lowercase(), rest))
 }
 
 fn parse_scp_like_remote(url: &str) -> Option<(&str, &str)> {
@@ -342,7 +362,13 @@ pub async fn check_skills(repo_url: &str, skill_names: &[String]) -> SkillsStatu
         );
     };
     let repo_arg = remote.gh_repo_arg();
-    let gh_authenticated = gh_auth_available(&remote.host).await;
+    let gh_auth = gh_auth_status(&remote.host).await;
+    if gh_auth == GhAuthStatus::MissingCli {
+        return SkillsStatus::unavailable(
+            "GitHub CLI (gh) not found. Install it to enable skill detection.",
+        );
+    }
+    let gh_authenticated = gh_auth == GhAuthStatus::Authenticated;
     let token = github_token_for_host(&remote.host);
 
     let query = format!(
@@ -834,25 +860,27 @@ fn install_run_request(
             // configured run setting.
             skip_permissions: true,
         },
-        env: install_agent_env(&config.env, &config.session_env),
+        env: install_agent_env(&config.repo_url, &config.env, &config.session_env),
     }
 }
 
 fn install_agent_env(
+    repo_url: &str,
     env: &BTreeMap<String, String>,
     session_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
-    install_agent_env_from(env, session_env, env::vars())
+    install_agent_env_from(repo_url, env, session_env, env::vars())
 }
 
 fn install_agent_env_from(
+    repo_url: &str,
     env: &BTreeMap<String, String>,
     session_env: &BTreeMap<String, String>,
     process_env: impl IntoIterator<Item = (String, String)>,
 ) -> Vec<(String, String)> {
     let process_env = process_env.into_iter().collect::<BTreeMap<_, _>>();
     let mut injected = env.clone();
-    for key in GITHUB_TOKEN_ENV_VARS {
+    for key in github_token_env_vars_for_repo_url(repo_url) {
         if let Some(value) = env
             .get(*key)
             .filter(|value| !value.trim().is_empty())
@@ -1516,6 +1544,39 @@ mod tests {
         assert_eq!(
             github_token_env_vars_for_host("ghe.example.com"),
             GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+        );
+    }
+
+    #[test]
+    fn repo_url_token_selection_uses_the_repo_host() {
+        assert_eq!(
+            github_token_env_vars_for_repo_url("git@github.com:acme/widgets.git"),
+            GITHUB_DOTCOM_TOKEN_ENV_VARS
+        );
+        assert_eq!(
+            github_token_env_vars_for_repo_url("https://octocorp.ghe.com/acme/widgets"),
+            GITHUB_DOTCOM_TOKEN_ENV_VARS
+        );
+        assert_eq!(
+            github_token_env_vars_for_repo_url("git@enterprise.internal:acme/widgets.git"),
+            GITHUB_ENTERPRISE_TOKEN_ENV_VARS
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_auth_status_preserves_missing_cli() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(127 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        assert_eq!(
+            gh_auth_status_from_output(Ok(output)),
+            GhAuthStatus::MissingCli
         );
     }
 
@@ -2279,11 +2340,16 @@ mod tests {
         let base = BTreeMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
         let session = BTreeMap::from([("CURSOR_API_KEY".to_string(), "test-key".to_string())]);
         let env = install_agent_env_from(
+            "git@github.com:acme/widgets.git",
             &base,
             &session,
             [
                 ("GH_TOKEN".to_string(), "from-process".to_string()),
                 ("GITHUB_TOKEN".to_string(), "fallback".to_string()),
+                (
+                    "GH_ENTERPRISE_TOKEN".to_string(),
+                    "do-not-forward-enterprise".to_string(),
+                ),
                 ("LINEAR_API_KEY".to_string(), "do-not-forward".to_string()),
             ],
         )
@@ -2295,6 +2361,7 @@ mod tests {
             env.get("GH_TOKEN").map(String::as_str),
             Some("from-process")
         );
+        assert!(!env.contains_key("GH_ENTERPRISE_TOKEN"));
         assert_eq!(
             env.get("CURSOR_API_KEY").map(String::as_str),
             Some("test-key")

@@ -7,7 +7,10 @@ description: Push the current branch to origin and ensure a PR exists for it (cr
 
 ## Preconditions
 
-- `gh auth status` succeeds, or `GITHUB_TOKEN`/`GH_TOKEN` is available for the repo host.
+- `gh auth status` succeeds, and plain `git push` has credentials for the repo host.
+  If relying on GitHub CLI for HTTPS git credentials, run `gh auth setup-git` first
+  (`gh auth setup-git --hostname <host>` for a non-default host). `GITHUB_TOKEN`/`GH_TOKEN`
+  alone can authenticate `gh pr ...` commands but is not enough for `git push -u origin HEAD`.
 - Working tree is committed (use the `symphony-commit` skill first).
 - Validation gate has been run for the latest commit (`pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`).
 
