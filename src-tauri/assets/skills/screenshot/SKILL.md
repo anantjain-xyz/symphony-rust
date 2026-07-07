@@ -199,8 +199,10 @@ process.exit(failed ? 2 : 0);
 
 4. **Build the raw URLs** at the new screenshot commit SHA — one base, one URL per file.
    ```sh
+   screenshot_sha_file=".symphony/screenshot-sha"
    screenshot_sha=$(git log -1 --format=%H)
-   printf '%s\n' "$screenshot_sha" > /tmp/symphony-screenshot-sha
+   mkdir -p .symphony
+   printf '%s\n' "$screenshot_sha" > "$screenshot_sha_file"
    repo_url=$(gh repo view --json url -q .url)
    for f in .symphony/screenshots/*.png; do
      name=$(basename "$f")
@@ -210,7 +212,8 @@ process.exit(failed ? 2 : 0);
 
 5. **Update PR body.** Read the current body, append (or replace) a `## Screenshots` section, write back. Never clobber existing sections. Embed every captured screenshot — one image per state — with a short caption derived from the filename so reviewers can scan them.
    ```sh
-   screenshot_sha=$(cat /tmp/symphony-screenshot-sha)
+   screenshot_sha_file=".symphony/screenshot-sha"
+   screenshot_sha=$(cat "$screenshot_sha_file")
    repo_url=$(gh repo view --json url -q .url)
    pr=$(gh pr view --json number -q .number)
    body=$(gh pr view --json body -q .body)
@@ -228,14 +231,15 @@ process.exit(failed ? 2 : 0);
 
 7. **Revert the screenshot commit** to remove the screenshot files from the branch tip while preserving the original screenshot commit in branch history:
    ```sh
-   screenshot_sha=$(cat /tmp/symphony-screenshot-sha)
-   test "$(git log -1 --format=%H)" = "$screenshot_sha"
+   screenshot_sha_file=".symphony/screenshot-sha"
+   screenshot_sha=$(cat "$screenshot_sha_file")
+   test "$(git log -1 --format=%H)" = "$screenshot_sha" || { git log --oneline -5; exit 1; }
    git revert --no-edit "$screenshot_sha"
    git push origin "$(git branch --show-current)"
    ```
    Do not reset or force-push to remove the screenshot commit. If the `test` fails, something else changed `HEAD`; stop, inspect `git log --oneline -5`, and only continue once you know which commit contains the screenshots. If the normal push is rejected because the remote moved, fetch and rebase with care; if the screenshot commit SHA changes, rebuild the raw URLs and update the PR body before pushing.
 
-8. **Cleanup workspace artifacts**: `rm -rf .symphony/screenshots .symphony/capture.mjs .playwright-mcp` and `rm -f /tmp/symphony-shots.json /tmp/symphony-screenshot-sha` (those should not appear in `git status` afterward). If the skill started a dev server, stop it.
+8. **Cleanup workspace artifacts**: `rm -rf .symphony/screenshots .symphony/capture.mjs .playwright-mcp` and `rm -f .symphony/screenshot-sha /tmp/symphony-shots.json` (those should not appear in `git status` afterward). If the skill started a dev server, stop it.
 
 ## Caveats
 
