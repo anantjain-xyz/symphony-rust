@@ -191,12 +191,11 @@ fn github_token_for_host_from_sources(
 ) -> Option<String> {
     github_token_for_host_from(
         host,
-        process_env.into_iter().chain(
-            session_env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        ),
+        session_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
     )
+    .or_else(|| github_token_for_host_from(host, process_env))
 }
 
 fn github_token_for_host_from(
@@ -1617,6 +1616,16 @@ mod tests {
         assert_eq!(
             github_token_for_host_from_sources("gitlab.com", process_env, &session_env),
             None
+        );
+
+        let process_env = [("GH_TOKEN".to_string(), "stale-process".to_string())];
+        let session_env = BTreeMap::from([(
+            "GITHUB_TOKEN".to_string(),
+            "repo-scoped-session".to_string(),
+        )]);
+        assert_eq!(
+            github_token_for_host_from_sources("github.com", process_env, &session_env),
+            Some("repo-scoped-session".to_string())
         );
     }
 

@@ -911,6 +911,35 @@ describe("App settings", () => {
     ).toBe(true);
   });
 
+  it("rechecks repo skills when the session environment changes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+
+    const repoUrl = settings.repos[0].url.trim();
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+        sessionEnv: {},
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=from-session" } },
+    );
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+        sessionEnv: { GITHUB_TOKEN: "from-session" },
+      }),
+    );
+  });
+
   it("clears the manual skills mark when the repository URL changes", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
