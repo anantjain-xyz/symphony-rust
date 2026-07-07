@@ -381,7 +381,10 @@ describe("App settings", () => {
     render(<App />);
 
     expect(screen.getByText("Local development instance")).toBeTruthy();
-    expect(screen.getByText("Local dev")).toBeTruthy();
+    expect(
+      screen.queryByText("Connected to this checkout, not the installed Symphony app."),
+    ).toBeNull();
+    expect(screen.queryByText("Local dev")).toBeNull();
   });
 
   it("does not auto-capitalize repository names", () => {
