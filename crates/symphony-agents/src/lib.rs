@@ -281,7 +281,7 @@ async fn map_codex_event(
             } else if ev["type"].as_str() == Some("item.completed") {
                 if let Some(kind) = ev["item"]["type"].as_str() {
                     if let Some(summary) = codex_item_summary(&ev["item"]) {
-                        send_status(events, summary).await;
+                        send_status(events, truncate(&summary, 2000)).await;
                     } else {
                         send_status(events, format!("{kind} completed")).await;
                     }
@@ -1948,6 +1948,27 @@ mod tests {
             mapped.humanized.as_deref(),
             Some("Let's verify the images render correctly.")
         );
+    }
+
+    #[tokio::test]
+    async fn codex_completed_item_summary_is_truncated() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let event = json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": format!("{}tail", "a".repeat(2000))
+            }
+        });
+
+        assert!(map_codex_event("th-1", "tn-1", event, &tx)
+            .await
+            .unwrap()
+            .is_none());
+        let mapped = rx.recv().await.unwrap();
+        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        let expected = format!("{}...", "a".repeat(2000));
+        assert_eq!(mapped.humanized.as_deref(), Some(expected.as_str()));
     }
 
     #[test]

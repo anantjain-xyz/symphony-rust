@@ -116,6 +116,8 @@ impl GithubRemote {
     fn api_base(&self) -> String {
         if self.host == "github.com" {
             "https://api.github.com".to_string()
+        } else if is_ghe_dotcom_host(&self.host) {
+            format!("https://api.{}", self.host)
         } else {
             format!("https://{}/api/v3", self.host)
         }
@@ -124,6 +126,8 @@ impl GithubRemote {
     fn graphql_endpoint(&self) -> String {
         if self.host == "github.com" {
             "https://api.github.com/graphql".to_string()
+        } else if is_ghe_dotcom_host(&self.host) {
+            format!("https://api.{}/graphql", self.host)
         } else {
             format!("https://{}/api/graphql", self.host)
         }
@@ -132,6 +136,11 @@ impl GithubRemote {
     fn auth_hint(&self) -> String {
         if self.host == "github.com" {
             "`gh auth status` or set `GITHUB_TOKEN`/`GH_TOKEN`".to_string()
+        } else if is_ghe_dotcom_host(&self.host) {
+            format!(
+                "`gh auth status --hostname {}` or set `GITHUB_TOKEN`/`GH_TOKEN`",
+                self.host
+            )
         } else {
             format!(
                 "`gh auth status --hostname {}` or set `GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN`",
@@ -153,7 +162,7 @@ const GITHUB_ENTERPRISE_TOKEN_ENV_VARS: &[&str] =
     &["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
 
 fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
-    if host == "github.com" {
+    if host == "github.com" || is_ghe_dotcom_host(host) {
         GITHUB_DOTCOM_TOKEN_ENV_VARS
     } else {
         GITHUB_ENTERPRISE_TOKEN_ENV_VARS
@@ -161,10 +170,18 @@ fn github_token_env_vars_for_host(host: &str) -> &'static [&'static str] {
 }
 
 fn github_token_for_host(host: &str) -> Option<String> {
+    github_token_for_host_from(host, env::vars())
+}
+
+fn github_token_for_host_from(
+    host: &str,
+    vars: impl IntoIterator<Item = (String, String)>,
+) -> Option<String> {
+    let vars = vars.into_iter().collect::<BTreeMap<_, _>>();
     github_token_env_vars_for_host(host)
         .iter()
-        .find_map(|key| env::var(key).ok())
-        .and_then(|value| (!value.trim().is_empty()).then_some(value))
+        .find_map(|key| vars.get(*key).filter(|value| !value.trim().is_empty()))
+        .cloned()
 }
 
 async fn gh_auth_available(host: &str) -> bool {
@@ -302,6 +319,10 @@ fn parse_scp_like_remote(url: &str) -> Option<(&str, &str)> {
 
 fn is_supported_github_host(host: &str) -> bool {
     host == "github.com" || host == "ghe.com" || host.ends_with(".ghe.com")
+}
+
+fn is_ghe_dotcom_host(host: &str) -> bool {
+    host == "ghe.com" || host.ends_with(".ghe.com")
 }
 
 /// Check the repo's default branch for the bundled skills without cloning.
@@ -821,9 +842,26 @@ fn install_agent_env(
     env: &BTreeMap<String, String>,
     session_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
+    install_agent_env_from(env, session_env, env::vars())
+}
+
+fn install_agent_env_from(
+    env: &BTreeMap<String, String>,
+    session_env: &BTreeMap<String, String>,
+    process_env: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let process_env = process_env.into_iter().collect::<BTreeMap<_, _>>();
     let mut injected = env.clone();
     for key in GITHUB_TOKEN_ENV_VARS {
-        if let Some(value) = env.get(*key).filter(|value| !value.trim().is_empty()) {
+        if let Some(value) = env
+            .get(*key)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                process_env
+                    .get(*key)
+                    .filter(|value| !value.trim().is_empty())
+            })
+        {
             injected.insert((*key).to_string(), value.clone());
         }
     }
@@ -1435,13 +1473,48 @@ mod tests {
     }
 
     #[test]
-    fn enterprise_hosts_use_enterprise_token_envs_only() {
+    fn ghe_dotcom_hosts_use_dotcom_token_envs() {
         assert_eq!(
             github_token_env_vars_for_host("github.com"),
             GITHUB_DOTCOM_TOKEN_ENV_VARS
         );
         assert_eq!(
             github_token_env_vars_for_host("octocorp.ghe.com"),
+            GITHUB_DOTCOM_TOKEN_ENV_VARS
+        );
+    }
+
+    #[test]
+    fn ghe_dotcom_hosts_use_dedicated_api_domain() {
+        let remote = parse_github_remote("https://octocorp.ghe.com/acme/widgets").unwrap();
+        assert_eq!(remote.api_base(), "https://api.octocorp.ghe.com");
+        assert_eq!(
+            remote.graphql_endpoint(),
+            "https://api.octocorp.ghe.com/graphql"
+        );
+    }
+
+    #[test]
+    fn token_lookup_skips_blank_env_values() {
+        let vars = [
+            ("GH_TOKEN".to_string(), " ".to_string()),
+            ("GITHUB_TOKEN".to_string(), "github-token".to_string()),
+            (
+                "GH_ENTERPRISE_TOKEN".to_string(),
+                "enterprise-token".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            github_token_for_host_from("github.com", vars.clone()),
+            Some("github-token".to_string())
+        );
+        assert_eq!(
+            github_token_for_host_from("octocorp.ghe.com", vars),
+            Some("github-token".to_string())
+        );
+        assert_eq!(
+            github_token_env_vars_for_host("ghe.example.com"),
             GITHUB_ENTERPRISE_TOKEN_ENV_VARS
         );
     }
@@ -2199,6 +2272,34 @@ mod tests {
             .env
             .iter()
             .any(|(key, value)| key == "GH_TOKEN" && value == "from-session"));
+    }
+
+    #[test]
+    fn install_agent_env_forwards_process_github_tokens() {
+        let base = BTreeMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
+        let session = BTreeMap::from([("CURSOR_API_KEY".to_string(), "test-key".to_string())]);
+        let env = install_agent_env_from(
+            &base,
+            &session,
+            [
+                ("GH_TOKEN".to_string(), "from-process".to_string()),
+                ("GITHUB_TOKEN".to_string(), "fallback".to_string()),
+                ("LINEAR_API_KEY".to_string(), "do-not-forward".to_string()),
+            ],
+        )
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            env.get("GH_TOKEN").map(String::as_str),
+            Some("from-process")
+        );
+        assert_eq!(
+            env.get("CURSOR_API_KEY").map(String::as_str),
+            Some("test-key")
+        );
+        assert!(!env.contains_key("LINEAR_API_KEY"));
     }
 
     #[tokio::test]
