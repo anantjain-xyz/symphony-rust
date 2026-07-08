@@ -1517,11 +1517,6 @@ function App() {
 
   return (
     <main className="app">
-      {IS_LOCAL_DEV ? (
-        <div className="dev-environment-banner" role="status">
-          <strong>Local development instance</strong>
-        </div>
-      ) : null}
       <header className="topbar">
         <div className="topbar-primary">
           <div className="brand">
@@ -1529,6 +1524,11 @@ function App() {
               <WaveMark />
             </div>
             <h1>Symphony</h1>
+            {IS_LOCAL_DEV ? (
+              <span className="brand-dev-pill" title="Local development instance">
+                Dev
+              </span>
+            ) : null}
           </div>
 
           <nav className="topnav" aria-label="Primary">

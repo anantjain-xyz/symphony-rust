@@ -191,26 +191,6 @@ tr:focus-visible {
   height: 100vh;
 }
 
-.dev-environment-banner {
-  align-items: center;
-  background: var(--warning);
-  border-bottom: 1px solid color-mix(in srgb, var(--warning-solid) 32%, var(--border));
-  color: var(--warning-foreground);
-  display: flex;
-  flex: 0 0 auto;
-  gap: 10px;
-  justify-content: center;
-  min-height: 34px;
-  padding: 7px 28px;
-  text-align: center;
-}
-
-.dev-environment-banner strong {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
 .topbar {
   align-items: center;
   background: var(--background);
@@ -268,6 +248,23 @@ tr:focus-visible {
   font-weight: 600;
   letter-spacing: 0;
   margin: 0;
+}
+
+.brand-dev-pill {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  height: 19px;
+  letter-spacing: 0;
+  line-height: 1;
+  padding: 0 7px;
+  text-transform: uppercase;
 }
 
 small {
@@ -2315,13 +2312,6 @@ textarea.mono-input {
 }
 
 @media (max-width: 520px) {
-  .dev-environment-banner {
-    align-items: center;
-    flex-direction: column;
-    gap: 2px;
-    padding: 7px 14px;
-  }
-
   .topbar {
     align-items: stretch;
     gap: 10px;
