@@ -5500,7 +5500,7 @@ checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
 
 [[package]]
 name = "symphony-agents"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5517,7 +5517,7 @@ dependencies = [
 
 [[package]]
 name = "symphony-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "serde",
@@ -5530,7 +5530,7 @@ dependencies = [
 
 [[package]]
 name = "symphony-desktop"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5558,7 +5558,7 @@ dependencies = [
 
 [[package]]
 name = "symphony-storage"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5575,7 +5575,7 @@ dependencies = [
 
 [[package]]
 name = "symphony-tracker"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -5588,7 +5588,7 @@ dependencies = [
 
 [[package]]
 name = "symphony-worker"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "chrono",
