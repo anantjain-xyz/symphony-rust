@@ -378,9 +378,12 @@ describe("App settings", () => {
   });
 
   it("marks local development builds distinctly", () => {
-    render(<App />);
+    const { container } = render(<App />);
 
-    expect(screen.getByText("Local development instance")).toBeTruthy();
+    const devPill = screen.getByText("Dev");
+    expect(devPill.classList.contains("brand-dev-pill")).toBe(true);
+    expect(devPill.getAttribute("title")).toBe("Local development instance");
+    expect(container.querySelector(".dev-environment-banner")).toBeNull();
     expect(
       screen.queryByText("Connected to this checkout, not the installed Symphony app."),
     ).toBeNull();
