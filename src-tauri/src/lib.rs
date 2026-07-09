@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{collections::BTreeMap, path::PathBuf};
 use symphony_storage::{
-    open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroRow,
-    RunWithIssueRow, StorageEvent,
+    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroBatchRow,
+    RetroRow, RetroSuggestionRow, RunWithIssueRow, StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -17,7 +17,10 @@ mod path_env;
 mod retro;
 mod settings;
 
-use retro::{parse_report, RetroDetail, RetroManager, RetroStatus};
+use retro::{
+    append_retro_guidance, parse_report, run_repo_pr_batch, RetroDetail, RetroManager,
+    RetroProposalConfig, RetroStatus,
+};
 #[cfg(debug_assertions)]
 use retro::{
     RetroConfidence, RetroEvidence, RetroFinding, RetroRepoReport, RetroReport, RetroRunState,
@@ -25,6 +28,7 @@ use retro::{
 };
 pub use settings::AppSettings;
 use settings::{default_prompt_template, parse_settings, workflow_from_settings};
+use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
@@ -587,7 +591,27 @@ async fn start_retro(
     };
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
-    state.retro.start(state.repo.clone(), tracker).await
+    let workspace_root =
+        resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
+    let proposal_config = RetroProposalConfig {
+        prompt_template: settings.prompt_template.clone(),
+        workflow_hash: workflow.source_hash.clone(),
+        repos: settings
+            .repos
+            .iter()
+            .map(|repo| (repo.name.clone(), repo.url.clone()))
+            .collect(),
+        workspace_root,
+        session_env: settings.session_env.clone(),
+        skills: bundled_skills()
+            .into_iter()
+            .map(|skill| (skill.name, skill.content))
+            .collect(),
+    };
+    state
+        .retro
+        .start(state.repo.clone(), tracker, proposal_config)
+        .await
 }
 
 #[tauri::command]
@@ -609,16 +633,242 @@ async fn get_retro_detail(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<RetroDetail>, String> {
-    state
+    let Some(row) = state
         .repo
         .get_retro(&id)
         .await
-        .map(|row| {
-            row.map(|row| RetroDetail {
-                report: parse_report(&row),
-                row,
-            })
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    let suggestions = state
+        .repo
+        .list_retro_suggestions(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    let batches = state
+        .repo
+        .list_retro_batches(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Some(RetroDetail {
+        report: parse_report(&row),
+        row,
+        suggestions,
+        batches,
+    }))
+}
+
+#[tauri::command]
+async fn set_retro_suggestion_decision(
+    state: State<'_, AppState>,
+    id: String,
+    decision: String,
+) -> Result<RetroSuggestionRow, String> {
+    if !matches!(decision.as_str(), "pending" | "accepted" | "rejected") {
+        return Err("Decision must be pending, accepted, or rejected.".to_string());
+    }
+    state
+        .repo
+        .set_retro_suggestion_decision(&id, &decision)
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Suggestion was not found.".to_string())
+}
+
+#[tauri::command]
+async fn apply_retro_workflow(
+    state: State<'_, AppState>,
+    retro_id: String,
+) -> Result<RetroBatchRow, String> {
+    let suggestions = state
+        .repo
+        .list_retro_suggestions(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.target_type == "prompt"
+                && suggestion.decision == "accepted"
+                && suggestion.proposal_status == "ready"
         })
+        .collect::<Vec<_>>();
+    if suggestions.is_empty() {
+        return Err("Accept at least one workflow suggestion first.".to_string());
+    }
+    let settings = load_settings_from_disk(&state).await?;
+    let workflow = workflow_from_settings(&settings, linear_api_key().as_deref());
+    let expected_ref = suggestions
+        .first()
+        .and_then(|suggestion| suggestion.base_ref.clone())
+        .ok_or_else(|| "Workflow proposal has no base revision.".to_string())?;
+    let batch = RetroBatchRow {
+        id: Uuid::new_v4().to_string(),
+        retro_id: retro_id.clone(),
+        kind: "workflow_update".to_string(),
+        repo_name: None,
+        repo_url: None,
+        base_ref: Some(expected_ref.clone()),
+        state: "running".to_string(),
+        progress: Some("Checking workflow freshness…".to_string()),
+        error: None,
+        pr_url: None,
+        created_at: now_iso(),
+        completed_at: None,
+    };
+    let suggestion_ids = suggestions
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    state
+        .repo
+        .create_retro_batch(&batch, &suggestion_ids)
+        .await
+        .map_err(|err| err.to_string())?;
+    if workflow.source_hash != expected_ref {
+        state
+            .repo
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("Workflow changed since this diff was prepared."),
+                Some("Generate a new retro and review the updated diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return state
+            .repo
+            .list_retro_batches(&retro_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .find(|item| item.id == batch.id)
+            .ok_or_else(|| "Workflow batch was not found.".to_string());
+    }
+
+    let guidance = suggestions
+        .iter()
+        .map(|suggestion| suggestion.guidance.clone())
+        .collect::<Vec<_>>();
+    let mut updated = settings;
+    updated.prompt_template = append_retro_guidance(&updated.prompt_template, &retro_id, &guidance);
+    if let Some(error) = validate_workflow_settings(&updated) {
+        state
+            .repo
+            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Err(error);
+    }
+    let json = serde_json::to_string_pretty(&updated).map_err(|err| err.to_string())?;
+    tokio::fs::write(&state.settings_path, json)
+        .await
+        .map_err(|err| err.to_string())?;
+    if live_reconfigure_allowed(&updated) {
+        state
+            .worker
+            .reconfigure(worker_start_config(&state, &updated))
+            .await;
+    }
+    state
+        .repo
+        .update_retro_batch(
+            &batch.id,
+            "completed",
+            Some("Workflow prompt updated."),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .find(|item| item.id == batch.id)
+        .ok_or_else(|| "Workflow batch was not found.".to_string())
+}
+
+#[tauri::command]
+async fn start_retro_prs(
+    state: State<'_, AppState>,
+    retro_id: String,
+    settings: AppSettings,
+) -> Result<Vec<RetroBatchRow>, String> {
+    let suggestions = state
+        .repo
+        .list_retro_suggestions(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.target_type == "skill"
+                && suggestion.decision == "accepted"
+                && suggestion.proposal_status == "ready"
+        })
+        .collect::<Vec<_>>();
+    if suggestions.is_empty() {
+        return Err("Accept at least one repository suggestion first.".to_string());
+    }
+    let mut by_repo = BTreeMap::<String, Vec<RetroSuggestionRow>>::new();
+    for suggestion in suggestions {
+        by_repo
+            .entry(suggestion.repo_name.clone())
+            .or_default()
+            .push(suggestion);
+    }
+    let workspace_root = resolve_workspace_root_dir(
+        &workflow_from_settings(&settings, linear_api_key().as_deref())
+            .front_matter
+            .workspace
+            .root,
+        &state.app_data_dir,
+    );
+    for (repo_name, suggestions) in by_repo {
+        let repo_url = suggestions
+            .first()
+            .and_then(|suggestion| suggestion.repo_url.clone())
+            .ok_or_else(|| format!("Repository `{repo_name}` is no longer configured."))?;
+        let batch = RetroBatchRow {
+            id: Uuid::new_v4().to_string(),
+            retro_id: retro_id.clone(),
+            kind: "repo_pr".to_string(),
+            repo_name: Some(repo_name.clone()),
+            repo_url: Some(repo_url),
+            base_ref: suggestions.first().and_then(|item| item.base_ref.clone()),
+            state: "queued".to_string(),
+            progress: Some("Queued for PR creation…".to_string()),
+            error: None,
+            pr_url: None,
+            created_at: now_iso(),
+            completed_at: None,
+        };
+        let ids = suggestions
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        state
+            .repo
+            .create_retro_batch(&batch, &ids)
+            .await
+            .map_err(|err| err.to_string())?;
+        let repository = state.repo.clone();
+        let session_env = settings.session_env.clone();
+        let workspace = workspace_root
+            .join("_retro-actions")
+            .join(&retro_id)
+            .join(sanitize_key(&repo_name));
+        tauri::async_runtime::spawn(async move {
+            run_repo_pr_batch(repository, batch, suggestions, workspace, session_env).await;
+        });
+    }
+    state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
         .map_err(|err| err.to_string())
 }
 
@@ -744,6 +994,9 @@ pub fn run() {
             get_retro_status,
             list_retros,
             get_retro_detail,
+            set_retro_suggestion_decision,
+            apply_retro_workflow,
+            start_retro_prs,
             get_skills_status,
             get_skills_install_status,
             install_skills
@@ -883,6 +1136,8 @@ fn export_bindings() {
             specta::ts::export::<SkillsStatus>(&conf),
             specta::ts::export::<SkillsInstallStatus>(&conf),
             specta::ts::export::<RetroRow>(&conf),
+            specta::ts::export::<RetroSuggestionRow>(&conf),
+            specta::ts::export::<RetroBatchRow>(&conf),
             specta::ts::export::<RetroRunState>(&conf),
             specta::ts::export::<RetroStatus>(&conf),
             specta::ts::export::<RetroDetail>(&conf),

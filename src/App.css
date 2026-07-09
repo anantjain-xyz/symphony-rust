@@ -553,7 +553,7 @@ small {
 
 .retro-layout {
   align-items: start;
-  grid-template-columns: minmax(360px, 0.75fr) minmax(520px, 1.25fr);
+  grid-template-columns: minmax(280px, 0.55fr) minmax(620px, 1.45fr);
 }
 
 .panel {
@@ -745,6 +745,242 @@ small {
 .retro-evidence span {
   font-size: 12px;
   font-weight: 600;
+}
+
+.retro-review {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.retro-review-summary {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.retro-review-summary > div:first-child,
+.retro-action-bar > div:first-child,
+.retro-batch-row > div,
+.retro-review-repo > header > div:first-child,
+.retro-suggestion-card > header > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.retro-filter {
+  display: inline-flex;
+}
+
+.retro-filter button {
+  border-radius: 0;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.retro-filter button:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.retro-filter button:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.retro-filter button + button {
+  margin-left: -1px;
+}
+
+.retro-filter button.active {
+  background: var(--accent);
+  border-color: var(--ring);
+  position: relative;
+}
+
+.retro-review-repo {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.retro-review-repo + .retro-review-repo {
+  border-top: 1px solid var(--border);
+}
+
+.retro-review-repo > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.retro-review-repo > header > div:first-child {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.retro-suggestion-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.retro-suggestion-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.retro-suggestion-card.decision-accepted {
+  border-color: var(--success-solid);
+}
+
+.retro-suggestion-card.decision-rejected {
+  background: var(--muted);
+  opacity: 0.82;
+}
+
+.retro-suggestion-card > header,
+.retro-suggestion-card > footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.retro-suggestion-card > header strong,
+.retro-batch-row strong {
+  overflow-wrap: anywhere;
+}
+
+.retro-suggestion-card > header small {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.retro-suggestion-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.retro-diff {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 360px;
+  min-width: 0;
+  overflow: auto;
+  padding: 0;
+  white-space: pre;
+}
+
+.retro-diff code,
+.retro-diff span {
+  display: block;
+  min-width: max-content;
+}
+
+.retro-diff span {
+  padding: 0 10px;
+}
+
+.retro-diff .diff-addition {
+  background: var(--success);
+  color: var(--success-foreground);
+}
+
+.retro-diff .diff-deletion {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.retro-diff .diff-meta {
+  color: var(--info-foreground);
+  font-weight: 600;
+}
+
+.retro-rationale {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.retro-rationale summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.retro-rationale p {
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
+.retro-rationale .retro-evidence {
+  margin-top: 8px;
+}
+
+.retro-proposal-error,
+.retro-legacy-banner {
+  margin: 0;
+}
+
+.retro-action-bar {
+  align-items: center;
+  background: var(--card);
+  border-top: 1px solid var(--border);
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px;
+  position: sticky;
+  z-index: 2;
+}
+
+.retro-batches {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0;
+  padding: 16px;
+}
+
+.retro-batches h4 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.retro-batch-row {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 10px 0;
+}
+
+.retro-batch-row:last-child {
+  padding-bottom: 0;
 }
 
 table {
@@ -1030,18 +1266,24 @@ td strong {
 }
 
 .badge.success,
-.badge.done {
+.badge.done,
+.badge.accepted,
+.badge.completed {
   background: var(--success);
   color: var(--success-foreground);
 }
 
-.badge.running {
+.badge.running,
+.badge.queued {
   background: var(--warning);
   color: var(--warning-foreground);
 }
 
 .badge.failure,
-.badge.timeout {
+.badge.timeout,
+.badge.failed,
+.badge.stale,
+.badge.rejected {
   background: var(--destructive);
   color: var(--destructive-foreground);
 }
@@ -2308,6 +2550,36 @@ textarea.mono-input {
     border-top: 1px solid var(--border);
     padding-left: 0;
     padding-top: 16px;
+  }
+
+  .retro-review-summary,
+  .retro-action-bar,
+  .retro-suggestion-card > header,
+  .retro-suggestion-card > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .retro-filter,
+  .retro-action-bar .actions,
+  .retro-suggestion-card > footer .actions {
+    display: flex;
+    width: 100%;
+  }
+
+  .retro-filter button,
+  .retro-action-bar .actions button,
+  .retro-suggestion-card > footer .actions button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .retro-batch-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .retro-batch-row button {
+    grid-column: 1 / -1;
   }
 }
 

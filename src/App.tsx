@@ -11,10 +11,12 @@ import type {
   LinearViewerProfile,
   Overview,
   RepoConfig,
+  RetroBatchRow,
   RetroDetail,
   RetroReport,
   RetroRow,
   RetroStatus,
+  RetroSuggestionRow,
   RunDetail,
   RunWithIssueRow,
   SkillsInstallStatus,
@@ -737,9 +739,62 @@ const previewRetroStatus: RetroStatus = {
   error: null,
 };
 
+const previewRetroSuggestions: RetroSuggestionRow[] = previewRetroReport.repos.flatMap(
+  (repo, repoIndex) =>
+    repo.suggestions.map((suggestion, findingIndex) => {
+      const isPrompt = suggestion.target_type === "prompt";
+      const targetPath = isPrompt
+        ? "Settings → Prompt template"
+        : `.agents/skills/${suggestion.target_id}/SKILL.md`;
+      const guidance = `When this pattern occurs, resolve the root cause before completing the task and record the reusable validation step for ${repo.repo_name}.`;
+      const before = isPrompt
+        ? "# Agent workflow\n\nImplement the requested issue and validate the result.\n"
+        : "# Skill guidance\n\nFollow the repository's established workflow.\n";
+      const after = `${before.trimEnd()}\n\n## Retro guidance (preview)\n\n- ${guidance}\n`;
+      return {
+        id: `preview-suggestion-${repoIndex}-${findingIndex}`,
+        retro_id: previewRetroReport.id,
+        repo_name: repo.repo_name,
+        repo_url: `https://github.com/acme/${repo.repo_name}.git`,
+        finding_index: findingIndex,
+        target_type: suggestion.target_type,
+        target_id: suggestion.target_id,
+        target_path: targetPath,
+        title: suggestion.title,
+        body: suggestion.body,
+        rationale: suggestion.rationale,
+        confidence: suggestion.confidence,
+        guidance,
+        before_content: before,
+        after_content: after,
+        unified_diff: [
+          `--- a/${targetPath}`,
+          `+++ b/${targetPath}`,
+          "@@ -1,3 +1,7 @@",
+          " # Skill guidance",
+          " ",
+          " Follow the repository's established workflow.",
+          "+",
+          "+## Retro guidance (preview)",
+          "+",
+          `+- ${guidance}`,
+        ].join("\n"),
+        base_ref: "7c4a8d9preview",
+        base_hash: "preview-base-hash",
+        proposal_status: "ready",
+        proposal_error: null,
+        decision: "pending",
+        decided_at: null,
+        created_at: previewRetroReport.generated_at,
+      };
+    }),
+);
+
 const previewRetroDetail: RetroDetail = {
   row: previewRetros[0],
   report: previewRetroReport,
+  suggestions: previewRetroSuggestions,
+  batches: [],
 };
 
 function previewRetroDetailForId(id: string): RetroDetail | null {
@@ -748,6 +803,8 @@ function previewRetroDetailForId(id: string): RetroDetail | null {
   return {
     row,
     report: row.id === previewRetroReport.id ? previewRetroReport : null,
+    suggestions: row.id === previewRetroReport.id ? previewRetroSuggestions : [],
+    batches: [],
   };
 }
 
@@ -1434,6 +1491,67 @@ function App() {
     setView("retro");
   }
 
+  async function decideRetroSuggestion(id: string, decision: string) {
+    if (!runtimeAvailable) {
+      setSelectedRetro((current) =>
+        current
+          ? {
+              ...current,
+              suggestions: current.suggestions.map((suggestion) =>
+                suggestion.id === id
+                  ? {
+                      ...suggestion,
+                      decision,
+                      decided_at: decision === "pending" ? null : new Date().toISOString(),
+                    }
+                  : suggestion,
+              ),
+            }
+          : current,
+      );
+      return;
+    }
+    const updated = await call(() =>
+      invoke<RetroSuggestionRow>("set_retro_suggestion_decision", { id, decision }),
+    );
+    setSelectedRetro((current) =>
+      current
+        ? {
+            ...current,
+            suggestions: current.suggestions.map((suggestion) =>
+              suggestion.id === updated.id ? updated : suggestion,
+            ),
+          }
+        : current,
+    );
+  }
+
+  async function applyRetroWorkflow(retroId: string) {
+    const batch = await call(() =>
+      invoke<RetroBatchRow>("apply_retro_workflow", { retroId }),
+    );
+    setSelectedRetro((current) =>
+      current?.row.id === retroId
+        ? { ...current, batches: [...current.batches, batch] }
+        : current,
+    );
+    const saved = await invoke<AppSettings>("load_settings");
+    setSettings(saved);
+    setSavedSnapshot(formSnapshot(saved));
+    await refreshDashboard();
+  }
+
+  async function startRetroPrs(retroId: string) {
+    if (!settings) return;
+    const batches = await call(() =>
+      invoke<RetroBatchRow[]>("start_retro_prs", { retroId, settings }),
+    );
+    setSelectedRetro((current) =>
+      current?.row.id === retroId ? { ...current, batches } : current,
+    );
+    await refreshDashboard();
+  }
+
   useEffect(() => {
     if (!runtimeAvailable || retroStatus.state !== "running") return;
     let cancelled = false;
@@ -1658,9 +1776,13 @@ function App() {
             selected={selectedRetro}
             runtimeAvailable={runtimeAvailable}
             busy={busy}
+            settingsDirty={dirty}
             setupBlocked={setup.blocked}
             onStartRetro={startRetro}
             onOpenRetro={openRetro}
+            onDecideSuggestion={decideRetroSuggestion}
+            onApplyWorkflow={applyRetroWorkflow}
+            onCreatePrs={startRetroPrs}
           />
         ) : null}
         {view === "settings" && settings ? (
@@ -2704,20 +2826,74 @@ function RetroView({
   selected,
   runtimeAvailable,
   busy,
+  settingsDirty,
   setupBlocked,
   onStartRetro,
   onOpenRetro,
+  onDecideSuggestion,
+  onApplyWorkflow,
+  onCreatePrs,
 }: {
   retros: RetroRow[];
   status: RetroStatus;
   selected: RetroDetail | null;
   runtimeAvailable: boolean;
   busy: boolean;
+  settingsDirty: boolean;
   setupBlocked: boolean;
   onStartRetro: () => void;
   onOpenRetro: (id: string) => void;
+  onDecideSuggestion: (id: string, decision: string) => void;
+  onApplyWorkflow: (retroId: string) => void;
+  onCreatePrs: (retroId: string) => void;
 }) {
+  const [reviewFilter, setReviewFilter] = useState<
+    "all" | "pending" | "accepted" | "rejected"
+  >("all");
   const activeReport = selected ? selected.report : status.report;
+  const actionable = selected?.suggestions ?? [];
+  const readySuggestions = actionable.filter(
+    (suggestion) => suggestion.proposal_status === "ready",
+  );
+  const pendingCount = readySuggestions.filter(
+    (suggestion) => suggestion.decision === "pending",
+  ).length;
+  const accepted = readySuggestions.filter(
+    (suggestion) => suggestion.decision === "accepted",
+  );
+  const rejectedCount = readySuggestions.filter(
+    (suggestion) => suggestion.decision === "rejected",
+  ).length;
+  const acceptedPromptCount = accepted.filter(
+    (suggestion) => suggestion.target_type === "prompt",
+  ).length;
+  const acceptedRepoSuggestions = accepted.filter(
+    (suggestion) => suggestion.target_type === "skill",
+  );
+  const acceptedRepoCount = new Set(
+    acceptedRepoSuggestions.map((suggestion) => suggestion.repo_name),
+  ).size;
+  const workflowLocked =
+    selected?.batches.some(
+      (batch) =>
+        batch.kind === "workflow_update" &&
+        ["queued", "running", "completed"].includes(batch.state),
+    ) ?? false;
+  const workflowStale =
+    selected?.batches.some(
+      (batch) => batch.kind === "workflow_update" && batch.state === "stale",
+    ) ?? false;
+  const workflowBlocked = workflowLocked || workflowStale;
+  const prsLocked =
+    selected?.batches.some(
+      (batch) =>
+        batch.kind === "repo_pr" && ["queued", "running", "completed"].includes(batch.state),
+    ) ?? false;
+  const prsStale =
+    selected?.batches.some(
+      (batch) => batch.kind === "repo_pr" && batch.state === "stale",
+    ) ?? false;
+  const prsBlocked = prsLocked || prsStale;
   const canStart =
     !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
   return (
@@ -2821,7 +2997,7 @@ function RetroView({
           )}
         </Panel>
 
-        <Panel title="Findings and suggestions">
+        <Panel title={actionable.length > 0 ? "Review suggestions" : "Findings and suggestions"}>
           {!activeReport ? (
             <Empty
               title="No report selected"
@@ -2832,11 +3008,120 @@ function RetroView({
               title="No runs in this window"
               text="The retro marker was advanced, but no terminal runs finished in the selected period."
             />
+          ) : actionable.length > 0 && selected ? (
+            <div className="retro-review">
+              <div className="retro-review-summary">
+                <div>
+                  <strong>
+                    {readySuggestions.length - pendingCount} of {readySuggestions.length} reviewed
+                  </strong>
+                  <small>
+                    {accepted.length} accepted · {rejectedCount} rejected
+                    {actionable.length - readySuggestions.length > 0
+                      ? ` · ${actionable.length - readySuggestions.length} unavailable`
+                      : ""}
+                  </small>
+                </div>
+                <div className="retro-filter" role="group" aria-label="Filter suggestions">
+                  {(["all", "pending", "accepted", "rejected"] as const).map((filter) => (
+                    <button
+                      type="button"
+                      key={filter}
+                      className={reviewFilter === filter ? "active" : undefined}
+                      aria-pressed={reviewFilter === filter}
+                      onClick={() => setReviewFilter(filter)}
+                    >
+                      {filter === "all"
+                        ? "All"
+                        : `${filter.charAt(0).toUpperCase()}${filter.slice(1)}`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {activeReport.repos.map((repo) => (
+                <RetroReviewRepo
+                  key={repo.repo_name}
+                  repo={repo}
+                  suggestions={actionable.filter(
+                    (suggestion) =>
+                      suggestion.repo_name === repo.repo_name &&
+                      (reviewFilter === "all" || suggestion.decision === reviewFilter),
+                  )}
+                  busy={busy}
+                  runtimeAvailable={runtimeAvailable}
+                  workflowLocked={workflowLocked}
+                  repoLocked={prsLocked}
+                  onDecide={onDecideSuggestion}
+                />
+              ))}
+
+              {selected.batches.length > 0 ? (
+                <RetroBatchResults batches={selected.batches} />
+              ) : null}
+
+              <div className="retro-action-bar">
+                <div>
+                  <strong>
+                    {pendingCount === 0 ? "Review complete" : `${pendingCount} remaining`}
+                  </strong>
+                  <small>
+                    {accepted.length === 0
+                      ? "Accept a change to create an implementation batch."
+                      : `${accepted.length} accepted change${accepted.length === 1 ? "" : "s"}`}
+                  </small>
+                </div>
+                <div className="actions">
+                  {acceptedPromptCount > 0 ? (
+                    <button
+                      type="button"
+                      disabled={
+                        !runtimeAvailable ||
+                        busy ||
+                        settingsDirty ||
+                        pendingCount > 0 ||
+                        workflowBlocked
+                      }
+                      title={
+                        settingsDirty
+                          ? "Save or discard the current Settings edits before applying a workflow change."
+                          : undefined
+                      }
+                      onClick={() => onApplyWorkflow(selected.row.id)}
+                    >
+                      {workflowStale
+                        ? "Generate a new retro"
+                        : workflowLocked
+                          ? "Workflow action started"
+                          : `Apply workflow prompt (${acceptedPromptCount})`}
+                    </button>
+                  ) : null}
+                  {acceptedRepoCount > 0 ? (
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={!runtimeAvailable || busy || pendingCount > 0 || prsBlocked}
+                      onClick={() => onCreatePrs(selected.row.id)}
+                    >
+                      {prsStale
+                        ? "Generate a new retro"
+                        : prsLocked
+                          ? "PR creation started"
+                          : `Create ${acceptedRepoCount} implementation PR${acceptedRepoCount === 1 ? "" : "s"}`}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="retro-report">
               {activeReport.repos.map((repo) => (
-                <RetroRepoCard key={repo.repo_name} repo={repo} />
+                <LegacyRetroRepoCard key={repo.repo_name} repo={repo} />
               ))}
+              <div className="banner info retro-legacy-banner">
+                <strong>Historical report</strong>
+                <span>Generate a new retro to review exact diffs and create change batches.</span>
+              </div>
             </div>
           )}
         </Panel>
@@ -2845,7 +3130,185 @@ function RetroView({
   );
 }
 
-function RetroRepoCard({ repo }: { repo: RetroReport["repos"][number] }) {
+function RetroReviewRepo({
+  repo,
+  suggestions,
+  busy,
+  runtimeAvailable,
+  workflowLocked,
+  repoLocked,
+  onDecide,
+}: {
+  repo: RetroReport["repos"][number];
+  suggestions: RetroSuggestionRow[];
+  busy: boolean;
+  runtimeAvailable: boolean;
+  workflowLocked: boolean;
+  repoLocked: boolean;
+  onDecide: (id: string, decision: string) => void;
+}) {
+  if (suggestions.length === 0) return null;
+  const reviewed = suggestions.filter((suggestion) => suggestion.decision !== "pending").length;
+  return (
+    <section className="retro-review-repo">
+      <header>
+        <div>
+          <span className="repo-badge">{repo.repo_name}</span>
+          <small>
+            {reviewed} of {suggestions.length} reviewed
+          </small>
+        </div>
+        <div className="retro-mini-stats">
+          <span>{repo.run_count} runs</span>
+          <span>{repo.failure_count} failures</span>
+          <span>{repo.retry_count} retries</span>
+        </div>
+      </header>
+      <div className="retro-suggestion-list">
+        {suggestions.map((suggestion) => {
+          const finding = repo.findings[suggestion.finding_index];
+          const locked =
+            suggestion.target_type === "prompt" ? workflowLocked : repoLocked;
+          return (
+            <article
+              className={`retro-suggestion-card decision-${suggestion.decision}`}
+              key={suggestion.id}
+            >
+              <header>
+                <div>
+                  <strong>{suggestion.title}</strong>
+                  <small>{suggestion.target_path}</small>
+                </div>
+                <div className="retro-suggestion-badges">
+                  <span className="retro-target">{suggestion.target_type}</span>
+                  <Badge status={suggestion.confidence} />
+                  {suggestion.decision !== "pending" ? (
+                    <Badge status={suggestion.decision} />
+                  ) : null}
+                </div>
+              </header>
+
+              {suggestion.proposal_status === "ready" && suggestion.unified_diff ? (
+                <UnifiedDiff diff={suggestion.unified_diff} />
+              ) : (
+                <div className="banner error retro-proposal-error">
+                  <strong>Diff unavailable</strong>
+                  <span>{suggestion.proposal_error ?? "The proposal could not be prepared."}</span>
+                </div>
+              )}
+
+              <details className="retro-rationale">
+                <summary>Why this change?</summary>
+                <p>{suggestion.rationale}</p>
+                {finding ? (
+                  <>
+                    <p>{finding.detail}</p>
+                    <ul className="retro-evidence">
+                      {finding.evidence.map((evidence) => (
+                        <li
+                          key={`${suggestion.id}-${evidence.issue_identifier}-${evidence.event_id ?? evidence.summary}`}
+                        >
+                          <code>{evidence.issue_identifier}</code>
+                          <small>{evidence.summary}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+              </details>
+
+              {suggestion.proposal_status === "ready" ? (
+                <footer>
+                  <small title={suggestion.base_ref ?? undefined}>
+                    Base {suggestion.base_ref?.slice(0, 8) ?? "unknown"}
+                  </small>
+                  <div className="actions">
+                    {suggestion.decision === "pending" ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={(busy && runtimeAvailable) || locked}
+                          onClick={() => onDecide(suggestion.id, "rejected")}
+                        >
+                          Reject
+                        </button>
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={(busy && runtimeAvailable) || locked}
+                          onClick={() => onDecide(suggestion.id, "accepted")}
+                        >
+                          Accept
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={(busy && runtimeAvailable) || locked}
+                        onClick={() => onDecide(suggestion.id, "pending")}
+                      >
+                        Undo {suggestion.decision}
+                      </button>
+                    )}
+                  </div>
+                </footer>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function UnifiedDiff({ diff }: { diff: string }) {
+  return (
+    <pre className="retro-diff" aria-label="Proposed unified diff">
+      <code>
+        {diff.split("\n").map((line, index) => {
+          const kind = line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")
+            ? "meta"
+            : line.startsWith("+")
+              ? "addition"
+              : line.startsWith("-")
+                ? "deletion"
+                : "context";
+          return (
+            <span className={`diff-${kind}`} key={`${index}-${line}`}>
+              {line || " "}
+              {"\n"}
+            </span>
+          );
+        })}
+      </code>
+    </pre>
+  );
+}
+
+function RetroBatchResults({ batches }: { batches: RetroBatchRow[] }) {
+  return (
+    <section className="retro-batches">
+      <h4>Change batches</h4>
+      {batches.map((batch) => (
+        <div className="retro-batch-row" key={batch.id}>
+          <div>
+            <strong>{batch.repo_name ?? "Workflow prompt"}</strong>
+            <small>{batch.progress ?? batch.error ?? "Waiting for an update…"}</small>
+            {batch.error ? <small className="row-error">{batch.error}</small> : null}
+          </div>
+          <Badge status={batch.state} />
+          {batch.pr_url ? (
+            <button type="button" onClick={() => openUrl(batch.pr_url!).catch(() => undefined)}>
+              View PR
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function LegacyRetroRepoCard({ repo }: { repo: RetroReport["repos"][number] }) {
   return (
     <article className="retro-repo-card">
       <header>

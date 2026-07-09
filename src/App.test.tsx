@@ -377,6 +377,35 @@ describe("App settings", () => {
     });
   });
 
+  it("reviews exact Retro diffs and gates change batches until every suggestion is decided", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+
+    expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
+    expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
+
+    const acceptButtons = screen.getAllByRole("button", { name: "Accept" });
+    fireEvent.click(acceptButtons[0]);
+    fireEvent.click(acceptButtons[1]);
+
+    const rejectButtons = screen.getAllByRole("button", { name: "Reject" });
+    fireEvent.click(rejectButtons[0]);
+    fireEvent.click(rejectButtons[1]);
+
+    expect(screen.getByText("4 of 4 reviewed")).toBeTruthy();
+    expect(screen.getByText("Review complete")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Undo accepted" })).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "Apply workflow prompt (1)" }).getAttribute("disabled"),
+    ).not.toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "Create 1 implementation PR" })
+        .getAttribute("disabled"),
+    ).not.toBeNull();
+  });
+
   it("marks local development builds distinctly", () => {
     const { container } = render(<App />);
 

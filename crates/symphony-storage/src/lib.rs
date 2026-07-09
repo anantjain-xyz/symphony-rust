@@ -101,6 +101,10 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/0005_issue_dispatch_suppressions.sql"),
     ),
     ("0006_retros", include_str!("migrations/0006_retros.sql")),
+    (
+        "0007_retro_review",
+        include_str!("migrations/0007_retro_review.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {
