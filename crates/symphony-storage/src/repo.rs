@@ -413,10 +413,17 @@ impl Repository {
         )
     }
 
-    pub async fn count_running(&self) -> Result<i64, StorageError> {
-        let (count,): (i64,) = sqlx::query_as("select count(*) from runs where status = 'running'")
-            .fetch_one(&self.pool)
-            .await?;
+    /// Count runs occupying a concurrency slot. This includes `pending` runs
+    /// (reserved and doing setup, not yet executing) as well as `running` ones,
+    /// so that the `max_concurrent_agents` gate counts work that is in-flight
+    /// but has not yet flipped to `running`. Counting only `running` here let a
+    /// single dispatch pass reserve many runs into `pending` at once, blowing
+    /// past the configured limit until they later transitioned to `running`.
+    pub async fn count_active(&self) -> Result<i64, StorageError> {
+        let (count,): (i64,) =
+            sqlx::query_as("select count(*) from runs where status in ('pending', 'running')")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count)
     }
 
@@ -2018,6 +2025,48 @@ mod tests {
         repo.mark_running(&first.id).await.unwrap();
         let result = repo.mark_running(&second.id).await;
         assert!(matches!(result, Err(StorageError::AlreadyRunning(_))));
+    }
+
+    #[tokio::test]
+    async fn count_active_includes_pending_runs() {
+        // The max_concurrent_agents gate uses count_active. A run reserved into
+        // `pending` (doing setup, not yet `running`) must still occupy a slot,
+        // otherwise a single dispatch pass reserves many runs at once and blows
+        // past the configured limit before any of them flips to `running`.
+        let repo = repo().await;
+        let issues: Vec<Issue> = (0..3)
+            .map(|n| Issue {
+                id: format!("lin-{n}"),
+                identifier: format!("SYM-{n}"),
+                ..issue()
+            })
+            .collect();
+        repo.upsert_issues(&issues).await.unwrap();
+
+        // Two pending, one running.
+        let pending_a = repo
+            .try_reserve_run("lin-0", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let running = repo
+            .try_reserve_run("lin-2", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&running.id).await.unwrap();
+
+        assert_eq!(repo.count_active().await.unwrap(), 3);
+
+        // A finished run no longer occupies a slot.
+        repo.finish_run(&pending_a.id, RunStatus::Cancelled, None, None)
+            .await
+            .unwrap();
+        assert_eq!(repo.count_active().await.unwrap(), 2);
     }
 
     #[tokio::test]
