@@ -407,6 +407,24 @@ describe("App settings", () => {
     ).not.toBeNull();
   });
 
+  it("explains when a Retro suggestion filter has no matching suggestions", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accepted" }));
+
+    expect(screen.getByText("No accepted suggestions")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Accept a pending suggestion to include it in an implementation batch.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Rejected" }));
+    expect(screen.getByText("No rejected suggestions")).toBeTruthy();
+    expect(screen.getByText("Suggestions you reject will appear here.")).toBeTruthy();
+  });
+
   it("scopes Retro PR locks to the repository whose batch succeeded", () => {
     const batch = (repoName: string, state: string): RetroBatchRow => ({
       id: `${repoName}-${state}`,

@@ -2882,6 +2882,27 @@ function RetroView({
   const rejectedCount = readySuggestions.filter(
     (suggestion) => suggestion.decision === "rejected",
   ).length;
+  const filteredSuggestions = actionable.filter(
+    (suggestion) => reviewFilter === "all" || suggestion.decision === reviewFilter,
+  );
+  const emptyFilterCopy = {
+    all: {
+      title: "No suggestions",
+      text: "This retro has no suggestions to show.",
+    },
+    pending: {
+      title: "No pending suggestions",
+      text: "Every available suggestion in this retro has been reviewed.",
+    },
+    accepted: {
+      title: "No accepted suggestions",
+      text: "Accept a pending suggestion to include it in an implementation batch.",
+    },
+    rejected: {
+      title: "No rejected suggestions",
+      text: "Suggestions you reject will appear here.",
+    },
+  }[reviewFilter];
   const acceptedPromptCount = accepted.filter(
     (suggestion) => suggestion.target_type === "prompt",
   ).length;
@@ -3055,24 +3076,26 @@ function RetroView({
                 </div>
               </div>
 
-              {activeReport.repos.map((repo) => (
-                <RetroReviewRepo
-                  key={repo.repo_name}
-                  repo={repo}
-                  suggestions={actionable.filter(
-                    (suggestion) =>
-                      suggestion.repo_name === repo.repo_name &&
-                      (reviewFilter === "all" || suggestion.decision === reviewFilter),
-                  )}
-                  busy={busy}
-                  runtimeAvailable={runtimeAvailable}
-                  workflowLocked={workflowLocked}
-                  repoLocked={
-                    retroRepoBatchState(selected.batches, repo.repo_name) === "locked"
-                  }
-                  onDecide={onDecideSuggestion}
-                />
-              ))}
+              {filteredSuggestions.length === 0 ? (
+                <Empty title={emptyFilterCopy.title} text={emptyFilterCopy.text} />
+              ) : (
+                activeReport.repos.map((repo) => (
+                  <RetroReviewRepo
+                    key={repo.repo_name}
+                    repo={repo}
+                    suggestions={filteredSuggestions.filter(
+                      (suggestion) => suggestion.repo_name === repo.repo_name,
+                    )}
+                    busy={busy}
+                    runtimeAvailable={runtimeAvailable}
+                    workflowLocked={workflowLocked}
+                    repoLocked={
+                      retroRepoBatchState(selected.batches, repo.repo_name) === "locked"
+                    }
+                    onDecide={onDecideSuggestion}
+                  />
+                ))
+              )}
 
               {selected.batches.length > 0 ? (
                 <RetroBatchResults batches={selected.batches} />
