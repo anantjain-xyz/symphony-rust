@@ -602,7 +602,7 @@ async fn tick<T: TrackerClient>(
             );
             continue;
         };
-        if repo.count_running().await?
+        if repo.count_active().await?
             >= dispatch_config
                 .workflow
                 .front_matter
@@ -632,7 +632,7 @@ async fn tick<T: TrackerClient>(
         else {
             return Ok(());
         };
-        if repo.count_running().await?
+        if repo.count_active().await?
             >= dispatch_config
                 .workflow
                 .front_matter
