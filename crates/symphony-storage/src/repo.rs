@@ -420,11 +420,10 @@ impl Repository {
     /// single dispatch pass reserve many runs into `pending` at once, blowing
     /// past the configured limit until they later transitioned to `running`.
     pub async fn count_active(&self) -> Result<i64, StorageError> {
-        let (count,): (i64,) = sqlx::query_as(
-            "select count(*) from runs where status in ('pending', 'running')",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("select count(*) from runs where status in ('pending', 'running')")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count)
     }
 
