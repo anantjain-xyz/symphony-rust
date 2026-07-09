@@ -2,11 +2,12 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { retroRepoBatchState } from "./App";
 import type {
   AppSettings,
   IssueRow,
   Overview,
+  RetroBatchRow,
   RunWithIssueRow,
   SkillsStatus,
   ValidationResult,
@@ -404,6 +405,56 @@ describe("App settings", () => {
         .getByRole("button", { name: "Create 1 implementation PR" })
         .getAttribute("disabled"),
     ).not.toBeNull();
+  });
+
+  it("scopes Retro PR locks to the repository whose batch succeeded", () => {
+    const batch = (repoName: string, state: string): RetroBatchRow => ({
+      id: `${repoName}-${state}`,
+      retro_id: "retro-1",
+      kind: "repo_pr",
+      repo_name: repoName,
+      repo_url: `https://github.com/acme/${repoName}.git`,
+      base_ref: "abc123",
+      state,
+      progress: null,
+      error: state === "failed" ? "network error" : null,
+      pr_url: state === "completed" ? `https://github.com/acme/${repoName}/pull/1` : null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      completed_at: state === "running" ? null : "2026-01-01T00:01:00.000Z",
+    });
+    const batches = [batch("widgets", "completed"), batch("api", "failed")];
+
+    expect(retroRepoBatchState(batches, "widgets")).toBe("locked");
+    expect(retroRepoBatchState(batches, "api")).toBe("available");
+    expect(retroRepoBatchState([batch("api", "stale")], "api")).toBe("stale");
+  });
+
+  it("starts Retros from saved backend settings instead of sending form edits", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "start_retro") {
+        return {
+          state: "running",
+          retro_id: "retro-saved-settings",
+          message: "Preparing retro window...",
+          report: null,
+          error: null,
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retro" }));
+    const generateButton = screen
+      .getAllByRole("button", { name: "Generate retro" })
+      .find((button) => button.classList.contains("primary"));
+    expect(generateButton).toBeTruthy();
+    fireEvent.click(generateButton!);
+
+    await waitFor(() => expect(tauriMocks.invoke).toHaveBeenCalledWith("start_retro"));
   });
 
   it("marks local development builds distinctly", () => {

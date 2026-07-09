@@ -1466,9 +1466,7 @@ function App() {
       setView("retro");
       return;
     }
-    const status = await call(() =>
-      invoke<RetroStatus>("start_retro", { settings }),
-    );
+    const status = await call(() => invoke<RetroStatus>("start_retro"));
     setRetroStatus(status);
     selectedRetroIdRef.current = status.retro_id;
     setSelectedRetro(null);
@@ -1544,7 +1542,7 @@ function App() {
   async function startRetroPrs(retroId: string) {
     if (!settings) return;
     const batches = await call(() =>
-      invoke<RetroBatchRow[]>("start_retro_prs", { retroId, settings }),
+      invoke<RetroBatchRow[]>("start_retro_prs", { retroId }),
     );
     setSelectedRetro((current) =>
       current?.row.id === retroId ? { ...current, batches } : current,
@@ -2820,6 +2818,26 @@ function DependencyNodeCard({ node }: { node: DependencyNode }) {
   );
 }
 
+export function retroRepoBatchState(
+  batches: RetroBatchRow[],
+  repoName: string,
+): "available" | "locked" | "stale" {
+  const repoBatches = batches.filter(
+    (batch) => batch.kind === "repo_pr" && batch.repo_name === repoName,
+  );
+  if (
+    repoBatches.some((batch) =>
+      ["queued", "running", "completed"].includes(batch.state),
+    )
+  ) {
+    return "locked";
+  }
+  if (repoBatches.some((batch) => batch.state === "stale")) {
+    return "stale";
+  }
+  return "available";
+}
+
 function RetroView({
   retros,
   status,
@@ -2870,9 +2888,9 @@ function RetroView({
   const acceptedRepoSuggestions = accepted.filter(
     (suggestion) => suggestion.target_type === "skill",
   );
-  const acceptedRepoCount = new Set(
+  const acceptedRepoNames = new Set(
     acceptedRepoSuggestions.map((suggestion) => suggestion.repo_name),
-  ).size;
+  );
   const workflowLocked =
     selected?.batches.some(
       (batch) =>
@@ -2884,16 +2902,14 @@ function RetroView({
       (batch) => batch.kind === "workflow_update" && batch.state === "stale",
     ) ?? false;
   const workflowBlocked = workflowLocked || workflowStale;
-  const prsLocked =
-    selected?.batches.some(
-      (batch) =>
-        batch.kind === "repo_pr" && ["queued", "running", "completed"].includes(batch.state),
-    ) ?? false;
-  const prsStale =
-    selected?.batches.some(
-      (batch) => batch.kind === "repo_pr" && batch.state === "stale",
-    ) ?? false;
-  const prsBlocked = prsLocked || prsStale;
+  const eligibleRepoNames = new Set(
+    [...acceptedRepoNames].filter(
+      (repoName) => retroRepoBatchState(selected?.batches ?? [], repoName) === "available",
+    ),
+  );
+  const staleRepoCount = [...acceptedRepoNames].filter(
+    (repoName) => retroRepoBatchState(selected?.batches ?? [], repoName) === "stale",
+  ).length;
   const canStart =
     !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
   return (
@@ -3051,7 +3067,9 @@ function RetroView({
                   busy={busy}
                   runtimeAvailable={runtimeAvailable}
                   workflowLocked={workflowLocked}
-                  repoLocked={prsLocked}
+                  repoLocked={
+                    retroRepoBatchState(selected.batches, repo.repo_name) === "locked"
+                  }
                   onDecide={onDecideSuggestion}
                 />
               ))}
@@ -3096,18 +3114,23 @@ function RetroView({
                           : `Apply workflow prompt (${acceptedPromptCount})`}
                     </button>
                   ) : null}
-                  {acceptedRepoCount > 0 ? (
+                  {acceptedRepoNames.size > 0 ? (
                     <button
                       type="button"
                       className="primary"
-                      disabled={!runtimeAvailable || busy || pendingCount > 0 || prsBlocked}
+                      disabled={
+                        !runtimeAvailable ||
+                        busy ||
+                        pendingCount > 0 ||
+                        eligibleRepoNames.size === 0
+                      }
                       onClick={() => onCreatePrs(selected.row.id)}
                     >
-                      {prsStale
+                      {eligibleRepoNames.size > 0
+                        ? `Create ${eligibleRepoNames.size} implementation PR${eligibleRepoNames.size === 1 ? "" : "s"}`
+                        : staleRepoCount > 0
                         ? "Generate a new retro"
-                        : prsLocked
-                          ? "PR creation started"
-                          : `Create ${acceptedRepoCount} implementation PR${acceptedRepoCount === 1 ? "" : "s"}`}
+                        : "PR creation started"}
                     </button>
                   ) : null}
                 </div>

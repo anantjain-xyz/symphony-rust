@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 use symphony_storage::{
     now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroBatchRow,
     RetroRow, RetroSuggestionRow, RunWithIssueRow, StorageEvent,
@@ -579,16 +582,14 @@ async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Resu
 }
 
 #[tauri::command]
-async fn start_retro(
-    state: State<'_, AppState>,
-    settings: AppSettings,
-) -> Result<RetroStatus, String> {
+async fn start_retro(state: State<'_, AppState>) -> Result<RetroStatus, String> {
     let Some(api_key) = linear_api_key() else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear, then run a retro."
                 .to_string(),
         );
     };
+    let settings = load_settings_from_disk(&state).await?;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let workspace_root =
@@ -761,10 +762,14 @@ async fn apply_retro_workflow(
             .map_err(|err| err.to_string())?;
         return Err(error);
     }
-    let json = serde_json::to_string_pretty(&updated).map_err(|err| err.to_string())?;
-    tokio::fs::write(&state.settings_path, json)
-        .await
-        .map_err(|err| err.to_string())?;
+    if let Err(error) = write_settings_file(&state.settings_path, &updated).await {
+        state
+            .repo
+            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .await
+            .map_err(|update_err| update_err.to_string())?;
+        return Err(error);
+    }
     if live_reconfigure_allowed(&updated) {
         state
             .worker
@@ -792,12 +797,34 @@ async fn apply_retro_workflow(
         .ok_or_else(|| "Workflow batch was not found.".to_string())
 }
 
+fn current_retro_repo_url(
+    settings: &AppSettings,
+    repo_name: &str,
+    stored_url: Option<&str>,
+) -> Option<String> {
+    let stored_url = stored_url?.trim();
+    let configured_url = settings
+        .repos
+        .iter()
+        .find(|repo| repo.name == repo_name)?
+        .url
+        .trim();
+    (!stored_url.is_empty() && stored_url == configured_url).then(|| configured_url.to_string())
+}
+
+async fn write_settings_file(path: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
+    tokio::fs::write(path, json)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 async fn start_retro_prs(
     state: State<'_, AppState>,
     retro_id: String,
-    settings: AppSettings,
 ) -> Result<Vec<RetroBatchRow>, String> {
+    let settings = load_settings_from_disk(&state).await?;
     let suggestions = state
         .repo
         .list_retro_suggestions(&retro_id)
@@ -820,6 +847,21 @@ async fn start_retro_prs(
             .or_default()
             .push(suggestion);
     }
+    let blocked_repos = state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|batch| {
+            batch.kind == "repo_pr"
+                && matches!(
+                    batch.state.as_str(),
+                    "queued" | "running" | "completed" | "stale"
+                )
+        })
+        .filter_map(|batch| batch.repo_name)
+        .collect::<BTreeSet<_>>();
     let workspace_root = resolve_workspace_root_dir(
         &workflow_from_settings(&settings, linear_api_key().as_deref())
             .front_matter
@@ -828,23 +870,39 @@ async fn start_retro_prs(
         &state.app_data_dir,
     );
     for (repo_name, suggestions) in by_repo {
-        let repo_url = suggestions
+        if blocked_repos.contains(&repo_name) {
+            continue;
+        }
+        let stored_url = suggestions
             .first()
-            .and_then(|suggestion| suggestion.repo_url.clone())
-            .ok_or_else(|| format!("Repository `{repo_name}` is no longer configured."))?;
+            .and_then(|suggestion| suggestion.repo_url.as_deref());
+        let repo_url = current_retro_repo_url(&settings, &repo_name, stored_url);
+        let stale_error = repo_url.is_none().then(|| {
+            format!(
+                "Repository `{repo_name}` was removed or its URL changed after this retro was generated. Generate a new retro before opening a PR."
+            )
+        });
         let batch = RetroBatchRow {
             id: Uuid::new_v4().to_string(),
             retro_id: retro_id.clone(),
             kind: "repo_pr".to_string(),
             repo_name: Some(repo_name.clone()),
-            repo_url: Some(repo_url),
+            repo_url,
             base_ref: suggestions.first().and_then(|item| item.base_ref.clone()),
-            state: "queued".to_string(),
-            progress: Some("Queued for PR creation…".to_string()),
-            error: None,
+            state: if stale_error.is_some() {
+                "stale"
+            } else {
+                "queued"
+            }
+            .to_string(),
+            progress: stale_error
+                .as_ref()
+                .map(|_| "Repository configuration changed.".to_string())
+                .or_else(|| Some("Queued for PR creation…".to_string())),
+            error: stale_error.clone(),
             pr_url: None,
             created_at: now_iso(),
-            completed_at: None,
+            completed_at: stale_error.as_ref().map(|_| now_iso()),
         };
         let ids = suggestions
             .iter()
@@ -855,6 +913,9 @@ async fn start_retro_prs(
             .create_retro_batch(&batch, &ids)
             .await
             .map_err(|err| err.to_string())?;
+        if stale_error.is_some() {
+            continue;
+        }
         let repository = state.repo.clone();
         let session_env = settings.session_env.clone();
         let workspace = workspace_root
@@ -1188,6 +1249,34 @@ mod tests {
             }],
             ..AppSettings::default()
         }
+    }
+
+    #[test]
+    fn retro_prs_require_the_saved_repo_name_and_url_to_match() {
+        let mut settings = configured_settings();
+        let stored = "git@github.com:acme/widgets.git";
+        assert_eq!(
+            current_retro_repo_url(&settings, "widgets", Some(stored)).as_deref(),
+            Some(stored)
+        );
+
+        settings.repos[0].url = "git@github.com:acme/replacement.git".to_string();
+        assert!(current_retro_repo_url(&settings, "widgets", Some(stored)).is_none());
+        assert!(current_retro_repo_url(&settings, "removed", Some(stored)).is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_write_errors_are_reported_to_retro_batches() {
+        let directory =
+            std::env::temp_dir().join(format!("symphony-settings-write-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+
+        let error = write_settings_file(&directory, &configured_settings())
+            .await
+            .unwrap_err();
+        assert!(!error.is_empty());
+
+        tokio::fs::remove_dir_all(directory).await.ok();
     }
 
     #[test]

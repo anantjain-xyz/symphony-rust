@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use symphony_storage::{
     now_iso, AgentEventRow, Repository, RetroBatchRow, RetroInputRow, RetroRow, RetroSuggestionRow,
@@ -18,6 +19,7 @@ const RETRO_BEGINNING: &str = "1970-01-01T00:00:00.000Z";
 const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
 const MAX_FINDINGS_PER_REPO: usize = 8;
 const MAX_EVIDENCE_PER_FINDING: usize = 5;
+const RETRO_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -726,8 +728,19 @@ pub async fn command_output(
     cwd: Option<&Path>,
     session_env: &BTreeMap<String, String>,
 ) -> Result<std::process::Output, String> {
+    command_output_with_timeout(program, args, cwd, session_env, RETRO_SUBPROCESS_TIMEOUT).await
+}
+
+async fn command_output_with_timeout(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    session_env: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     let mut command = Command::new(program);
     command.args(args);
+    command.kill_on_drop(true);
     command.env_remove("LINEAR_API_KEY");
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -737,10 +750,69 @@ pub async fn command_output(
             command.env(key, value);
         }
     }
-    command
-        .output()
-        .await
-        .map_err(|err| format!("Could not run {program}: {err}"))
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(result) => result.map_err(|err| format!("Could not run {program}: {err}")),
+        Err(_) => Err(format!(
+            "{program} timed out after {} seconds.",
+            timeout.as_secs()
+        )),
+    }
+}
+
+async fn remote_branch_matches_local(
+    workspace: &Path,
+    branch: &str,
+    session_env: &BTreeMap<String, String>,
+) -> Result<Option<bool>, String> {
+    let remote_ref = format!("refs/heads/{branch}");
+    let remote_branch = command_output(
+        "git",
+        &["ls-remote", "--heads", "origin", &remote_ref],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !remote_branch.status.success() {
+        return Err(format!(
+            "Could not inspect the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&remote_branch.stderr), 300)
+        ));
+    }
+    if String::from_utf8_lossy(&remote_branch.stdout)
+        .trim()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+
+    let fetch = command_output(
+        "git",
+        &["fetch", "--depth", "1", "origin", branch],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !fetch.status.success() {
+        return Err(format!(
+            "Could not fetch the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&fetch.stderr), 300)
+        ));
+    }
+    let diff = command_output(
+        "git",
+        &["diff", "--quiet", "FETCH_HEAD", "HEAD", "--"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    match diff.status.code() {
+        Some(0) => Ok(Some(true)),
+        Some(1) => Ok(Some(false)),
+        _ => Err(format!(
+            "Could not compare the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&diff.stderr), 300)
+        )),
+    }
 }
 
 pub fn tail(value: &str, max_chars: usize) -> String {
@@ -851,7 +923,6 @@ async fn execute_repo_pr_batch(
             .map_err(|err| err.to_string())?;
         return Ok(());
     }
-
     repository
         .update_retro_batch(
             &batch.id,
@@ -983,28 +1054,50 @@ async fn execute_repo_pr_batch(
         ));
     }
 
+    let reuse_remote_branch = match remote_branch_matches_local(
+        workspace,
+        &branch,
+        session_env,
+    )
+    .await?
+    {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            return Err(format!(
+                "Remote branch `{branch}` already exists with different changes. Review or remove that branch before retrying."
+            ));
+        }
+    };
+
     repository
         .update_retro_batch(
             &batch.id,
             "running",
-            Some("Pushing branch and opening PR…"),
+            Some(if reuse_remote_branch {
+                "Reusing pushed branch and opening PR…"
+            } else {
+                "Pushing branch and opening PR…"
+            }),
             None,
             None,
         )
         .await
         .map_err(|err| err.to_string())?;
-    let push = command_output(
-        "git",
-        &["push", "-u", "origin", &branch],
-        Some(workspace),
-        session_env,
-    )
-    .await?;
-    if !push.status.success() {
-        return Err(format!(
-            "Could not push branch: {}",
-            tail(&String::from_utf8_lossy(&push.stderr), 400)
-        ));
+    if !reuse_remote_branch {
+        let push = command_output(
+            "git",
+            &["push", "-u", "origin", &branch],
+            Some(workspace),
+            session_env,
+        )
+        .await?;
+        if !push.status.success() {
+            return Err(format!(
+                "Could not push branch: {}",
+                tail(&String::from_utf8_lossy(&push.stderr), 400)
+            ));
+        }
     }
     let title = format!("Apply Symphony retro guidance ({short_retro})");
     let mut body = "## Accepted retro suggestions\n\n".to_string();
@@ -1706,6 +1799,19 @@ fn retro_relevant_workpad_hash(body: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    async fn git_test_ok(cwd: Option<&Path>, args: &[&str]) {
+        let output = command_output("git", args, cwd, &BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn produces_an_exact_reviewable_guidance_diff() {
         let before = "# Workflow\n\nExisting guidance.\n";
@@ -1742,6 +1848,98 @@ mod tests {
 
         tokio::fs::remove_dir_all(root).await.ok();
         tokio::fs::remove_dir_all(outside).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn times_out_stalled_retro_subprocesses() {
+        let error = command_output_with_timeout(
+            "sh",
+            &["-c", "sleep 2"],
+            None,
+            &BTreeMap::new(),
+            Duration::from_millis(25),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reuses_a_pushed_branch_when_its_reviewed_tree_matches() {
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        let retry = root.join("retry");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let remote_arg = remote.display().to_string();
+        let seed_arg = seed.display().to_string();
+        let retry_arg = retry.display().to_string();
+        let branch = "symphony/retro-12345678";
+
+        git_test_ok(None, &["init", "--bare", &remote_arg]).await;
+        git_test_ok(None, &["init", &seed_arg]).await;
+        git_test_ok(Some(&seed), &["config", "user.name", "Test"]).await;
+        git_test_ok(
+            Some(&seed),
+            &["config", "user.email", "test@example.com"],
+        )
+        .await;
+        tokio::fs::write(seed.join("SKILL.md"), "base\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&seed), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&seed), &["commit", "-m", "base"]).await;
+        git_test_ok(Some(&seed), &["branch", "-M", "main"]).await;
+        git_test_ok(Some(&seed), &["remote", "add", "origin", &remote_arg]).await;
+        git_test_ok(Some(&seed), &["push", "-u", "origin", "main"]).await;
+        git_test_ok(Some(&seed), &["checkout", "-b", branch]).await;
+        tokio::fs::write(seed.join("SKILL.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&seed), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&seed), &["commit", "-m", "reviewed"]).await;
+        git_test_ok(Some(&seed), &["push", "-u", "origin", branch]).await;
+
+        git_test_ok(
+            None,
+            &["clone", "--branch", "main", "--single-branch", &remote_arg, &retry_arg],
+        )
+        .await;
+        git_test_ok(Some(&retry), &["config", "user.name", "Test"]).await;
+        git_test_ok(
+            Some(&retry),
+            &["config", "user.email", "test@example.com"],
+        )
+        .await;
+        git_test_ok(Some(&retry), &["checkout", "-b", branch]).await;
+        tokio::fs::write(retry.join("SKILL.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&retry), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&retry), &["commit", "-m", "retry"]).await;
+
+        assert_eq!(
+            remote_branch_matches_local(&retry, branch, &BTreeMap::new())
+                .await
+                .unwrap(),
+            Some(true)
+        );
+
+        tokio::fs::write(retry.join("SKILL.md"), "different change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&retry), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&retry), &["commit", "-m", "different"]).await;
+        assert_eq!(
+            remote_branch_matches_local(&retry, branch, &BTreeMap::new())
+                .await
+                .unwrap(),
+            Some(false)
+        );
+
+        tokio::fs::remove_dir_all(root).await.ok();
     }
 
     #[test]
