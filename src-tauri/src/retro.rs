@@ -1054,12 +1054,8 @@ async fn execute_repo_pr_batch(
         ));
     }
 
-    let reuse_remote_branch = match remote_branch_matches_local(
-        workspace,
-        &branch,
-        session_env,
-    )
-    .await?
+    let reuse_remote_branch = match remote_branch_matches_local(workspace, &branch, session_env)
+        .await?
     {
         None => false,
         Some(true) => true,
@@ -1881,11 +1877,7 @@ mod tests {
         git_test_ok(None, &["init", "--bare", &remote_arg]).await;
         git_test_ok(None, &["init", &seed_arg]).await;
         git_test_ok(Some(&seed), &["config", "user.name", "Test"]).await;
-        git_test_ok(
-            Some(&seed),
-            &["config", "user.email", "test@example.com"],
-        )
-        .await;
+        git_test_ok(Some(&seed), &["config", "user.email", "test@example.com"]).await;
         tokio::fs::write(seed.join("SKILL.md"), "base\n")
             .await
             .unwrap();
@@ -1904,15 +1896,18 @@ mod tests {
 
         git_test_ok(
             None,
-            &["clone", "--branch", "main", "--single-branch", &remote_arg, &retry_arg],
+            &[
+                "clone",
+                "--branch",
+                "main",
+                "--single-branch",
+                &remote_arg,
+                &retry_arg,
+            ],
         )
         .await;
         git_test_ok(Some(&retry), &["config", "user.name", "Test"]).await;
-        git_test_ok(
-            Some(&retry),
-            &["config", "user.email", "test@example.com"],
-        )
-        .await;
+        git_test_ok(Some(&retry), &["config", "user.email", "test@example.com"]).await;
         git_test_ok(Some(&retry), &["checkout", "-b", branch]).await;
         tokio::fs::write(retry.join("SKILL.md"), "reviewed change\n")
             .await

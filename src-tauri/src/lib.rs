@@ -5,8 +5,9 @@ use std::{
     path::PathBuf,
 };
 use symphony_storage::{
-    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroBatchRow,
-    RetroRow, RetroSuggestionRow, RunWithIssueRow, StorageEvent,
+    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository,
+    RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
+    StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -35,6 +36,10 @@ use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
+const RETRO_REVIEW_INCOMPLETE_MESSAGE: &str =
+    "Review every available suggestion before creating a change batch.";
+const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
+    "Symphony restarted before this change batch completed. Retry the batch.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SaveSettingsRequest {
@@ -677,16 +682,29 @@ async fn set_retro_suggestion_decision(
         .ok_or_else(|| "Suggestion was not found.".to_string())
 }
 
+fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<(), String> {
+    if suggestions
+        .iter()
+        .any(|suggestion| suggestion.proposal_status == "ready" && suggestion.decision == "pending")
+    {
+        Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 async fn apply_retro_workflow(
     state: State<'_, AppState>,
     retro_id: String,
 ) -> Result<RetroBatchRow, String> {
-    let suggestions = state
+    let all_suggestions = state
         .repo
         .list_retro_suggestions(&retro_id)
         .await
-        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())?;
+    ensure_retro_review_complete(&all_suggestions)?;
+    let suggestions = all_suggestions
         .into_iter()
         .filter(|suggestion| {
             suggestion.target_type == "prompt"
@@ -723,9 +741,18 @@ async fn apply_retro_workflow(
         .collect::<Vec<_>>();
     state
         .repo
-        .create_retro_batch(&batch, &suggestion_ids)
+        .reserve_retro_batch(&batch, &suggestion_ids)
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| err.to_string())
+        .and_then(|reservation| match reservation {
+            RetroBatchReservation::Created => Ok(()),
+            RetroBatchReservation::ReviewIncomplete => {
+                Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
+            }
+            RetroBatchReservation::AlreadyReserved => {
+                Err("A workflow change batch already exists for this retro.".to_string())
+            }
+        })?;
     if workflow.source_hash != expected_ref {
         state
             .repo
@@ -825,11 +852,13 @@ async fn start_retro_prs(
     retro_id: String,
 ) -> Result<Vec<RetroBatchRow>, String> {
     let settings = load_settings_from_disk(&state).await?;
-    let suggestions = state
+    let all_suggestions = state
         .repo
         .list_retro_suggestions(&retro_id)
         .await
-        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())?;
+    ensure_retro_review_complete(&all_suggestions)?;
+    let suggestions = all_suggestions
         .into_iter()
         .filter(|suggestion| {
             suggestion.target_type == "skill"
@@ -908,11 +937,18 @@ async fn start_retro_prs(
             .iter()
             .map(|item| item.id.clone())
             .collect::<Vec<_>>();
-        state
+        let reservation = state
             .repo
-            .create_retro_batch(&batch, &ids)
+            .reserve_retro_batch(&batch, &ids)
             .await
             .map_err(|err| err.to_string())?;
+        match reservation {
+            RetroBatchReservation::Created => {}
+            RetroBatchReservation::ReviewIncomplete => {
+                return Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string());
+            }
+            RetroBatchReservation::AlreadyReserved => continue,
+        }
         if stale_error.is_some() {
             continue;
         }
@@ -1016,6 +1052,8 @@ pub fn run() {
                 let bus = EventBus::default();
                 let pool = open_sqlite(&db_path).await?;
                 let repo = Repository::new(pool, bus.clone());
+                repo.fail_in_progress_retro_batches(INTERRUPTED_RETRO_BATCH_MESSAGE)
+                    .await?;
                 Ok::<_, symphony_storage::StorageError>((repo, bus))
             })?;
             let worker = WorkerManager::new(repo.clone());
