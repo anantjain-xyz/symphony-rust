@@ -747,10 +747,13 @@ const previewRetroSuggestions: RetroSuggestionRow[] = previewRetroReport.repos.f
         ? "Settings → Prompt template"
         : `.agents/skills/${suggestion.target_id}/SKILL.md`;
       const guidance = `When this pattern occurs, resolve the root cause before completing the task and record the reusable validation step for ${repo.repo_name}.`;
-      const before = isPrompt
-        ? "# Agent workflow\n\nImplement the requested issue and validate the result.\n"
-        : "# Skill guidance\n\nFollow the repository's established workflow.\n";
-      const after = `${before.trimEnd()}\n\n## Retro guidance (preview)\n\n- ${guidance}\n`;
+      const documentTitle = isPrompt ? "Agent workflow" : "Skill guidance";
+      const sectionTitle = isPrompt ? "Instructions" : "Steps";
+      const existingInstruction = isPrompt
+        ? "Implement the requested issue and validate the result."
+        : "Follow the repository's established workflow.";
+      const before = `# ${documentTitle}\n\n## ${sectionTitle}\n\n1. ${existingInstruction}\n`;
+      const after = `${before.trimEnd()}\n2. ${guidance}\n`;
       return {
         id: `preview-suggestion-${repoIndex}-${findingIndex}`,
         retro_id: previewRetroReport.id,
@@ -770,14 +773,13 @@ const previewRetroSuggestions: RetroSuggestionRow[] = previewRetroReport.repos.f
         unified_diff: [
           `--- a/${targetPath}`,
           `+++ b/${targetPath}`,
-          "@@ -1,3 +1,7 @@",
-          " # Skill guidance",
+          "@@ -1,5 +1,6 @@",
+          ` # ${documentTitle}`,
           " ",
-          " Follow the repository's established workflow.",
-          "+",
-          "+## Retro guidance (preview)",
-          "+",
-          `+- ${guidance}`,
+          ` ## ${sectionTitle}`,
+          " ",
+          ` 1. ${existingInstruction}`,
+          `+2. ${guidance}`,
         ].join("\n"),
         base_ref: "7c4a8d9preview",
         base_hash: "preview-base-hash",

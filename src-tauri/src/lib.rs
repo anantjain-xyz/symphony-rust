@@ -22,8 +22,8 @@ mod retro;
 mod settings;
 
 use retro::{
-    append_retro_guidance, parse_report, run_repo_pr_batch, RetroDetail, RetroManager,
-    RetroProposalConfig, RetroStatus,
+    integrate_retro_guidance, parse_report, run_repo_pr_batch, uses_legacy_retro_section,
+    RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
 };
 #[cfg(debug_assertions)]
 use retro::{
@@ -753,6 +753,27 @@ async fn apply_retro_workflow(
                 Err("A workflow change batch already exists for this retro.".to_string())
             }
         })?;
+    if suggestions.iter().any(uses_legacy_retro_section) {
+        state
+            .repo
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("The proposal format changed."),
+                Some("Generate a new retro and review the updated in-place diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return state
+            .repo
+            .list_retro_batches(&retro_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .find(|item| item.id == batch.id)
+            .ok_or_else(|| "Workflow batch was not found.".to_string());
+    }
     if workflow.source_hash != expected_ref {
         state
             .repo
@@ -780,7 +801,7 @@ async fn apply_retro_workflow(
         .map(|suggestion| suggestion.guidance.clone())
         .collect::<Vec<_>>();
     let mut updated = settings;
-    updated.prompt_template = append_retro_guidance(&updated.prompt_template, &retro_id, &guidance);
+    updated.prompt_template = integrate_retro_guidance(&updated.prompt_template, &guidance);
     if let Some(error) = validate_workflow_settings(&updated) {
         state
             .repo
@@ -906,11 +927,19 @@ async fn start_retro_prs(
             .first()
             .and_then(|suggestion| suggestion.repo_url.as_deref());
         let repo_url = current_retro_repo_url(&settings, &repo_name, stored_url);
-        let stale_error = repo_url.is_none().then(|| {
-            format!(
-                "Repository `{repo_name}` was removed or its URL changed after this retro was generated. Generate a new retro before opening a PR."
+        let legacy_proposal = suggestions.iter().any(uses_legacy_retro_section);
+        let stale_error = if legacy_proposal {
+            Some(
+                "The proposal format changed. Generate a new retro and review the updated in-place diff."
+                    .to_string(),
             )
-        });
+        } else {
+            repo_url.is_none().then(|| {
+                format!(
+                    "Repository `{repo_name}` was removed or its URL changed after this retro was generated. Generate a new retro before opening a PR."
+                )
+            })
+        };
         let batch = RetroBatchRow {
             id: Uuid::new_v4().to_string(),
             retro_id: retro_id.clone(),
@@ -926,7 +955,13 @@ async fn start_retro_prs(
             .to_string(),
             progress: stale_error
                 .as_ref()
-                .map(|_| "Repository configuration changed.".to_string())
+                .map(|_| {
+                    if legacy_proposal {
+                        "Proposal format changed.".to_string()
+                    } else {
+                        "Repository configuration changed.".to_string()
+                    }
+                })
                 .or_else(|| Some("Queued for PR creation…".to_string())),
             error: stale_error.clone(),
             pr_url: None,

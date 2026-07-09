@@ -439,6 +439,7 @@ async fn materialize_suggestions(
 ) -> Vec<RetroSuggestionRow> {
     let mut rows = Vec::new();
     for repo_report in &report.repos {
+        let mut seen_changes = BTreeSet::new();
         let repo_url = config.repos.get(&repo_report.repo_name).cloned();
         let needs_skill_snapshot = repo_report
             .suggestions
@@ -479,6 +480,10 @@ async fn materialize_suggestions(
                     format!(".agents/skills/{}/SKILL.md", suggestion.target_id)
                 }
             };
+            let change_key = format!("{}|{}|{}", target_type, suggestion.target_id, guidance);
+            if !seen_changes.insert(change_key) {
+                continue;
+            }
             let stable_key = format!(
                 "{}|{}|{}|{}|{}|{}",
                 retro.id,
@@ -494,8 +499,7 @@ async fn materialize_suggestions(
             let materialized = match &suggestion.target_type {
                 RetroSuggestionTarget::Prompt => {
                     let before = config.prompt_template.clone();
-                    let after =
-                        append_retro_guidance(&before, &retro.id, std::slice::from_ref(&guidance));
+                    let after = integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
                     Ok((
                         before.clone(),
                         after.clone(),
@@ -515,9 +519,8 @@ async fn materialize_suggestions(
                                 };
                                 match seed {
                                     Some(seed) => {
-                                        let after = append_retro_guidance(
+                                        let after = integrate_retro_guidance(
                                             &seed,
-                                            &retro.id,
                                             std::slice::from_ref(&guidance),
                                         );
                                         Ok((
@@ -544,6 +547,7 @@ async fn materialize_suggestions(
 
             let (before_content, after_content, diff, base_ref, base_hash, status, error) =
                 match materialized {
+                    Ok((before, after, _, _, _)) if before == after => continue,
                     Ok((before, after, diff, base_ref, base_hash)) => (
                         Some(before),
                         Some(after),
@@ -599,7 +603,9 @@ async fn materialize_suggestions(
 fn guidance_for(finding: &RetroFinding) -> String {
     let detail = finding.detail.trim().trim_end_matches('.');
     let context = format!("{} {}", finding.title, finding.detail).to_lowercase();
-    if context.contains("screenshot") || context.contains("playwright") {
+    if context.contains("commands exited unsuccessfully") {
+        "Handle non-zero command exits according to context: expected probe failures should be quiet, while actionable setup or validation failures must be resolved before pushing and reusable prerequisites recorded in the workpad.".to_string()
+    } else if context.contains("screenshot") || context.contains("playwright") {
         "For user-facing UI changes, capture the relevant desktop and responsive states after validation, and keep only the final evidence requested by the repository workflow.".to_string()
     } else if context.contains("workpad was not found") {
         "Create or update the Symphony Workpad for every dispatched issue, recording progress, validation, and reusable confusion before completing the task.".to_string()
@@ -623,19 +629,108 @@ fn guidance_for(finding: &RetroFinding) -> String {
     }
 }
 
-pub fn append_retro_guidance(base: &str, retro_id: &str, guidance: &[String]) -> String {
-    let short_id = retro_id.get(..8).unwrap_or(retro_id);
-    let mut result = base.trim_end().to_string();
-    if !result.is_empty() {
-        result.push_str("\n\n");
+pub fn integrate_retro_guidance(base: &str, guidance: &[String]) -> String {
+    let mut seen = BTreeSet::new();
+    let additions = guidance
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty() && !base.contains(item))
+        .filter(|item| seen.insert((*item).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if additions.is_empty() {
+        return base.to_string();
     }
-    result.push_str(&format!("## Retro guidance ({short_id})\n\n"));
-    for item in guidance {
-        result.push_str("- ");
-        result.push_str(item.trim());
+
+    let had_trailing_newline = base.ends_with('\n');
+    let mut lines = base.lines().map(str::to_string).collect::<Vec<_>>();
+    if lines.is_empty() {
+        let mut result = additions
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        result.push('\n');
+        return result;
+    }
+
+    let preferred_headings = [
+        "## Instructions",
+        "## Steps",
+        "## Goals",
+        "## Acceptance criteria & validation",
+        "## Preconditions",
+        "## Loop",
+        "## When to run",
+    ];
+    let section_start = preferred_headings
+        .iter()
+        .find_map(|heading| lines.iter().position(|line| line.trim() == *heading))
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("## "))
+        });
+
+    if let Some(section_start) = section_start {
+        let section_end = lines[section_start + 1..]
+            .iter()
+            .position(|line| line.trim_start().starts_with("## "))
+            .map(|offset| section_start + 1 + offset)
+            .unwrap_or(lines.len());
+        let content_end = (section_start + 1..section_end)
+            .rev()
+            .find(|index| !lines[*index].trim().is_empty())
+            .map(|index| index + 1)
+            .unwrap_or(section_start + 1);
+        let ordered_number = lines[section_start + 1..content_end]
+            .iter()
+            .filter_map(|line| markdown_ordered_item_number(line))
+            .max();
+        let has_unordered_items = lines[section_start + 1..content_end].iter().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("- ") || line.starts_with("* ")
+        });
+        let mut inserted = Vec::new();
+        if let Some(number) = ordered_number {
+            inserted.extend(
+                additions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {item}", number + index + 1)),
+            );
+        } else {
+            if !has_unordered_items {
+                inserted.push(String::new());
+            }
+            inserted.extend(additions.iter().map(|item| format!("- {item}")));
+        }
+        lines.splice(content_end..content_end, inserted);
+    } else {
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        lines.push(String::new());
+        lines.extend(additions.iter().map(|item| format!("- {item}")));
+    }
+
+    let mut result = lines.join("\n");
+    if had_trailing_newline {
         result.push('\n');
     }
     result
+}
+
+fn markdown_ordered_item_number(line: &str) -> Option<usize> {
+    let (prefix, _) = line.trim_start().split_once(". ")?;
+    prefix.parse().ok()
+}
+
+pub fn uses_legacy_retro_section(suggestion: &RetroSuggestionRow) -> bool {
+    suggestion
+        .after_content
+        .as_deref()
+        .is_some_and(|content| content.contains("## Retro guidance ("))
 }
 
 pub fn unified_diff(path: &str, before: &str, after: &str) -> String {
@@ -861,6 +956,19 @@ async fn execute_repo_pr_batch(
         )
         .await
         .map_err(|err| err.to_string())?;
+    if suggestions.iter().any(uses_legacy_retro_section) {
+        repository
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("The proposal format changed."),
+                Some("Generate a new retro and review the updated in-place diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
     let repo_url = batch
         .repo_url
         .as_deref()
@@ -976,7 +1084,7 @@ async fn execute_repo_pr_batch(
             return Ok(());
         }
         let seed = if current.is_empty() {
-            proposal_seed(items[0], &batch.retro_id)?
+            proposal_seed(items[0])?
         } else {
             current
         };
@@ -984,7 +1092,7 @@ async fn execute_repo_pr_batch(
             .iter()
             .map(|item| item.guidance.clone())
             .collect::<Vec<_>>();
-        let updated = append_retro_guidance(&seed, &batch.retro_id, &guidance);
+        let updated = integrate_retro_guidance(&seed, &guidance);
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -1042,7 +1150,7 @@ async fn execute_repo_pr_batch(
     }
     let commit = command_output(
         "git",
-        &["commit", "-m", "Apply Symphony retro guidance"],
+        &["commit", "-m", "Apply Symphony retro suggestions"],
         Some(workspace),
         session_env,
     )
@@ -1095,7 +1203,7 @@ async fn execute_repo_pr_batch(
             ));
         }
     }
-    let title = format!("Apply Symphony retro guidance ({short_retro})");
+    let title = format!("Apply Symphony retro suggestions ({short_retro})");
     let mut body = "## Accepted retro suggestions\n\n".to_string();
     for suggestion in suggestions {
         body.push_str(&format!("- {}\n", suggestion.title));
@@ -1148,25 +1256,40 @@ async fn execute_repo_pr_batch(
     Ok(())
 }
 
-fn proposal_seed(suggestion: &RetroSuggestionRow, retro_id: &str) -> Result<String, String> {
-    let marker = format!(
-        "\n\n## Retro guidance ({})\n\n",
-        retro_id.get(..8).unwrap_or(retro_id)
-    );
-    suggestion
-        .after_content
-        .as_deref()
-        .and_then(|content| {
-            content
-                .split_once(&marker)
-                .map(|(seed, _)| seed.to_string())
-        })
-        .ok_or_else(|| {
-            format!(
-                "Could not reconstruct the base for {}.",
-                suggestion.target_path
-            )
-        })
+fn proposal_seed(suggestion: &RetroSuggestionRow) -> Result<String, String> {
+    let content = suggestion.after_content.as_deref().ok_or_else(|| {
+        format!(
+            "Could not reconstruct the base for {}.",
+            suggestion.target_path
+        )
+    })?;
+    let had_trailing_newline = content.ends_with('\n');
+    let guidance = suggestion.guidance.trim();
+    let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(index) = lines
+        .iter()
+        .position(|line| markdown_list_item_body(line).is_some_and(|body| body.trim() == guidance))
+    else {
+        return Err(format!(
+            "Could not reconstruct the base for {}.",
+            suggestion.target_path
+        ));
+    };
+    lines.remove(index);
+    let mut seed = lines.join("\n");
+    if had_trailing_newline {
+        seed.push('\n');
+    }
+    Ok(seed)
+}
+
+fn markdown_list_item_body(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if let Some(body) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return Some(body);
+    }
+    let (prefix, body) = line.split_once(". ")?;
+    prefix.parse::<usize>().ok().map(|_| body)
 }
 
 async fn safe_repo_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -1425,12 +1548,17 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                     .and_then(|value| value.get("tool"))
                     .and_then(|value| value.as_str())
                     .unwrap_or("tool");
+                let command = tool_command(value.as_ref());
+                let (key, title, detail) = tool_confusion_finding(tool, summary);
+                let evidence_summary = command
+                    .map(|command| format!("{} → {summary}", truncate_detail(command)))
+                    .unwrap_or_else(|| summary.to_string());
                 repo.push_finding(
-                    format!("tool:{tool}:{}", normalized_key(summary)),
-                    format!("`{tool}` calls produced confusing results"),
-                    truncate_detail(summary),
+                    key,
+                    title,
+                    detail,
                     RetroSeverity::Medium,
-                    event_evidence(run, event, "tool_call", summary),
+                    event_evidence(run, event, "tool_call", &evidence_summary),
                 );
             }
         }
@@ -1574,11 +1702,7 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
     RetroSuggestion {
         target_type,
         target_id,
-        title: format!(
-            "Clarify `{}` for {}",
-            short_title(&finding.title),
-            repo_name
-        ),
+        title: format!("Clarify {} for {}", short_title(&finding.title), repo_name),
         body: format!(
             "Add guidance to {target_label} for this repeated pattern: {}",
             finding.detail
@@ -1671,6 +1795,32 @@ fn should_report_tool_confusion(value: Option<&serde_json::Value>, summary: &str
     looks_like_tool_confusion(summary)
 }
 
+fn tool_command(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(|value| value.get("args"))
+        .and_then(|args| args.get("command"))
+        .and_then(|command| command.as_str())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+fn tool_confusion_finding(tool: &str, summary: &str) -> (String, String, String) {
+    if looks_like_nonzero_exit(summary) {
+        return (
+            format!("tool:{tool}:nonzero-exit"),
+            format!("`{tool}` commands exited unsuccessfully"),
+            format!(
+                "`{tool}` commands returned non-zero exits. The captured command context distinguishes expected probe failures from actionable setup or validation failures."
+            ),
+        );
+    }
+    (
+        format!("tool:{tool}:{}", normalized_key(summary)),
+        format!("`{tool}` calls produced confusing results"),
+        truncate_detail(summary),
+    )
+}
+
 fn tool_result_failed(value: Option<&serde_json::Value>, summary: &str) -> bool {
     value
         .and_then(|value| value.get("is_error"))
@@ -1741,7 +1891,11 @@ fn normalized_key(value: &str) -> String {
 }
 
 fn short_title(value: &str) -> String {
-    let value = value.trim_matches('`').trim();
+    let value = value.trim();
+    let value = value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(value);
     if value.chars().count() <= 72 {
         value.to_string()
     } else {
@@ -1808,19 +1962,136 @@ mod tests {
         );
     }
 
+    fn test_suggestion(after_content: String, guidance: &str) -> RetroSuggestionRow {
+        RetroSuggestionRow {
+            id: "suggestion-1".to_string(),
+            retro_id: "retro-1".to_string(),
+            repo_name: "widgets".to_string(),
+            repo_url: Some("https://github.com/acme/widgets.git".to_string()),
+            finding_index: 0,
+            target_type: "skill".to_string(),
+            target_id: "symphony-push".to_string(),
+            target_path: ".agents/skills/symphony-push/SKILL.md".to_string(),
+            title: "Improve push validation".to_string(),
+            body: "Record the validation requirement.".to_string(),
+            rationale: "Repeated failures".to_string(),
+            confidence: "high".to_string(),
+            guidance: guidance.to_string(),
+            before_content: Some(String::new()),
+            after_content: Some(after_content),
+            unified_diff: None,
+            base_ref: Some("abc123".to_string()),
+            base_hash: Some(hash_body("")),
+            proposal_status: "ready".to_string(),
+            proposal_error: None,
+            decision: "pending".to_string(),
+            decided_at: None,
+            created_at: now_iso(),
+        }
+    }
+
     #[test]
     fn produces_an_exact_reviewable_guidance_diff() {
-        let before = "# Workflow\n\nExisting guidance.\n";
-        let after = append_retro_guidance(
-            before,
-            "12345678-retro",
-            &["Run validation before pushing.".to_string()],
+        let before = "# Workflow\n\n## Instructions\n\n1. Existing guidance.\n";
+        let after =
+            integrate_retro_guidance(before, &["Run validation before pushing.".to_string()]);
+        assert!(!after.contains("Retro guidance"));
+        assert!(after.contains("2. Run validation before pushing."));
+        assert_eq!(
+            integrate_retro_guidance(&after, &["Run validation before pushing.".to_string()]),
+            after
         );
-        assert!(after.contains("## Retro guidance (12345678)"));
-        assert!(after.contains("- Run validation before pushing."));
         let diff = unified_diff("Settings → Prompt template", before, &after);
         assert!(diff.contains("--- a/Settings → Prompt template"));
-        assert!(diff.contains("+## Retro guidance (12345678)"));
+        assert!(diff.contains("+2. Run validation before pushing."));
+        assert!(!diff.contains("Retro guidance"));
+    }
+
+    #[test]
+    fn reconstructs_a_missing_skill_seed_after_in_place_guidance() {
+        let seed = "# Push\n\n## Steps\n\n1. Push the current branch.\n";
+        let guidance = "Run validation before pushing.";
+        let after = integrate_retro_guidance(seed, &[guidance.to_string()]);
+        let suggestion = test_suggestion(after, guidance);
+
+        assert_eq!(proposal_seed(&suggestion).unwrap(), seed);
+        assert!(!uses_legacy_retro_section(&suggestion));
+    }
+
+    #[tokio::test]
+    async fn materializes_one_card_for_an_identical_target_change() {
+        let findings = ["exit 1", "exit 2"]
+            .into_iter()
+            .map(|detail| RetroFinding {
+                title: "`bash` commands exited unsuccessfully".to_string(),
+                detail: detail.to_string(),
+                severity: RetroSeverity::Medium,
+                occurrences: 1,
+                evidence: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let suggestions = findings
+            .iter()
+            .map(|finding| suggestion_for("widgets", finding))
+            .collect::<Vec<_>>();
+        let retro = RetroRow {
+            id: "retro-1".to_string(),
+            since_at: "1970-01-01T00:00:00.000Z".to_string(),
+            until_at: "2099-01-01T00:00:00.000Z".to_string(),
+            status: "completed".to_string(),
+            run_count: 2,
+            issue_count: 1,
+            report_json: None,
+            error_message: None,
+            created_at: now_iso(),
+            completed_at: Some(now_iso()),
+        };
+        let report = RetroReport {
+            id: retro.id.clone(),
+            since_at: retro.since_at.clone(),
+            until_at: retro.until_at.clone(),
+            generated_at: now_iso(),
+            run_count: 2,
+            issue_count: 1,
+            workpad_count: 1,
+            repos: vec![RetroRepoReport {
+                repo_name: "widgets".to_string(),
+                run_count: 2,
+                issue_count: 1,
+                workpad_count: 1,
+                failure_count: 0,
+                retry_count: 0,
+                findings,
+                suggestions,
+            }],
+        };
+        let config = RetroProposalConfig {
+            prompt_template: "# Workflow\n\n## Instructions\n\n1. Do the work.\n".to_string(),
+            workflow_hash: "workflow-hash".to_string(),
+            repos: BTreeMap::new(),
+            workspace_root: std::env::temp_dir(),
+            session_env: BTreeMap::new(),
+            skills: BTreeMap::new(),
+        };
+
+        let rows = materialize_suggestions(&retro, &report, &config).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]
+            .unified_diff
+            .as_deref()
+            .unwrap()
+            .contains("+2. Handle non-zero command exits"));
+        assert!(!rows[0]
+            .unified_diff
+            .as_deref()
+            .unwrap()
+            .contains("Retro guidance"));
+
+        let mut already_applied = config.clone();
+        already_applied.prompt_template = rows[0].after_content.clone().unwrap();
+        assert!(materialize_suggestions(&retro, &report, &already_applied)
+            .await
+            .is_empty());
     }
 
     #[cfg(unix)]
@@ -2006,6 +2277,57 @@ mod tests {
             None,
             "read succeeded and source mentioned a missing file"
         ));
+
+        let exit_one = tool_confusion_finding("bash", "exit 1");
+        let exit_two = tool_confusion_finding("bash", "exit 2");
+        assert_eq!(exit_one, exit_two);
+        assert_eq!(exit_one.0, "tool:bash:nonzero-exit");
+        assert_eq!(exit_one.1, "`bash` commands exited unsuccessfully");
+
+        let payload = serde_json::json!({
+            "args": { "command": "/bin/zsh -lc 'npm run db:start'" },
+            "result_summary": "exit 1",
+            "tool": "bash"
+        });
+        assert_eq!(
+            tool_command(Some(&payload)),
+            Some("/bin/zsh -lc 'npm run db:start'")
+        );
+    }
+
+    #[test]
+    fn aggregates_nonzero_exit_codes_into_one_contextual_finding() {
+        let mut repo = RepoAccumulator::new("widgets".to_string());
+        for (summary, command) in [
+            ("exit 1", "npm run db:start"),
+            ("exit 2", "cargo test --workspace"),
+        ] {
+            let (key, title, detail) = tool_confusion_finding("bash", summary);
+            repo.push_finding(
+                key,
+                title,
+                detail,
+                RetroSeverity::Medium,
+                RetroEvidence {
+                    issue_identifier: "SYM-1".to_string(),
+                    run_id: Some("run-1".to_string()),
+                    run_number: Some(1),
+                    event_id: None,
+                    kind: "tool_call".to_string(),
+                    summary: format!("{command} → {summary}"),
+                },
+            );
+        }
+
+        let report = repo.finish();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].occurrences, 2);
+        assert_eq!(report.findings[0].evidence.len(), 2);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(
+            report.suggestions[0].title,
+            "Clarify `bash` commands exited unsuccessfully for widgets"
+        );
     }
 
     #[test]
