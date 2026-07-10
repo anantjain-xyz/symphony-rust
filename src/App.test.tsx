@@ -379,7 +379,7 @@ describe("App settings", () => {
   });
 
   it("reviews exact Retro diffs and gates change batches until every suggestion is decided", () => {
-    render(<App />);
+    const { container } = render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Retro" }));
 
@@ -392,6 +392,20 @@ describe("App settings", () => {
     ).toEqual(["Pending", "Accepted", "Rejected", "All"]);
     expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
     expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
+    const metadata = container.querySelectorAll(".retro-suggestion-badges");
+    expect(Array.from(metadata[0].children).map((item) => item.textContent)).toEqual([
+      "skill",
+      "medium",
+      "3 occurrences",
+    ]);
+    expect(Array.from(metadata[2].children).map((item) => item.textContent)).toEqual([
+      "prompt",
+      "low",
+      "1 occurrence",
+    ]);
+    expect(metadata[0].children[1].classList.contains("medium")).toBe(true);
+    expect(metadata[1].children[1].classList.contains("high")).toBe(true);
+    expect(metadata[2].children[1].classList.contains("low")).toBe(true);
 
     const acceptButtons = screen.getAllByRole("button", { name: "Accept" });
     fireEvent.click(acceptButtons[0]);

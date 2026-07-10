@@ -641,8 +641,8 @@ const previewRetroReport: RetroReport = {
           title: "Workpad confusion: unclear auth setup for local API tests",
           detail:
             "Runs lost time rediscovering which environment variables were needed before integration tests could exercise authenticated routes.",
-          severity: "medium",
-          occurrences: 2,
+          severity: "low",
+          occurrences: 1,
           evidence: [
             {
               issue_identifier: "API-24",
@@ -687,8 +687,8 @@ const previewRetroReport: RetroReport = {
           title: "Clarify repo setup discovery for api",
           body:
             "Add guidance that repo-specific validation prerequisites should be captured in the workpad after the first failed setup command, not repeatedly rediscovered on retries.",
-          rationale: "2 occurrences found in api with medium severity.",
-          confidence: "medium",
+          rationale: "1 occurrence found in api with low severity.",
+          confidence: "low",
         },
         {
           target_type: "skill",
@@ -3315,7 +3315,13 @@ function RetroReviewRepo({
                 </div>
                 <div className="retro-suggestion-badges">
                   <span className="retro-target">{suggestion.target_type}</span>
-                  <Badge status={suggestion.confidence} />
+                  <Badge status={finding?.severity ?? suggestion.confidence} />
+                  {finding ? (
+                    <span className="retro-occurrence-tag">
+                      {finding.occurrences} occurrence
+                      {finding.occurrences === 1 ? "" : "s"}
+                    </span>
+                  ) : null}
                 </div>
               </header>
 

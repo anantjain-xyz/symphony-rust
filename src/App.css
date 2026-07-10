@@ -714,7 +714,8 @@ small {
   overflow-wrap: anywhere;
 }
 
-.retro-target {
+.retro-target,
+.retro-occurrence-tag {
   background: var(--muted);
   border-radius: 999px;
   color: var(--muted-foreground);
@@ -727,6 +728,10 @@ small {
   padding: 2px 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.retro-occurrence-tag {
+  flex: 0 0 auto;
 }
 
 .retro-evidence {
@@ -1344,6 +1349,21 @@ td strong {
 .badge.rework {
   background: var(--warning);
   color: var(--warning-foreground);
+}
+
+.badge.high {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.badge.medium {
+  background: var(--warning);
+  color: var(--warning-foreground);
+}
+
+.badge.low {
+  background: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .pulse {
