@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.10"
+version = "0.1.11"
 authors = ["Anant Jain"]
 
 [workspace.dependencies]
