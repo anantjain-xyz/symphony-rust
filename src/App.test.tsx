@@ -383,6 +383,13 @@ describe("App settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retro" }));
 
+    expect(
+      Array.from(
+        screen
+          .getByRole("group", { name: "Filter suggestions" })
+          .querySelectorAll("button"),
+      ).map((button) => button.textContent),
+    ).toEqual(["Pending", "Accepted", "Rejected", "All"]);
     expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
     expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
 

@@ -3148,7 +3148,7 @@ function RetroView({
                   </small>
                 </div>
                 <div className="retro-filter" role="group" aria-label="Filter suggestions">
-                  {(["all", "pending", "accepted", "rejected"] as const).map((filter) => (
+                  {(["pending", "accepted", "rejected", "all"] as const).map((filter) => (
                     <button
                       type="button"
                       key={filter}
