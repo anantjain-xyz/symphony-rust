@@ -16,7 +16,7 @@ use symphony_tracker::{TrackerClient, WorkpadComment};
 use tokio::{process::Command, sync::Mutex};
 
 const RETRO_BEGINNING: &str = "1970-01-01T00:00:00.000Z";
-const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
+pub(crate) const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
 const MAX_FINDINGS_PER_REPO: usize = 8;
 const MAX_EVIDENCE_PER_FINDING: usize = 5;
 const RETRO_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
@@ -480,7 +480,7 @@ async fn materialize_suggestions(
         for (index, suggestion) in repo_report.suggestions.iter().enumerate() {
             let finding = repo_report.findings.get(index);
             let guidance = finding
-                .map(guidance_for)
+                .map(|finding| finding.detail.clone())
                 .unwrap_or_else(|| suggestion.body.clone());
             let target_type = match &suggestion.target_type {
                 RetroSuggestionTarget::Prompt => "prompt",
@@ -513,6 +513,7 @@ async fn materialize_suggestions(
                     let before = config.prompt_template.clone();
                     let after = integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
                     Ok((
+                        target_path.clone(),
                         before.clone(),
                         after.clone(),
                         unified_diff(&target_path, &before, &after),
@@ -522,31 +523,43 @@ async fn materialize_suggestions(
                 }
                 RetroSuggestionTarget::Skill => match &snapshot {
                     Ok(snapshot) => match safe_repo_target(&snapshot.root, &target_path).await {
-                        Ok(file_path) => match read_optional_text(&file_path, &target_path).await {
-                            Ok(before) => {
-                                let seed = if before.is_empty() {
-                                    config.skills.get(&suggestion.target_id).cloned()
-                                } else {
-                                    Some(before.clone())
-                                };
-                                match seed {
-                                    Some(seed) => {
-                                        let after = integrate_retro_guidance(
-                                            &seed,
-                                            std::slice::from_ref(&guidance),
-                                        );
-                                        Ok((
-                                            before.clone(),
-                                            after.clone(),
-                                            unified_diff(&target_path, &before, &after),
-                                            snapshot.head.clone(),
-                                            hash_body(&before),
-                                        ))
+                        Ok(file_path) => match repo_relative_target(&snapshot.root, &file_path)
+                            .await
+                        {
+                            Ok(resolved_target_path) => {
+                                match read_optional_text(&file_path, &resolved_target_path).await {
+                                    Ok(before) => {
+                                        let seed = if before.is_empty() {
+                                            config.skills.get(&suggestion.target_id).cloned()
+                                        } else {
+                                            Some(before.clone())
+                                        };
+                                        match seed {
+                                            Some(seed) => {
+                                                let after = integrate_retro_guidance(
+                                                    &seed,
+                                                    std::slice::from_ref(&guidance),
+                                                );
+                                                Ok((
+                                                    resolved_target_path.clone(),
+                                                    before.clone(),
+                                                    after.clone(),
+                                                    unified_diff(
+                                                        &resolved_target_path,
+                                                        &before,
+                                                        &after,
+                                                    ),
+                                                    snapshot.head.clone(),
+                                                    hash_body(&before),
+                                                ))
+                                            }
+                                            None => Err(format!(
+                                                "Bundled skill `{}` was not found.",
+                                                suggestion.target_id
+                                            )),
+                                        }
                                     }
-                                    None => Err(format!(
-                                        "Bundled skill `{}` was not found.",
-                                        suggestion.target_id
-                                    )),
+                                    Err(error) => Err(error),
                                 }
                             }
                             Err(error) => Err(error),
@@ -557,28 +570,38 @@ async fn materialize_suggestions(
                 },
             };
 
-            let (before_content, after_content, diff, base_ref, base_hash, status, error) =
-                match materialized {
-                    Ok((before, after, _, _, _)) if before == after => continue,
-                    Ok((before, after, diff, base_ref, base_hash)) => (
-                        Some(before),
-                        Some(after),
-                        Some(diff),
-                        Some(base_ref),
-                        Some(base_hash),
-                        "ready".to_string(),
-                        None,
-                    ),
-                    Err(error) => (
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        "unavailable".to_string(),
-                        Some(error),
-                    ),
-                };
+            let (
+                target_path,
+                before_content,
+                after_content,
+                diff,
+                base_ref,
+                base_hash,
+                status,
+                error,
+            ) = match materialized {
+                Ok((_, before, after, _, _, _)) if before == after => continue,
+                Ok((resolved_target_path, before, after, diff, base_ref, base_hash)) => (
+                    resolved_target_path,
+                    Some(before),
+                    Some(after),
+                    Some(diff),
+                    Some(base_ref),
+                    Some(base_hash),
+                    "ready".to_string(),
+                    None,
+                ),
+                Err(error) => (
+                    target_path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "unavailable".to_string(),
+                    Some(error),
+                ),
+            };
             rows.push(RetroSuggestionRow {
                 id,
                 retro_id: retro.id.clone(),
@@ -1018,26 +1041,26 @@ async fn execute_repo_pr_batch(
     let existing = command_output(
         "gh",
         &[
-            "pr", "list", "--head", &branch, "--state", "open", "--json", "url", "--jq", ".[0].url",
+            "pr",
+            "list",
+            "--head",
+            &branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
         ],
         Some(workspace),
         session_env,
     )
     .await?;
-    let existing_url = String::from_utf8_lossy(&existing.stdout).trim().to_string();
-    if existing.status.success() && !existing_url.is_empty() {
-        repository
-            .update_retro_batch(
-                &batch.id,
-                "completed",
-                Some("Existing retro PR found."),
-                None,
-                Some(&existing_url),
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
+    let existing_url = existing
+        .status
+        .success()
+        .then(|| pr_url_from_output(&existing.stdout))
+        .flatten();
     repository
         .update_retro_batch(
             &batch.id,
@@ -1150,12 +1173,19 @@ async fn execute_repo_pr_batch(
             ));
         }
     };
+    if existing_url.is_some() && !reuse_remote_branch {
+        return Err(format!(
+            "The existing PR for `{branch}` no longer has a remote branch that matches the reviewed changes."
+        ));
+    }
 
     repository
         .update_retro_batch(
             &batch.id,
             "running",
-            Some(if reuse_remote_branch {
+            Some(if existing_url.is_some() {
+                "Verifying existing retro PR…"
+            } else if reuse_remote_branch {
                 "Reusing pushed branch and opening PR…"
             } else {
                 "Pushing branch and opening PR…"
@@ -1186,44 +1216,42 @@ async fn execute_repo_pr_batch(
         body.push_str(&format!("- {}\n", suggestion.title));
     }
     body.push_str("\nThe committed changes match the diffs reviewed in Symphony.\n");
-    let created = command_output(
-        "gh",
-        &[
-            "pr",
-            "create",
-            "--base",
-            &default_branch,
-            "--head",
-            &branch,
-            "--title",
-            &title,
-            "--body",
-            &body,
-        ],
-        Some(workspace),
-        session_env,
-    )
-    .await?;
-    if !created.status.success() {
-        return Err(format!(
-            "Could not create PR: {}",
-            tail(&String::from_utf8_lossy(&created.stderr), 400)
-        ));
-    }
-    let pr_url = String::from_utf8_lossy(&created.stdout)
-        .lines()
-        .find(|line| line.trim().starts_with("http"))
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
-    if pr_url.is_empty() {
-        return Err("GitHub reported success but no PR URL was returned.".to_string());
-    }
+    let (pr_url, completed_progress) = if let Some(existing_url) = existing_url {
+        (existing_url, "Existing retro PR verified.")
+    } else {
+        let created = command_output(
+            "gh",
+            &[
+                "pr",
+                "create",
+                "--base",
+                &default_branch,
+                "--head",
+                &branch,
+                "--title",
+                &title,
+                "--body",
+                &body,
+            ],
+            Some(workspace),
+            session_env,
+        )
+        .await?;
+        if !created.status.success() {
+            return Err(format!(
+                "Could not create PR: {}",
+                tail(&String::from_utf8_lossy(&created.stderr), 400)
+            ));
+        }
+        let pr_url = pr_url_from_output(&created.stdout)
+            .ok_or_else(|| "GitHub reported success but no PR URL was returned.".to_string())?;
+        (pr_url, "Implementation PR created.")
+    };
     repository
         .update_retro_batch(
             &batch.id,
             "completed",
-            Some("Implementation PR created."),
+            Some(completed_progress),
             None,
             Some(&pr_url),
         )
@@ -1231,6 +1259,14 @@ async fn execute_repo_pr_batch(
         .map_err(|err| err.to_string())?;
     tokio::fs::remove_dir_all(workspace).await.ok();
     Ok(())
+}
+
+fn pr_url_from_output(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .map(str::to_string)
 }
 
 async fn commit_retro_changes(
@@ -1314,14 +1350,23 @@ async fn safe_repo_target(root: &Path, relative: &str) -> Result<PathBuf, String
     {
         return Err(format!("Unsafe retro target path: {relative}"));
     }
-    let mut current = root.to_path_buf();
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|err| format!("Could not resolve repository root: {err}"))?;
+    let mut current = canonical_root.clone();
     for component in relative_path.components() {
         current.push(component.as_os_str());
         match tokio::fs::symlink_metadata(&current).await {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!(
-                    "Retro target `{relative}` contains a symbolic link and cannot be changed safely."
-                ));
+                let resolved = tokio::fs::canonicalize(&current).await.map_err(|err| {
+                    format!("Could not resolve symbolic link in Retro target `{relative}`: {err}")
+                })?;
+                if !resolved.starts_with(&canonical_root) {
+                    return Err(format!(
+                        "Retro target `{relative}` resolves outside the repository."
+                    ));
+                }
+                current = resolved;
             }
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1333,6 +1378,21 @@ async fn safe_repo_target(root: &Path, relative: &str) -> Result<PathBuf, String
         }
     }
     Ok(current)
+}
+
+async fn repo_relative_target(root: &Path, target: &Path) -> Result<String, String> {
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|err| format!("Could not resolve repository root: {err}"))?;
+    let relative = target.strip_prefix(&canonical_root).map_err(|_| {
+        format!(
+            "Retro target `{}` resolves outside the repository.",
+            target.display()
+        )
+    })?;
+    Ok(relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/"))
 }
 
 async fn read_optional_text(path: &Path, label: &str) -> Result<String, String> {
@@ -1759,13 +1819,6 @@ impl RepoAccumulator {
     }
 }
 
-#[cfg(test)]
-fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
-    let guidance = guidance_for(finding);
-    let (target_type, target_id) = suggestion_target(finding);
-    suggestion_from_parts(repo_name, finding, target_type, target_id, &guidance)
-}
-
 fn suggestion_for_group(repo_name: &str, group: &SuggestionGroup) -> RetroSuggestion {
     suggestion_from_parts(
         repo_name,
@@ -2053,7 +2106,7 @@ fn severity_label(severity: &RetroSeverity) -> &'static str {
     }
 }
 
-fn hash_body(body: &str) -> String {
+pub(crate) fn hash_body(body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -2138,6 +2191,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_actual_urls_from_pr_lookup_output() {
+        assert_eq!(pr_url_from_output(b"null\n"), None);
+        assert_eq!(pr_url_from_output(b"\n"), None);
+        assert_eq!(
+            pr_url_from_output(b"https://github.com/acme/widgets/pull/7\n"),
+            Some("https://github.com/acme/widgets/pull/7".to_string())
+        );
+    }
+
+    #[test]
     fn reconstructs_a_missing_skill_seed_after_in_place_guidance() {
         let seed = "# Push\n\n## Steps\n\n1. Push the current branch.\n";
         let guidance = "Run validation before pushing.";
@@ -2150,20 +2213,28 @@ mod tests {
 
     #[tokio::test]
     async fn materializes_one_card_for_an_identical_target_change() {
-        let findings = ["exit 1", "exit 2"]
-            .into_iter()
-            .map(|detail| RetroFinding {
-                title: "`bash` commands exited unsuccessfully".to_string(),
-                detail: detail.to_string(),
-                severity: RetroSeverity::Medium,
-                occurrences: 1,
-                evidence: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let suggestions = findings
-            .iter()
-            .map(|finding| suggestion_for("widgets", finding))
-            .collect::<Vec<_>>();
+        let mut accumulator = RepoAccumulator::new("widgets".to_string());
+        for (key, detail) in [("exit-one", "exit 1"), ("exit-two", "exit 2")] {
+            accumulator.push_finding(
+                key.to_string(),
+                "`bash` commands exited unsuccessfully".to_string(),
+                detail.to_string(),
+                RetroSeverity::Medium,
+                RetroEvidence {
+                    issue_identifier: "SYM-1".to_string(),
+                    run_id: None,
+                    run_number: None,
+                    event_id: None,
+                    kind: "tool_call".to_string(),
+                    summary: detail.to_string(),
+                },
+            );
+        }
+        let repo_report = accumulator.finish();
+        assert_eq!(repo_report.findings.len(), 1);
+        assert!(repo_report.findings[0]
+            .detail
+            .starts_with("Handle non-zero command exits"));
         let retro = RetroRow {
             id: "retro-1".to_string(),
             since_at: "1970-01-01T00:00:00.000Z".to_string(),
@@ -2184,16 +2255,7 @@ mod tests {
             run_count: 2,
             issue_count: 1,
             workpad_count: 1,
-            repos: vec![RetroRepoReport {
-                repo_name: "widgets".to_string(),
-                run_count: 2,
-                issue_count: 1,
-                workpad_count: 1,
-                failure_count: 0,
-                retry_count: 0,
-                findings,
-                suggestions,
-            }],
+            repos: vec![repo_report],
         };
         let config = RetroProposalConfig {
             prompt_template: "# Workflow\n\n## Instructions\n\n1. Do the work.\n".to_string(),
@@ -2241,10 +2303,41 @@ mod tests {
         let error = safe_repo_target(&root, ".agents/skills/symphony-workpad/SKILL.md")
             .await
             .unwrap_err();
-        assert!(error.contains("symbolic link"));
+        assert!(error.contains("outside the repository"));
 
         tokio::fs::remove_dir_all(root).await.ok();
         tokio::fs::remove_dir_all(outside).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolves_supported_in_repo_skill_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let shared_skill = root.join("shared/symphony-workpad");
+        tokio::fs::create_dir_all(root.join(".agents/skills"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&shared_skill).await.unwrap();
+        tokio::fs::write(shared_skill.join("SKILL.md"), "# Workpad\n")
+            .await
+            .unwrap();
+        symlink(
+            "../../shared/symphony-workpad",
+            root.join(".agents/skills/symphony-workpad"),
+        )
+        .unwrap();
+
+        let target = safe_repo_target(&root, ".agents/skills/symphony-workpad/SKILL.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo_relative_target(&root, &target).await.unwrap(),
+            "shared/symphony-workpad/SKILL.md"
+        );
+
+        tokio::fs::remove_dir_all(root).await.ok();
     }
 
     #[cfg(unix)]

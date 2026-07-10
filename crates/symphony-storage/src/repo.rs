@@ -191,6 +191,7 @@ pub struct RetroBatchRow {
 pub enum RetroBatchReservation {
     Created,
     ReviewIncomplete,
+    AcceptedSetChanged,
     AlreadyReserved,
 }
 
@@ -1295,6 +1296,15 @@ impl Repository {
             delete from retros
             where id = ?1
               and status != 'running'
+              and (
+                status != 'completed'
+                or id = (
+                  select id from retros
+                  where status = 'completed'
+                  order by until_at desc, created_at desc
+                  limit 1
+                )
+              )
               and not exists (
                 select 1 from retro_batches
                 where retro_id = retros.id
@@ -1424,10 +1434,16 @@ impl Repository {
             set decision = ?1, decided_at = ?2
             where id = ?3 and proposal_status = 'ready'
               and not exists (
-                select 1 from retro_batch_items bi
-                join retro_batches b on b.id = bi.batch_id
-                where bi.suggestion_id = retro_suggestions.id
+                select 1 from retro_batches b
+                where b.retro_id = retro_suggestions.retro_id
                   and b.state in ('queued', 'running', 'completed')
+                  and (
+                    (retro_suggestions.target_type = 'prompt'
+                      and b.kind = 'workflow_update')
+                    or (retro_suggestions.target_type = 'skill'
+                      and b.kind = 'repo_pr'
+                      and b.repo_name = retro_suggestions.repo_name)
+                  )
               )
             "#,
         )
@@ -1453,6 +1469,53 @@ impl Repository {
         suggestion_ids: &[String],
     ) -> Result<RetroBatchReservation, StorageError> {
         let mut tx = self.pool.begin().await?;
+        // Acquire the SQLite write lock before reading the review state so a
+        // decision update cannot commit between validation and reservation.
+        sqlx::query("update retros set id = id where id = ?1")
+            .bind(&batch.retro_id)
+            .execute(&mut *tx)
+            .await?;
+        let review_incomplete: bool = sqlx::query_scalar(
+            r#"
+            select exists (
+              select 1 from retro_suggestions
+              where retro_id = ?1
+                and proposal_status = 'ready'
+                and decision = 'pending'
+            )
+            "#,
+        )
+        .bind(&batch.retro_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if review_incomplete {
+            tx.rollback().await?;
+            return Ok(RetroBatchReservation::ReviewIncomplete);
+        }
+        let current_accepted_ids = sqlx::query_scalar::<_, String>(
+            r#"
+            select id from retro_suggestions
+            where retro_id = ?1
+              and proposal_status = 'ready'
+              and decision = 'accepted'
+              and (
+                (?2 = 'workflow_update' and target_type = 'prompt')
+                or (?2 = 'repo_pr' and target_type = 'skill' and repo_name = ?3)
+              )
+            order by id
+            "#,
+        )
+        .bind(&batch.retro_id)
+        .bind(&batch.kind)
+        .bind(&batch.repo_name)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut expected_ids = suggestion_ids.to_vec();
+        expected_ids.sort();
+        if current_accepted_ids.is_empty() || current_accepted_ids != expected_ids {
+            tx.rollback().await?;
+            return Ok(RetroBatchReservation::AcceptedSetChanged);
+        }
         let result = sqlx::query(
             r#"
             insert into retro_batches (
@@ -1493,25 +1556,8 @@ impl Repository {
         .execute(&mut *tx)
         .await?;
         if result.rows_affected() == 0 {
-            let review_incomplete: bool = sqlx::query_scalar(
-                r#"
-                select exists (
-                  select 1 from retro_suggestions
-                  where retro_id = ?1
-                    and proposal_status = 'ready'
-                    and decision = 'pending'
-                )
-                "#,
-            )
-            .bind(&batch.retro_id)
-            .fetch_one(&mut *tx)
-            .await?;
             tx.rollback().await?;
-            return Ok(if review_incomplete {
-                RetroBatchReservation::ReviewIncomplete
-            } else {
-                RetroBatchReservation::AlreadyReserved
-            });
+            return Ok(RetroBatchReservation::AlreadyReserved);
         }
         for suggestion_id in suggestion_ids {
             sqlx::query("insert into retro_batch_items (batch_id, suggestion_id) values (?1, ?2)")
@@ -2332,6 +2378,8 @@ mod tests {
         repo.finish_retro(&latest.id, r#"{"id":"latest"}"#, 1, 1)
             .await
             .unwrap();
+        assert!(!repo.delete_retro(&earlier.id).await.unwrap());
+        assert!(repo.get_retro(&earlier.id).await.unwrap().is_some());
 
         repo.upsert_issues(&[issue()]).await.unwrap();
         let run = repo
@@ -2435,7 +2483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persists_retro_decisions_and_locks_items_captured_by_a_batch() {
+    async fn persists_retro_decisions_and_locks_the_entire_batch_target() {
         let repo = repo().await;
         let retro = repo
             .create_retro("1970-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z")
@@ -2467,6 +2515,11 @@ mod tests {
             created_at: now_iso(),
         };
         repo.insert_retro_suggestions(std::slice::from_ref(&suggestion))
+            .await
+            .unwrap();
+        let mut rejected = test_retro_suggestion(&retro.id, "suggestion-2", "rejected");
+        rejected.finding_index = 1;
+        repo.insert_retro_suggestions(std::slice::from_ref(&rejected))
             .await
             .unwrap();
         let accepted = repo
@@ -2504,7 +2557,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(locked.decision, "accepted");
+        let rejected_locked = repo
+            .set_retro_suggestion_decision(&rejected.id, "accepted")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rejected_locked.decision, "rejected");
         assert_eq!(repo.list_retro_batches(&retro.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revalidates_the_exact_accepted_set_before_reserving_a_batch() {
+        let repo = repo().await;
+        let retro = repo
+            .create_retro("1970-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        let first = test_retro_suggestion(&retro.id, "accepted-a", "accepted");
+        let mut second = test_retro_suggestion(&retro.id, "accepted-b", "accepted");
+        second.finding_index = 1;
+        repo.insert_retro_suggestions(&[first.clone(), second.clone()])
+            .await
+            .unwrap();
+        let batch = test_retro_batch(&retro.id, "stale-selection", "repo_pr", Some("widgets"));
+
+        assert_eq!(
+            repo.reserve_retro_batch(&batch, std::slice::from_ref(&first.id))
+                .await
+                .unwrap(),
+            RetroBatchReservation::AcceptedSetChanged
+        );
+        assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+
+        assert_eq!(
+            repo.reserve_retro_batch(&batch, &[first.id, second.id])
+                .await
+                .unwrap(),
+            RetroBatchReservation::Created
+        );
     }
 
     #[tokio::test]
@@ -2591,7 +2681,12 @@ mod tests {
             .await
             .unwrap();
         let suggestion = test_retro_suggestion(&retro.id, "accepted-suggestion", "accepted");
-        repo.insert_retro_suggestions(std::slice::from_ref(&suggestion))
+        let mut prompt_suggestion = test_retro_suggestion(&retro.id, "accepted-prompt", "accepted");
+        prompt_suggestion.finding_index = 1;
+        prompt_suggestion.target_type = "prompt".to_string();
+        prompt_suggestion.target_id = "common prompt".to_string();
+        prompt_suggestion.target_path = "Settings → Prompt template".to_string();
+        repo.insert_retro_suggestions(&[suggestion.clone(), prompt_suggestion.clone()])
             .await
             .unwrap();
         let running = test_retro_batch(&retro.id, "running-batch", "repo_pr", Some("widgets"));
@@ -2603,7 +2698,7 @@ mod tests {
             RetroBatchReservation::Created
         );
         assert_eq!(
-            repo.reserve_retro_batch(&queued, std::slice::from_ref(&suggestion.id))
+            repo.reserve_retro_batch(&queued, std::slice::from_ref(&prompt_suggestion.id))
                 .await
                 .unwrap(),
             RetroBatchReservation::Created

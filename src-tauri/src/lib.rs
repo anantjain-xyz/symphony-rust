@@ -22,8 +22,9 @@ mod retro;
 mod settings;
 
 use retro::{
-    integrate_retro_guidance, parse_report, run_repo_pr_batch, uses_legacy_retro_section,
-    RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
+    hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
+    uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
+    INTERRUPTED_RETRO_MESSAGE,
 };
 #[cfg(debug_assertions)]
 use retro::{
@@ -38,6 +39,8 @@ const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
 const RETRO_REVIEW_INCOMPLETE_MESSAGE: &str =
     "Review every available suggestion before creating a change batch.";
+const RETRO_ACCEPTED_SET_CHANGED_MESSAGE: &str =
+    "Accepted suggestions changed while the batch was starting. Review the latest decisions and retry.";
 const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
     "Symphony restarted before this change batch completed. Retry the batch.";
 
@@ -674,7 +677,7 @@ async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), Stri
         .map_err(|err| err.to_string())?;
     if !deleted {
         return Err(
-            "This retro was not found or still has generation or batch work in progress."
+            "This retro was not found, is not the latest completed retro, or still has generation or batch work in progress."
                 .to_string(),
         );
     }
@@ -733,11 +736,21 @@ async fn apply_retro_workflow(
         return Err("Accept at least one workflow suggestion first.".to_string());
     }
     let settings = load_settings_from_disk(&state).await?;
-    let workflow = workflow_from_settings(&settings, linear_api_key().as_deref());
     let expected_ref = suggestions
         .first()
         .and_then(|suggestion| suggestion.base_ref.clone())
         .ok_or_else(|| "Workflow proposal has no base revision.".to_string())?;
+    let expected_prompt_hashes = suggestions
+        .iter()
+        .filter_map(|suggestion| suggestion.base_hash.clone())
+        .collect::<BTreeSet<_>>();
+    if expected_prompt_hashes.len() != 1 {
+        return Err("Workflow proposals do not share one prompt revision.".to_string());
+    }
+    let expected_prompt_hash = expected_prompt_hashes
+        .into_iter()
+        .next()
+        .expect("one prompt hash was checked above");
     let batch = RetroBatchRow {
         id: Uuid::new_v4().to_string(),
         retro_id: retro_id.clone(),
@@ -766,6 +779,9 @@ async fn apply_retro_workflow(
             RetroBatchReservation::ReviewIncomplete => {
                 Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
             }
+            RetroBatchReservation::AcceptedSetChanged => {
+                Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.to_string())
+            }
             RetroBatchReservation::AlreadyReserved => {
                 Err("A workflow change batch already exists for this retro.".to_string())
             }
@@ -791,13 +807,13 @@ async fn apply_retro_workflow(
             .find(|item| item.id == batch.id)
             .ok_or_else(|| "Workflow batch was not found.".to_string());
     }
-    if workflow.source_hash != expected_ref {
+    if prompt_revision(&settings) != expected_prompt_hash {
         state
             .repo
             .update_retro_batch(
                 &batch.id,
                 "stale",
-                Some("Workflow changed since this diff was prepared."),
+                Some("Prompt changed since this diff was prepared."),
                 Some("Generate a new retro and review the updated diff."),
                 None,
             )
@@ -875,6 +891,10 @@ fn current_retro_repo_url(
         .url
         .trim();
     (!stored_url.is_empty() && stored_url == configured_url).then(|| configured_url.to_string())
+}
+
+fn prompt_revision(settings: &AppSettings) -> String {
+    hash_body(&settings.prompt_template)
 }
 
 async fn write_settings_file(path: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
@@ -999,6 +1019,9 @@ async fn start_retro_prs(
             RetroBatchReservation::ReviewIncomplete => {
                 return Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string());
             }
+            RetroBatchReservation::AcceptedSetChanged => {
+                return Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.to_string());
+            }
             RetroBatchReservation::AlreadyReserved => continue,
         }
         if stale_error.is_some() {
@@ -1104,6 +1127,7 @@ pub fn run() {
                 let bus = EventBus::default();
                 let pool = open_sqlite(&db_path).await?;
                 let repo = Repository::new(pool, bus.clone());
+                repo.fail_running_retros(INTERRUPTED_RETRO_MESSAGE).await?;
                 repo.fail_in_progress_retro_batches(INTERRUPTED_RETRO_BATCH_MESSAGE)
                     .await?;
                 Ok::<_, symphony_storage::StorageError>((repo, bus))
@@ -1354,6 +1378,19 @@ mod tests {
         settings.repos[0].url = "git@github.com:acme/replacement.git".to_string();
         assert!(current_retro_repo_url(&settings, "widgets", Some(stored)).is_none());
         assert!(current_retro_repo_url(&settings, "removed", Some(stored)).is_none());
+    }
+
+    #[test]
+    fn prompt_revision_ignores_unrelated_workflow_settings() {
+        let settings = configured_settings();
+        let revision = prompt_revision(&settings);
+        let original_workflow = workflow_from_settings(&settings, Some("lin_api_test"));
+        let mut changed = settings;
+        changed.active_states.push("Needs review".to_string());
+        let changed_workflow = workflow_from_settings(&changed, Some("lin_api_test"));
+
+        assert_ne!(original_workflow.source_hash, changed_workflow.source_hash);
+        assert_eq!(prompt_revision(&changed), revision);
     }
 
     #[tokio::test]
