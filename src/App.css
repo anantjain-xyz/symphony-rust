@@ -176,6 +176,16 @@ button.primary:hover:not(:disabled) {
   opacity: 0.9;
 }
 
+button.danger {
+  border-color: var(--destructive-foreground);
+  color: var(--destructive-foreground);
+}
+
+button.danger:hover:not(:disabled),
+button.danger.confirm {
+  background: var(--destructive);
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,

@@ -1288,6 +1288,58 @@ impl Repository {
         )
     }
 
+    pub async fn delete_retro(&self, id: &str) -> Result<bool, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+            delete from retros
+            where id = ?1
+              and status != 'running'
+              and not exists (
+                select 1 from retro_batches
+                where retro_id = retros.id
+                  and state in ('queued', 'running')
+              )
+            "#,
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        // Foreign keys normally cascade these rows. Keep the explicit cleanup
+        // for databases opened by older builds or diagnostic tools without
+        // SQLite foreign-key enforcement enabled.
+        sqlx::query(
+            r#"
+            delete from retro_batch_items
+            where batch_id in (select id from retro_batches where retro_id = ?1)
+               or suggestion_id in (select id from retro_suggestions where retro_id = ?1)
+            "#,
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("delete from retro_batches where retro_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from retro_suggestions where retro_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from retro_inputs where retro_id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.changed("retros", "delete");
+        Ok(true)
+    }
+
     pub async fn insert_retro_suggestions(
         &self,
         suggestions: &[RetroSuggestionRow],
@@ -2261,6 +2313,125 @@ mod tests {
             failed.error_message.as_deref(),
             Some("Retro interrupted before completion.")
         );
+    }
+
+    #[tokio::test]
+    async fn deletes_retro_artifacts_and_rolls_back_the_generation_marker() {
+        let repo = repo().await;
+        let earlier = repo
+            .create_retro("1970-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        repo.finish_retro(&earlier.id, r#"{"id":"earlier"}"#, 0, 0)
+            .await
+            .unwrap();
+        let latest = repo
+            .create_retro("2026-01-01T00:00:00.000Z", "2027-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        repo.finish_retro(&latest.id, r#"{"id":"latest"}"#, 1, 1)
+            .await
+            .unwrap();
+
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.insert_retro_inputs(&[RetroInputRow {
+            retro_id: latest.id.clone(),
+            run_id: run.id,
+            issue_id: "lin-1".to_string(),
+            repo_name: Some("widgets".to_string()),
+            workpad_comment_id: None,
+            workpad_hash: None,
+        }])
+        .await
+        .unwrap();
+        let suggestion = test_retro_suggestion(&latest.id, "delete-suggestion", "accepted");
+        repo.insert_retro_suggestions(std::slice::from_ref(&suggestion))
+            .await
+            .unwrap();
+        let batch = test_retro_batch(&latest.id, "delete-batch", "repo_pr", Some("widgets"));
+        assert_eq!(
+            repo.reserve_retro_batch(&batch, std::slice::from_ref(&suggestion.id))
+                .await
+                .unwrap(),
+            RetroBatchReservation::Created
+        );
+        repo.update_retro_batch(&batch.id, "completed", Some("Done"), None, None)
+            .await
+            .unwrap();
+
+        assert!(repo.delete_retro(&latest.id).await.unwrap());
+        assert!(repo.get_retro(&latest.id).await.unwrap().is_none());
+        assert!(repo
+            .list_retro_suggestions(&latest.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .list_retro_batches(&latest.id)
+            .await
+            .unwrap()
+            .is_empty());
+        let input_count: i64 =
+            sqlx::query_scalar("select count(*) from retro_inputs where retro_id = ?1")
+                .bind(&latest.id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        let batch_item_count: i64 =
+            sqlx::query_scalar("select count(*) from retro_batch_items where batch_id = ?1")
+                .bind(&batch.id)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(input_count, 0);
+        assert_eq!(batch_item_count, 0);
+        assert_eq!(
+            repo.latest_completed_retro().await.unwrap().unwrap().id,
+            earlier.id
+        );
+
+        let running = repo
+            .create_retro("2027-01-01T00:00:00.000Z", "2028-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        assert!(!repo.delete_retro(&running.id).await.unwrap());
+        assert!(repo.get_retro(&running.id).await.unwrap().is_some());
+
+        repo.fail_retro(&running.id, "Finished for test.")
+            .await
+            .unwrap();
+        let protected_suggestion =
+            test_retro_suggestion(&running.id, "protected-suggestion", "accepted");
+        repo.insert_retro_suggestions(std::slice::from_ref(&protected_suggestion))
+            .await
+            .unwrap();
+        let protected_batch =
+            test_retro_batch(&running.id, "protected-batch", "repo_pr", Some("widgets"));
+        assert_eq!(
+            repo.reserve_retro_batch(
+                &protected_batch,
+                std::slice::from_ref(&protected_suggestion.id),
+            )
+            .await
+            .unwrap(),
+            RetroBatchReservation::Created
+        );
+        assert!(!repo.delete_retro(&running.id).await.unwrap());
+        repo.update_retro_batch(
+            &protected_batch.id,
+            "failed",
+            None,
+            Some("Stopped for test."),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(repo.delete_retro(&running.id).await.unwrap());
     }
 
     #[tokio::test]

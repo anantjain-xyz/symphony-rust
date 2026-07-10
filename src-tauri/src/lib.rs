@@ -666,6 +666,23 @@ async fn get_retro_detail(
 }
 
 #[tauri::command]
+async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let deleted = state
+        .repo
+        .delete_retro(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    if !deleted {
+        return Err(
+            "This retro was not found or still has generation or batch work in progress."
+                .to_string(),
+        );
+    }
+    state.retro.forget(&id).await;
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_retro_suggestion_decision(
     state: State<'_, AppState>,
     id: String,
@@ -1128,6 +1145,7 @@ pub fn run() {
             get_retro_status,
             list_retros,
             get_retro_detail,
+            delete_retro,
             set_retro_suggestion_decision,
             apply_retro_workflow,
             start_retro_prs,

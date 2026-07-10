@@ -163,6 +163,18 @@ impl RetroManager {
             .unwrap_or_else(RetroStatus::idle)
     }
 
+    pub async fn forget(&self, retro_id: &str) {
+        let mut guard = self.inner.lock().await;
+        if guard.as_ref().and_then(|status| status.retro_id.as_deref()) == Some(retro_id)
+            && !matches!(
+                guard.as_ref().map(|status| &status.state),
+                Some(RetroRunState::Running)
+            )
+        {
+            *guard = None;
+        }
+    }
+
     pub async fn start<T>(
         &self,
         repo: Repository,

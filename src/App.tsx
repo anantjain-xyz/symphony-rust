@@ -1491,6 +1491,29 @@ function App() {
     setView("retro");
   }
 
+  async function deleteRetro(id: string) {
+    const index = retros.findIndex((retro) => retro.id === id);
+    const remaining = retros.filter((retro) => retro.id !== id);
+    const nextRetro = remaining[index] ?? remaining[index - 1] ?? remaining[0] ?? null;
+    if (!runtimeAvailable) {
+      setRetros(remaining);
+      selectedRetroIdRef.current = nextRetro?.id ?? null;
+      setSelectedRetro(nextRetro ? previewRetroDetailForId(nextRetro.id) : null);
+      setRetroStatus((current) =>
+        current.retro_id === id ? emptyRetroStatus : current,
+      );
+      return;
+    }
+    try {
+      await call(() => invoke<void>("delete_retro", { id }));
+    } catch {
+      return;
+    }
+    selectedRetroIdRef.current = nextRetro?.id ?? null;
+    setSelectedRetro(null);
+    await refreshDashboard();
+  }
+
   async function decideRetroSuggestion(id: string, decision: string) {
     if (!runtimeAvailable) {
       setSelectedRetro((current) =>
@@ -1780,6 +1803,7 @@ function App() {
             setupBlocked={setup.blocked}
             onStartRetro={startRetro}
             onOpenRetro={openRetro}
+            onDeleteRetro={deleteRetro}
             onDecideSuggestion={decideRetroSuggestion}
             onApplyWorkflow={applyRetroWorkflow}
             onCreatePrs={startRetroPrs}
@@ -2850,6 +2874,7 @@ function RetroView({
   setupBlocked,
   onStartRetro,
   onOpenRetro,
+  onDeleteRetro,
   onDecideSuggestion,
   onApplyWorkflow,
   onCreatePrs,
@@ -2863,6 +2888,7 @@ function RetroView({
   setupBlocked: boolean;
   onStartRetro: () => void;
   onOpenRetro: (id: string) => void;
+  onDeleteRetro: (id: string) => void;
   onDecideSuggestion: (id: string, decision: string) => void;
   onApplyWorkflow: (retroId: string) => void;
   onCreatePrs: (retroId: string) => void;
@@ -2870,6 +2896,8 @@ function RetroView({
   const [reviewFilter, setReviewFilter] = useState<
     "all" | "pending" | "accepted" | "rejected"
   >("all");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const confirmDeleteTimer = useRef<number | null>(null);
   const activeReport = selected ? selected.report : status.report;
   const actionable = selected?.suggestions ?? [];
   const readySuggestions = actionable.filter(
@@ -2935,6 +2963,47 @@ function RetroView({
   ).length;
   const canStart =
     !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
+  const deletionBlocked =
+    status.state === "running" ||
+    selected?.row.status === "running" ||
+    selected?.batches.some((batch) => ["queued", "running"].includes(batch.state)) ||
+    false;
+  const deleteConfirmationActive = confirmDeleteId === selected?.row.id;
+
+  useEffect(() => {
+    setConfirmDeleteId(null);
+    if (confirmDeleteTimer.current !== null) {
+      window.clearTimeout(confirmDeleteTimer.current);
+      confirmDeleteTimer.current = null;
+    }
+    return () => {
+      if (confirmDeleteTimer.current !== null) {
+        window.clearTimeout(confirmDeleteTimer.current);
+        confirmDeleteTimer.current = null;
+      }
+    };
+  }, [selected?.row.id]);
+
+  function requestDeleteRetro() {
+    if (!selected || busy || deletionBlocked) return;
+    if (!deleteConfirmationActive) {
+      setConfirmDeleteId(selected.row.id);
+      if (confirmDeleteTimer.current !== null) {
+        window.clearTimeout(confirmDeleteTimer.current);
+      }
+      confirmDeleteTimer.current = window.setTimeout(() => {
+        setConfirmDeleteId(null);
+        confirmDeleteTimer.current = null;
+      }, 4000);
+      return;
+    }
+    if (confirmDeleteTimer.current !== null) {
+      window.clearTimeout(confirmDeleteTimer.current);
+      confirmDeleteTimer.current = null;
+    }
+    setConfirmDeleteId(null);
+    onDeleteRetro(selected.row.id);
+  }
   return (
     <>
       <header className="page-header">
@@ -2946,6 +3015,23 @@ function RetroView({
           </p>
         </div>
         <div className="actions">
+          {selected ? (
+            <button
+              type="button"
+              className={`danger${deleteConfirmationActive ? " confirm" : ""}`}
+              disabled={busy || deletionBlocked}
+              title={
+                deletionBlocked
+                  ? "Wait for Retro generation and change batches to finish before deleting."
+                  : deleteConfirmationActive
+                    ? "Delete this Retro and roll the generation marker back"
+                    : "Delete this Retro so its run window can be generated again"
+              }
+              onClick={requestDeleteRetro}
+            >
+              {deleteConfirmationActive ? "Confirm delete" : "Delete retro"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="primary"

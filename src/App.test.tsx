@@ -425,6 +425,27 @@ describe("App settings", () => {
     expect(screen.getByText("Suggestions you reject will appear here.")).toBeTruthy();
   });
 
+  it("deletes a selected Retro only after confirmation", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete retro" }));
+    expect(screen.getByRole("button", { name: "Confirm delete" })).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Delete retro" })).toBeTruthy();
+  });
+
   it("scopes Retro PR locks to the repository whose batch succeeded", () => {
     const batch = (repoName: string, state: string): RetroBatchRow => ({
       id: `${repoName}-${state}`,
