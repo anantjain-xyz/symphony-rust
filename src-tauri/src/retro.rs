@@ -120,7 +120,7 @@ pub struct RetroSuggestion {
     pub confidence: RetroConfidence,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum RetroSuggestionTarget {
     Prompt,
@@ -613,7 +613,6 @@ async fn materialize_suggestions(
 }
 
 fn guidance_for(finding: &RetroFinding) -> String {
-    let detail = finding.detail.trim().trim_end_matches('.');
     let context = format!("{} {}", finding.title, finding.detail).to_lowercase();
     if context.contains("commands exited unsuccessfully") {
         "Handle non-zero command exits according to context: expected probe failures should be quiet, while actionable setup or validation failures must be resolved before pushing and reusable prerequisites recorded in the workpad.".to_string()
@@ -631,13 +630,9 @@ fn guidance_for(finding: &RetroFinding) -> String {
         || context.contains("exit")
         || context.contains("failed")
     {
-        format!(
-            "Run the repository's required validation before pushing; if it fails, resolve the root cause and record any reusable prerequisite in the workpad. Observed pattern: {detail}."
-        )
+        "Run the repository's required validation before pushing; if it fails, resolve the root cause and record any reusable prerequisite in the workpad.".to_string()
     } else {
-        format!(
-            "When this pattern occurs, resolve the root cause before completing the task and record any reusable prerequisite in the workpad: {detail}."
-        )
+        "When a recurring issue blocks progress, resolve the root cause before completing the task and record any reusable prerequisite in the workpad.".to_string()
     }
 }
 
@@ -1629,6 +1624,14 @@ struct RepoAccumulator {
     findings: BTreeMap<String, RetroFinding>,
 }
 
+#[derive(Debug)]
+struct SuggestionGroup {
+    target_type: RetroSuggestionTarget,
+    target_id: String,
+    guidance: String,
+    finding: RetroFinding,
+}
+
 impl RepoAccumulator {
     fn new(repo_name: String) -> Self {
         Self {
@@ -1668,18 +1671,75 @@ impl RepoAccumulator {
     }
 
     fn finish(self) -> RetroRepoReport {
-        let mut findings = self.findings.into_values().collect::<Vec<_>>();
-        findings.sort_by(|a, b| {
+        let mut raw_findings = self.findings.into_values().collect::<Vec<_>>();
+        raw_findings.sort_by(|a, b| {
             b.severity
                 .cmp(&a.severity)
                 .then_with(|| b.occurrences.cmp(&a.occurrences))
                 .then_with(|| a.title.cmp(&b.title))
         });
-        findings.truncate(MAX_FINDINGS_PER_REPO);
-        let suggestions = findings
+
+        let mut grouped =
+            BTreeMap::<(RetroSuggestionTarget, String, String), SuggestionGroup>::new();
+        for finding in raw_findings {
+            let guidance = guidance_for(&finding);
+            let (target_type, target_id) = suggestion_target(&finding);
+            let key = (target_type.clone(), target_id.clone(), guidance.clone());
+            if let Some(group) = grouped.get_mut(&key) {
+                group.finding.occurrences += finding.occurrences;
+                if finding.severity > group.finding.severity {
+                    group.finding.severity = finding.severity;
+                }
+                let mut seen_evidence = group
+                    .finding
+                    .evidence
+                    .iter()
+                    .map(evidence_key)
+                    .collect::<BTreeSet<_>>();
+                for evidence in finding.evidence {
+                    if group.finding.evidence.len() >= MAX_EVIDENCE_PER_FINDING {
+                        break;
+                    }
+                    if seen_evidence.insert(evidence_key(&evidence)) {
+                        group.finding.evidence.push(evidence);
+                    }
+                }
+            } else {
+                grouped.insert(
+                    key,
+                    SuggestionGroup {
+                        target_type,
+                        target_id,
+                        finding: RetroFinding {
+                            title: suggestion_topic(&guidance).to_string(),
+                            detail: guidance.clone(),
+                            severity: finding.severity,
+                            occurrences: finding.occurrences,
+                            evidence: finding.evidence,
+                        },
+                        guidance,
+                    },
+                );
+            }
+        }
+
+        let mut groups = grouped.into_values().collect::<Vec<_>>();
+        groups.sort_by(|a, b| {
+            b.finding
+                .severity
+                .cmp(&a.finding.severity)
+                .then_with(|| b.finding.occurrences.cmp(&a.finding.occurrences))
+                .then_with(|| a.finding.title.cmp(&b.finding.title))
+        });
+        groups.truncate(MAX_FINDINGS_PER_REPO);
+        let findings = groups
             .iter()
-            .map(|finding| suggestion_for(&self.repo_name, finding))
-            .collect();
+            .map(|group| group.finding.clone())
+            .collect::<Vec<_>>();
+        let suggestions = groups
+            .iter()
+            .map(|group| suggestion_for_group(&self.repo_name, group))
+            .collect::<Vec<_>>();
         RetroRepoReport {
             repo_name: self.repo_name,
             run_count: self.run_count,
@@ -1693,13 +1753,39 @@ impl RepoAccumulator {
     }
 }
 
+#[cfg(test)]
 fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
+    let guidance = guidance_for(finding);
+    let (target_type, target_id) = suggestion_target(finding);
+    suggestion_from_parts(repo_name, finding, target_type, target_id, &guidance)
+}
+
+fn suggestion_for_group(repo_name: &str, group: &SuggestionGroup) -> RetroSuggestion {
+    suggestion_from_parts(
+        repo_name,
+        &group.finding,
+        group.target_type.clone(),
+        group.target_id.clone(),
+        &group.guidance,
+    )
+}
+
+fn suggestion_target(finding: &RetroFinding) -> (RetroSuggestionTarget, String) {
     let joined = finding.detail.to_lowercase();
-    let (target_type, target_id) = if let Some(skill) = skill_target(&joined) {
+    if let Some(skill) = skill_target(&joined) {
         (RetroSuggestionTarget::Skill, skill.to_string())
     } else {
         (RetroSuggestionTarget::Prompt, "common prompt".to_string())
-    };
+    }
+}
+
+fn suggestion_from_parts(
+    repo_name: &str,
+    finding: &RetroFinding,
+    target_type: RetroSuggestionTarget,
+    target_id: String,
+    guidance: &str,
+) -> RetroSuggestion {
     let target_label = match target_type {
         RetroSuggestionTarget::Prompt => "common prompt".to_string(),
         RetroSuggestionTarget::Skill => target_id.clone(),
@@ -1714,11 +1800,8 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
     RetroSuggestion {
         target_type,
         target_id,
-        title: format!("Clarify {} for {}", short_title(&finding.title), repo_name),
-        body: format!(
-            "Add guidance to {target_label} for this repeated pattern: {}",
-            finding.detail
-        ),
+        title: format!("Clarify {} for {}", suggestion_topic(guidance), repo_name),
+        body: format!("Update {target_label} with this guidance: {guidance}"),
         rationale: format!(
             "{} occurrence{} found in {} with {} severity.",
             finding.occurrences,
@@ -1728,6 +1811,35 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
         ),
         confidence,
     }
+}
+
+fn suggestion_topic(guidance: &str) -> &'static str {
+    if guidance.starts_with("Handle non-zero command exits") {
+        "non-zero command handling"
+    } else if guidance.starts_with("For user-facing UI changes") {
+        "UI evidence requirements"
+    } else if guidance.starts_with("Create or update the Symphony Workpad") {
+        "workpad requirements"
+    } else if guidance.starts_with("Unattended runs must not stop") {
+        "unattended-run behavior"
+    } else if guidance.starts_with("Before completing review work") {
+        "PR feedback handling"
+    } else if guidance.starts_with("Run the repository's required validation") {
+        "validation requirements"
+    } else {
+        "recurring issue handling"
+    }
+}
+
+fn evidence_key(evidence: &RetroEvidence) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        evidence.issue_identifier,
+        evidence.run_id.as_deref().unwrap_or_default(),
+        evidence.event_id.unwrap_or_default(),
+        evidence.kind,
+        evidence.summary
+    )
 }
 
 fn skill_target(text: &str) -> Option<&'static str> {
@@ -2338,8 +2450,62 @@ mod tests {
         assert_eq!(report.suggestions.len(), 1);
         assert_eq!(
             report.suggestions[0].title,
-            "Clarify `bash` commands exited unsuccessfully for widgets"
+            "Clarify non-zero command handling for widgets"
         );
+    }
+
+    #[test]
+    fn consolidates_findings_that_generate_the_same_suggestion() {
+        let mut repo = RepoAccumulator::new("widgets".to_string());
+        for (key, issue, run_id, detail) in [
+            (
+                "run:failure:worker_restarted",
+                "SYM-1",
+                "run-1",
+                "Worker restarted while run was in-flight.",
+            ),
+            (
+                "run:failure:agent_failure",
+                "SYM-2",
+                "run-2",
+                "Validation failed after the worker resumed.",
+            ),
+        ] {
+            repo.push_finding(
+                key.to_string(),
+                "Runs failed while work was in progress".to_string(),
+                detail.to_string(),
+                RetroSeverity::High,
+                RetroEvidence {
+                    issue_identifier: issue.to_string(),
+                    run_id: Some(run_id.to_string()),
+                    run_number: Some(1),
+                    event_id: None,
+                    kind: "run".to_string(),
+                    summary: detail.to_string(),
+                },
+            );
+        }
+
+        let report = repo.finish();
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(report.findings[0].occurrences, 2);
+        assert_eq!(report.findings[0].evidence.len(), 2);
+        assert_eq!(
+            report.suggestions[0].title,
+            "Clarify validation requirements for widgets"
+        );
+        assert_eq!(
+            report.suggestions[0].rationale,
+            "2 occurrences found in widgets with high severity."
+        );
+        assert!(!report.suggestions[0].body.contains("Observed pattern"));
+        assert!(!report.suggestions[0].body.contains("Worker restarted"));
+        assert!(report.suggestions[0]
+            .body
+            .contains("Run the repository's required validation before pushing"));
     }
 
     #[test]
