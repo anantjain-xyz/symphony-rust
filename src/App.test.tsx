@@ -2,11 +2,12 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { retroRepoBatchState } from "./App";
 import type {
   AppSettings,
   IssueRow,
   Overview,
+  RetroBatchRow,
   RunWithIssueRow,
   SkillsStatus,
   ValidationResult,
@@ -375,6 +376,168 @@ describe("App settings", () => {
         clear: vi.fn(() => localStorageItems.clear()),
       },
     });
+  });
+
+  it("reviews exact Retro diffs and gates change batches until every suggestion is decided", () => {
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+
+    expect(
+      Array.from(
+        screen
+          .getByRole("group", { name: "Filter suggestions" })
+          .querySelectorAll("button"),
+      ).map((button) => button.textContent),
+    ).toEqual(["Pending", "Accepted", "Rejected", "All"]);
+    expect(
+      screen.getByRole("button", { name: "Pending" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
+    expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
+    const metadata = container.querySelectorAll(".retro-suggestion-badges");
+    expect(Array.from(metadata[0].children).map((item) => item.textContent)).toEqual([
+      "skill",
+      "medium",
+      "3 occurrences",
+    ]);
+    expect(Array.from(metadata[2].children).map((item) => item.textContent)).toEqual([
+      "prompt",
+      "low",
+      "1 occurrence",
+    ]);
+    expect(metadata[0].children[1].classList.contains("medium")).toBe(true);
+    expect(metadata[1].children[1].classList.contains("high")).toBe(true);
+    expect(metadata[2].children[1].classList.contains("low")).toBe(true);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[0]);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[0]);
+
+    expect(screen.getByText("4 of 4 reviewed")).toBeTruthy();
+    expect(screen.getByText("Review complete")).toBeTruthy();
+    expect(screen.getByText("No pending suggestions")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    expect(
+      screen.getAllByText("Accepted", { selector: ".retro-decision-label.accepted" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByText("Rejected", { selector: ".retro-decision-label.rejected" }),
+    ).toHaveLength(2);
+    const acceptedUndoButtons = screen.getAllByRole("button", {
+      name: "Undo accepted decision",
+    });
+    expect(acceptedUndoButtons).toHaveLength(2);
+    expect(acceptedUndoButtons[0].textContent).toBe("");
+    expect(
+      screen.getAllByRole("button", { name: "Undo rejected decision" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "Apply workflow prompt (1)" }).getAttribute("disabled"),
+    ).not.toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "Create 1 implementation PR" })
+        .getAttribute("disabled"),
+    ).not.toBeNull();
+
+    fireEvent.click(acceptedUndoButtons[0]);
+    expect(screen.getByText("3 of 4 reviewed")).toBeTruthy();
+  });
+
+  it("explains when a Retro suggestion filter has no matching suggestions", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accepted" }));
+
+    expect(screen.getByText("No accepted suggestions")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Accept a pending suggestion to include it in an implementation batch.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Rejected" }));
+    expect(screen.getByText("No rejected suggestions")).toBeTruthy();
+    expect(screen.getByText("Suggestions you reject will appear here.")).toBeTruthy();
+  });
+
+  it("deletes a selected Retro only after confirmation", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete retro" }));
+    expect(screen.getByRole("button", { name: "Confirm delete" })).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+    expect(
+      screen.getAllByRole("button", { name: /Open retro from/ }),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Delete retro" })).toBeTruthy();
+  });
+
+  it("scopes Retro PR locks to the repository whose batch succeeded", () => {
+    const batch = (repoName: string, state: string): RetroBatchRow => ({
+      id: `${repoName}-${state}`,
+      retro_id: "retro-1",
+      kind: "repo_pr",
+      repo_name: repoName,
+      repo_url: `https://github.com/acme/${repoName}.git`,
+      base_ref: "abc123",
+      state,
+      progress: null,
+      error: state === "failed" ? "network error" : null,
+      pr_url: state === "completed" ? `https://github.com/acme/${repoName}/pull/1` : null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      completed_at: state === "running" ? null : "2026-01-01T00:01:00.000Z",
+    });
+    const batches = [batch("widgets", "completed"), batch("api", "failed")];
+
+    expect(retroRepoBatchState(batches, "widgets")).toBe("locked");
+    expect(retroRepoBatchState(batches, "api")).toBe("available");
+    expect(retroRepoBatchState([batch("api", "stale")], "api")).toBe("stale");
+  });
+
+  it("starts Retros from saved backend settings instead of sending form edits", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "start_retro") {
+        return {
+          state: "running",
+          retro_id: "retro-saved-settings",
+          message: "Preparing retro window...",
+          report: null,
+          error: null,
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retro" }));
+    const generateButton = screen
+      .getAllByRole("button", { name: "Generate retro" })
+      .find((button) => button.classList.contains("primary"));
+    expect(generateButton).toBeTruthy();
+    fireEvent.click(generateButton!);
+
+    await waitFor(() => expect(tauriMocks.invoke).toHaveBeenCalledWith("start_retro"));
   });
 
   it("marks local development builds distinctly", () => {

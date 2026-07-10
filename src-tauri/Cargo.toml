@@ -33,6 +33,7 @@ keyring-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+similar.workspace = true
 specta.workspace = true
 symphony-agents = { path = "../crates/symphony-agents" }
 symphony-core = { path = "../crates/symphony-core" }
@@ -47,3 +48,4 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 which.workspace = true
+uuid.workspace = true

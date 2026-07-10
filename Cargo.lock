@@ -5057,6 +5057,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
 name = "simsimd"
 version = "6.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5539,6 +5545,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "specta",
  "symphony-agents",
  "symphony-core",
@@ -5553,6 +5560,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "which 8.0.2",
 ]
 

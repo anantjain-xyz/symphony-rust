@@ -19,6 +19,17 @@
 
 Everything runs on your machine. The only network calls are to Linear's API and whatever your agents and hooks do.
 
+## Retros
+
+The **Retro** view turns repeated run failures and workpad confusion into reviewable workflow improvements. Each generated retro covers terminal runs since the previous completed retro and groups its findings by repository.
+
+New retros prepare an exact diff for every suggested prompt or skill change. Review each proposal with **Accept** or **Reject**; accepted changes remain local until the review is complete. Symphony then offers the applicable actions:
+
+- **Apply workflow prompt** updates the validated prompt template stored in Settings and hot-reconfigures the worker when possible.
+- **Create implementation PRs** groups accepted skill changes into one pull request per repository. Each PR uses a deterministic `symphony/retro-*` branch and contains only the reviewed target files.
+
+Proposals record the workflow hash or repository revision they were generated from. If the prompt, default branch, or target file changes before execution, Symphony marks the batch stale instead of applying an unseen merge. PR progress and successful links are retained per repository, so a failure in one repository does not hide successful PRs for another. Retros created before reviewable diffs were introduced remain available as read-only historical reports.
+
 ## Requirements
 
 - **macOS** (primary target; Tauri builds for other platforms are untested)
@@ -89,7 +100,7 @@ Retried runs automatically get a `## Retry context` section appended with the pr
 ## Architecture
 
 - `src-tauri/` — Tauri desktop shell, commands, keychain-backed settings, event forwarding
-- `src/` — React dashboard (Overview, Runs, Issues, Settings)
+- `src/` — React dashboard (Overview, Runs, Issues, Retro, Settings)
 - `crates/symphony-core` — domain types, workflow config, prompt rendering
 - `crates/symphony-storage` — SQLite schema, repository, broadcast event bus
 - `crates/symphony-tracker` — Linear GraphQL client and issue normalization

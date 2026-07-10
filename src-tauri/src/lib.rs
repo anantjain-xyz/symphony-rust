@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 use symphony_storage::{
-    open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository, RetroRow,
-    RunWithIssueRow, StorageEvent,
+    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository,
+    RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
+    StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -17,7 +21,11 @@ mod path_env;
 mod retro;
 mod settings;
 
-use retro::{parse_report, RetroDetail, RetroManager, RetroStatus};
+use retro::{
+    hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
+    uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
+    INTERRUPTED_RETRO_MESSAGE,
+};
 #[cfg(debug_assertions)]
 use retro::{
     RetroConfidence, RetroEvidence, RetroFinding, RetroRepoReport, RetroReport, RetroRunState,
@@ -25,9 +33,16 @@ use retro::{
 };
 pub use settings::AppSettings;
 use settings::{default_prompt_template, parse_settings, workflow_from_settings};
+use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "symphony";
 const KEYRING_LINEAR_USER: &str = "linear_api_key";
+const RETRO_REVIEW_INCOMPLETE_MESSAGE: &str =
+    "Review every available suggestion before creating a change batch.";
+const RETRO_ACCEPTED_SET_CHANGED_MESSAGE: &str =
+    "Accepted suggestions changed while the batch was starting. Review the latest decisions and retry.";
+const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
+    "Symphony restarted before this change batch completed. Retry the batch.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SaveSettingsRequest {
@@ -575,19 +590,37 @@ async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Resu
 }
 
 #[tauri::command]
-async fn start_retro(
-    state: State<'_, AppState>,
-    settings: AppSettings,
-) -> Result<RetroStatus, String> {
+async fn start_retro(state: State<'_, AppState>) -> Result<RetroStatus, String> {
     let Some(api_key) = linear_api_key() else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear, then run a retro."
                 .to_string(),
         );
     };
+    let settings = load_settings_from_disk(&state).await?;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
-    state.retro.start(state.repo.clone(), tracker).await
+    let workspace_root =
+        resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
+    let proposal_config = RetroProposalConfig {
+        prompt_template: settings.prompt_template.clone(),
+        workflow_hash: workflow.source_hash.clone(),
+        repos: settings
+            .repos
+            .iter()
+            .map(|repo| (repo.name.clone(), repo.url.clone()))
+            .collect(),
+        workspace_root,
+        session_env: settings.session_env.clone(),
+        skills: bundled_skills()
+            .into_iter()
+            .map(|skill| (skill.name, skill.content))
+            .collect(),
+    };
+    state
+        .retro
+        .start(state.repo.clone(), tracker, proposal_config)
+        .await
 }
 
 #[tauri::command]
@@ -609,16 +642,405 @@ async fn get_retro_detail(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<RetroDetail>, String> {
-    state
+    let Some(row) = state
         .repo
         .get_retro(&id)
         .await
-        .map(|row| {
-            row.map(|row| RetroDetail {
-                report: parse_report(&row),
-                row,
-            })
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    let suggestions = state
+        .repo
+        .list_retro_suggestions(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    let batches = state
+        .repo
+        .list_retro_batches(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(Some(RetroDetail {
+        report: parse_report(&row),
+        row,
+        suggestions,
+        batches,
+    }))
+}
+
+#[tauri::command]
+async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let deleted = state
+        .repo
+        .delete_retro(&id)
+        .await
+        .map_err(|err| err.to_string())?;
+    if !deleted {
+        return Err(
+            "This retro was not found, is not the latest completed retro, or still has generation or batch work in progress."
+                .to_string(),
+        );
+    }
+    state.retro.forget(&id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_retro_suggestion_decision(
+    state: State<'_, AppState>,
+    id: String,
+    decision: String,
+) -> Result<RetroSuggestionRow, String> {
+    if !matches!(decision.as_str(), "pending" | "accepted" | "rejected") {
+        return Err("Decision must be pending, accepted, or rejected.".to_string());
+    }
+    state
+        .repo
+        .set_retro_suggestion_decision(&id, &decision)
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Suggestion was not found.".to_string())
+}
+
+fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<(), String> {
+    if suggestions
+        .iter()
+        .any(|suggestion| suggestion.proposal_status == "ready" && suggestion.decision == "pending")
+    {
+        Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn apply_retro_workflow(
+    state: State<'_, AppState>,
+    retro_id: String,
+) -> Result<RetroBatchRow, String> {
+    let all_suggestions = state
+        .repo
+        .list_retro_suggestions(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?;
+    ensure_retro_review_complete(&all_suggestions)?;
+    let suggestions = all_suggestions
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.target_type == "prompt"
+                && suggestion.decision == "accepted"
+                && suggestion.proposal_status == "ready"
         })
+        .collect::<Vec<_>>();
+    if suggestions.is_empty() {
+        return Err("Accept at least one workflow suggestion first.".to_string());
+    }
+    let settings = load_settings_from_disk(&state).await?;
+    let expected_ref = suggestions
+        .first()
+        .and_then(|suggestion| suggestion.base_ref.clone())
+        .ok_or_else(|| "Workflow proposal has no base revision.".to_string())?;
+    let expected_prompt_hashes = suggestions
+        .iter()
+        .filter_map(|suggestion| suggestion.base_hash.clone())
+        .collect::<BTreeSet<_>>();
+    if expected_prompt_hashes.len() != 1 {
+        return Err("Workflow proposals do not share one prompt revision.".to_string());
+    }
+    let expected_prompt_hash = expected_prompt_hashes
+        .into_iter()
+        .next()
+        .expect("one prompt hash was checked above");
+    let batch = RetroBatchRow {
+        id: Uuid::new_v4().to_string(),
+        retro_id: retro_id.clone(),
+        kind: "workflow_update".to_string(),
+        repo_name: None,
+        repo_url: None,
+        base_ref: Some(expected_ref.clone()),
+        state: "running".to_string(),
+        progress: Some("Checking workflow freshness…".to_string()),
+        error: None,
+        pr_url: None,
+        created_at: now_iso(),
+        completed_at: None,
+    };
+    let suggestion_ids = suggestions
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    state
+        .repo
+        .reserve_retro_batch(&batch, &suggestion_ids)
+        .await
+        .map_err(|err| err.to_string())
+        .and_then(|reservation| match reservation {
+            RetroBatchReservation::Created => Ok(()),
+            RetroBatchReservation::ReviewIncomplete => {
+                Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
+            }
+            RetroBatchReservation::AcceptedSetChanged => {
+                Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.to_string())
+            }
+            RetroBatchReservation::AlreadyReserved => {
+                Err("A workflow change batch already exists for this retro.".to_string())
+            }
+        })?;
+    if suggestions.iter().any(uses_legacy_retro_section) {
+        state
+            .repo
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("The proposal format changed."),
+                Some("Generate a new retro and review the updated in-place diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return state
+            .repo
+            .list_retro_batches(&retro_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .find(|item| item.id == batch.id)
+            .ok_or_else(|| "Workflow batch was not found.".to_string());
+    }
+    if prompt_revision(&settings) != expected_prompt_hash {
+        state
+            .repo
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("Prompt changed since this diff was prepared."),
+                Some("Generate a new retro and review the updated diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return state
+            .repo
+            .list_retro_batches(&retro_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .find(|item| item.id == batch.id)
+            .ok_or_else(|| "Workflow batch was not found.".to_string());
+    }
+
+    let guidance = suggestions
+        .iter()
+        .map(|suggestion| suggestion.guidance.clone())
+        .collect::<Vec<_>>();
+    let mut updated = settings;
+    updated.prompt_template = integrate_retro_guidance(&updated.prompt_template, &guidance);
+    if let Some(error) = validate_workflow_settings(&updated) {
+        state
+            .repo
+            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .await
+            .map_err(|err| err.to_string())?;
+        return Err(error);
+    }
+    if let Err(error) = write_settings_file(&state.settings_path, &updated).await {
+        state
+            .repo
+            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .await
+            .map_err(|update_err| update_err.to_string())?;
+        return Err(error);
+    }
+    if live_reconfigure_allowed(&updated) {
+        state
+            .worker
+            .reconfigure(worker_start_config(&state, &updated))
+            .await;
+    }
+    state
+        .repo
+        .update_retro_batch(
+            &batch.id,
+            "completed",
+            Some("Workflow prompt updated."),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .find(|item| item.id == batch.id)
+        .ok_or_else(|| "Workflow batch was not found.".to_string())
+}
+
+fn current_retro_repo_url(
+    settings: &AppSettings,
+    repo_name: &str,
+    stored_url: Option<&str>,
+) -> Option<String> {
+    let stored_url = stored_url?.trim();
+    let configured_url = settings
+        .repos
+        .iter()
+        .find(|repo| repo.name == repo_name)?
+        .url
+        .trim();
+    (!stored_url.is_empty() && stored_url == configured_url).then(|| configured_url.to_string())
+}
+
+fn prompt_revision(settings: &AppSettings) -> String {
+    hash_body(&settings.prompt_template)
+}
+
+async fn write_settings_file(path: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
+    tokio::fs::write(path, json)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn start_retro_prs(
+    state: State<'_, AppState>,
+    retro_id: String,
+) -> Result<Vec<RetroBatchRow>, String> {
+    let settings = load_settings_from_disk(&state).await?;
+    let all_suggestions = state
+        .repo
+        .list_retro_suggestions(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?;
+    ensure_retro_review_complete(&all_suggestions)?;
+    let suggestions = all_suggestions
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion.target_type == "skill"
+                && suggestion.decision == "accepted"
+                && suggestion.proposal_status == "ready"
+        })
+        .collect::<Vec<_>>();
+    if suggestions.is_empty() {
+        return Err("Accept at least one repository suggestion first.".to_string());
+    }
+    let mut by_repo = BTreeMap::<String, Vec<RetroSuggestionRow>>::new();
+    for suggestion in suggestions {
+        by_repo
+            .entry(suggestion.repo_name.clone())
+            .or_default()
+            .push(suggestion);
+    }
+    let blocked_repos = state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|batch| {
+            batch.kind == "repo_pr"
+                && matches!(
+                    batch.state.as_str(),
+                    "queued" | "running" | "completed" | "stale"
+                )
+        })
+        .filter_map(|batch| batch.repo_name)
+        .collect::<BTreeSet<_>>();
+    let workspace_root = resolve_workspace_root_dir(
+        &workflow_from_settings(&settings, linear_api_key().as_deref())
+            .front_matter
+            .workspace
+            .root,
+        &state.app_data_dir,
+    );
+    for (repo_name, suggestions) in by_repo {
+        if blocked_repos.contains(&repo_name) {
+            continue;
+        }
+        let stored_url = suggestions
+            .first()
+            .and_then(|suggestion| suggestion.repo_url.as_deref());
+        let repo_url = current_retro_repo_url(&settings, &repo_name, stored_url);
+        let legacy_proposal = suggestions.iter().any(uses_legacy_retro_section);
+        let stale_error = if legacy_proposal {
+            Some(
+                "The proposal format changed. Generate a new retro and review the updated in-place diff."
+                    .to_string(),
+            )
+        } else {
+            repo_url.is_none().then(|| {
+                format!(
+                    "Repository `{repo_name}` was removed or its URL changed after this retro was generated. Generate a new retro before opening a PR."
+                )
+            })
+        };
+        let batch = RetroBatchRow {
+            id: Uuid::new_v4().to_string(),
+            retro_id: retro_id.clone(),
+            kind: "repo_pr".to_string(),
+            repo_name: Some(repo_name.clone()),
+            repo_url,
+            base_ref: suggestions.first().and_then(|item| item.base_ref.clone()),
+            state: if stale_error.is_some() {
+                "stale"
+            } else {
+                "queued"
+            }
+            .to_string(),
+            progress: stale_error
+                .as_ref()
+                .map(|_| {
+                    if legacy_proposal {
+                        "Proposal format changed.".to_string()
+                    } else {
+                        "Repository configuration changed.".to_string()
+                    }
+                })
+                .or_else(|| Some("Queued for PR creation…".to_string())),
+            error: stale_error.clone(),
+            pr_url: None,
+            created_at: now_iso(),
+            completed_at: stale_error.as_ref().map(|_| now_iso()),
+        };
+        let ids = suggestions
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        let reservation = state
+            .repo
+            .reserve_retro_batch(&batch, &ids)
+            .await
+            .map_err(|err| err.to_string())?;
+        match reservation {
+            RetroBatchReservation::Created => {}
+            RetroBatchReservation::ReviewIncomplete => {
+                return Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string());
+            }
+            RetroBatchReservation::AcceptedSetChanged => {
+                return Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.to_string());
+            }
+            RetroBatchReservation::AlreadyReserved => continue,
+        }
+        if stale_error.is_some() {
+            continue;
+        }
+        let repository = state.repo.clone();
+        let session_env = settings.session_env.clone();
+        let workspace = workspace_root
+            .join("_retro-actions")
+            .join(&retro_id)
+            .join(sanitize_key(&repo_name));
+        tauri::async_runtime::spawn(async move {
+            run_repo_pr_batch(repository, batch, suggestions, workspace, session_env).await;
+        });
+    }
+    state
+        .repo
+        .list_retro_batches(&retro_id)
+        .await
         .map_err(|err| err.to_string())
 }
 
@@ -705,6 +1127,9 @@ pub fn run() {
                 let bus = EventBus::default();
                 let pool = open_sqlite(&db_path).await?;
                 let repo = Repository::new(pool, bus.clone());
+                repo.fail_running_retros(INTERRUPTED_RETRO_MESSAGE).await?;
+                repo.fail_in_progress_retro_batches(INTERRUPTED_RETRO_BATCH_MESSAGE)
+                    .await?;
                 Ok::<_, symphony_storage::StorageError>((repo, bus))
             })?;
             let worker = WorkerManager::new(repo.clone());
@@ -744,6 +1169,10 @@ pub fn run() {
             get_retro_status,
             list_retros,
             get_retro_detail,
+            delete_retro,
+            set_retro_suggestion_decision,
+            apply_retro_workflow,
+            start_retro_prs,
             get_skills_status,
             get_skills_install_status,
             install_skills
@@ -883,6 +1312,8 @@ fn export_bindings() {
             specta::ts::export::<SkillsStatus>(&conf),
             specta::ts::export::<SkillsInstallStatus>(&conf),
             specta::ts::export::<RetroRow>(&conf),
+            specta::ts::export::<RetroSuggestionRow>(&conf),
+            specta::ts::export::<RetroBatchRow>(&conf),
             specta::ts::export::<RetroRunState>(&conf),
             specta::ts::export::<RetroStatus>(&conf),
             specta::ts::export::<RetroDetail>(&conf),
@@ -933,6 +1364,47 @@ mod tests {
             }],
             ..AppSettings::default()
         }
+    }
+
+    #[test]
+    fn retro_prs_require_the_saved_repo_name_and_url_to_match() {
+        let mut settings = configured_settings();
+        let stored = "git@github.com:acme/widgets.git";
+        assert_eq!(
+            current_retro_repo_url(&settings, "widgets", Some(stored)).as_deref(),
+            Some(stored)
+        );
+
+        settings.repos[0].url = "git@github.com:acme/replacement.git".to_string();
+        assert!(current_retro_repo_url(&settings, "widgets", Some(stored)).is_none());
+        assert!(current_retro_repo_url(&settings, "removed", Some(stored)).is_none());
+    }
+
+    #[test]
+    fn prompt_revision_ignores_unrelated_workflow_settings() {
+        let settings = configured_settings();
+        let revision = prompt_revision(&settings);
+        let original_workflow = workflow_from_settings(&settings, Some("lin_api_test"));
+        let mut changed = settings;
+        changed.active_states.push("Needs review".to_string());
+        let changed_workflow = workflow_from_settings(&changed, Some("lin_api_test"));
+
+        assert_ne!(original_workflow.source_hash, changed_workflow.source_hash);
+        assert_eq!(prompt_revision(&changed), revision);
+    }
+
+    #[tokio::test]
+    async fn settings_write_errors_are_reported_to_retro_batches() {
+        let directory =
+            std::env::temp_dir().join(format!("symphony-settings-write-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+
+        let error = write_settings_file(&directory, &configured_settings())
+            .await
+            .unwrap_err();
+        assert!(!error.is_empty());
+
+        tokio::fs::remove_dir_all(directory).await.ok();
     }
 
     #[test]

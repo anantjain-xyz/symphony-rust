@@ -1,21 +1,25 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use similar::TextDiff;
 use specta::Type;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use symphony_storage::{
-    now_iso, AgentEventRow, Repository, RetroInputRow, RetroRow, RunWithIssueRow,
-    WorkpadSnapshotRow,
+    now_iso, AgentEventRow, Repository, RetroBatchRow, RetroInputRow, RetroRow, RetroSuggestionRow,
+    RunWithIssueRow, WorkpadSnapshotRow,
 };
 use symphony_tracker::{TrackerClient, WorkpadComment};
-use tokio::sync::Mutex;
+use tokio::{process::Command, sync::Mutex};
 
 const RETRO_BEGINNING: &str = "1970-01-01T00:00:00.000Z";
-const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
+pub(crate) const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before completion.";
 const MAX_FINDINGS_PER_REPO: usize = 8;
 const MAX_EVIDENCE_PER_FINDING: usize = 5;
+const RETRO_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +55,8 @@ impl RetroStatus {
 pub struct RetroDetail {
     pub row: RetroRow,
     pub report: Option<RetroReport>,
+    pub suggestions: Vec<RetroSuggestionRow>,
+    pub batches: Vec<RetroBatchRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -114,7 +120,7 @@ pub struct RetroSuggestion {
     pub confidence: RetroConfidence,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum RetroSuggestionTarget {
     Prompt,
@@ -134,6 +140,16 @@ pub struct RetroManager {
     inner: Arc<Mutex<Option<RetroStatus>>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RetroProposalConfig {
+    pub prompt_template: String,
+    pub workflow_hash: String,
+    pub repos: BTreeMap<String, String>,
+    pub workspace_root: PathBuf,
+    pub session_env: BTreeMap<String, String>,
+    pub skills: BTreeMap<String, String>,
+}
+
 impl RetroManager {
     pub fn new() -> Self {
         Self::default()
@@ -147,7 +163,24 @@ impl RetroManager {
             .unwrap_or_else(RetroStatus::idle)
     }
 
-    pub async fn start<T>(&self, repo: Repository, tracker: T) -> Result<RetroStatus, String>
+    pub async fn forget(&self, retro_id: &str) {
+        let mut guard = self.inner.lock().await;
+        if guard.as_ref().and_then(|status| status.retro_id.as_deref()) == Some(retro_id)
+            && !matches!(
+                guard.as_ref().map(|status| &status.state),
+                Some(RetroRunState::Running)
+            )
+        {
+            *guard = None;
+        }
+    }
+
+    pub async fn start<T>(
+        &self,
+        repo: Repository,
+        tracker: T,
+        proposal_config: RetroProposalConfig,
+    ) -> Result<RetroStatus, String>
     where
         T: TrackerClient + 'static,
     {
@@ -196,7 +229,14 @@ impl RetroManager {
 
         let inner = self.inner.clone();
         tokio::spawn(async move {
-            let result = build_retro(&inner, repo.clone(), tracker, retro.clone()).await;
+            let result = build_retro(
+                &inner,
+                repo.clone(),
+                tracker,
+                retro.clone(),
+                proposal_config,
+            )
+            .await;
             let mut guard = inner.lock().await;
             match result {
                 Ok(report) => {
@@ -294,6 +334,7 @@ async fn build_retro<T>(
     repo: Repository,
     tracker: T,
     retro: RetroRow,
+    proposal_config: RetroProposalConfig,
 ) -> Result<RetroReport, String>
 where
     T: TrackerClient,
@@ -389,7 +430,977 @@ where
     repo.insert_retro_inputs(&inputs)
         .await
         .map_err(|err| err.to_string())?;
+    set_message(inner, "Preparing reviewable changes...").await;
+    let suggestions = materialize_suggestions(&retro, &report, &proposal_config).await;
+    repo.insert_retro_suggestions(&suggestions)
+        .await
+        .map_err(|err| err.to_string())?;
     Ok(report)
+}
+
+#[derive(Debug)]
+struct RepoSnapshot {
+    root: PathBuf,
+    head: String,
+}
+
+async fn materialize_suggestions(
+    retro: &RetroRow,
+    report: &RetroReport,
+    config: &RetroProposalConfig,
+) -> Vec<RetroSuggestionRow> {
+    let mut rows = Vec::new();
+    for repo_report in &report.repos {
+        let mut seen_changes = BTreeSet::new();
+        let repo_url = config.repos.get(&repo_report.repo_name).cloned();
+        let needs_skill_snapshot = repo_report
+            .suggestions
+            .iter()
+            .any(|suggestion| matches!(suggestion.target_type, RetroSuggestionTarget::Skill));
+        let snapshot = if needs_skill_snapshot {
+            match repo_url.as_deref() {
+                Some(url) => {
+                    clone_repo_snapshot(
+                        url,
+                        &config
+                            .workspace_root
+                            .join("_retro-proposals")
+                            .join(&retro.id)
+                            .join(path_key(&repo_report.repo_name)),
+                        &config.session_env,
+                    )
+                    .await
+                }
+                None => Err("Repository is no longer configured.".to_string()),
+            }
+        } else {
+            Err("No repository snapshot needed.".to_string())
+        };
+
+        for (index, suggestion) in repo_report.suggestions.iter().enumerate() {
+            let finding = repo_report.findings.get(index);
+            let guidance = finding
+                .map(|finding| finding.detail.clone())
+                .unwrap_or_else(|| suggestion.body.clone());
+            let target_type = match &suggestion.target_type {
+                RetroSuggestionTarget::Prompt => "prompt",
+                RetroSuggestionTarget::Skill => "skill",
+            };
+            let target_path = match &suggestion.target_type {
+                RetroSuggestionTarget::Prompt => "Settings → Prompt template".to_string(),
+                RetroSuggestionTarget::Skill => {
+                    format!(".agents/skills/{}/SKILL.md", suggestion.target_id)
+                }
+            };
+            let change_key = format!("{}|{}|{}", target_type, suggestion.target_id, guidance);
+            if !seen_changes.insert(change_key) {
+                continue;
+            }
+            let stable_key = format!(
+                "{}|{}|{}|{}|{}|{}",
+                retro.id,
+                repo_report.repo_name,
+                target_type,
+                suggestion.target_id,
+                index,
+                suggestion.title
+            );
+            let id = format!("{}-{}", retro.id, &hash_body(&stable_key)[..16]);
+            let created_at = now_iso();
+
+            let materialized = match &suggestion.target_type {
+                RetroSuggestionTarget::Prompt => {
+                    let before = config.prompt_template.clone();
+                    let after = integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
+                    Ok((
+                        target_path.clone(),
+                        before.clone(),
+                        after.clone(),
+                        unified_diff(&target_path, &before, &after),
+                        config.workflow_hash.clone(),
+                        hash_body(&before),
+                    ))
+                }
+                RetroSuggestionTarget::Skill => match &snapshot {
+                    Ok(snapshot) => match safe_repo_target(&snapshot.root, &target_path).await {
+                        Ok(file_path) => match repo_relative_target(&snapshot.root, &file_path)
+                            .await
+                        {
+                            Ok(resolved_target_path) => {
+                                match read_optional_text(&file_path, &resolved_target_path).await {
+                                    Ok(before) => {
+                                        let seed = if before.is_empty() {
+                                            config.skills.get(&suggestion.target_id).cloned()
+                                        } else {
+                                            Some(before.clone())
+                                        };
+                                        match seed {
+                                            Some(seed) => {
+                                                let after = integrate_retro_guidance(
+                                                    &seed,
+                                                    std::slice::from_ref(&guidance),
+                                                );
+                                                Ok((
+                                                    resolved_target_path.clone(),
+                                                    before.clone(),
+                                                    after.clone(),
+                                                    unified_diff(
+                                                        &resolved_target_path,
+                                                        &before,
+                                                        &after,
+                                                    ),
+                                                    snapshot.head.clone(),
+                                                    hash_body(&before),
+                                                ))
+                                            }
+                                            None => Err(format!(
+                                                "Bundled skill `{}` was not found.",
+                                                suggestion.target_id
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error.clone()),
+                },
+            };
+
+            let (
+                target_path,
+                before_content,
+                after_content,
+                diff,
+                base_ref,
+                base_hash,
+                status,
+                error,
+            ) = match materialized {
+                Ok((_, before, after, _, _, _)) if before == after => continue,
+                Ok((resolved_target_path, before, after, diff, base_ref, base_hash)) => (
+                    resolved_target_path,
+                    Some(before),
+                    Some(after),
+                    Some(diff),
+                    Some(base_ref),
+                    Some(base_hash),
+                    "ready".to_string(),
+                    None,
+                ),
+                Err(error) => (
+                    target_path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "unavailable".to_string(),
+                    Some(error),
+                ),
+            };
+            rows.push(RetroSuggestionRow {
+                id,
+                retro_id: retro.id.clone(),
+                repo_name: repo_report.repo_name.clone(),
+                repo_url: repo_url.clone(),
+                finding_index: index as i64,
+                target_type: target_type.to_string(),
+                target_id: suggestion.target_id.clone(),
+                target_path,
+                title: suggestion.title.clone(),
+                body: suggestion.body.clone(),
+                rationale: suggestion.rationale.clone(),
+                confidence: confidence_label(&suggestion.confidence).to_string(),
+                guidance,
+                before_content,
+                after_content,
+                unified_diff: diff,
+                base_ref,
+                base_hash,
+                proposal_status: status,
+                proposal_error: error,
+                decision: "pending".to_string(),
+                decided_at: None,
+                created_at,
+            });
+        }
+        if let Ok(snapshot) = snapshot {
+            tokio::fs::remove_dir_all(snapshot.root).await.ok();
+        }
+    }
+    rows
+}
+
+fn guidance_for(finding: &RetroFinding) -> String {
+    let context = format!("{} {}", finding.title, finding.detail).to_lowercase();
+    if context.contains("commands exited unsuccessfully") {
+        "Handle non-zero command exits according to context: expected probe failures should be quiet, while actionable setup or validation failures must be resolved before pushing and reusable prerequisites recorded in the workpad.".to_string()
+    } else if context.contains("screenshot") || context.contains("playwright") {
+        "For user-facing UI changes, capture the relevant desktop and responsive states after validation, and keep only the final evidence requested by the repository workflow.".to_string()
+    } else if context.contains("workpad was not found") {
+        "Create or update the Symphony Workpad for every dispatched issue, recording progress, validation, and reusable confusion before completing the task.".to_string()
+    } else if context.contains("approval") || context.contains("follow-up") {
+        "Unattended runs must not stop for interactive approval or a follow-up question; choose a safe in-scope path and record any genuine blocker in the workpad.".to_string()
+    } else if context.contains("review") || context.contains("feedback") {
+        "Before completing review work, inspect all unresolved review threads, address the actionable items, and verify the resulting diff and checks.".to_string()
+    } else if context.contains("test")
+        || context.contains("typecheck")
+        || context.contains("validation")
+        || context.contains("exit")
+        || context.contains("failed")
+    {
+        "Run the repository's required validation before pushing; if it fails, resolve the root cause and record any reusable prerequisite in the workpad.".to_string()
+    } else {
+        "When a recurring issue blocks progress, resolve the root cause before completing the task and record any reusable prerequisite in the workpad.".to_string()
+    }
+}
+
+pub fn integrate_retro_guidance(base: &str, guidance: &[String]) -> String {
+    let mut seen = BTreeSet::new();
+    let additions = guidance
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty() && !base.contains(item))
+        .filter(|item| seen.insert((*item).to_string()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if additions.is_empty() {
+        return base.to_string();
+    }
+
+    let had_trailing_newline = base.ends_with('\n');
+    let mut lines = base.lines().map(str::to_string).collect::<Vec<_>>();
+    if lines.is_empty() {
+        let mut result = additions
+            .iter()
+            .map(|item| format!("- {item}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        result.push('\n');
+        return result;
+    }
+
+    let preferred_headings = [
+        "## Instructions",
+        "## Steps",
+        "## Goals",
+        "## Acceptance criteria & validation",
+        "## Preconditions",
+        "## Loop",
+        "## When to run",
+    ];
+    let section_start = preferred_headings
+        .iter()
+        .find_map(|heading| lines.iter().position(|line| line.trim() == *heading))
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("## "))
+        });
+
+    if let Some(section_start) = section_start {
+        let section_end = lines[section_start + 1..]
+            .iter()
+            .position(|line| line.trim_start().starts_with("## "))
+            .map(|offset| section_start + 1 + offset)
+            .unwrap_or(lines.len());
+        let content_end = (section_start + 1..section_end)
+            .rev()
+            .find(|index| !lines[*index].trim().is_empty())
+            .map(|index| index + 1)
+            .unwrap_or(section_start + 1);
+        let ordered_number = lines[section_start + 1..content_end]
+            .iter()
+            .filter_map(|line| markdown_ordered_item_number(line))
+            .max();
+        let has_unordered_items = lines[section_start + 1..content_end].iter().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("- ") || line.starts_with("* ")
+        });
+        let mut inserted = Vec::new();
+        if let Some(number) = ordered_number {
+            inserted.extend(
+                additions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {item}", number + index + 1)),
+            );
+        } else {
+            if !has_unordered_items {
+                inserted.push(String::new());
+            }
+            inserted.extend(additions.iter().map(|item| format!("- {item}")));
+        }
+        lines.splice(content_end..content_end, inserted);
+    } else {
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        lines.push(String::new());
+        lines.extend(additions.iter().map(|item| format!("- {item}")));
+    }
+
+    let mut result = lines.join("\n");
+    if had_trailing_newline {
+        result.push('\n');
+    }
+    result
+}
+
+fn markdown_ordered_item_number(line: &str) -> Option<usize> {
+    let (prefix, _) = line.trim_start().split_once(". ")?;
+    prefix.parse().ok()
+}
+
+pub fn uses_legacy_retro_section(suggestion: &RetroSuggestionRow) -> bool {
+    suggestion
+        .after_content
+        .as_deref()
+        .is_some_and(|content| content.contains("## Retro guidance ("))
+}
+
+pub fn unified_diff(path: &str, before: &str, after: &str) -> String {
+    let before_path = if before.is_empty() {
+        "/dev/null".to_string()
+    } else {
+        format!("a/{path}")
+    };
+    let after_path = format!("b/{path}");
+    TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(&before_path, &after_path)
+        .to_string()
+}
+
+fn confidence_label(confidence: &RetroConfidence) -> &'static str {
+    match confidence {
+        RetroConfidence::Low => "low",
+        RetroConfidence::Medium => "medium",
+        RetroConfidence::High => "high",
+    }
+}
+
+fn path_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+async fn clone_repo_snapshot(
+    repo_url: &str,
+    destination: &Path,
+    session_env: &BTreeMap<String, String>,
+) -> Result<RepoSnapshot, String> {
+    tokio::fs::remove_dir_all(destination).await.ok();
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|err| format!("Could not create proposal workspace: {err}"))?;
+    }
+    let destination_arg = destination.display().to_string();
+    let output = command_output(
+        "git",
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--single-branch",
+            "--",
+            repo_url,
+            &destination_arg,
+        ],
+        None,
+        session_env,
+    )
+    .await?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not clone repository: {}",
+            tail(&String::from_utf8_lossy(&output.stderr), 300)
+        ));
+    }
+    let head = command_output(
+        "git",
+        &["rev-parse", "HEAD"],
+        Some(destination),
+        session_env,
+    )
+    .await?;
+    if !head.status.success() {
+        return Err("Could not resolve the repository revision.".to_string());
+    }
+    Ok(RepoSnapshot {
+        root: destination.to_path_buf(),
+        head: String::from_utf8_lossy(&head.stdout).trim().to_string(),
+    })
+}
+
+pub async fn command_output(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    session_env: &BTreeMap<String, String>,
+) -> Result<std::process::Output, String> {
+    command_output_with_timeout(program, args, cwd, session_env, RETRO_SUBPROCESS_TIMEOUT).await
+}
+
+async fn command_output_with_timeout(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&Path>,
+    session_env: &BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    command.kill_on_drop(true);
+    command.env_remove("LINEAR_API_KEY");
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    for (key, value) in session_env {
+        if key != "LINEAR_API_KEY" {
+            command.env(key, value);
+        }
+    }
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(result) => result.map_err(|err| format!("Could not run {program}: {err}")),
+        Err(_) => Err(format!(
+            "{program} timed out after {} seconds.",
+            timeout.as_secs()
+        )),
+    }
+}
+
+async fn remote_branch_matches_local(
+    workspace: &Path,
+    branch: &str,
+    session_env: &BTreeMap<String, String>,
+) -> Result<Option<bool>, String> {
+    let remote_ref = format!("refs/heads/{branch}");
+    let remote_branch = command_output(
+        "git",
+        &["ls-remote", "--heads", "origin", &remote_ref],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !remote_branch.status.success() {
+        return Err(format!(
+            "Could not inspect the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&remote_branch.stderr), 300)
+        ));
+    }
+    if String::from_utf8_lossy(&remote_branch.stdout)
+        .trim()
+        .is_empty()
+    {
+        return Ok(None);
+    }
+
+    let fetch = command_output(
+        "git",
+        &["fetch", "--depth", "1", "origin", branch],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !fetch.status.success() {
+        return Err(format!(
+            "Could not fetch the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&fetch.stderr), 300)
+        ));
+    }
+    let diff = command_output(
+        "git",
+        &["diff", "--quiet", "FETCH_HEAD", "HEAD", "--"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    match diff.status.code() {
+        Some(0) => Ok(Some(true)),
+        Some(1) => Ok(Some(false)),
+        _ => Err(format!(
+            "Could not compare the existing retro branch: {}",
+            tail(&String::from_utf8_lossy(&diff.stderr), 300)
+        )),
+    }
+}
+
+pub fn tail(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.trim().to_string();
+    }
+    chars[chars.len() - max_chars..]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+pub async fn run_repo_pr_batch(
+    repository: Repository,
+    batch: RetroBatchRow,
+    suggestions: Vec<RetroSuggestionRow>,
+    workspace: PathBuf,
+    session_env: BTreeMap<String, String>,
+) {
+    if let Err(message) =
+        execute_repo_pr_batch(&repository, &batch, &suggestions, &workspace, &session_env).await
+    {
+        repository
+            .update_retro_batch(&batch.id, "failed", None, Some(&message), None)
+            .await
+            .ok();
+    }
+}
+
+async fn execute_repo_pr_batch(
+    repository: &Repository,
+    batch: &RetroBatchRow,
+    suggestions: &[RetroSuggestionRow],
+    workspace: &Path,
+    session_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    repository
+        .update_retro_batch(
+            &batch.id,
+            "running",
+            Some("Cloning the repository…"),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if suggestions.iter().any(uses_legacy_retro_section) {
+        repository
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("The proposal format changed."),
+                Some("Generate a new retro and review the updated in-place diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+    let repo_url = batch
+        .repo_url
+        .as_deref()
+        .ok_or_else(|| "Batch has no repository URL.".to_string())?;
+    let snapshot = clone_repo_snapshot(repo_url, workspace, session_env).await?;
+    let expected_refs = suggestions
+        .iter()
+        .filter_map(|suggestion| suggestion.base_ref.as_deref())
+        .collect::<BTreeSet<_>>();
+    if expected_refs.len() != 1 || !expected_refs.contains(snapshot.head.as_str()) {
+        repository
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("The default branch changed since review."),
+                Some("Generate a new retro and review the updated diff."),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    let branch_output = command_output(
+        "git",
+        &["branch", "--show-current"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !branch_output.status.success() {
+        return Err("Could not determine the repository's default branch.".to_string());
+    }
+    let default_branch = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
+    let short_retro = batch.retro_id.get(..8).unwrap_or(batch.retro_id.as_str());
+    let branch = format!("symphony/retro-{short_retro}");
+
+    let existing = command_output(
+        "gh",
+        &[
+            "pr",
+            "list",
+            "--head",
+            &branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+        ],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    let existing_url = existing
+        .status
+        .success()
+        .then(|| pr_url_from_output(&existing.stdout))
+        .flatten();
+    repository
+        .update_retro_batch(
+            &batch.id,
+            "running",
+            Some("Applying accepted changes…"),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let checkout = command_output(
+        "git",
+        &["checkout", "-b", &branch],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !checkout.status.success() {
+        return Err(format!(
+            "Could not create branch: {}",
+            tail(&String::from_utf8_lossy(&checkout.stderr), 300)
+        ));
+    }
+
+    let mut by_path = BTreeMap::<String, Vec<&RetroSuggestionRow>>::new();
+    for suggestion in suggestions {
+        by_path
+            .entry(suggestion.target_path.clone())
+            .or_default()
+            .push(suggestion);
+    }
+    let mut changed_paths = Vec::new();
+    for (path, items) in by_path {
+        let destination = safe_repo_target(workspace, &path).await?;
+        let current = read_optional_text(&destination, &path).await?;
+        let expected_hashes = items
+            .iter()
+            .filter_map(|item| item.base_hash.as_deref())
+            .collect::<BTreeSet<_>>();
+        if expected_hashes.len() != 1 || !expected_hashes.contains(hash_body(&current).as_str()) {
+            repository
+                .update_retro_batch(
+                    &batch.id,
+                    "stale",
+                    Some("A reviewed target file changed."),
+                    Some("Generate a new retro and review the updated diff."),
+                    None,
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            return Ok(());
+        }
+        let seed = if current.is_empty() {
+            proposal_seed(items[0])?
+        } else {
+            current
+        };
+        let guidance = items
+            .iter()
+            .map(|item| item.guidance.clone())
+            .collect::<Vec<_>>();
+        let updated = integrate_retro_guidance(&seed, &guidance);
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| format!("Could not create target directory: {err}"))?;
+        }
+        tokio::fs::write(&destination, updated)
+            .await
+            .map_err(|err| format!("Could not write {path}: {err}"))?;
+        changed_paths.push(path);
+    }
+
+    let diff_names = command_output(
+        "git",
+        &["status", "--porcelain", "--untracked-files=all"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    let actual_paths = String::from_utf8_lossy(&diff_names.stdout)
+        .lines()
+        .filter_map(|line| line.get(3..).map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    let allowed_paths = changed_paths.iter().cloned().collect::<BTreeSet<_>>();
+    if actual_paths != allowed_paths {
+        return Err("The generated change touched files outside the reviewed batch.".to_string());
+    }
+
+    repository
+        .update_retro_batch(
+            &batch.id,
+            "running",
+            Some("Committing accepted changes…"),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    commit_retro_changes(workspace, &changed_paths, session_env).await?;
+
+    let reuse_remote_branch = match remote_branch_matches_local(workspace, &branch, session_env)
+        .await?
+    {
+        None => false,
+        Some(true) => true,
+        Some(false) => {
+            return Err(format!(
+                "Remote branch `{branch}` already exists with different changes. Review or remove that branch before retrying."
+            ));
+        }
+    };
+    if existing_url.is_some() && !reuse_remote_branch {
+        return Err(format!(
+            "The existing PR for `{branch}` no longer has a remote branch that matches the reviewed changes."
+        ));
+    }
+
+    repository
+        .update_retro_batch(
+            &batch.id,
+            "running",
+            Some(if existing_url.is_some() {
+                "Verifying existing retro PR…"
+            } else if reuse_remote_branch {
+                "Reusing pushed branch and opening PR…"
+            } else {
+                "Pushing branch and opening PR…"
+            }),
+            None,
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    if !reuse_remote_branch {
+        let push = command_output(
+            "git",
+            &["push", "-u", "origin", &branch],
+            Some(workspace),
+            session_env,
+        )
+        .await?;
+        if !push.status.success() {
+            return Err(format!(
+                "Could not push branch: {}",
+                tail(&String::from_utf8_lossy(&push.stderr), 400)
+            ));
+        }
+    }
+    let title = format!("Apply Symphony retro suggestions ({short_retro})");
+    let mut body = "## Accepted retro suggestions\n\n".to_string();
+    for suggestion in suggestions {
+        body.push_str(&format!("- {}\n", suggestion.title));
+    }
+    body.push_str("\nThe committed changes match the diffs reviewed in Symphony.\n");
+    let (pr_url, completed_progress) = if let Some(existing_url) = existing_url {
+        (existing_url, "Existing retro PR verified.")
+    } else {
+        let created = command_output(
+            "gh",
+            &[
+                "pr",
+                "create",
+                "--base",
+                &default_branch,
+                "--head",
+                &branch,
+                "--title",
+                &title,
+                "--body",
+                &body,
+            ],
+            Some(workspace),
+            session_env,
+        )
+        .await?;
+        if !created.status.success() {
+            return Err(format!(
+                "Could not create PR: {}",
+                tail(&String::from_utf8_lossy(&created.stderr), 400)
+            ));
+        }
+        let pr_url = pr_url_from_output(&created.stdout)
+            .ok_or_else(|| "GitHub reported success but no PR URL was returned.".to_string())?;
+        (pr_url, "Implementation PR created.")
+    };
+    repository
+        .update_retro_batch(
+            &batch.id,
+            "completed",
+            Some(completed_progress),
+            None,
+            Some(&pr_url),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    tokio::fs::remove_dir_all(workspace).await.ok();
+    Ok(())
+}
+
+fn pr_url_from_output(output: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://") || line.starts_with("http://"))
+        .map(str::to_string)
+}
+
+async fn commit_retro_changes(
+    workspace: &Path,
+    changed_paths: &[String],
+    session_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(changed_paths.iter().map(String::as_str));
+    let add = command_output("git", &add_args, Some(workspace), session_env).await?;
+    if !add.status.success() {
+        return Err(format!(
+            "Could not stage changes: {}",
+            tail(&String::from_utf8_lossy(&add.stderr), 300)
+        ));
+    }
+    let commit = command_output(
+        "git",
+        &["commit", "-m", "Apply Symphony retro suggestions"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !commit.status.success() {
+        let stderr = tail(&String::from_utf8_lossy(&commit.stderr), 300);
+        if stderr.contains("Author identity unknown")
+            || stderr.contains("unable to auto-detect email address")
+        {
+            return Err(
+                "Could not commit with your Git identity. Configure `git config --global user.name` and `git config --global user.email`, then retry."
+                    .to_string(),
+            );
+        }
+        return Err(format!("Could not commit changes: {}", stderr));
+    }
+    Ok(())
+}
+
+fn proposal_seed(suggestion: &RetroSuggestionRow) -> Result<String, String> {
+    let content = suggestion.after_content.as_deref().ok_or_else(|| {
+        format!(
+            "Could not reconstruct the base for {}.",
+            suggestion.target_path
+        )
+    })?;
+    let had_trailing_newline = content.ends_with('\n');
+    let guidance = suggestion.guidance.trim();
+    let mut lines = content.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(index) = lines
+        .iter()
+        .position(|line| markdown_list_item_body(line).is_some_and(|body| body.trim() == guidance))
+    else {
+        return Err(format!(
+            "Could not reconstruct the base for {}.",
+            suggestion.target_path
+        ));
+    };
+    lines.remove(index);
+    let mut seed = lines.join("\n");
+    if had_trailing_newline {
+        seed.push('\n');
+    }
+    Ok(seed)
+}
+
+fn markdown_list_item_body(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if let Some(body) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+        return Some(body);
+    }
+    let (prefix, body) = line.split_once(". ")?;
+    prefix.parse::<usize>().ok().map(|_| body)
+}
+
+async fn safe_repo_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!("Unsafe retro target path: {relative}"));
+    }
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|err| format!("Could not resolve repository root: {err}"))?;
+    let mut current = canonical_root.clone();
+    for component in relative_path.components() {
+        current.push(component.as_os_str());
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let resolved = tokio::fs::canonicalize(&current).await.map_err(|err| {
+                    format!("Could not resolve symbolic link in Retro target `{relative}`: {err}")
+                })?;
+                if !resolved.starts_with(&canonical_root) {
+                    return Err(format!(
+                        "Retro target `{relative}` resolves outside the repository."
+                    ));
+                }
+                current = resolved;
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "Could not inspect retro target `{relative}`: {err}"
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+async fn repo_relative_target(root: &Path, target: &Path) -> Result<String, String> {
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|err| format!("Could not resolve repository root: {err}"))?;
+    let relative = target.strip_prefix(&canonical_root).map_err(|_| {
+        format!(
+            "Retro target `{}` resolves outside the repository.",
+            target.display()
+        )
+    })?;
+    Ok(relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
+async fn read_optional_text(path: &Path, label: &str) -> Result<String, String> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => Ok(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(format!("Could not read retro target `{label}`: {err}")),
+    }
 }
 
 fn analyze_retro(
@@ -610,12 +1621,17 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                     .and_then(|value| value.get("tool"))
                     .and_then(|value| value.as_str())
                     .unwrap_or("tool");
+                let command = tool_command(value.as_ref());
+                let (key, title, detail) = tool_confusion_finding(tool, summary);
+                let evidence_summary = command
+                    .map(|command| format!("{} → {summary}", truncate_detail(command)))
+                    .unwrap_or_else(|| summary.to_string());
                 repo.push_finding(
-                    format!("tool:{tool}:{}", normalized_key(summary)),
-                    format!("`{tool}` calls produced confusing results"),
-                    truncate_detail(summary),
+                    key,
+                    title,
+                    detail,
                     RetroSeverity::Medium,
-                    event_evidence(run, event, "tool_call", summary),
+                    event_evidence(run, event, "tool_call", &evidence_summary),
                 );
             }
         }
@@ -674,6 +1690,14 @@ struct RepoAccumulator {
     findings: BTreeMap<String, RetroFinding>,
 }
 
+#[derive(Debug)]
+struct SuggestionGroup {
+    target_type: RetroSuggestionTarget,
+    target_id: String,
+    guidance: String,
+    finding: RetroFinding,
+}
+
 impl RepoAccumulator {
     fn new(repo_name: String) -> Self {
         Self {
@@ -713,18 +1737,75 @@ impl RepoAccumulator {
     }
 
     fn finish(self) -> RetroRepoReport {
-        let mut findings = self.findings.into_values().collect::<Vec<_>>();
-        findings.sort_by(|a, b| {
+        let mut raw_findings = self.findings.into_values().collect::<Vec<_>>();
+        raw_findings.sort_by(|a, b| {
             b.severity
                 .cmp(&a.severity)
                 .then_with(|| b.occurrences.cmp(&a.occurrences))
                 .then_with(|| a.title.cmp(&b.title))
         });
-        findings.truncate(MAX_FINDINGS_PER_REPO);
-        let suggestions = findings
+
+        let mut grouped =
+            BTreeMap::<(RetroSuggestionTarget, String, String), SuggestionGroup>::new();
+        for finding in raw_findings {
+            let guidance = guidance_for(&finding);
+            let (target_type, target_id) = suggestion_target(&finding);
+            let key = (target_type.clone(), target_id.clone(), guidance.clone());
+            if let Some(group) = grouped.get_mut(&key) {
+                group.finding.occurrences += finding.occurrences;
+                if finding.severity > group.finding.severity {
+                    group.finding.severity = finding.severity;
+                }
+                let mut seen_evidence = group
+                    .finding
+                    .evidence
+                    .iter()
+                    .map(evidence_key)
+                    .collect::<BTreeSet<_>>();
+                for evidence in finding.evidence {
+                    if group.finding.evidence.len() >= MAX_EVIDENCE_PER_FINDING {
+                        break;
+                    }
+                    if seen_evidence.insert(evidence_key(&evidence)) {
+                        group.finding.evidence.push(evidence);
+                    }
+                }
+            } else {
+                grouped.insert(
+                    key,
+                    SuggestionGroup {
+                        target_type,
+                        target_id,
+                        finding: RetroFinding {
+                            title: suggestion_topic(&guidance).to_string(),
+                            detail: guidance.clone(),
+                            severity: finding.severity,
+                            occurrences: finding.occurrences,
+                            evidence: finding.evidence,
+                        },
+                        guidance,
+                    },
+                );
+            }
+        }
+
+        let mut groups = grouped.into_values().collect::<Vec<_>>();
+        groups.sort_by(|a, b| {
+            b.finding
+                .severity
+                .cmp(&a.finding.severity)
+                .then_with(|| b.finding.occurrences.cmp(&a.finding.occurrences))
+                .then_with(|| a.finding.title.cmp(&b.finding.title))
+        });
+        groups.truncate(MAX_FINDINGS_PER_REPO);
+        let findings = groups
             .iter()
-            .map(|finding| suggestion_for(&self.repo_name, finding))
-            .collect();
+            .map(|group| group.finding.clone())
+            .collect::<Vec<_>>();
+        let suggestions = groups
+            .iter()
+            .map(|group| suggestion_for_group(&self.repo_name, group))
+            .collect::<Vec<_>>();
         RetroRepoReport {
             repo_name: self.repo_name,
             run_count: self.run_count,
@@ -738,13 +1819,32 @@ impl RepoAccumulator {
     }
 }
 
-fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
+fn suggestion_for_group(repo_name: &str, group: &SuggestionGroup) -> RetroSuggestion {
+    suggestion_from_parts(
+        repo_name,
+        &group.finding,
+        group.target_type.clone(),
+        group.target_id.clone(),
+        &group.guidance,
+    )
+}
+
+fn suggestion_target(finding: &RetroFinding) -> (RetroSuggestionTarget, String) {
     let joined = finding.detail.to_lowercase();
-    let (target_type, target_id) = if let Some(skill) = skill_target(&joined) {
+    if let Some(skill) = skill_target(&joined) {
         (RetroSuggestionTarget::Skill, skill.to_string())
     } else {
         (RetroSuggestionTarget::Prompt, "common prompt".to_string())
-    };
+    }
+}
+
+fn suggestion_from_parts(
+    repo_name: &str,
+    finding: &RetroFinding,
+    target_type: RetroSuggestionTarget,
+    target_id: String,
+    guidance: &str,
+) -> RetroSuggestion {
     let target_label = match target_type {
         RetroSuggestionTarget::Prompt => "common prompt".to_string(),
         RetroSuggestionTarget::Skill => target_id.clone(),
@@ -759,15 +1859,8 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
     RetroSuggestion {
         target_type,
         target_id,
-        title: format!(
-            "Clarify `{}` for {}",
-            short_title(&finding.title),
-            repo_name
-        ),
-        body: format!(
-            "Add guidance to {target_label} for this repeated pattern: {}",
-            finding.detail
-        ),
+        title: format!("Clarify {} for {}", suggestion_topic(guidance), repo_name),
+        body: format!("Update {target_label} with this guidance: {guidance}"),
         rationale: format!(
             "{} occurrence{} found in {} with {} severity.",
             finding.occurrences,
@@ -777,6 +1870,35 @@ fn suggestion_for(repo_name: &str, finding: &RetroFinding) -> RetroSuggestion {
         ),
         confidence,
     }
+}
+
+fn suggestion_topic(guidance: &str) -> &'static str {
+    if guidance.starts_with("Handle non-zero command exits") {
+        "non-zero command handling"
+    } else if guidance.starts_with("For user-facing UI changes") {
+        "UI evidence requirements"
+    } else if guidance.starts_with("Create or update the Symphony Workpad") {
+        "workpad requirements"
+    } else if guidance.starts_with("Unattended runs must not stop") {
+        "unattended-run behavior"
+    } else if guidance.starts_with("Before completing review work") {
+        "PR feedback handling"
+    } else if guidance.starts_with("Run the repository's required validation") {
+        "validation requirements"
+    } else {
+        "recurring issue handling"
+    }
+}
+
+fn evidence_key(evidence: &RetroEvidence) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        evidence.issue_identifier,
+        evidence.run_id.as_deref().unwrap_or_default(),
+        evidence.event_id.unwrap_or_default(),
+        evidence.kind,
+        evidence.summary
+    )
 }
 
 fn skill_target(text: &str) -> Option<&'static str> {
@@ -856,6 +1978,32 @@ fn should_report_tool_confusion(value: Option<&serde_json::Value>, summary: &str
     looks_like_tool_confusion(summary)
 }
 
+fn tool_command(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(|value| value.get("args"))
+        .and_then(|args| args.get("command"))
+        .and_then(|command| command.as_str())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+fn tool_confusion_finding(tool: &str, summary: &str) -> (String, String, String) {
+    if looks_like_nonzero_exit(summary) {
+        return (
+            format!("tool:{tool}:nonzero-exit"),
+            format!("`{tool}` commands exited unsuccessfully"),
+            format!(
+                "`{tool}` commands returned non-zero exits. The captured command context distinguishes expected probe failures from actionable setup or validation failures."
+            ),
+        );
+    }
+    (
+        format!("tool:{tool}:{}", normalized_key(summary)),
+        format!("`{tool}` calls produced confusing results"),
+        truncate_detail(summary),
+    )
+}
+
 fn tool_result_failed(value: Option<&serde_json::Value>, summary: &str) -> bool {
     value
         .and_then(|value| value.get("is_error"))
@@ -926,7 +2074,11 @@ fn normalized_key(value: &str) -> String {
 }
 
 fn short_title(value: &str) -> String {
-    let value = value.trim_matches('`').trim();
+    let value = value.trim();
+    let value = value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(value);
     if value.chars().count() <= 72 {
         value.to_string()
     } else {
@@ -954,7 +2106,7 @@ fn severity_label(severity: &RetroSeverity) -> &'static str {
     }
 }
 
-fn hash_body(body: &str) -> String {
+pub(crate) fn hash_body(body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -979,6 +2131,370 @@ fn retro_relevant_workpad_hash(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    async fn git_test_ok(cwd: Option<&Path>, args: &[&str]) {
+        let output = command_output("git", args, cwd, &BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_suggestion(after_content: String, guidance: &str) -> RetroSuggestionRow {
+        RetroSuggestionRow {
+            id: "suggestion-1".to_string(),
+            retro_id: "retro-1".to_string(),
+            repo_name: "widgets".to_string(),
+            repo_url: Some("https://github.com/acme/widgets.git".to_string()),
+            finding_index: 0,
+            target_type: "skill".to_string(),
+            target_id: "symphony-push".to_string(),
+            target_path: ".agents/skills/symphony-push/SKILL.md".to_string(),
+            title: "Improve push validation".to_string(),
+            body: "Record the validation requirement.".to_string(),
+            rationale: "Repeated failures".to_string(),
+            confidence: "high".to_string(),
+            guidance: guidance.to_string(),
+            before_content: Some(String::new()),
+            after_content: Some(after_content),
+            unified_diff: None,
+            base_ref: Some("abc123".to_string()),
+            base_hash: Some(hash_body("")),
+            proposal_status: "ready".to_string(),
+            proposal_error: None,
+            decision: "pending".to_string(),
+            decided_at: None,
+            created_at: now_iso(),
+        }
+    }
+
+    #[test]
+    fn produces_an_exact_reviewable_guidance_diff() {
+        let before = "# Workflow\n\n## Instructions\n\n1. Existing guidance.\n";
+        let after =
+            integrate_retro_guidance(before, &["Run validation before pushing.".to_string()]);
+        assert!(!after.contains("Retro guidance"));
+        assert!(after.contains("2. Run validation before pushing."));
+        assert_eq!(
+            integrate_retro_guidance(&after, &["Run validation before pushing.".to_string()]),
+            after
+        );
+        let diff = unified_diff("Settings → Prompt template", before, &after);
+        assert!(diff.contains("--- a/Settings → Prompt template"));
+        assert!(diff.contains("+2. Run validation before pushing."));
+        assert!(!diff.contains("Retro guidance"));
+    }
+
+    #[test]
+    fn accepts_only_actual_urls_from_pr_lookup_output() {
+        assert_eq!(pr_url_from_output(b"null\n"), None);
+        assert_eq!(pr_url_from_output(b"\n"), None);
+        assert_eq!(
+            pr_url_from_output(b"https://github.com/acme/widgets/pull/7\n"),
+            Some("https://github.com/acme/widgets/pull/7".to_string())
+        );
+    }
+
+    #[test]
+    fn reconstructs_a_missing_skill_seed_after_in_place_guidance() {
+        let seed = "# Push\n\n## Steps\n\n1. Push the current branch.\n";
+        let guidance = "Run validation before pushing.";
+        let after = integrate_retro_guidance(seed, &[guidance.to_string()]);
+        let suggestion = test_suggestion(after, guidance);
+
+        assert_eq!(proposal_seed(&suggestion).unwrap(), seed);
+        assert!(!uses_legacy_retro_section(&suggestion));
+    }
+
+    #[tokio::test]
+    async fn materializes_one_card_for_an_identical_target_change() {
+        let mut accumulator = RepoAccumulator::new("widgets".to_string());
+        for (key, detail) in [("exit-one", "exit 1"), ("exit-two", "exit 2")] {
+            accumulator.push_finding(
+                key.to_string(),
+                "`bash` commands exited unsuccessfully".to_string(),
+                detail.to_string(),
+                RetroSeverity::Medium,
+                RetroEvidence {
+                    issue_identifier: "SYM-1".to_string(),
+                    run_id: None,
+                    run_number: None,
+                    event_id: None,
+                    kind: "tool_call".to_string(),
+                    summary: detail.to_string(),
+                },
+            );
+        }
+        let repo_report = accumulator.finish();
+        assert_eq!(repo_report.findings.len(), 1);
+        assert!(repo_report.findings[0]
+            .detail
+            .starts_with("Handle non-zero command exits"));
+        let retro = RetroRow {
+            id: "retro-1".to_string(),
+            since_at: "1970-01-01T00:00:00.000Z".to_string(),
+            until_at: "2099-01-01T00:00:00.000Z".to_string(),
+            status: "completed".to_string(),
+            run_count: 2,
+            issue_count: 1,
+            report_json: None,
+            error_message: None,
+            created_at: now_iso(),
+            completed_at: Some(now_iso()),
+        };
+        let report = RetroReport {
+            id: retro.id.clone(),
+            since_at: retro.since_at.clone(),
+            until_at: retro.until_at.clone(),
+            generated_at: now_iso(),
+            run_count: 2,
+            issue_count: 1,
+            workpad_count: 1,
+            repos: vec![repo_report],
+        };
+        let config = RetroProposalConfig {
+            prompt_template: "# Workflow\n\n## Instructions\n\n1. Do the work.\n".to_string(),
+            workflow_hash: "workflow-hash".to_string(),
+            repos: BTreeMap::new(),
+            workspace_root: std::env::temp_dir(),
+            session_env: BTreeMap::new(),
+            skills: BTreeMap::new(),
+        };
+
+        let rows = materialize_suggestions(&retro, &report, &config).await;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]
+            .unified_diff
+            .as_deref()
+            .unwrap()
+            .contains("+2. Handle non-zero command exits"));
+        assert!(!rows[0]
+            .unified_diff
+            .as_deref()
+            .unwrap()
+            .contains("Retro guidance"));
+
+        let mut already_applied = config.clone();
+        already_applied.prompt_template = rows[0].after_content.clone().unwrap();
+        assert!(materialize_suggestions(&retro, &report, &already_applied)
+            .await
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_skill_targets_that_escape_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("symphony-outside-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(root.join(".agents"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        symlink(&outside, root.join(".agents/skills")).unwrap();
+
+        let error = safe_repo_target(&root, ".agents/skills/symphony-workpad/SKILL.md")
+            .await
+            .unwrap_err();
+        assert!(error.contains("outside the repository"));
+
+        tokio::fs::remove_dir_all(root).await.ok();
+        tokio::fs::remove_dir_all(outside).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolves_supported_in_repo_skill_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let shared_skill = root.join("shared/symphony-workpad");
+        tokio::fs::create_dir_all(root.join(".agents/skills"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&shared_skill).await.unwrap();
+        tokio::fs::write(shared_skill.join("SKILL.md"), "# Workpad\n")
+            .await
+            .unwrap();
+        symlink(
+            "../../shared/symphony-workpad",
+            root.join(".agents/skills/symphony-workpad"),
+        )
+        .unwrap();
+
+        let target = safe_repo_target(&root, ".agents/skills/symphony-workpad/SKILL.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo_relative_target(&root, &target).await.unwrap(),
+            "shared/symphony-workpad/SKILL.md"
+        );
+
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn times_out_stalled_retro_subprocesses() {
+        let error = command_output_with_timeout(
+            "sh",
+            &["-c", "sleep 2"],
+            None,
+            &BTreeMap::new(),
+            Duration::from_millis(25),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retro_commits_use_the_users_git_identity() {
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let global_config = root.join("gitconfig");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let workspace_arg = workspace.display().to_string();
+        let config_arg = global_config.display().to_string();
+        git_test_ok(None, &["init", &workspace_arg]).await;
+        git_test_ok(
+            None,
+            &["config", "--file", &config_arg, "user.name", "Retro User"],
+        )
+        .await;
+        git_test_ok(
+            None,
+            &[
+                "config",
+                "--file",
+                &config_arg,
+                "user.email",
+                "retro-user@example.com",
+            ],
+        )
+        .await;
+        tokio::fs::write(workspace.join("change.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        let env = BTreeMap::from([
+            ("GIT_CONFIG_GLOBAL".to_string(), config_arg),
+            ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+        ]);
+
+        commit_retro_changes(&workspace, &["change.md".to_string()], &env)
+            .await
+            .unwrap();
+
+        let author = command_output(
+            "git",
+            &["log", "-1", "--format=%an%n%ae"],
+            Some(&workspace),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(author.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&author.stdout).trim(),
+            "Retro User\nretro-user@example.com"
+        );
+        let local_email = command_output(
+            "git",
+            &["config", "--local", "--get", "user.email"],
+            Some(&workspace),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(!local_email.status.success());
+
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reuses_a_pushed_branch_when_its_reviewed_tree_matches() {
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        let retry = root.join("retry");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let remote_arg = remote.display().to_string();
+        let seed_arg = seed.display().to_string();
+        let retry_arg = retry.display().to_string();
+        let branch = "symphony/retro-12345678";
+
+        git_test_ok(None, &["init", "--bare", &remote_arg]).await;
+        git_test_ok(None, &["init", &seed_arg]).await;
+        git_test_ok(Some(&seed), &["config", "user.name", "Test"]).await;
+        git_test_ok(Some(&seed), &["config", "user.email", "test@example.com"]).await;
+        tokio::fs::write(seed.join("SKILL.md"), "base\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&seed), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&seed), &["commit", "-m", "base"]).await;
+        git_test_ok(Some(&seed), &["branch", "-M", "main"]).await;
+        git_test_ok(Some(&seed), &["remote", "add", "origin", &remote_arg]).await;
+        git_test_ok(Some(&seed), &["push", "-u", "origin", "main"]).await;
+        git_test_ok(Some(&seed), &["checkout", "-b", branch]).await;
+        tokio::fs::write(seed.join("SKILL.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&seed), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&seed), &["commit", "-m", "reviewed"]).await;
+        git_test_ok(Some(&seed), &["push", "-u", "origin", branch]).await;
+
+        git_test_ok(
+            None,
+            &[
+                "clone",
+                "--branch",
+                "main",
+                "--single-branch",
+                &remote_arg,
+                &retry_arg,
+            ],
+        )
+        .await;
+        git_test_ok(Some(&retry), &["config", "user.name", "Test"]).await;
+        git_test_ok(Some(&retry), &["config", "user.email", "test@example.com"]).await;
+        git_test_ok(Some(&retry), &["checkout", "-b", branch]).await;
+        tokio::fs::write(retry.join("SKILL.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&retry), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&retry), &["commit", "-m", "retry"]).await;
+
+        assert_eq!(
+            remote_branch_matches_local(&retry, branch, &BTreeMap::new())
+                .await
+                .unwrap(),
+            Some(true)
+        );
+
+        tokio::fs::write(retry.join("SKILL.md"), "different change\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&retry), &["add", "SKILL.md"]).await;
+        git_test_ok(Some(&retry), &["commit", "-m", "different"]).await;
+        assert_eq!(
+            remote_branch_matches_local(&retry, branch, &BTreeMap::new())
+                .await
+                .unwrap(),
+            Some(false)
+        );
+
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
 
     #[test]
     fn parses_workpad_sections() {
@@ -1049,6 +2565,111 @@ mod tests {
             None,
             "read succeeded and source mentioned a missing file"
         ));
+
+        let exit_one = tool_confusion_finding("bash", "exit 1");
+        let exit_two = tool_confusion_finding("bash", "exit 2");
+        assert_eq!(exit_one, exit_two);
+        assert_eq!(exit_one.0, "tool:bash:nonzero-exit");
+        assert_eq!(exit_one.1, "`bash` commands exited unsuccessfully");
+
+        let payload = serde_json::json!({
+            "args": { "command": "/bin/zsh -lc 'npm run db:start'" },
+            "result_summary": "exit 1",
+            "tool": "bash"
+        });
+        assert_eq!(
+            tool_command(Some(&payload)),
+            Some("/bin/zsh -lc 'npm run db:start'")
+        );
+    }
+
+    #[test]
+    fn aggregates_nonzero_exit_codes_into_one_contextual_finding() {
+        let mut repo = RepoAccumulator::new("widgets".to_string());
+        for (summary, command) in [
+            ("exit 1", "npm run db:start"),
+            ("exit 2", "cargo test --workspace"),
+        ] {
+            let (key, title, detail) = tool_confusion_finding("bash", summary);
+            repo.push_finding(
+                key,
+                title,
+                detail,
+                RetroSeverity::Medium,
+                RetroEvidence {
+                    issue_identifier: "SYM-1".to_string(),
+                    run_id: Some("run-1".to_string()),
+                    run_number: Some(1),
+                    event_id: None,
+                    kind: "tool_call".to_string(),
+                    summary: format!("{command} → {summary}"),
+                },
+            );
+        }
+
+        let report = repo.finish();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].occurrences, 2);
+        assert_eq!(report.findings[0].evidence.len(), 2);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(
+            report.suggestions[0].title,
+            "Clarify non-zero command handling for widgets"
+        );
+    }
+
+    #[test]
+    fn consolidates_findings_that_generate_the_same_suggestion() {
+        let mut repo = RepoAccumulator::new("widgets".to_string());
+        for (key, issue, run_id, detail) in [
+            (
+                "run:failure:worker_restarted",
+                "SYM-1",
+                "run-1",
+                "Worker restarted while run was in-flight.",
+            ),
+            (
+                "run:failure:agent_failure",
+                "SYM-2",
+                "run-2",
+                "Validation failed after the worker resumed.",
+            ),
+        ] {
+            repo.push_finding(
+                key.to_string(),
+                "Runs failed while work was in progress".to_string(),
+                detail.to_string(),
+                RetroSeverity::High,
+                RetroEvidence {
+                    issue_identifier: issue.to_string(),
+                    run_id: Some(run_id.to_string()),
+                    run_number: Some(1),
+                    event_id: None,
+                    kind: "run".to_string(),
+                    summary: detail.to_string(),
+                },
+            );
+        }
+
+        let report = repo.finish();
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(report.findings[0].occurrences, 2);
+        assert_eq!(report.findings[0].evidence.len(), 2);
+        assert_eq!(
+            report.suggestions[0].title,
+            "Clarify validation requirements for widgets"
+        );
+        assert_eq!(
+            report.suggestions[0].rationale,
+            "2 occurrences found in widgets with high severity."
+        );
+        assert!(!report.suggestions[0].body.contains("Observed pattern"));
+        assert!(!report.suggestions[0].body.contains("Worker restarted"));
+        assert!(report.suggestions[0]
+            .body
+            .contains("Run the repository's required validation before pushing"));
     }
 
     #[test]

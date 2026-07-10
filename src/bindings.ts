@@ -220,6 +220,49 @@ export type RetroStatus = {
 export type RetroDetail = {
   row: RetroRow;
   report: RetroReport | null;
+  suggestions: RetroSuggestionRow[];
+  batches: RetroBatchRow[];
+};
+
+export type RetroSuggestionRow = {
+  id: string;
+  retro_id: string;
+  repo_name: string;
+  repo_url: string | null;
+  finding_index: number;
+  target_type: string;
+  target_id: string;
+  target_path: string;
+  title: string;
+  body: string;
+  rationale: string;
+  confidence: string;
+  guidance: string;
+  before_content: string | null;
+  after_content: string | null;
+  unified_diff: string | null;
+  base_ref: string | null;
+  base_hash: string | null;
+  proposal_status: string;
+  proposal_error: string | null;
+  decision: string;
+  decided_at: string | null;
+  created_at: string;
+};
+
+export type RetroBatchRow = {
+  id: string;
+  retro_id: string;
+  kind: string;
+  repo_name: string | null;
+  repo_url: string | null;
+  base_ref: string | null;
+  state: string;
+  progress: string | null;
+  error: string | null;
+  pr_url: string | null;
+  created_at: string;
+  completed_at: string | null;
 };
 
 export type RetroReport = {
