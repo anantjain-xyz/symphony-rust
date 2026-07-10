@@ -390,6 +390,12 @@ describe("App settings", () => {
           .querySelectorAll("button"),
       ).map((button) => button.textContent),
     ).toEqual(["Pending", "Accepted", "Rejected", "All"]);
+    expect(
+      screen.getByRole("button", { name: "Pending" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed"),
+    ).toBe("false");
     expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
     expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
     const metadata = container.querySelectorAll(".retro-suggestion-badges");
@@ -407,16 +413,17 @@ describe("App settings", () => {
     expect(metadata[1].children[1].classList.contains("high")).toBe(true);
     expect(metadata[2].children[1].classList.contains("low")).toBe(true);
 
-    const acceptButtons = screen.getAllByRole("button", { name: "Accept" });
-    fireEvent.click(acceptButtons[0]);
-    fireEvent.click(acceptButtons[1]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Accept" })[0]);
 
-    const rejectButtons = screen.getAllByRole("button", { name: "Reject" });
-    fireEvent.click(rejectButtons[0]);
-    fireEvent.click(rejectButtons[1]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[0]);
 
     expect(screen.getByText("4 of 4 reviewed")).toBeTruthy();
     expect(screen.getByText("Review complete")).toBeTruthy();
+    expect(screen.getByText("No pending suggestions")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(
       screen.getAllByText("Accepted", { selector: ".retro-decision-label.accepted" }),
     ).toHaveLength(2);

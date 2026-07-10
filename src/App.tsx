@@ -2895,7 +2895,7 @@ function RetroView({
 }) {
   const [reviewFilter, setReviewFilter] = useState<
     "all" | "pending" | "accepted" | "rejected"
-  >("all");
+  >("pending");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const confirmDeleteTimer = useRef<number | null>(null);
   const activeReport = selected ? selected.report : status.report;
