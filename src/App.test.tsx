@@ -396,7 +396,20 @@ describe("App settings", () => {
 
     expect(screen.getByText("4 of 4 reviewed")).toBeTruthy();
     expect(screen.getByText("Review complete")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "Undo accepted" })).toHaveLength(2);
+    expect(
+      screen.getAllByText("Accepted", { selector: ".retro-decision-label.accepted" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByText("Rejected", { selector: ".retro-decision-label.rejected" }),
+    ).toHaveLength(2);
+    const acceptedUndoButtons = screen.getAllByRole("button", {
+      name: "Undo accepted decision",
+    });
+    expect(acceptedUndoButtons).toHaveLength(2);
+    expect(acceptedUndoButtons[0].textContent).toBe("");
+    expect(
+      screen.getAllByRole("button", { name: "Undo rejected decision" }),
+    ).toHaveLength(2);
     expect(
       screen.getByRole("button", { name: "Apply workflow prompt (1)" }).getAttribute("disabled"),
     ).not.toBeNull();
@@ -405,6 +418,9 @@ describe("App settings", () => {
         .getByRole("button", { name: "Create 1 implementation PR" })
         .getAttribute("disabled"),
     ).not.toBeNull();
+
+    fireEvent.click(acceptedUndoButtons[0]);
+    expect(screen.getByText("3 of 4 reviewed")).toBeTruthy();
   });
 
   it("explains when a Retro suggestion filter has no matching suggestions", () => {

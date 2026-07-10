@@ -889,6 +889,43 @@ small {
   gap: 6px;
 }
 
+.retro-decision-state {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.retro-decision-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.retro-decision-label.accepted {
+  color: var(--success-solid);
+}
+
+.retro-decision-label.rejected {
+  color: var(--muted-foreground);
+}
+
+.retro-undo-button {
+  color: var(--muted-foreground);
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  width: 28px;
+}
+
+.retro-undo-button svg {
+  fill: none;
+  height: 15px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  width: 15px;
+}
+
 .retro-diff {
   background: var(--muted);
   border: 1px solid var(--border);

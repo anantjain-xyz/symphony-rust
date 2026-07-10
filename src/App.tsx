@@ -3316,9 +3316,6 @@ function RetroReviewRepo({
                 <div className="retro-suggestion-badges">
                   <span className="retro-target">{suggestion.target_type}</span>
                   <Badge status={suggestion.confidence} />
-                  {suggestion.decision !== "pending" ? (
-                    <Badge status={suggestion.decision} />
-                  ) : null}
                 </div>
               </header>
 
@@ -3376,13 +3373,24 @@ function RetroReviewRepo({
                         </button>
                       </>
                     ) : (
-                      <button
-                        type="button"
-                        disabled={(busy && runtimeAvailable) || locked}
-                        onClick={() => onDecide(suggestion.id, "pending")}
-                      >
-                        Undo {suggestion.decision}
-                      </button>
+                      <div className="retro-decision-state">
+                        <span className={`retro-decision-label ${suggestion.decision}`}>
+                          {suggestion.decision === "accepted" ? "Accepted" : "Rejected"}
+                        </span>
+                        <button
+                          type="button"
+                          className="retro-undo-button"
+                          aria-label={`Undo ${suggestion.decision} decision`}
+                          title={`Undo ${suggestion.decision}`}
+                          disabled={(busy && runtimeAvailable) || locked}
+                          onClick={() => onDecide(suggestion.id, "pending")}
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true">
+                            <path d="M6.5 3.5 3 7l3.5 3.5" />
+                            <path d="M3.5 7h5a4.5 4.5 0 0 1 4.5 4.5" />
+                          </svg>
+                        </button>
+                      </div>
                     )}
                   </div>
                 </footer>
