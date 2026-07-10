@@ -1137,37 +1137,7 @@ async fn execute_repo_pr_batch(
         )
         .await
         .map_err(|err| err.to_string())?;
-    for args in [
-        vec!["config", "user.name", "Symphony"],
-        vec!["config", "user.email", "symphony@localhost"],
-    ] {
-        let output = command_output("git", &args, Some(workspace), session_env).await?;
-        if !output.status.success() {
-            return Err("Could not configure the retro commit author.".to_string());
-        }
-    }
-    let mut add_args = vec!["add", "--"];
-    add_args.extend(changed_paths.iter().map(String::as_str));
-    let add = command_output("git", &add_args, Some(workspace), session_env).await?;
-    if !add.status.success() {
-        return Err(format!(
-            "Could not stage changes: {}",
-            tail(&String::from_utf8_lossy(&add.stderr), 300)
-        ));
-    }
-    let commit = command_output(
-        "git",
-        &["commit", "-m", "Apply Symphony retro suggestions"],
-        Some(workspace),
-        session_env,
-    )
-    .await?;
-    if !commit.status.success() {
-        return Err(format!(
-            "Could not commit changes: {}",
-            tail(&String::from_utf8_lossy(&commit.stderr), 300)
-        ));
-    }
+    commit_retro_changes(workspace, &changed_paths, session_env).await?;
 
     let reuse_remote_branch = match remote_branch_matches_local(workspace, &branch, session_env)
         .await?
@@ -1260,6 +1230,42 @@ async fn execute_repo_pr_batch(
         .await
         .map_err(|err| err.to_string())?;
     tokio::fs::remove_dir_all(workspace).await.ok();
+    Ok(())
+}
+
+async fn commit_retro_changes(
+    workspace: &Path,
+    changed_paths: &[String],
+    session_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(changed_paths.iter().map(String::as_str));
+    let add = command_output("git", &add_args, Some(workspace), session_env).await?;
+    if !add.status.success() {
+        return Err(format!(
+            "Could not stage changes: {}",
+            tail(&String::from_utf8_lossy(&add.stderr), 300)
+        ));
+    }
+    let commit = command_output(
+        "git",
+        &["commit", "-m", "Apply Symphony retro suggestions"],
+        Some(workspace),
+        session_env,
+    )
+    .await?;
+    if !commit.status.success() {
+        let stderr = tail(&String::from_utf8_lossy(&commit.stderr), 300);
+        if stderr.contains("Author identity unknown")
+            || stderr.contains("unable to auto-detect email address")
+        {
+            return Err(
+                "Could not commit with your Git identity. Configure `git config --global user.name` and `git config --global user.email`, then retry."
+                    .to_string(),
+            );
+        }
+        return Err(format!("Could not commit changes: {}", stderr));
+    }
     Ok(())
 }
 
@@ -2254,6 +2260,71 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retro_commits_use_the_users_git_identity() {
+        let root = std::env::temp_dir().join(format!("symphony-retro-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let global_config = root.join("gitconfig");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let workspace_arg = workspace.display().to_string();
+        let config_arg = global_config.display().to_string();
+        git_test_ok(None, &["init", &workspace_arg]).await;
+        git_test_ok(
+            None,
+            &["config", "--file", &config_arg, "user.name", "Retro User"],
+        )
+        .await;
+        git_test_ok(
+            None,
+            &[
+                "config",
+                "--file",
+                &config_arg,
+                "user.email",
+                "retro-user@example.com",
+            ],
+        )
+        .await;
+        tokio::fs::write(workspace.join("change.md"), "reviewed change\n")
+            .await
+            .unwrap();
+        let env = BTreeMap::from([
+            ("GIT_CONFIG_GLOBAL".to_string(), config_arg),
+            ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+        ]);
+
+        commit_retro_changes(&workspace, &["change.md".to_string()], &env)
+            .await
+            .unwrap();
+
+        let author = command_output(
+            "git",
+            &["log", "-1", "--format=%an%n%ae"],
+            Some(&workspace),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(author.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&author.stdout).trim(),
+            "Retro User\nretro-user@example.com"
+        );
+        let local_email = command_output(
+            "git",
+            &["config", "--local", "--get", "user.email"],
+            Some(&workspace),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(!local_email.status.success());
+
+        tokio::fs::remove_dir_all(root).await.ok();
     }
 
     #[cfg(unix)]
