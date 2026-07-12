@@ -53,4 +53,6 @@ which.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+minisign-verify.workspace = true
 tempfile.workspace = true

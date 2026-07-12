@@ -5707,9 +5707,11 @@ name = "symphony-desktop"
 version = "0.1.12"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "keyring",
  "keyring-core",
+ "minisign-verify",
  "serde",
  "serde_json",
  "sha2",

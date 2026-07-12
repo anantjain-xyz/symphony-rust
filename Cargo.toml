@@ -18,10 +18,12 @@ authors = ["Anant Jain"]
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 keyring = "4.0.1"
 keyring-core = "1.0.0"
+minisign-verify = "0.2.5"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

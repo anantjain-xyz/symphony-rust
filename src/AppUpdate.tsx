@@ -202,6 +202,7 @@ export function AppUpdate({
         }
       });
       setPhase("ready");
+      if (safetyRef.current.transientBusy) return;
       if (
         hasUnsafeWork(safetyRef.current) &&
         safetyFingerprint(safetyRef.current) !== approvedSafetyRef.current

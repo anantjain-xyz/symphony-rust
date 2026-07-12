@@ -81,6 +81,9 @@ if [[ ! -s "$UPDATER_BUNDLE" || ! -s "$UPDATER_SIGNATURE" ]]; then
   echo "error: Tauri did not produce the signed macOS updater artifacts" >&2
   exit 1
 fi
+cargo run --quiet --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  --example verify-updater-signature -- \
+  "$UPDATER_BUNDLE" "$UPDATER_SIGNATURE" "$ROOT/src-tauri/tauri.conf.json"
 
 echo
 echo "── artifacts ──"

@@ -214,6 +214,62 @@ describe("AppUpdate", () => {
     await waitFor(() => expect(candidate.install).toHaveBeenCalledTimes(1));
   });
 
+  it("leaves a downloaded update ready while another action is busy", async () => {
+    let finishDownload!: () => void;
+    const candidate = updateCandidate({
+      download: vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDownload = resolve;
+          }),
+      ),
+    });
+    tauriMocks.check.mockResolvedValue(candidate);
+    const prepareForInstall = vi.fn().mockResolvedValue(vi.fn());
+    const onActionError = vi.fn();
+    const { rerender } = render(
+      <AppUpdate
+        enabled
+        safety={safe}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
+    );
+    await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
+    rerender(
+      <AppUpdate
+        enabled
+        safety={{ ...safe, transientBusy: true }}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
+    finishDownload();
+
+    const busyButton = await screen.findByRole("button", {
+      name: "Finish the current action before updating Symphony",
+    });
+    expect((busyButton as HTMLButtonElement).disabled).toBe(true);
+    expect(candidate.install).not.toHaveBeenCalled();
+
+    rerender(
+      <AppUpdate
+        enabled
+        safety={safe}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Update Symphony to v0.1.12" }),
+    );
+    await waitFor(() => expect(candidate.install).toHaveBeenCalledTimes(1));
+  });
+
   it("restores the worker and keeps a downloaded update ready after install failure", async () => {
     const candidate = updateCandidate({
       install: vi.fn().mockRejectedValue(new Error("signature mismatch")),
