@@ -2131,6 +2131,48 @@ pre {
   font-weight: 500;
 }
 
+.agent-cli-status-block {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-cli-status-row {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  align-items: center;
+  display: grid;
+  font-size: 12px;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 38px;
+  padding: 5px 8px 5px 10px;
+}
+
+.agent-cli-status-row > span:first-child {
+  align-items: baseline;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-cli-status-row strong {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.agent-cli-status-row code {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-cli-status-row .link-button {
+  white-space: nowrap;
+}
+
 .save-status {
   color: var(--muted-foreground);
   font-size: 12px;
