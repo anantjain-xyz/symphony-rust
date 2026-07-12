@@ -86,12 +86,15 @@ pub async fn resolve_repo_workflow(
     workspace: &Path,
     repo_url: &str,
     default_prompt: &str,
+    session_env: &BTreeMap<String, String>,
     cancel: &CancellationToken,
 ) -> ResolvedRepoWorkflow {
     let timeout = WORKFLOW_FETCH_TIMEOUT;
-    let default_branch = git_output(
+    let git_env = install_agent_env(repo_url, &BTreeMap::new(), session_env);
+    let default_branch = git_output_with_env(
         workspace,
         ["ls-remote", "--symref", repo_url, "HEAD"],
+        &git_env,
         timeout,
         cancel,
     )
@@ -103,9 +106,10 @@ pub async fn resolve_repo_workflow(
     let refreshed = if let Some(branch) = default_branch.as_deref() {
         let source = format!("refs/heads/{branch}");
         let refspec = format!("+{source}:{WORKFLOW_CACHE_REF}");
-        git_output(
+        git_output_with_env(
             workspace,
             ["fetch", "--no-tags", "--depth", "1", repo_url, &refspec],
+            &git_env,
             timeout,
             cancel,
         )
@@ -950,8 +954,22 @@ async fn git_output<const N: usize>(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<Output, String> {
+    git_output_with_env(workspace, args, &[], timeout, cancel).await
+}
+
+async fn git_output_with_env<const N: usize>(
+    workspace: &Path,
+    args: [&str; N],
+    env: &[(String, String)],
+    timeout: Duration,
+    cancel: &CancellationToken,
+) -> Result<Output, String> {
     let mut command = Command::new("git");
-    command.args(args).current_dir(workspace).kill_on_drop(true);
+    command
+        .args(args)
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .current_dir(workspace)
+        .kill_on_drop(true);
     tokio::select! {
         _ = cancel.cancelled() => Err("cancelled".to_string()),
         result = tokio::time::timeout(timeout, command.output()) => match result {
@@ -1080,6 +1098,7 @@ mod tests {
             &workspace,
             source.to_str().unwrap(),
             "app default",
+            &BTreeMap::new(),
             &CancellationToken::new(),
         )
         .await;
@@ -1093,11 +1112,59 @@ mod tests {
             &workspace,
             source.to_str().unwrap(),
             "app default",
+            &BTreeMap::new(),
             &CancellationToken::new(),
         )
         .await;
         assert_eq!(cached.source, RepoWorkflowSource::Repository);
         assert_eq!(cached.prompt_template, "default v2\n");
         assert!(cached.cached);
+    }
+
+    #[tokio::test]
+    async fn dispatch_uses_session_git_environment_for_private_repo_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        git_ok(&source, &["init", "-b", "main"]).await;
+        git_ok(&source, &["config", "user.name", "Symphony Test"]).await;
+        git_ok(&source, &["config", "user.email", "symphony@example.com"]).await;
+        commit_file(&source, WORKFLOW_FILE, "private workflow\n", "initial").await;
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                source.to_str().unwrap(),
+                workspace.to_str().unwrap(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(clone.status.success());
+
+        let session_env = BTreeMap::from([
+            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+            (
+                "GIT_CONFIG_KEY_0".to_string(),
+                format!("url.{}.insteadOf", source.display()),
+            ),
+            (
+                "GIT_CONFIG_VALUE_0".to_string(),
+                "symphony-private:".to_string(),
+            ),
+        ]);
+        let resolved = resolve_repo_workflow(
+            &workspace,
+            "symphony-private:",
+            "app default",
+            &session_env,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(resolved.source, RepoWorkflowSource::Repository);
+        assert_eq!(resolved.prompt_template, "private workflow\n");
+        assert!(!resolved.cached);
     }
 }

@@ -1041,6 +1041,7 @@ where
         &workspace.path,
         &repo_config.url,
         &config.workflow.prompt_template,
+        &config.session_env,
         &stop,
     )
     .await;
