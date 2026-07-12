@@ -1204,6 +1204,8 @@ pub fn run() {
     let path_fix = path_env::fix();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let handle = app.handle().clone();
             let app_dir = app.path().app_data_dir()?;

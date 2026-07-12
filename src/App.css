@@ -41,6 +41,8 @@
 
   --info: hsl(214 60% 96%);
   --info-foreground: hsl(214 55% 36%);
+  --update-solid: hsl(211 100% 42%);
+  --update-solid-hover: hsl(211 100% 37%);
 
   --neutral-dot: hsl(240 4% 60%);
 
@@ -88,6 +90,8 @@
 
   --info: hsl(214 45% 16%);
   --info-foreground: hsl(214 65% 74%);
+  --update-solid: hsl(211 95% 54%);
+  --update-solid-hover: hsl(211 95% 60%);
 
   --neutral-dot: hsl(240 4% 50%);
 
@@ -275,6 +279,138 @@ tr:focus-visible {
   line-height: 1;
   padding: 0 7px;
   text-transform: uppercase;
+}
+
+.update-button {
+  background: var(--update-solid);
+  border-color: var(--update-solid);
+  border-radius: 999px;
+  color: white;
+  flex: 0 0 auto;
+  gap: 6px;
+  height: 32px;
+  min-height: 32px;
+  overflow: hidden;
+  padding: 0;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    width 180ms ease;
+  white-space: nowrap;
+  width: 32px;
+}
+
+.update-button:hover:not(:disabled),
+.update-button:focus-visible:not(:disabled) {
+  background: var(--update-solid-hover);
+  border-color: var(--update-solid-hover);
+}
+
+.update-button.available:hover:not(:disabled),
+.update-button.available:focus-visible:not(:disabled) {
+  width: 88px;
+}
+
+.update-button.expanded {
+  padding: 0 11px;
+  width: auto;
+}
+
+.update-button:disabled {
+  cursor: wait;
+  opacity: 1;
+}
+
+.update-button.available:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.update-button-icon {
+  display: block;
+  flex: 0 0 16px;
+  height: 16px;
+  width: 16px;
+}
+
+.update-button-label {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.update-button.available .update-button-label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    max-width 180ms ease,
+    opacity 120ms ease;
+}
+
+.update-button.available:hover:not(:disabled) .update-button-label,
+.update-button.available:focus-visible:not(:disabled) .update-button-label {
+  max-width: 54px;
+  opacity: 1;
+}
+
+.update-spinner {
+  animation: update-spin 700ms linear infinite;
+  border: 2px solid hsl(0 0% 100% / 0.42);
+  border-radius: 50%;
+  border-top-color: white;
+  display: block;
+  flex: 0 0 15px;
+  height: 15px;
+  width: 15px;
+}
+
+@keyframes update-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.update-dialog-backdrop {
+  align-items: center;
+  background: hsl(240 10% 4% / 0.45);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 100;
+}
+
+.update-dialog {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 4px);
+  box-shadow: 0 18px 48px hsl(240 10% 4% / 0.22);
+  color: var(--card-foreground);
+  max-width: 440px;
+  padding: 22px;
+  width: 100%;
+}
+
+.update-dialog h2 {
+  font-size: 18px;
+  line-height: 1.25;
+  margin: 0 0 8px;
+}
+
+.update-dialog p {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.update-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
 }
 
 small {

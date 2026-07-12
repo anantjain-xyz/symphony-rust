@@ -47,6 +47,7 @@ import {
   countMatches,
   highlightMatches,
 } from "./MarkdownText";
+import { AppUpdate } from "./AppUpdate";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -1793,6 +1794,60 @@ function App() {
         ? "Worker is stopping"
         : "Start worker";
 
+  const updateBackgroundWork = [
+    retroStatus.state === "running" ? "the active Retro" : null,
+    skillsInstall?.state === "running" ? "the skills installation" : null,
+    selectedRetro?.batches.some((batch) =>
+      ["queued", "running"].includes(batch.state),
+    )
+      ? "the active Retro change batch"
+      : null,
+  ].filter((item): item is string => item !== null);
+
+  async function prepareForUpdateInstall() {
+    const workerWasRunning = worker.state === "running";
+    const restoreWorker = async () => {
+      if (!workerWasRunning) return;
+      const status = await invoke<WorkerStatus>("get_worker_status");
+      if (status.state === "stopped") {
+        setWorker(await invoke<WorkerStatus>("start_worker"));
+      }
+    };
+
+    if (worker.state !== "stopped") {
+      setWorker(await invoke<WorkerStatus>("stop_worker"));
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const [nextWorker, nextOverview] = await Promise.all([
+          invoke<WorkerStatus>("get_worker_status"),
+          invoke<Overview>("get_overview"),
+        ]);
+        setWorker(nextWorker);
+        setOverview(nextOverview);
+        if (nextWorker.state === "stopped" && nextOverview.active_runs.length === 0) {
+          return restoreWorker;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+      if (workerWasRunning) {
+        void (async () => {
+          for (;;) {
+            const status = await invoke<WorkerStatus>("get_worker_status");
+            setWorker(status);
+            if (status.state === "stopped") {
+              await restoreWorker();
+              return;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 500));
+          }
+        })().catch(() => undefined);
+      }
+      throw new Error("Symphony could not stop active work safely within 30 seconds.");
+    }
+
+    return restoreWorker;
+  }
+
   return (
     <main className="app">
       <header className="topbar">
@@ -1807,6 +1862,17 @@ function App() {
                 Dev
               </span>
             ) : null}
+            <AppUpdate
+              enabled={runtimeAvailable && !IS_LOCAL_DEV}
+              safety={{
+                activeRunCount: overview.active_runs.length,
+                backgroundWork: updateBackgroundWork,
+                hasUnsavedSettings: dirty,
+                transientBusy: busy,
+              }}
+              prepareForInstall={prepareForUpdateInstall}
+              onActionError={setError}
+            />
           </div>
 
           <nav className="topnav" aria-label="Primary">

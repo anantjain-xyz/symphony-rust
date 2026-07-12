@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Symphony",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "identifier": "xyz.anantjain.symphony",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -33,5 +33,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxNjY0NzlFQTI1M0Y0NTkKUldSWjlGT2lua2RtNGNJU0FkYnVCc0Q5cVY0ZlRwV0tZbEkvSW9NblJKS3Zwbyszdk9PdFJVZ0UK",
+      "endpoints": [
+        "https://github.com/anantjain-xyz/symphony-rust/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

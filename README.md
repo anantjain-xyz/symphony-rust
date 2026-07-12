@@ -17,7 +17,7 @@
 4. **Track** — agent events, token counts, retries, failures, and provider rate-limit signals are recorded in a local SQLite database and streamed live to the dashboard.
 5. **Retry** — failed runs are retried with exponential backoff, and the retry prompt includes the previous run's error context.
 
-Everything runs on your machine. The only network calls are to Linear's API and whatever your agents and hooks do.
+Everything runs on your machine. Network calls go to Linear's API, the tools your agents and hooks use, and — in packaged builds — GitHub Releases for a lightweight update check at launch and every six hours. Update bundles are downloaded only after you click **Update**.
 
 ## Retros
 
@@ -102,6 +102,7 @@ Retried runs automatically get a `## Retry context` section appended with the pr
 - Custom session environment variables are saved in `settings.json` and injected into agent sessions alongside Symphony's runtime variables like `$LINEAR_API_KEY`, `$REPO_URL`, and `$REPO_NAME`.
 - Runs, issues, and agent events are stored in a local **SQLite** database under the app data directory (`~/Library/Application Support/xyz.anantjain.symphony` on macOS), alongside daily-rotated logs and per-run workspaces.
 - Agents run with the sandbox/permission settings you give them under *Settings → Agent*. The defaults (`approval_policy: never`, `permission_mode: auto`, network access on for Codex, `force` + `trust` on for Cursor) are tuned for unattended runs in disposable workspaces — review them before pointing Symphony at anything sensitive.
+- Packaged builds check the public GitHub Releases feed for signed updates. When one is available, a compact button beside the Symphony logo expands to **Update** on hover or keyboard focus. Installation is always user-initiated and warns before interrupting active work or discarding unsaved Settings changes.
 
 ## Architecture
 
@@ -132,18 +133,23 @@ pnpm typecheck && pnpm test && cargo test --workspace   # the checks CI runs
 pnpm release:mac
 ```
 
-This builds, signs, notarizes, and staples the distributable DMG, then verifies the result with `spctl` and `stapler validate`. Signing and notarization credentials live in `~/.symphony-release.env` (override the location with `SYMPHONY_RELEASE_ENV`):
+This builds, signs, notarizes, and staples the distributable DMG, creates the signed Tauri updater archive, then verifies both outputs. Apple signing and notarization credentials live in `~/.symphony-release.env` (override the location with `SYMPHONY_RELEASE_ENV`):
 
 ```sh
 APPLE_SIGNING_IDENTITY=... # e.g. "Developer ID Application: Jane Doe (TEAMID1234)"
 APPLE_API_ISSUER=...       # App Store Connect issuer ID (UUID)
 APPLE_API_KEY=...          # API key ID
 APPLE_API_KEY_PATH=...     # absolute path to the AuthKey_<id>.p8 file
+# Optional overrides; the updater key defaults to ~/.tauri/symphony.key
+TAURI_SIGNING_PRIVATE_KEY_PATH=...
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...
 ```
 
 The Developer ID Application certificate named by `APPLE_SIGNING_IDENTITY` must be installed in the login keychain; the script validates it before building.
 
-The finished DMG lands in `target/release/bundle/dmg/`.
+Generate the updater key once with `pnpm tauri signer generate -w ~/.tauri/symphony.key`. The public key is embedded in the app; keep the private key outside the repository and back it up securely. Losing it prevents future in-app updates for versions that trust it.
+
+The finished DMG lands in `target/release/bundle/dmg/`. The updater bundle and signature land beside the app in `target/release/bundle/macos/`.
 
 ### Publishing a release
 
@@ -151,7 +157,9 @@ The finished DMG lands in `target/release/bundle/dmg/`.
 pnpm release:publish
 ```
 
-This runs the signed build above, then tags `v<version>` (read from `src-tauri/tauri.conf.json`) and creates a GitHub release with the DMG attached under both its versioned name and the stable name `Symphony.dmg` — the file behind the download link at the top of this README, which always serves the newest release. Bump the version in `src-tauri/tauri.conf.json` (and keep `package.json` in sync) before publishing.
+This runs the signed build above, then tags `v<version>` (read from `src-tauri/tauri.conf.json`) and creates a draft GitHub release. It uploads and verifies the versioned DMG, stable `Symphony.dmg`, signed `Symphony.app.tar.gz`, its signature, and `latest.json` before publishing the release. The stable DMG and updater feed therefore always resolve to one complete release. Bump the version in `src-tauri/tauri.conf.json` (and keep the other version manifests in sync) before publishing.
+
+The first release containing the updater must still be installed manually by users on an older build. Every later stable release can be discovered and installed from inside Symphony.
 
 The script refuses to run unless you're on a clean `main` checkout matching `origin/main`, and it needs an authenticated [GitHub CLI](https://cli.github.com) (`gh`) with push access.
 

@@ -1,6 +1,6 @@
 [package]
 name = "symphony-desktop"
-version = "0.1.11"
+version = "0.1.12"
 description = "Symphony desktop operator app"
 authors.workspace = true
 edition.workspace = true
@@ -42,6 +42,8 @@ symphony-tracker = { path = "../crates/symphony-tracker" }
 symphony-worker = { path = "../crates/symphony-worker" }
 tauri.workspace = true
 tauri-plugin-opener.workspace = true
+tauri-plugin-process.workspace = true
+tauri-plugin-updater.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

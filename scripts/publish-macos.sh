@@ -5,12 +5,15 @@ set -euo pipefail
 #
 # Runs release-macos.sh (build + sign + notarize + verify), then tags
 # v<version> (read from src-tauri/tauri.conf.json) and creates a GitHub
-# release with the DMG attached twice:
+# draft release with all assets attached and verified before publication:
 #
 #   Symphony_<version>_<arch>.dmg   the versioned artifact
 #   Symphony.dmg                    stable name, so the README's
 #                                   releases/latest/download/Symphony.dmg
 #                                   link always serves the newest build
+#   Symphony.app.tar.gz             updater bundle
+#   Symphony.app.tar.gz.sig         updater signature
+#   latest.json                     updater feed metadata
 #
 # Requires an authenticated GitHub CLI (`gh`) with push access.
 
@@ -61,22 +64,72 @@ if (( ${#DMGS[@]} != 1 )); then
   exit 1
 fi
 DMG="${DMGS[0]}"
+UPDATER_BUNDLE="$ROOT/target/release/bundle/macos/Symphony.app.tar.gz"
+UPDATER_SIGNATURE="$UPDATER_BUNDLE.sig"
+if [[ ! -s "$UPDATER_BUNDLE" || ! -s "$UPDATER_SIGNATURE" ]]; then
+  echo "error: signed updater artifacts are missing" >&2
+  exit 1
+fi
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$DMG" "$STAGE/Symphony.dmg"
+REPO_URL="$(gh repo view --json url -q .url)"
+REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/Symphony.app.tar.gz"
+SIGNATURE="$(<"$UPDATER_SIGNATURE")"
+VERSION="$VERSION" UPDATER_URL="$UPDATER_URL" SIGNATURE="$SIGNATURE" \
+  node -e '
+    const feed = {
+      version: process.env.VERSION,
+      platforms: {
+        "darwin-aarch64": {
+          url: process.env.UPDATER_URL,
+          signature: process.env.SIGNATURE,
+        },
+      },
+    };
+    process.stdout.write(`${JSON.stringify(feed, null, 2)}\n`);
+  ' > "$STAGE/latest.json"
+node -e '
+  const fs = require("node:fs");
+  const feed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const platform = feed.platforms?.["darwin-aarch64"];
+  if (!feed.version || !platform?.url || !platform?.signature) process.exit(1);
+' "$STAGE/latest.json"
 
 echo
-echo "── creating GitHub release $TAG ──"
-# --target pins the tag to the commit that was actually built, in case main
-# moves on the remote while the signed build runs.
+echo "── creating draft GitHub release $TAG ──"
+# Keep the release out of /releases/latest until every updater asset has been
+# uploaded and verified. --target pins the tag to the commit that was built.
 gh release create "$TAG" \
   --target "$COMMIT" \
   --title "Symphony $TAG" \
   --generate-notes \
-  "$DMG" "$STAGE/Symphony.dmg"
+  --draft \
+  "$DMG" \
+  "$STAGE/Symphony.dmg" \
+  "$UPDATER_BUNDLE" \
+  "$UPDATER_SIGNATURE" \
+  "$STAGE/latest.json"
 
-REPO_URL="$(gh repo view --json url -q .url)"
+for asset in \
+  "$(basename "$DMG")" \
+  Symphony.dmg \
+  Symphony.app.tar.gz \
+  Symphony.app.tar.gz.sig \
+  latest.json; do
+  if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qxF "$asset"; then
+    echo "error: draft release is missing $asset; leaving $TAG as a draft" >&2
+    exit 1
+  fi
+done
+
+echo
+echo "── publishing verified release $TAG ──"
+gh release edit "$TAG" --draft=false
+
 echo
 echo "Published: $REPO_URL/releases/tag/$TAG"
 echo "Stable download: $REPO_URL/releases/latest/download/Symphony.dmg"
+echo "Updater feed: $REPO_URL/releases/latest/download/latest.json"
