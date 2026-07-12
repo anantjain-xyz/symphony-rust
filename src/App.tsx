@@ -48,6 +48,7 @@ import {
   highlightMatches,
 } from "./MarkdownText";
 import { AppUpdate } from "./AppUpdate";
+import type { UpdateSafety } from "./AppUpdate";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -1817,7 +1818,13 @@ function App() {
   ].filter((item): item is string => item !== null);
 
   async function prepareForUpdateInstall() {
-    const workerWasRunning = worker.state === "running";
+    const [installWorker, installOverview] = await Promise.all([
+      invoke<WorkerStatus>("get_worker_status"),
+      invoke<Overview>("get_overview"),
+    ]);
+    setWorker(installWorker);
+    setOverview(installOverview);
+    const workerWasRunning = installWorker.state === "running";
     const restoreWorker = async () => {
       if (!workerWasRunning) return;
       const status = await invoke<WorkerStatus>("get_worker_status");
@@ -1825,39 +1832,74 @@ function App() {
         setWorker(await invoke<WorkerStatus>("start_worker"));
       }
     };
-
-    if (worker.state !== "stopped") {
-      setWorker(await invoke<WorkerStatus>("stop_worker"));
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline) {
-        const [nextWorker, nextOverview] = await Promise.all([
-          invoke<WorkerStatus>("get_worker_status"),
-          invoke<Overview>("get_overview"),
-        ]);
-        setWorker(nextWorker);
-        setOverview(nextOverview);
-        if (nextWorker.state === "stopped" && nextOverview.active_runs.length === 0) {
-          return restoreWorker;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 250));
-      }
-      if (workerWasRunning) {
-        void (async () => {
-          for (;;) {
-            const status = await invoke<WorkerStatus>("get_worker_status");
-            setWorker(status);
-            if (status.state === "stopped") {
-              await restoreWorker();
-              return;
-            }
-            await new Promise((resolve) => window.setTimeout(resolve, 500));
+    const restoreWorkerWhenStopped = async () => {
+      if (!workerWasRunning) return;
+      for (;;) {
+        try {
+          const status = await invoke<WorkerStatus>("get_worker_status");
+          setWorker(status);
+          if (status.state === "stopped") {
+            await restoreWorker();
+            return;
           }
-        })().catch(() => undefined);
+        } catch {
+          // A transient read/start failure must not abandon restoration after
+          // the updater has already requested worker shutdown.
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
       }
+    };
+
+    if (installWorker.state !== "stopped") {
+      setWorker(await invoke<WorkerStatus>("stop_worker"));
+      try {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          const [nextWorker, nextOverview] = await Promise.all([
+            invoke<WorkerStatus>("get_worker_status"),
+            invoke<Overview>("get_overview"),
+          ]);
+          setWorker(nextWorker);
+          setOverview(nextOverview);
+          if (
+            nextWorker.state === "stopped" &&
+            nextOverview.active_runs.length === 0
+          ) {
+            return restoreWorker;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+      } catch (error) {
+        void restoreWorkerWhenStopped().catch(() => undefined);
+        throw error;
+      }
+      void restoreWorkerWhenStopped().catch(() => undefined);
       throw new Error("Symphony could not stop active work safely within 30 seconds.");
     }
 
     return restoreWorker;
+  }
+
+  async function verifyUpdateInstallSafety(): Promise<UpdateSafety> {
+    const [nextOverview, nextHasInProgressRetroBatches] = await Promise.all([
+      invoke<Overview>("get_overview"),
+      invoke<boolean>("has_in_progress_retro_batches"),
+    ]);
+    setOverview(nextOverview);
+    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
+    return {
+      activeRunCount: nextOverview.active_runs.length,
+      activeRunIds: nextOverview.active_runs.map((run) => run.id),
+      backgroundWork: [
+        retroStatus.state === "running" ? "the active Retro" : null,
+        skillsInstall?.state === "running" ? "the skills installation" : null,
+        workflowTransfer?.state === "running" ? "the workflow transfer" : null,
+        nextHasInProgressRetroBatches ? "an active Retro change batch" : null,
+      ].filter((item): item is string => item !== null),
+      hasUnsavedSettings: dirty,
+      settingsFingerprint: dirty && settings ? formSnapshot(settings) : null,
+      transientBusy: busy,
+    };
   }
 
   return (
@@ -1878,11 +1920,15 @@ function App() {
               enabled={runtimeAvailable && !IS_LOCAL_DEV}
               safety={{
                 activeRunCount: overview.active_runs.length,
+                activeRunIds: overview.active_runs.map((run) => run.id),
                 backgroundWork: updateBackgroundWork,
                 hasUnsavedSettings: dirty,
+                settingsFingerprint: dirty && settings ? formSnapshot(settings) : null,
                 transientBusy: busy,
               }}
+              verifyInstallSafety={verifyUpdateInstallSafety}
               prepareForInstall={prepareForUpdateInstall}
+              onInstallLockChange={setBusy}
               onActionError={setError}
             />
           </div>

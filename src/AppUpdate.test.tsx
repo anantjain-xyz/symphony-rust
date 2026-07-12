@@ -20,8 +20,10 @@ vi.mock("@tauri-apps/plugin-process", () => ({
 
 const safe: UpdateSafety = {
   activeRunCount: 0,
+  activeRunIds: [],
   backgroundWork: [],
   hasUnsavedSettings: false,
+  settingsFingerprint: null,
   transientBusy: false,
 };
 
@@ -45,21 +47,29 @@ function updateCandidate(overrides: Record<string, unknown> = {}) {
 
 function renderUpdate({
   safety = safe,
+  verifyInstallSafety = vi.fn().mockImplementation(async () => safety),
   prepareForInstall = vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
+  onInstallLockChange = vi.fn(),
   onActionError = vi.fn(),
 }: {
   safety?: UpdateSafety;
+  verifyInstallSafety?: ReturnType<typeof vi.fn>;
   prepareForInstall?: ReturnType<typeof vi.fn>;
+  onInstallLockChange?: ReturnType<typeof vi.fn>;
   onActionError?: ReturnType<typeof vi.fn>;
 } = {}) {
   return {
     prepareForInstall,
+    verifyInstallSafety,
+    onInstallLockChange,
     onActionError,
     ...render(
       <AppUpdate
         enabled
         safety={safety}
+        verifyInstallSafety={verifyInstallSafety}
         prepareForInstall={prepareForInstall}
+        onInstallLockChange={onInstallLockChange}
         onActionError={onActionError}
       />,
     ),
@@ -86,7 +96,7 @@ describe("AppUpdate", () => {
   it("downloads, installs, and relaunches a safe update", async () => {
     const candidate = updateCandidate();
     tauriMocks.check.mockResolvedValue(candidate);
-    const { prepareForInstall } = renderUpdate();
+    const { prepareForInstall, onInstallLockChange } = renderUpdate();
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
@@ -94,6 +104,7 @@ describe("AppUpdate", () => {
 
     await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
     expect(prepareForInstall).toHaveBeenCalledTimes(1);
+    expect(onInstallLockChange).toHaveBeenCalledWith(true);
     expect(candidate.install).toHaveBeenCalledTimes(1);
     expect(tauriMocks.relaunch).toHaveBeenCalledTimes(1);
   });
@@ -104,8 +115,10 @@ describe("AppUpdate", () => {
     renderUpdate({
       safety: {
         activeRunCount: 2,
+        activeRunIds: ["run-a", "run-b"],
         backgroundWork: ["the active Retro"],
         hasUnsavedSettings: true,
+        settingsFingerprint: "dirty-settings",
         transientBusy: false,
       },
     });
@@ -169,6 +182,25 @@ describe("AppUpdate", () => {
     expect(candidate.install).not.toHaveBeenCalled();
   });
 
+  it("uses fresh backend safety before installation", async () => {
+    const candidate = updateCandidate();
+    tauriMocks.check.mockResolvedValue(candidate);
+    const verifyInstallSafety = vi.fn().mockResolvedValue({
+      ...safe,
+      activeRunCount: 1,
+      activeRunIds: ["newly-reserved-run"],
+    });
+    renderUpdate({ verifyInstallSafety });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
+    );
+
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    expect(screen.getByText(/1 active run will be interrupted/)).toBeTruthy();
+    expect(candidate.install).not.toHaveBeenCalled();
+  });
+
   it("reconfirms when unsafe work changes after initial approval", async () => {
     let finishDownload!: () => void;
     const candidate = updateCandidate({
@@ -182,7 +214,13 @@ describe("AppUpdate", () => {
     tauriMocks.check.mockResolvedValue(candidate);
     const prepareForInstall = vi.fn().mockResolvedValue(vi.fn());
     const onActionError = vi.fn();
-    const initialSafety = { ...safe, hasUnsavedSettings: true };
+    const initialSafety = {
+      ...safe,
+      activeRunCount: 1,
+      activeRunIds: ["run-a"],
+      hasUnsavedSettings: true,
+      settingsFingerprint: "settings-a",
+    };
     const { rerender } = render(
       <AppUpdate
         enabled
@@ -201,7 +239,11 @@ describe("AppUpdate", () => {
     rerender(
       <AppUpdate
         enabled
-        safety={{ ...initialSafety, activeRunCount: 1 }}
+        safety={{
+          ...initialSafety,
+          activeRunIds: ["run-b"],
+          settingsFingerprint: "settings-b",
+        }}
         prepareForInstall={prepareForInstall}
         onActionError={onActionError}
       />,
@@ -278,7 +320,10 @@ describe("AppUpdate", () => {
     const restoreWorker = vi.fn().mockResolvedValue(undefined);
     const prepareForInstall = vi.fn().mockResolvedValue(restoreWorker);
     const onActionError = vi.fn();
-    renderUpdate({ prepareForInstall, onActionError });
+    const { onInstallLockChange } = renderUpdate({
+      prepareForInstall,
+      onActionError,
+    });
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
@@ -288,6 +333,7 @@ describe("AppUpdate", () => {
       "Update installation failed: signature mismatch",
     ));
     expect(restoreWorker).toHaveBeenCalledTimes(1);
+    expect(onInstallLockChange).toHaveBeenLastCalledWith(false);
     expect(tauriMocks.relaunch).not.toHaveBeenCalled();
   });
 

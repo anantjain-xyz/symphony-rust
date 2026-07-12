@@ -18,15 +18,19 @@ type ConfirmationStage = "start" | "install" | "restart";
 
 export type UpdateSafety = {
   activeRunCount: number;
+  activeRunIds: string[];
   backgroundWork: string[];
   hasUnsavedSettings: boolean;
+  settingsFingerprint: string | null;
   transientBusy: boolean;
 };
 
 type AppUpdateProps = {
   enabled: boolean;
   safety: UpdateSafety;
+  verifyInstallSafety?: () => Promise<UpdateSafety>;
   prepareForInstall: () => Promise<() => Promise<void>>;
+  onInstallLockChange?: (locked: boolean) => void;
   onActionError: (message: string) => void;
 };
 
@@ -40,9 +44,11 @@ function hasUnsafeWork(safety: UpdateSafety) {
 
 function safetyFingerprint(safety: UpdateSafety) {
   return JSON.stringify({
-    activeRunCount: safety.activeRunCount,
+    activeRunIds: [...safety.activeRunIds].sort(),
     backgroundWork: [...safety.backgroundWork].sort(),
-    hasUnsavedSettings: safety.hasUnsavedSettings,
+    settingsFingerprint: safety.hasUnsavedSettings
+      ? safety.settingsFingerprint
+      : null,
   });
 }
 
@@ -55,18 +61,27 @@ function errorMessage(error: unknown) {
 export function AppUpdate({
   enabled,
   safety,
+  verifyInstallSafety,
   prepareForInstall,
+  onInstallLockChange,
   onActionError,
 }: AppUpdateProps) {
   const [phase, setPhase] = useState<UpdatePhase>("hidden");
   const [candidate, setCandidate] = useState<Update | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationStage | null>(null);
+  const [confirmationSafety, setConfirmationSafety] = useState<UpdateSafety | null>(null);
   const candidateRef = useRef<Update | null>(null);
   const checkingRef = useRef(false);
   const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
   const prepareForInstallRef = useRef(prepareForInstall);
+  const verifyInstallSafetyRef = useRef<() => Promise<UpdateSafety>>(
+    verifyInstallSafety ?? (async () => safety),
+  );
+  const onInstallLockChangeRef = useRef<(locked: boolean) => void>(
+    onInstallLockChange ?? (() => undefined),
+  );
   const onActionErrorRef = useRef(onActionError);
   const updateButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -74,6 +89,9 @@ export function AppUpdate({
 
   safetyRef.current = safety;
   prepareForInstallRef.current = prepareForInstall;
+  verifyInstallSafetyRef.current =
+    verifyInstallSafety ?? (async () => safetyRef.current);
+  onInstallLockChangeRef.current = onInstallLockChange ?? (() => undefined);
   onActionErrorRef.current = onActionError;
 
   useEffect(() => {
@@ -159,6 +177,7 @@ export function AppUpdate({
     if (safety.transientBusy) return;
     approvedSafetyRef.current = null;
     if (hasUnsafeWork(safety)) {
+      setConfirmationSafety(safety);
       setConfirmation(phase === "ready" ? "install" : "start");
       return;
     }
@@ -171,12 +190,15 @@ export function AppUpdate({
 
   const confirmUpdate = () => {
     const stage = confirmation;
-    approvedSafetyRef.current = safetyFingerprint(safetyRef.current);
+    approvedSafetyRef.current = safetyFingerprint(
+      confirmationSafety ?? safetyRef.current,
+    );
     setConfirmation(null);
+    setConfirmationSafety(null);
     if (stage === "start") {
       void download();
     } else if (stage === "install") {
-      void installAndRestart();
+      void requestInstall();
     } else if (stage === "restart") {
       void restartInstalledUpdate();
     }
@@ -203,14 +225,7 @@ export function AppUpdate({
       });
       setPhase("ready");
       if (safetyRef.current.transientBusy) return;
-      if (
-        hasUnsafeWork(safetyRef.current) &&
-        safetyFingerprint(safetyRef.current) !== approvedSafetyRef.current
-      ) {
-        setConfirmation("install");
-        return;
-      }
-      await installAndRestart();
+      await requestInstall();
     } catch (error) {
       setPhase("available");
       setProgress(null);
@@ -218,14 +233,42 @@ export function AppUpdate({
     }
   };
 
+  const requestInstall = async () => {
+    try {
+      const verifiedSafety = await verifyInstallSafetyRef.current();
+      safetyRef.current = verifiedSafety;
+      if (verifiedSafety.transientBusy) {
+        setPhase("ready");
+        return;
+      }
+      if (
+        hasUnsafeWork(verifiedSafety) &&
+        safetyFingerprint(verifiedSafety) !== approvedSafetyRef.current
+      ) {
+        setConfirmationSafety(verifiedSafety);
+        setConfirmation("install");
+        setPhase("ready");
+        return;
+      }
+      await installAndRestart();
+    } catch (error) {
+      setPhase("ready");
+      onActionErrorRef.current(
+        `Could not verify update safety: ${errorMessage(error)}`,
+      );
+    }
+  };
+
   const installAndRestart = async () => {
     let restoreWorker: (() => Promise<void>) | null = null;
     try {
       setPhase("installing");
+      onInstallLockChangeRef.current(true);
       restoreWorker = await prepareForInstallRef.current();
       await candidate.install();
     } catch (error) {
       await restoreWorker?.().catch(() => undefined);
+      onInstallLockChangeRef.current(false);
       setPhase("ready");
       onActionErrorRef.current(`Update installation failed: ${errorMessage(error)}`);
       return;
@@ -236,6 +279,7 @@ export function AppUpdate({
       await relaunch();
     } catch (error) {
       await restoreWorker?.().catch(() => undefined);
+      onInstallLockChangeRef.current(false);
       setPhase("restart-required");
       onActionErrorRef.current(
         `The update was installed, but Symphony could not restart: ${errorMessage(error)}`,
@@ -247,10 +291,12 @@ export function AppUpdate({
     let restoreWorker: (() => Promise<void>) | null = null;
     try {
       setPhase("restarting");
+      onInstallLockChangeRef.current(true);
       restoreWorker = await prepareForInstallRef.current();
       await relaunch();
     } catch (error) {
       await restoreWorker?.().catch(() => undefined);
+      onInstallLockChangeRef.current(false);
       setPhase("restart-required");
       onActionErrorRef.current(`Symphony could not restart: ${errorMessage(error)}`);
     }
@@ -260,6 +306,7 @@ export function AppUpdate({
     if (safety.transientBusy) return;
     approvedSafetyRef.current = null;
     if (hasUnsafeWork(safety)) {
+      setConfirmationSafety(safety);
       setConfirmation("restart");
       return;
     }
@@ -319,7 +366,9 @@ export function AppUpdate({
             aria-describedby="update-dialog-description"
           >
             <h2 id="update-dialog-title">Update and restart Symphony?</h2>
-            <p id="update-dialog-description">{safetyDescription(safety)}</p>
+            <p id="update-dialog-description">
+              {safetyDescription(confirmationSafety ?? safety)}
+            </p>
             <div className="update-dialog-actions">
               <button
                 ref={cancelButtonRef}
