@@ -1041,7 +1041,6 @@ where
         &workspace.path,
         &repo_config.url,
         &config.workflow.prompt_template,
-        config.workflow.front_matter.hooks.timeout_ms,
         &stop,
     )
     .await;

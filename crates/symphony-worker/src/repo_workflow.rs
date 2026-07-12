@@ -1,7 +1,8 @@
 use crate::skills::{
     clone_default_branch_command, gh_auth_status, github_graphql, github_open_pr_url,
     github_token_for_host, install_agent_env, parse_github_remote, remove_existing,
-    resolve_default_branch, run_shell, run_shell_with_env, shell_quote, tail, GhAuthStatus,
+    resolve_default_branch_with_env, run_shell, run_shell_with_env, shell_quote, tail,
+    GhAuthStatus,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -20,7 +21,9 @@ pub const WORKFLOW_FILE: &str = "SYMPHONY-WORKFLOW.md";
 pub const WORKFLOW_FILE_LOWER: &str = "symphony-workflow.md";
 const WORKFLOW_CACHE_REF: &str = "refs/symphony/workflow-default";
 pub const WORKFLOW_TRANSFER_BRANCH: &str = "symphony/install-workflow";
-const WORKFLOW_TRANSFER_WORKSPACE: &str = "_workflow-transfer";
+const WORKFLOW_ACTIONS_DIR: &str = ".symphony-actions";
+const WORKFLOW_TRANSFER_WORKSPACE: &str = "workflow-transfer";
+const WORKFLOW_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -83,10 +86,9 @@ pub async fn resolve_repo_workflow(
     workspace: &Path,
     repo_url: &str,
     default_prompt: &str,
-    timeout_ms: u64,
     cancel: &CancellationToken,
 ) -> ResolvedRepoWorkflow {
-    let timeout = Duration::from_millis(timeout_ms.max(1));
+    let timeout = WORKFLOW_FETCH_TIMEOUT;
     let default_branch = git_output(
         workspace,
         ["ls-remote", "--symref", repo_url, "HEAD"],
@@ -279,7 +281,8 @@ pub async fn check_repo_workflow(
         status.can_transfer = false;
         return status;
     }
-    match resolve_default_branch(repo_url).await {
+    let git_env = install_agent_env(repo_url, &BTreeMap::new(), session_env);
+    match resolve_default_branch_with_env(repo_url, &git_env).await {
         Ok(_) => status.can_transfer = true,
         Err(error) => {
             status.can_transfer = false;
@@ -512,14 +515,13 @@ async fn run_workflow_transfer(
     config: WorkflowTransferConfig,
 ) -> Result<String, String> {
     set_transfer_message(inner, "Resolving default branch…").await;
-    let default_branch = resolve_default_branch(&config.repo_url).await?;
-    let workspace = config.workspace_root.join(WORKFLOW_TRANSFER_WORKSPACE);
+    let env = install_agent_env(&config.repo_url, &config.env, &config.session_env);
+    let default_branch = resolve_default_branch_with_env(&config.repo_url, &env).await?;
+    let workspace = workflow_transfer_workspace(&config.workspace_root);
     tokio::fs::remove_dir_all(&workspace).await.ok();
     tokio::fs::create_dir_all(&workspace)
         .await
         .map_err(|error| format!("could not create transfer workspace: {error}"))?;
-    let env = install_agent_env(&config.repo_url, &config.env, &config.session_env);
-
     set_transfer_message(inner, "Cloning repository…").await;
     let clone = run_shell_with_env(
         Some(&workspace),
@@ -549,9 +551,6 @@ async fn run_workflow_transfer(
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!value.is_empty()).then_some(value)
     });
-    if let Some(url) = existing_pr {
-        return Ok(url);
-    }
     let remote_ref = format!("refs/heads/{WORKFLOW_TRANSFER_BRANCH}");
     let remote_branch = run_shell_with_env(
         Some(&workspace),
@@ -601,13 +600,15 @@ async fn run_workflow_transfer(
         .await
         .map_err(|error| error.to_string())?;
         let matching = names.status.success()
-            && String::from_utf8_lossy(&names.stdout).trim() == WORKFLOW_FILE
             && content.status.success()
-            && content.stdout == config.prompt_template.as_bytes();
+            && workflow_branch_matches(&names.stdout, &content.stdout, &config.prompt_template);
         if !matching {
             return Err(format!(
                 "Remote branch `{WORKFLOW_TRANSFER_BRANCH}` already exists with different changes. Review or remove it before retrying."
             ));
+        }
+        if let Some(url) = existing_pr {
+            return Ok(url);
         }
         let body = "Adds the saved default Symphony workflow to this repository. Once merged, Symphony will use this file for runs routed here.";
         let pr = run_shell_with_env(
@@ -635,6 +636,11 @@ async fn run_workflow_transfer(
             .find(|line| line.starts_with("http://") || line.starts_with("https://"))
             .map(str::to_string)
             .ok_or_else(|| "GitHub reported success but no PR URL was returned.".to_string());
+    }
+    if existing_pr.is_some() {
+        return Err(format!(
+            "An open workflow PR exists, but its remote branch `{WORKFLOW_TRANSFER_BRANCH}` is missing. Close the stale PR before retrying."
+        ));
     }
     let existing = resolve_at_ref(
         &workspace,
@@ -758,6 +764,17 @@ async fn run_workflow_transfer(
         .find(|line| line.starts_with("http://") || line.starts_with("https://"))
         .map(str::to_string)
         .ok_or_else(|| "GitHub reported success but no PR URL was returned.".to_string())
+}
+
+fn workflow_transfer_workspace(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .join(WORKFLOW_ACTIONS_DIR)
+        .join(WORKFLOW_TRANSFER_WORKSPACE)
+}
+
+fn workflow_branch_matches(changed_names: &[u8], content: &[u8], prompt_template: &str) -> bool {
+    String::from_utf8_lossy(changed_names).trim() == WORKFLOW_FILE
+        && content == prompt_template.as_bytes()
 }
 
 async fn resolve_at_ref(
@@ -979,6 +996,38 @@ mod tests {
     }
 
     #[test]
+    fn transfer_workspace_uses_reserved_actions_namespace() {
+        let root = Path::new("/tmp/symphony-workspaces");
+        assert_eq!(
+            workflow_transfer_workspace(root),
+            root.join(".symphony-actions/workflow-transfer")
+        );
+        assert_ne!(
+            workflow_transfer_workspace(root),
+            root.join(WORKFLOW_TRANSFER_WORKSPACE)
+        );
+    }
+
+    #[test]
+    fn existing_workflow_branch_must_match_current_prompt_exactly() {
+        assert!(workflow_branch_matches(
+            format!("{WORKFLOW_FILE}\n").as_bytes(),
+            b"current workflow\n",
+            "current workflow\n"
+        ));
+        assert!(!workflow_branch_matches(
+            format!("{WORKFLOW_FILE}\n").as_bytes(),
+            b"stale workflow\n",
+            "current workflow\n"
+        ));
+        assert!(!workflow_branch_matches(
+            format!("{WORKFLOW_FILE}\nREADME.md\n").as_bytes(),
+            b"current workflow\n",
+            "current workflow\n"
+        ));
+    }
+
+    #[test]
     fn github_listing_prefers_uppercase_and_reports_invalid_fallback() {
         let listing = serde_json::json!({
             "data": { "repository": {
@@ -1031,7 +1080,6 @@ mod tests {
             &workspace,
             source.to_str().unwrap(),
             "app default",
-            10_000,
             &CancellationToken::new(),
         )
         .await;
@@ -1045,7 +1093,6 @@ mod tests {
             &workspace,
             source.to_str().unwrap(),
             "app default",
-            1_000,
             &CancellationToken::new(),
         )
         .await;

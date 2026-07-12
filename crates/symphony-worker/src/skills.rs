@@ -793,9 +793,17 @@ async fn run_install(
 }
 
 pub(crate) async fn resolve_default_branch(repo_url: &str) -> Result<String, String> {
-    let output = run_shell(
+    resolve_default_branch_with_env(repo_url, &[]).await
+}
+
+pub(crate) async fn resolve_default_branch_with_env(
+    repo_url: &str,
+    env: &[(String, String)],
+) -> Result<String, String> {
+    let output = run_shell_with_env(
         None,
         &format!("git ls-remote --symref {} HEAD", shell_quote(repo_url)),
+        env,
     )
     .await
     .map_err(|err| format!("could not run git: {err}"))?;
