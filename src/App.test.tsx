@@ -212,7 +212,8 @@ function dashboardInvoke({
   issues?: IssueRow[];
   overview?: Overview;
   skillsStatus?: SkillsStatus;
-  validation?: Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
+  validation?: Partial<ValidationResult> &
+    Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
   workerStatus?: WorkerStatus;
 }) {
   return async (command: string, args?: { request?: { settings: AppSettings } }) => {
@@ -245,7 +246,6 @@ function dashboardInvoke({
         return skillsStatus;
       case "validate_settings":
         return {
-          ...validation,
           codex_found: true,
           claude_found: true,
           cursor_found: true,
@@ -256,6 +256,7 @@ function dashboardInvoke({
           opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
+          ...validation,
         };
       case "get_linear_viewer":
         return {
@@ -1107,6 +1108,42 @@ describe("App settings", () => {
         sessionEnv: { GITHUB_TOKEN: "from-session" },
       }),
     );
+  });
+
+  it("links missing agent CLIs to their official installation guide", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.openUrl.mockResolvedValue(undefined);
+    const settings = testSettings();
+    settings.agent_backend = "cursor";
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        validation: {
+          workflow_ok: true,
+          workflow_blocking: false,
+          workflow_error: null,
+          cursor_found: false,
+        },
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    const installButton = await screen.findByRole("button", { name: "Install Cursor" });
+    expect(
+      screen.getByText(
+        "After installing, open Cursor CLI once to sign in and choose a default model.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/The CLI that works on issues/)).toBeNull();
+    fireEvent.click(installButton);
+
+    expect(tauriMocks.openUrl).toHaveBeenCalledWith(
+      "https://docs.cursor.com/en/cli/installation",
+    );
+    expect(screen.queryByRole("button", { name: "Install Codex" })).toBeNull();
+    expect(screen.queryByText("Claude Code CLI")).toBeNull();
   });
 
   it("clears the manual skills mark when the repository URL changes", async () => {

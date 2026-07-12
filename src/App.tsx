@@ -4210,9 +4210,12 @@ function SettingsView({
               disabled={!runtimeAvailable}
               onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
             />
-            <small className="hint">
-              The CLI that works on issues. Must be installed and authenticated on this machine.
-            </small>
+            {validation ? (
+              <AgentCliStatus
+                backend={settings.agent_backend}
+                validation={validation}
+              />
+            ) : null}
           </div>
           <label>
             Launch command
@@ -4253,36 +4256,6 @@ function SettingsView({
               . Leave blank to run <code>{settings.agent_backend}</code> directly.
             </small>
           </label>
-          {validation ? (
-            <small className="hint">
-              Codex CLI
-              {validation.codex_command === "codex" ? "" : ` (${validation.codex_command})`}:{" "}
-              <span className={validation.codex_found ? "detect ok" : "detect missing"}>
-                {validation.codex_found ? "found" : "not found"}
-              </span>
-              {" · "}
-              Claude CLI
-              {validation.claude_command === "claude" ? "" : ` (${validation.claude_command})`}:{" "}
-              <span className={validation.claude_found ? "detect ok" : "detect missing"}>
-                {validation.claude_found ? "found" : "not found"}
-              </span>
-              {" · "}
-              Cursor CLI
-              {validation.cursor_command === "agent" ? "" : ` (${validation.cursor_command})`}:{" "}
-              <span className={validation.cursor_found ? "detect ok" : "detect missing"}>
-                {validation.cursor_found ? "found" : "not found"}
-              </span>
-              {" · "}
-              opencode CLI
-              {validation.opencode_command === "opencode"
-                ? ""
-                : ` (${validation.opencode_command})`}
-              :{" "}
-              <span className={validation.opencode_found ? "detect ok" : "detect missing"}>
-                {validation.opencode_found ? "found" : "not found"}
-              </span>
-            </small>
-          ) : null}
           <label>
             Turn timeout (seconds)
             <SettingsNumberInput
@@ -4934,6 +4907,74 @@ const BACKEND_OPTIONS: Array<{ value: AppSettings["agent_backend"]; label: strin
   { value: "cursor", label: "Cursor" },
   { value: "opencode", label: "opencode" },
 ];
+
+const AGENT_CLI_OPTIONS = [
+  {
+    key: "codex",
+    label: "Codex",
+    defaultCommand: "codex",
+    installUrl: "https://developers.openai.com/codex/cli",
+  },
+  {
+    key: "claude",
+    label: "Claude Code",
+    defaultCommand: "claude",
+    installUrl: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
+  },
+  {
+    key: "cursor",
+    label: "Cursor",
+    defaultCommand: "agent",
+    installUrl: "https://docs.cursor.com/en/cli/installation",
+  },
+  {
+    key: "opencode",
+    label: "opencode",
+    defaultCommand: "opencode",
+    installUrl: "https://opencode.ai/docs/",
+  },
+] as const;
+
+function AgentCliStatus({
+  backend,
+  validation,
+}: {
+  backend: AppSettings["agent_backend"];
+  validation: ValidationResult;
+}) {
+  const { label, defaultCommand, installUrl } =
+    AGENT_CLI_OPTIONS.find((option) => option.key === backend) ?? AGENT_CLI_OPTIONS[0];
+  const found = validation[`${backend}_found`];
+  const command = validation[`${backend}_command`];
+
+  return (
+    <div className="agent-cli-status-block" aria-label={`${label} CLI availability`}>
+      <div className="agent-cli-status-row">
+        <span>
+          <strong>{label} CLI</strong>
+          {command === defaultCommand ? null : <code>{command}</code>}
+        </span>
+        <span className={found ? "detect ok" : "detect missing"}>
+          {found ? "Found" : "Not found"}
+        </span>
+        {!found ? (
+          <button
+            type="button"
+            className="link-button outlined"
+            onClick={() => openUrl(installUrl).catch(() => undefined)}
+          >
+            Install {label}
+          </button>
+        ) : null}
+      </div>
+      <small className="hint">
+        {found
+          ? `Open ${label} CLI once to confirm you're signed in and a default model is configured.`
+          : `After installing, open ${label} CLI once to sign in and choose a default model.`}
+      </small>
+    </div>
+  );
+}
 
 function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
   if (backend === "claude") {
