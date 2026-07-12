@@ -4005,13 +4005,6 @@ function SettingsView({
             const bodyId = `repo-card-body-${index}`;
             const toggleLabel = `${expanded ? "Collapse" : "Edit"} ${repoTitle} repository`;
             const workflowStatus = workflowStatuses[repo.url.trim()] ?? null;
-            const workflowLabel = workflowChecking[repo.url.trim()]
-              ? "Workflow: checking"
-              : workflowStatus?.source === "repository"
-                ? "Workflow: repository"
-                : workflowStatus?.source === "default"
-                  ? "Workflow: default"
-                  : "Workflow: unknown";
             return (
               <fieldset
                 className={expanded ? "repo-card expanded" : "repo-card collapsed"}
@@ -4040,9 +4033,6 @@ function SettingsView({
                     <span className="repo-card-title">
                       <strong>{repoTitle}</strong>
                       <small>{repoSummary}</small>
-                    </span>
-                    <span className={`repo-workflow-pill source-${workflowStatus?.source ?? "unknown"}`}>
-                      {workflowLabel}
                     </span>
                   </button>
                   <div className="repo-card-actions">

@@ -1092,7 +1092,7 @@ describe("App settings", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
     expect(await screen.findByText("Using symphony-workflow.md.")).toBeTruthy();
-    expect(screen.getByText("Workflow: repository")).toBeTruthy();
+    expect(screen.queryByText("Workflow: repository")).toBeNull();
   });
 
   it("lets users mark repo skills as installed without installing the bundled set", async () => {
