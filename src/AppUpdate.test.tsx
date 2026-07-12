@@ -169,6 +169,51 @@ describe("AppUpdate", () => {
     expect(candidate.install).not.toHaveBeenCalled();
   });
 
+  it("reconfirms when unsafe work changes after initial approval", async () => {
+    let finishDownload!: () => void;
+    const candidate = updateCandidate({
+      download: vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDownload = resolve;
+          }),
+      ),
+    });
+    tauriMocks.check.mockResolvedValue(candidate);
+    const prepareForInstall = vi.fn().mockResolvedValue(vi.fn());
+    const onActionError = vi.fn();
+    const initialSafety = { ...safe, hasUnsavedSettings: true };
+    const { rerender } = render(
+      <AppUpdate
+        enabled
+        safety={initialSafety}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
+    await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <AppUpdate
+        enabled
+        safety={{ ...initialSafety, activeRunCount: 1 }}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
+    finishDownload();
+
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    expect(candidate.install).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
+    await waitFor(() => expect(candidate.install).toHaveBeenCalledTimes(1));
+  });
+
   it("restores the worker and keeps a downloaded update ready after install failure", async () => {
     const candidate = updateCandidate({
       install: vi.fn().mockRejectedValue(new Error("signature mismatch")),
@@ -195,7 +240,7 @@ describe("AppUpdate", () => {
     tauriMocks.check.mockResolvedValue(candidate);
     tauriMocks.relaunch.mockRejectedValueOnce(new Error("restart denied"));
     const onActionError = vi.fn();
-    renderUpdate({ onActionError });
+    const { rerender, prepareForInstall } = renderUpdate({ onActionError });
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
@@ -208,7 +253,18 @@ describe("AppUpdate", () => {
       "The update was installed, but Symphony could not restart: restart denied",
     );
 
+    rerender(
+      <AppUpdate
+        enabled
+        safety={{ ...safe, activeRunCount: 1 }}
+        prepareForInstall={prepareForInstall}
+        onActionError={onActionError}
+      />,
+    );
     fireEvent.click(restart);
+    expect(await screen.findByRole("alertdialog")).toBeTruthy();
+    expect(tauriMocks.relaunch).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Restart Symphony" }));
     await waitFor(() => expect(tauriMocks.relaunch).toHaveBeenCalledTimes(2));
     expect(candidate.install).toHaveBeenCalledTimes(1);
   });

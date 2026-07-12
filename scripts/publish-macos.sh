@@ -20,6 +20,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
+if [[ "$HOST_OS" != "Darwin" || "$HOST_ARCH" != "arm64" ]]; then
+  echo "error: updater releases must be built on Apple Silicon macOS (found $HOST_OS/$HOST_ARCH)" >&2
+  exit 1
+fi
+
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 TAG="v$VERSION"
 
@@ -64,6 +71,10 @@ if (( ${#DMGS[@]} != 1 )); then
   exit 1
 fi
 DMG="${DMGS[0]}"
+if [[ "$(basename "$DMG")" != "Symphony_${VERSION}_aarch64.dmg" ]]; then
+  echo "error: updater feed targets darwin-aarch64, but the built DMG is $(basename "$DMG")" >&2
+  exit 1
+fi
 UPDATER_BUNDLE="$ROOT/target/release/bundle/macos/Symphony.app.tar.gz"
 UPDATER_SIGNATURE="$UPDATER_BUNDLE.sig"
 if [[ ! -s "$UPDATER_BUNDLE" || ! -s "$UPDATER_SIGNATURE" ]]; then

@@ -922,6 +922,12 @@ function App() {
   const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
   const [workflowTransfer, setWorkflowTransfer] =
     useState<WorkflowTransferStatus | null>(null);
+  const [hasInProgressRetroBatches, setHasInProgressRetroBatches] = useState(
+    !runtimeAvailable &&
+      previewRetroDetail.batches.some((batch) =>
+        ["queued", "running"].includes(batch.state),
+      ),
+  );
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
   const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
     () => new Set(),
@@ -962,6 +968,7 @@ function App() {
       nextRetroStatus,
       nextRetros,
       nextRetroDetail,
+      nextHasInProgressRetroBatches,
     ] =
       await Promise.all([
         invoke<Overview>("get_overview"),
@@ -976,6 +983,7 @@ function App() {
         retroDetailId
           ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
           : Promise.resolve(null),
+        invoke<boolean>("has_in_progress_retro_batches"),
       ]);
     setOverview(nextOverview);
     setRuns(nextRuns);
@@ -983,6 +991,7 @@ function App() {
     setWorker(nextWorker);
     setRetroStatus(nextRetroStatus);
     setRetros(nextRetros);
+    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
     if (detailId && detailId === selectedRunIdRef.current) {
       setSelectedRun(nextDetail);
       if (!nextDetail) selectedRunIdRef.current = null;
@@ -1797,11 +1806,8 @@ function App() {
   const updateBackgroundWork = [
     retroStatus.state === "running" ? "the active Retro" : null,
     skillsInstall?.state === "running" ? "the skills installation" : null,
-    selectedRetro?.batches.some((batch) =>
-      ["queued", "running"].includes(batch.state),
-    )
-      ? "the active Retro change batch"
-      : null,
+    workflowTransfer?.state === "running" ? "the workflow transfer" : null,
+    hasInProgressRetroBatches ? "an active Retro change batch" : null,
   ].filter((item): item is string => item !== null);
 
   async function prepareForUpdateInstall() {

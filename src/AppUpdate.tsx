@@ -14,7 +14,7 @@ type UpdatePhase =
   | "restarting"
   | "restart-required";
 
-type ConfirmationStage = "start" | "install";
+type ConfirmationStage = "start" | "install" | "restart";
 
 export type UpdateSafety = {
   activeRunCount: number;
@@ -38,6 +38,14 @@ function hasUnsafeWork(safety: UpdateSafety) {
   );
 }
 
+function safetyFingerprint(safety: UpdateSafety) {
+  return JSON.stringify({
+    activeRunCount: safety.activeRunCount,
+    backgroundWork: [...safety.backgroundWork].sort(),
+    hasUnsavedSettings: safety.hasUnsavedSettings,
+  });
+}
+
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -56,7 +64,7 @@ export function AppUpdate({
   const [confirmation, setConfirmation] = useState<ConfirmationStage | null>(null);
   const candidateRef = useRef<Update | null>(null);
   const checkingRef = useRef(false);
-  const approvedUnsafeRef = useRef(false);
+  const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
   const prepareForInstallRef = useRef(prepareForInstall);
   const onActionErrorRef = useRef(onActionError);
@@ -149,7 +157,7 @@ export function AppUpdate({
 
   const requestStart = () => {
     if (safety.transientBusy) return;
-    approvedUnsafeRef.current = false;
+    approvedSafetyRef.current = null;
     if (hasUnsafeWork(safety)) {
       setConfirmation(phase === "ready" ? "install" : "start");
       return;
@@ -163,12 +171,14 @@ export function AppUpdate({
 
   const confirmUpdate = () => {
     const stage = confirmation;
-    approvedUnsafeRef.current = true;
+    approvedSafetyRef.current = safetyFingerprint(safetyRef.current);
     setConfirmation(null);
     if (stage === "start") {
       void download();
     } else if (stage === "install") {
       void installAndRestart();
+    } else if (stage === "restart") {
+      void restartInstalledUpdate();
     }
   };
 
@@ -192,7 +202,10 @@ export function AppUpdate({
         }
       });
       setPhase("ready");
-      if (hasUnsafeWork(safetyRef.current) && !approvedUnsafeRef.current) {
+      if (
+        hasUnsafeWork(safetyRef.current) &&
+        safetyFingerprint(safetyRef.current) !== approvedSafetyRef.current
+      ) {
         setConfirmation("install");
         return;
       }
@@ -242,6 +255,16 @@ export function AppUpdate({
     }
   };
 
+  const requestRestart = () => {
+    if (safety.transientBusy) return;
+    approvedSafetyRef.current = null;
+    if (hasUnsafeWork(safety)) {
+      setConfirmation("restart");
+      return;
+    }
+    void restartInstalledUpdate();
+  };
+
   const working = ["downloading", "installing", "restarting"].includes(phase);
   const buttonLabel =
     phase === "downloading"
@@ -270,7 +293,7 @@ export function AppUpdate({
         type="button"
         className={`update-button ${phase}${phase !== "available" ? " expanded" : ""}`}
         disabled={working || safety.transientBusy}
-        onClick={phase === "restart-required" ? restartInstalledUpdate : requestStart}
+        onClick={phase === "restart-required" ? requestRestart : requestStart}
         title={title}
         aria-label={title}
         aria-live="polite"
@@ -305,7 +328,7 @@ export function AppUpdate({
                 Not now
               </button>
               <button type="button" className="primary" onClick={confirmUpdate}>
-                Update &amp; Restart
+                {confirmation === "restart" ? "Restart Symphony" : "Update & Restart"}
               </button>
             </div>
           </section>
