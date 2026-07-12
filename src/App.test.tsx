@@ -216,7 +216,10 @@ function dashboardInvoke({
     Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
   workerStatus?: WorkerStatus;
 }) {
-  return async (command: string, args?: { request?: { settings: AppSettings } }) => {
+  return async (
+    command: string,
+    args?: { request?: { settings: AppSettings }; settings?: AppSettings },
+  ) => {
     switch (command) {
       case "load_settings":
         return settings;
@@ -252,7 +255,7 @@ function dashboardInvoke({
           opencode_found: true,
           codex_command: "codex",
           claude_command: "claude",
-          cursor_command: "agent",
+          cursor_command: args?.settings?.cursor_command ?? "agent",
           opencode_command: "opencode",
           app_data_dir: "/tmp/symphony",
           database_path: "/tmp/symphony/symphony.db",
@@ -1141,6 +1144,13 @@ describe("App settings", () => {
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/The CLI that works on issues/)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(/^Launch command/, { selector: "input" }), {
+      target: { value: "custom-cursor" },
+    });
+    expect(await screen.findByText("custom-cursor")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Cursor" })).toBeTruthy();
+
     fireEvent.click(installButton);
 
     expect(tauriMocks.openUrl).toHaveBeenCalledWith(

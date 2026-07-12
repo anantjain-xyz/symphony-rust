@@ -1075,10 +1075,6 @@ function App() {
   );
 
   useEffect(() => {
-    setValidation(null);
-  }, [settings]);
-
-  useEffect(() => {
     if (!runtimeAvailable || !settings?.tracker_assigned_to_me) {
       linearViewerSeq.current += 1;
       setLinearViewer(null);
@@ -1615,16 +1611,28 @@ function App() {
     ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
       (savedFlash && savedLiveConfigKept));
 
-  // Revalidate when entering Settings, once settings finish loading there, or
-  // when the selected backend changes so its CLI status never disappears.
+  // Keep validation current while Settings are edited so the selected CLI's
+  // status and install action do not disappear after backend or command changes.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
+    let cancelled = false;
     invoke<ValidationResult>("validate_settings", { settings })
-      .then(setValidation)
+      .then((result) => {
+        if (!cancelled) setValidation(result);
+      })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [view, runtimeAvailable, settings]);
+
+  // Repo skill detection does not depend on the selected agent or its command,
+  // so it only needs refreshing when Settings are entered or first loaded.
+  useEffect(() => {
+    if (!runtimeAvailable || view !== "settings" || !settings) return;
     refreshSkillsStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, runtimeAvailable, settings !== null, settings?.agent_backend]);
+  }, [view, runtimeAvailable, settings !== null]);
 
   function requestStop() {
     if (overview.active_runs.length > 0 && !confirmStop) {
