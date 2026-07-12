@@ -10,6 +10,7 @@ import type {
   RetroBatchRow,
   RunWithIssueRow,
   SkillsStatus,
+  RepoWorkflowStatus,
   ValidationResult,
   WorkerStatus,
 } from "./bindings";
@@ -197,6 +198,14 @@ function dashboardInvoke({
     pr_url: null,
     detail: null,
   },
+  workflowStatus = {
+    source: "default",
+    filename: null,
+    fallback_reason: "missing",
+    detail: "No repository workflow was found on the default branch.",
+    pr_url: null,
+    can_transfer: true,
+  },
   validation = {
     workflow_ok: true,
     workflow_blocking: false,
@@ -212,6 +221,7 @@ function dashboardInvoke({
   issues?: IssueRow[];
   overview?: Overview;
   skillsStatus?: SkillsStatus;
+  workflowStatus?: RepoWorkflowStatus;
   validation?: Partial<ValidationResult> &
     Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
   workerStatus?: WorkerStatus;
@@ -247,6 +257,8 @@ function dashboardInvoke({
         return true;
       case "get_skills_status":
         return skillsStatus;
+      case "get_repo_workflow_status":
+        return workflowStatus;
       case "validate_settings":
         return {
           codex_found: true,
@@ -443,7 +455,7 @@ describe("App settings", () => {
       screen.getAllByRole("button", { name: "Undo rejected decision" }),
     ).toHaveLength(2);
     expect(
-      screen.getByRole("button", { name: "Apply workflow prompt (1)" }).getAttribute("disabled"),
+      screen.getByRole("button", { name: "Apply default workflow (1)" }).getAttribute("disabled"),
     ).not.toBeNull();
     expect(
       screen
@@ -1036,6 +1048,57 @@ describe("App settings", () => {
     expect(createPrButton.getAttribute("disabled")).not.toBeNull();
   });
 
+  it("shows the repository workflow source and gates transfer on saved settings", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings: testSettings(),
+        workflowStatus: {
+          source: "default",
+          filename: null,
+          fallback_reason: "missing",
+          detail: "No repository workflow was found on the default branch.",
+          pr_url: null,
+          can_transfer: true,
+        },
+      }),
+    );
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Using the saved default workflow.")).toBeTruthy();
+    const transfer = screen.getByRole("button", { name: "Transfer workflow to repo" });
+    await waitFor(() => expect(transfer.getAttribute("disabled")).toBeNull());
+
+    const editor = container.querySelector<HTMLTextAreaElement>(".prompt-editor textarea");
+    expect(editor).toBeTruthy();
+    fireEvent.change(editor!, { target: { value: "Unsaved workflow" } });
+    expect(transfer.getAttribute("disabled")).not.toBeNull();
+    expect(
+      screen.getByText("Save Settings before transferring the workflow currently used by the worker."),
+    ).toBeTruthy();
+  });
+
+  it("shows the exact checked-in workflow filename", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings: testSettings(),
+        workflowStatus: {
+          source: "repository",
+          filename: "symphony-workflow.md",
+          fallback_reason: null,
+          detail: null,
+          pr_url: null,
+          can_transfer: false,
+        },
+      }),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Using symphony-workflow.md.")).toBeTruthy();
+    expect(screen.queryByText("Workflow: repository")).toBeNull();
+  });
+
   it("lets users mark repo skills as installed without installing the bundled set", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = {
@@ -1236,7 +1299,8 @@ describe("App settings", () => {
 
     expect(await screen.findByText("An install PR is waiting for review.")).toBeTruthy();
     const viewPrButton = screen.getByRole("button", { name: "View PR" });
-    const checkAgainButton = screen.getByRole("button", { name: "Check again" });
+    const checkAgainButtons = screen.getAllByRole("button", { name: "Check again" });
+    const checkAgainButton = checkAgainButtons[checkAgainButtons.length - 1];
     expect(screen.queryByRole("button", { name: "Open PR" })).toBeNull();
     expect(viewPrButton.className).toBe(checkAgainButton.className);
 

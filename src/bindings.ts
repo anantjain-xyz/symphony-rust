@@ -357,6 +357,25 @@ export type SkillsInstallStatus = {
   error: string | null;
 };
 
+export type RepoWorkflowSource = "repository" | "default" | "unknown";
+
+export type RepoWorkflowStatus = {
+  source: RepoWorkflowSource;
+  filename: string | null;
+  fallback_reason: string | null;
+  detail: string | null;
+  pr_url: string | null;
+  can_transfer: boolean;
+};
+
+export type WorkflowTransferStatus = {
+  state: "idle" | "running" | "completed" | "failed";
+  repo_url: string | null;
+  message: string | null;
+  pr_url: string | null;
+  error: string | null;
+};
+
 export type RunDetail = {
   run: RunWithIssueRow;
   events: AgentEventRow[];

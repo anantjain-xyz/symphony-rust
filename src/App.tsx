@@ -11,6 +11,7 @@ import type {
   LinearViewerProfile,
   Overview,
   RepoConfig,
+  RepoWorkflowStatus,
   RetroBatchRow,
   RetroDetail,
   RetroReport,
@@ -23,6 +24,7 @@ import type {
   SkillsStatus,
   TrackerTestResult,
   ValidationResult,
+  WorkflowTransferStatus,
   WorkerStatus,
 } from "./bindings";
 import {
@@ -186,7 +188,7 @@ const emptyRetroStatus: RetroStatus = {
 
 const previewSettings: AppSettings = {
   prompt_template:
-    "# Prompt preview\n\nConnect through the Tauri desktop runtime to load and edit the saved prompt template.",
+    "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved default workflow.",
   repos: [
     {
       name: "widgets",
@@ -247,6 +249,17 @@ const previewSkillsStatuses: Record<string, SkillsStatus> = {
     missing: BUNDLED_SKILL_NAMES,
     pr_url: null,
     detail: null,
+  },
+};
+
+const previewWorkflowStatuses: Record<string, RepoWorkflowStatus> = {
+  [previewSettings.repos[0].url.trim()]: {
+    source: "default",
+    filename: null,
+    fallback_reason: "missing",
+    detail: "No repository workflow was found on the default branch.",
+    pr_url: null,
+    can_transfer: true,
   },
 };
 
@@ -902,6 +915,12 @@ function App() {
   );
   const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
+  const [workflowStatuses, setWorkflowStatuses] = useState<
+    Record<string, RepoWorkflowStatus>
+  >(runtimeAvailable ? {} : previewWorkflowStatuses);
+  const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
+  const [workflowTransfer, setWorkflowTransfer] =
+    useState<WorkflowTransferStatus | null>(null);
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
   const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
     () => new Set(),
@@ -923,6 +942,8 @@ function App() {
   const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
+  const workflowCheckSeq = useRef<Record<string, number>>({});
+  const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
 
   // Dashboard data refreshes on worker events; settings load separately so
@@ -1179,6 +1200,7 @@ function App() {
         (!result.workflow_ok || refreshedWorker?.last_error !== null),
     );
     refreshSkillsStatus(saved);
+    refreshWorkflowStatus(saved);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
@@ -1285,6 +1307,67 @@ function App() {
     setSkillsInstall(status);
   }
 
+  function checkRepoWorkflow(url: string, sessionEnv = settings?.session_env ?? {}) {
+    const repoUrl = url.trim();
+    if (!runtimeAvailable || repoUrl === "") return;
+    const contextKey = skillsCheckContextKey(repoUrl, sessionEnv);
+    const seq = (workflowCheckSeq.current[repoUrl] ?? 0) + 1;
+    workflowCheckSeq.current[repoUrl] = seq;
+    workflowCheckContext.current[repoUrl] = contextKey;
+    setWorkflowChecking((prev) => ({ ...prev, [repoUrl]: true }));
+    invoke<RepoWorkflowStatus>("get_repo_workflow_status", { repoUrl, sessionEnv })
+      .then((status) => {
+        if (
+          workflowCheckSeq.current[repoUrl] !== seq ||
+          workflowCheckContext.current[repoUrl] !== contextKey
+        ) {
+          return;
+        }
+        setWorkflowStatuses((prev) => ({ ...prev, [repoUrl]: status }));
+        setWorkflowTransfer((prev) =>
+          prev?.state !== "running" && prev?.repo_url === repoUrl ? null : prev,
+        );
+      })
+      .catch(() => {
+        if (
+          workflowCheckSeq.current[repoUrl] !== seq ||
+          workflowCheckContext.current[repoUrl] !== contextKey
+        ) {
+          return;
+        }
+        setWorkflowStatuses((prev) => {
+          const next = { ...prev };
+          delete next[repoUrl];
+          return next;
+        });
+      })
+      .finally(() => {
+        if (
+          workflowCheckSeq.current[repoUrl] === seq &&
+          workflowCheckContext.current[repoUrl] === contextKey
+        ) {
+          setWorkflowChecking((prev) => ({ ...prev, [repoUrl]: false }));
+        }
+      });
+  }
+
+  function refreshWorkflowStatus(forSettings?: AppSettings) {
+    const target = forSettings ?? settings;
+    if (!target) return;
+    for (const url of configuredRepoUrls(target)) {
+      checkRepoWorkflow(url, target.session_env);
+    }
+  }
+
+  async function startWorkflowTransfer(url: string) {
+    const status = await call(() =>
+      invoke<WorkflowTransferStatus>("transfer_workflow_to_repo", {
+        repoUrl: url.trim(),
+      }),
+    );
+    setWorkflowTransfer(status);
+  }
+
   // Check every configured URL once edits settle (covers the initial settings
   // load, a newly added card, an edited URL, and Session env auth changes).
   // Debounced so typing doesn't spam gh; URLs that drop out of the config
@@ -1315,6 +1398,30 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
 
+  useEffect(() => {
+    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
+    const sessionEnv = settings?.session_env ?? {};
+    const urls = repoUrlsKey.split("\n");
+    for (const url of urls) {
+      workflowCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
+    }
+    setWorkflowStatuses((prev) => {
+      const next = { ...prev };
+      for (const url of urls) delete next[url];
+      return next;
+    });
+    setWorkflowChecking((prev) => {
+      const next = { ...prev };
+      for (const url of urls) next[url] = true;
+      return next;
+    });
+    const handle = window.setTimeout(() => {
+      for (const url of urls) checkRepoWorkflow(url, sessionEnv);
+    }, 600);
+    return () => window.clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
+
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
   useEffect(() => {
@@ -1337,6 +1444,27 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtimeAvailable, skillsInstall?.state]);
+
+  useEffect(() => {
+    if (!runtimeAvailable || workflowTransfer?.state !== "running") return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      invoke<WorkflowTransferStatus>("get_workflow_transfer_status")
+        .then((status) => {
+          if (cancelled) return;
+          setWorkflowTransfer(status);
+          if (status.state === "completed" && status.repo_url) {
+            checkRepoWorkflow(status.repo_url);
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runtimeAvailable, workflowTransfer?.state]);
 
   async function removeLinearKey() {
     if (!settings) return;
@@ -1631,6 +1759,7 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
     refreshSkillsStatus();
+    refreshWorkflowStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
@@ -1831,6 +1960,10 @@ function App() {
             skillsStatuses={skillsStatuses}
             skillsChecking={skillsChecking}
             skillsInstall={skillsInstall}
+            workflowStatuses={workflowStatuses}
+            workflowChecking={workflowChecking}
+            workflowTransfer={workflowTransfer}
+            settingsDirty={dirty}
             workerRunning={worker.state === "running"}
             workerConfigError={worker.state === "running" && worker.last_error !== null}
             liveReconfigureSkipped={liveReconfigureSkipped}
@@ -1844,6 +1977,8 @@ function App() {
             onResetPrompt={resetPrompt}
             onRefreshSkills={checkRepoSkills}
             onInstallSkills={startSkillsInstall}
+            onRefreshWorkflow={checkRepoWorkflow}
+            onTransferWorkflow={startWorkflowTransfer}
           />
         ) : null}
       </section>
@@ -2945,7 +3080,8 @@ function RetroView({
     (suggestion) => suggestion.target_type === "prompt",
   ).length;
   const acceptedRepoSuggestions = accepted.filter(
-    (suggestion) => suggestion.target_type === "skill",
+    (suggestion) =>
+      suggestion.target_type === "skill" || suggestion.target_type === "repo_workflow",
   );
   const acceptedRepoNames = new Set(
     acceptedRepoSuggestions.map((suggestion) => suggestion.repo_name),
@@ -3230,7 +3366,7 @@ function RetroView({
                         ? "Generate a new retro"
                         : workflowLocked
                           ? "Workflow action started"
-                          : `Apply workflow prompt (${acceptedPromptCount})`}
+                          : `Apply default workflow (${acceptedPromptCount})`}
                     </button>
                   ) : null}
                   {acceptedRepoNames.size > 0 ? (
@@ -3322,7 +3458,11 @@ function RetroReviewRepo({
                   <small>{suggestion.target_path}</small>
                 </div>
                 <div className="retro-suggestion-badges">
-                  <span className="retro-target">{suggestion.target_type}</span>
+                  <span className="retro-target">
+                    {suggestion.target_type === "repo_workflow"
+                      ? "repo workflow"
+                      : suggestion.target_type}
+                  </span>
                   <Badge status={finding?.severity ?? suggestion.confidence} />
                   {finding ? (
                     <span className="retro-occurrence-tag">
@@ -3700,6 +3840,10 @@ function SettingsView({
   skillsStatuses,
   skillsChecking,
   skillsInstall,
+  workflowStatuses,
+  workflowChecking,
+  workflowTransfer,
+  settingsDirty,
   workerRunning,
   workerConfigError,
   liveReconfigureSkipped,
@@ -3713,6 +3857,8 @@ function SettingsView({
   onResetPrompt,
   onRefreshSkills,
   onInstallSkills,
+  onRefreshWorkflow,
+  onTransferWorkflow,
 }: {
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
@@ -3726,6 +3872,10 @@ function SettingsView({
   skillsStatuses: Record<string, SkillsStatus>;
   skillsChecking: Record<string, boolean>;
   skillsInstall: SkillsInstallStatus | null;
+  workflowStatuses: Record<string, RepoWorkflowStatus>;
+  workflowChecking: Record<string, boolean>;
+  workflowTransfer: WorkflowTransferStatus | null;
+  settingsDirty: boolean;
   workerRunning: boolean;
   workerConfigError: boolean;
   liveReconfigureSkipped: boolean;
@@ -3739,6 +3889,8 @@ function SettingsView({
   onResetPrompt: () => void;
   onRefreshSkills: (repoUrl: string) => void;
   onInstallSkills: (repoUrl: string) => void;
+  onRefreshWorkflow: (repoUrl: string) => void;
+  onTransferWorkflow: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
   const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(
@@ -3860,6 +4012,7 @@ function SettingsView({
             const expanded = expandedRepoIndex === index;
             const bodyId = `repo-card-body-${index}`;
             const toggleLabel = `${expanded ? "Collapse" : "Edit"} ${repoTitle} repository`;
+            const workflowStatus = workflowStatuses[repo.url.trim()] ?? null;
             return (
               <fieldset
                 className={expanded ? "repo-card expanded" : "repo-card collapsed"}
@@ -3990,6 +4143,22 @@ function SettingsView({
                         Optional. Paste Linear project URLs or IDs; beats the team rule.
                       </small>
                     </label>
+                    <WorkflowBlock
+                      status={workflowStatus}
+                      checking={workflowChecking[repo.url.trim()] ?? false}
+                      transfer={
+                        workflowTransfer?.repo_url === repo.url.trim()
+                          ? workflowTransfer
+                          : null
+                      }
+                      transferRunning={workflowTransfer?.state === "running"}
+                      settingsDirty={settingsDirty}
+                      busy={busy}
+                      runtimeAvailable={runtimeAvailable}
+                      repoConfigured={repo.url.trim() !== ""}
+                      onRefresh={() => onRefreshWorkflow(repo.url)}
+                      onTransfer={() => onTransferWorkflow(repo.url)}
+                    />
                     <SkillsBlock
                       status={skillsStatuses[repo.url.trim()] ?? null}
                       checking={skillsChecking[repo.url.trim()] ?? false}
@@ -4730,7 +4899,7 @@ function SettingsView({
         </section>
       </div>
 
-      <Panel title="Prompt template">
+      <Panel title="Default workflow">
         <PromptEditor
           value={settings.prompt_template}
           disabled={!runtimeAvailable}
@@ -4745,7 +4914,8 @@ function SettingsView({
             Reset to default
           </button>
           <small className="hint">
-            Replaces the editor with the bundled default prompt. Nothing changes until you save.
+            Replaces the editor with the bundled default. Repositories with a valid
+            SYMPHONY-WORKFLOW.md override it; nothing changes until you save.
           </small>
         </div>
       </Panel>
@@ -5238,6 +5408,151 @@ function PromptEditor({
           run's error automatically.
         </p>
       </aside>
+    </div>
+  );
+}
+
+function WorkflowBlock({
+  status,
+  checking,
+  transfer,
+  transferRunning,
+  settingsDirty,
+  busy,
+  runtimeAvailable,
+  repoConfigured,
+  onRefresh,
+  onTransfer,
+}: {
+  status: RepoWorkflowStatus | null;
+  checking: boolean;
+  transfer: WorkflowTransferStatus | null;
+  transferRunning: boolean;
+  settingsDirty: boolean;
+  busy: boolean;
+  runtimeAvailable: boolean;
+  repoConfigured: boolean;
+  onRefresh: () => void;
+  onTransfer: () => void;
+}) {
+  const transferring = transfer?.state === "running";
+  const otherTransferRunning = transferRunning && !transferring;
+  const prUrl =
+    (transfer?.state === "completed" ? transfer.pr_url : null) ?? status?.pr_url ?? null;
+  const actionDisabled =
+    busy || transferRunning || settingsDirty || !runtimeAvailable || !repoConfigured;
+  const checkDisabled = busy || transferRunning || !runtimeAvailable || !repoConfigured;
+
+  let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
+  let headline = "Check which workflow this repository uses.";
+  let detail: React.ReactNode =
+    "A workflow checked into the default branch overrides the saved default workflow for runs routed here.";
+  let meta: React.ReactNode = null;
+  let actions: React.ReactNode = null;
+
+  const checkAgain = (
+    <button type="button" disabled={checkDisabled} onClick={onRefresh}>
+      Check again
+    </button>
+  );
+
+  if (!repoConfigured) {
+    headline = "Add a repository URL first.";
+    detail = "Workflow detection and transfer PR creation run against the repo URL above.";
+  } else if (transferring) {
+    tone = "info";
+    headline = "Creating a workflow PR.";
+    detail =
+      "Symphony is copying the saved default workflow into SYMPHONY-WORKFLOW.md on a temporary branch.";
+    meta = transfer?.message ?? "Preparing transfer...";
+    actions = <button disabled>Creating PR...</button>;
+  } else if (transfer?.state === "failed") {
+    tone = "error";
+    headline = "Workflow PR was not created.";
+    detail = "Fix the reported Git or GitHub access problem, save Settings, and retry.";
+    meta = transfer.error ?? "Transfer failed.";
+    actions = (
+      <button type="button" className="primary" disabled={actionDisabled} onClick={onTransfer}>
+        Retry workflow PR
+      </button>
+    );
+  } else if (checking) {
+    tone = "info";
+    headline = "Checking the default branch.";
+    detail = "Symphony is looking for either supported workflow filename on GitHub.";
+  } else if (status?.source === "repository") {
+    tone = "success";
+    headline = `Using ${status.filename ?? "the repository workflow"}.`;
+    detail = "Future dispatches fetch this workflow from the repository default branch.";
+    actions = checkAgain;
+  } else if (prUrl) {
+    tone = "warning";
+    headline = "Using the default workflow until the PR merges.";
+    detail = "A repository workflow transfer is waiting for review.";
+    actions = (
+      <>
+        <button type="button" onClick={() => openUrl(prUrl).catch(() => undefined)}>
+          View PR
+        </button>
+        {checkAgain}
+      </>
+    );
+  } else if (status?.source === "default") {
+    tone = status.fallback_reason === "invalid" ? "warning" : "neutral";
+    headline = "Using the saved default workflow.";
+    detail = status.detail ?? "No valid repository workflow was found.";
+    if (settingsDirty) {
+      meta = "Save Settings before transferring the workflow currently used by the worker.";
+    } else if (!status.can_transfer) {
+      meta = "Transfer requires GitHub plus Git clone and push access.";
+    }
+    actions = (
+      <>
+        <button
+          type="button"
+          className="primary"
+          disabled={actionDisabled || !status.can_transfer}
+          onClick={onTransfer}
+        >
+          Transfer workflow to repo
+        </button>
+        {checkAgain}
+      </>
+    );
+  } else if (status?.source === "unknown") {
+    tone = "error";
+    headline = "Symphony could not determine the workflow.";
+    detail = status.detail ?? "Check the repository URL and GitHub authentication.";
+    actions = (
+      <button type="button" disabled={checkDisabled} onClick={onRefresh}>
+        Check status
+      </button>
+    );
+  } else {
+    actions = (
+      <button type="button" disabled={checkDisabled} onClick={onRefresh}>
+        Check status
+      </button>
+    );
+  }
+
+  if (otherTransferRunning) {
+    meta = "Another repository is already creating a workflow PR.";
+  }
+
+  return (
+    <div className="field-group skills-field workflow-field">
+      <div className="field-label-row">
+        <span>Workflow</span>
+      </div>
+      <div className={`skills-install ${tone}`} aria-live="polite">
+        <div className="skills-install-copy">
+          <strong>{headline}</strong>
+          <small>{detail}</small>
+          {meta ? <small className={tone === "error" ? "skills-install-detail error" : "skills-install-detail"}>{meta}</small> : null}
+        </div>
+        {actions ? <div className="skills-install-actions">{actions}</div> : null}
+      </div>
     </div>
   );
 }

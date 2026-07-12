@@ -1,5 +1,5 @@
 use crate::{
-    backoff_ms, run_hook, sanitize_key,
+    backoff_ms, resolve_repo_workflow, run_hook, sanitize_key,
     skills::{
         ensure_workspace_skills, github_token_env_has_token_for_repo_url,
         github_token_env_vars_for_repo_url,
@@ -1037,7 +1037,44 @@ where
         return Ok(());
     }
 
-    let mut prompt = render_prompt(&config.workflow.prompt_template, &issue, Some(&repo_config));
+    let resolved_workflow = resolve_repo_workflow(
+        &workspace.path,
+        &repo_config.url,
+        &config.workflow.prompt_template,
+        &config.session_env,
+        &stop,
+    )
+    .await;
+    let workflow_message = match resolved_workflow.source {
+        crate::RepoWorkflowSource::Repository => format!(
+            "Using {}{}",
+            resolved_workflow
+                .filename
+                .as_deref()
+                .unwrap_or(crate::WORKFLOW_FILE),
+            resolved_workflow
+                .revision
+                .as_deref()
+                .and_then(|revision| revision.get(..8))
+                .map(|revision| format!(" from the repository default branch at {revision}"))
+                .unwrap_or_default()
+        ),
+        _ => resolved_workflow
+            .detail
+            .clone()
+            .unwrap_or_else(|| "Using the default workflow.".to_string()),
+    };
+    repo.append_event(
+        &run.id,
+        symphony_core::AgentEventKind::Status,
+        &serde_json::json!({ "message": workflow_message }),
+    )
+    .await?;
+    let mut prompt = render_prompt(
+        &resolved_workflow.prompt_template,
+        &issue,
+        Some(&repo_config),
+    );
     if let Some(prior) = repo.prior_run(&issue.id, &run.id).await? {
         let recent_events = repo
             .recent_events_for_issue(&issue.id, 10)
