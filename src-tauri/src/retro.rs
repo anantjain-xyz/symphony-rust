@@ -13,6 +13,7 @@ use symphony_storage::{
     RunWithIssueRow, WorkpadSnapshotRow,
 };
 use symphony_tracker::{TrackerClient, WorkpadComment};
+use symphony_worker::{resolve_repo_workflow_at_ref, RepoWorkflowSource};
 use tokio::{process::Command, sync::Mutex};
 
 const RETRO_BEGINNING: &str = "1970-01-01T00:00:00.000Z";
@@ -439,9 +440,9 @@ where
 }
 
 #[derive(Debug)]
-struct RepoSnapshot {
-    root: PathBuf,
-    head: String,
+pub(crate) struct RepoSnapshot {
+    pub(crate) root: PathBuf,
+    pub(crate) head: String,
 }
 
 async fn materialize_suggestions(
@@ -453,11 +454,8 @@ async fn materialize_suggestions(
     for repo_report in &report.repos {
         let mut seen_changes = BTreeSet::new();
         let repo_url = config.repos.get(&repo_report.repo_name).cloned();
-        let needs_skill_snapshot = repo_report
-            .suggestions
-            .iter()
-            .any(|suggestion| matches!(suggestion.target_type, RetroSuggestionTarget::Skill));
-        let snapshot = if needs_skill_snapshot {
+        let needs_repo_snapshot = !repo_report.suggestions.is_empty();
+        let snapshot = if needs_repo_snapshot {
             match repo_url.as_deref() {
                 Some(url) => {
                     clone_repo_snapshot(
@@ -476,51 +474,92 @@ async fn materialize_suggestions(
         } else {
             Err("No repository snapshot needed.".to_string())
         };
+        let repo_workflow = match &snapshot {
+            Ok(snapshot) => Ok(resolve_repo_workflow_at_ref(
+                &snapshot.root,
+                &snapshot.head,
+                &config.prompt_template,
+            )
+            .await),
+            Err(error) => Err(error.clone()),
+        };
 
         for (index, suggestion) in repo_report.suggestions.iter().enumerate() {
             let finding = repo_report.findings.get(index);
             let guidance = finding
                 .map(|finding| finding.detail.clone())
                 .unwrap_or_else(|| suggestion.body.clone());
-            let target_type = match &suggestion.target_type {
-                RetroSuggestionTarget::Prompt => "prompt",
-                RetroSuggestionTarget::Skill => "skill",
+            let target_type = match (&suggestion.target_type, &repo_workflow) {
+                (RetroSuggestionTarget::Prompt, Ok(workflow))
+                    if workflow.source == RepoWorkflowSource::Repository =>
+                {
+                    "repo_workflow"
+                }
+                (RetroSuggestionTarget::Prompt, _) => "prompt",
+                (RetroSuggestionTarget::Skill, _) => "skill",
             };
-            let target_path = match &suggestion.target_type {
-                RetroSuggestionTarget::Prompt => "Settings → Prompt template".to_string(),
-                RetroSuggestionTarget::Skill => {
+            let target_path = match (&suggestion.target_type, &repo_workflow) {
+                (RetroSuggestionTarget::Prompt, Ok(workflow))
+                    if workflow.source == RepoWorkflowSource::Repository =>
+                {
+                    workflow
+                        .filename
+                        .clone()
+                        .unwrap_or_else(|| symphony_worker::WORKFLOW_FILE.to_string())
+                }
+                (RetroSuggestionTarget::Prompt, _) => "Settings → Default workflow".to_string(),
+                (RetroSuggestionTarget::Skill, _) => {
                     format!(".agents/skills/{}/SKILL.md", suggestion.target_id)
                 }
             };
-            let change_key = format!("{}|{}|{}", target_type, suggestion.target_id, guidance);
+            let target_id = if target_type == "repo_workflow" {
+                "repository workflow".to_string()
+            } else {
+                suggestion.target_id.clone()
+            };
+            let change_key = format!("{target_type}|{target_id}|{guidance}");
             if !seen_changes.insert(change_key) {
                 continue;
             }
             let stable_key = format!(
                 "{}|{}|{}|{}|{}|{}",
-                retro.id,
-                repo_report.repo_name,
-                target_type,
-                suggestion.target_id,
-                index,
-                suggestion.title
+                retro.id, repo_report.repo_name, target_type, target_id, index, suggestion.title
             );
             let id = format!("{}-{}", retro.id, &hash_body(&stable_key)[..16]);
             let created_at = now_iso();
 
             let materialized = match &suggestion.target_type {
-                RetroSuggestionTarget::Prompt => {
-                    let before = config.prompt_template.clone();
-                    let after = integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
-                    Ok((
-                        target_path.clone(),
-                        before.clone(),
-                        after.clone(),
-                        unified_diff(&target_path, &before, &after),
-                        config.workflow_hash.clone(),
-                        hash_body(&before),
-                    ))
-                }
+                RetroSuggestionTarget::Prompt => match (&repo_workflow, &snapshot) {
+                    (Ok(workflow), Ok(snapshot))
+                        if workflow.source == RepoWorkflowSource::Repository =>
+                    {
+                        let before = workflow.prompt_template.clone();
+                        let after =
+                            integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
+                        Ok((
+                            target_path.clone(),
+                            before.clone(),
+                            after.clone(),
+                            unified_diff(&target_path, &before, &after),
+                            snapshot.head.clone(),
+                            hash_body(&before),
+                        ))
+                    }
+                    (Ok(_), Ok(_)) => {
+                        let before = config.prompt_template.clone();
+                        let after =
+                            integrate_retro_guidance(&before, std::slice::from_ref(&guidance));
+                        Ok((
+                            target_path.clone(),
+                            before.clone(),
+                            after.clone(),
+                            unified_diff(&target_path, &before, &after),
+                            config.workflow_hash.clone(),
+                            hash_body(&before),
+                        ))
+                    }
+                    (Err(error), _) | (_, Err(error)) => Err(error.clone()),
+                },
                 RetroSuggestionTarget::Skill => match &snapshot {
                     Ok(snapshot) => match safe_repo_target(&snapshot.root, &target_path).await {
                         Ok(file_path) => match repo_relative_target(&snapshot.root, &file_path)
@@ -609,7 +648,7 @@ async fn materialize_suggestions(
                 repo_url: repo_url.clone(),
                 finding_index: index as i64,
                 target_type: target_type.to_string(),
-                target_id: suggestion.target_id.clone(),
+                target_id,
                 target_path,
                 title: suggestion.title.clone(),
                 body: suggestion.body.clone(),
@@ -798,7 +837,7 @@ fn path_key(value: &str) -> String {
         .collect()
 }
 
-async fn clone_repo_snapshot(
+pub(crate) async fn clone_repo_snapshot(
     repo_url: &str,
     destination: &Path,
     session_env: &BTreeMap<String, String>,
@@ -1123,6 +1162,10 @@ async fn execute_repo_pr_batch(
             .map(|item| item.guidance.clone())
             .collect::<Vec<_>>();
         let updated = integrate_retro_guidance(&seed, &guidance);
+        if items.iter().any(|item| item.target_type == "repo_workflow") {
+            symphony_core::validate_prompt_template(&updated)
+                .map_err(|error| format!("The proposed repository workflow is invalid: {error}"))?;
+        }
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -2132,7 +2175,6 @@ fn retro_relevant_workpad_hash(body: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     async fn git_test_ok(cwd: Option<&Path>, args: &[&str]) {
         let output = command_output("git", args, cwd, &BTreeMap::new())
             .await
@@ -2213,6 +2255,21 @@ mod tests {
 
     #[tokio::test]
     async fn materializes_one_card_for_an_identical_target_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        git_test_ok(Some(&source), &["init", "-b", "main"]).await;
+        git_test_ok(Some(&source), &["config", "user.name", "Symphony Test"]).await;
+        git_test_ok(
+            Some(&source),
+            &["config", "user.email", "symphony@example.com"],
+        )
+        .await;
+        tokio::fs::write(source.join("README.md"), "fixture\n")
+            .await
+            .unwrap();
+        git_test_ok(Some(&source), &["add", "README.md"]).await;
+        git_test_ok(Some(&source), &["commit", "-m", "fixture"]).await;
         let mut accumulator = RepoAccumulator::new("widgets".to_string());
         for (key, detail) in [("exit-one", "exit 1"), ("exit-two", "exit 2")] {
             accumulator.push_finding(
@@ -2260,8 +2317,8 @@ mod tests {
         let config = RetroProposalConfig {
             prompt_template: "# Workflow\n\n## Instructions\n\n1. Do the work.\n".to_string(),
             workflow_hash: "workflow-hash".to_string(),
-            repos: BTreeMap::new(),
-            workspace_root: std::env::temp_dir(),
+            repos: BTreeMap::from([("widgets".to_string(), source.display().to_string())]),
+            workspace_root: temp.path().join("proposals"),
             session_env: BTreeMap::new(),
             skills: BTreeMap::new(),
         };
@@ -2284,6 +2341,83 @@ mod tests {
         assert!(materialize_suggestions(&retro, &report, &already_applied)
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn materializes_prompt_guidance_against_a_repository_workflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        git_test_ok(Some(&source), &["init", "-b", "main"]).await;
+        git_test_ok(Some(&source), &["config", "user.name", "Symphony Test"]).await;
+        git_test_ok(
+            Some(&source),
+            &["config", "user.email", "symphony@example.com"],
+        )
+        .await;
+        tokio::fs::write(
+            source.join(symphony_worker::WORKFLOW_FILE),
+            "# Repo workflow\n\n## Instructions\n\n1. Do the work.\n",
+        )
+        .await
+        .unwrap();
+        git_test_ok(Some(&source), &["add", symphony_worker::WORKFLOW_FILE]).await;
+        git_test_ok(Some(&source), &["commit", "-m", "workflow"]).await;
+
+        let mut accumulator = RepoAccumulator::new("widgets".to_string());
+        accumulator.push_finding(
+            "recurring".to_string(),
+            "Recurring orchestration confusion".to_string(),
+            "Record the reusable prerequisite before retrying.".to_string(),
+            RetroSeverity::Medium,
+            RetroEvidence {
+                issue_identifier: "SYM-1".to_string(),
+                run_id: None,
+                run_number: None,
+                event_id: None,
+                kind: "workpad".to_string(),
+                summary: "confusion".to_string(),
+            },
+        );
+        let retro = RetroRow {
+            id: "retro-repo-workflow".to_string(),
+            since_at: RETRO_BEGINNING.to_string(),
+            until_at: "2099-01-01T00:00:00.000Z".to_string(),
+            status: "completed".to_string(),
+            run_count: 1,
+            issue_count: 1,
+            report_json: None,
+            error_message: None,
+            created_at: now_iso(),
+            completed_at: Some(now_iso()),
+        };
+        let report = RetroReport {
+            id: retro.id.clone(),
+            since_at: retro.since_at.clone(),
+            until_at: retro.until_at.clone(),
+            generated_at: now_iso(),
+            run_count: 1,
+            issue_count: 1,
+            workpad_count: 1,
+            repos: vec![accumulator.finish()],
+        };
+        let config = RetroProposalConfig {
+            prompt_template: "# Default\n".to_string(),
+            workflow_hash: "default-hash".to_string(),
+            repos: BTreeMap::from([("widgets".to_string(), source.display().to_string())]),
+            workspace_root: temp.path().join("proposals"),
+            session_env: BTreeMap::new(),
+            skills: BTreeMap::new(),
+        };
+
+        let rows = materialize_suggestions(&retro, &report, &config).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target_type, "repo_workflow");
+        assert_eq!(rows[0].target_path, symphony_worker::WORKFLOW_FILE);
+        assert!(rows[0]
+            .before_content
+            .as_deref()
+            .is_some_and(|content| content.contains("# Repo workflow")));
     }
 
     #[cfg(unix)]

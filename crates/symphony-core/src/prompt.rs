@@ -18,6 +18,49 @@ pub const PROMPT_VARIABLES: [&str; 10] = [
     "repo.url",
 ];
 
+/// Validate an agent prompt template using the same rules for the app-wide
+/// default and repository-owned workflow files.
+pub fn validate_prompt_template(template: &str) -> Result<(), String> {
+    if template.trim().is_empty() {
+        return Err("The workflow is empty.".to_string());
+    }
+    let unknown = unknown_prompt_placeholders(template);
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Unknown prompt placeholder{}: {}. Supported: {}.",
+        if unknown.len() == 1 { "" } else { "s" },
+        unknown.join(", "),
+        PROMPT_VARIABLES.join(", ")
+    ))
+}
+
+/// Scan `{{...}}` placeholders and report plausible variable names that
+/// `render_prompt` leaves unresolved. JSON and other literal braces remain
+/// allowed, matching Settings validation's historical behavior.
+pub fn unknown_prompt_placeholders(template: &str) -> Vec<String> {
+    let mut unknown = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("}}") else { break };
+        let name = rest[..end].trim();
+        let looks_like_var = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_');
+        if looks_like_var
+            && !PROMPT_VARIABLES.contains(&name)
+            && !unknown.iter().any(|seen| seen == name)
+        {
+            unknown.push(name.to_string());
+        }
+        rest = &rest[end + 2..];
+    }
+    unknown
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct RetryContext {
     pub run_number: i64,
@@ -192,5 +235,17 @@ mod tests {
             render_prompt("[{{issue.labels}}][{{issue.blockers}}]", &issue(), None),
             "[][]"
         );
+    }
+
+    #[test]
+    fn validates_prompt_templates_consistently() {
+        assert!(validate_prompt_template("Work on {{issue.title}}").is_ok());
+        assert!(validate_prompt_template("Static instructions").is_ok());
+        assert_eq!(
+            unknown_prompt_placeholders("{{issue.nope}} {{ issue.nope }} {{repo.name}}"),
+            vec!["issue.nope"]
+        );
+        assert!(validate_prompt_template("  ").is_err());
+        assert!(validate_prompt_template("{{issue.nope}}").is_err());
     }
 }

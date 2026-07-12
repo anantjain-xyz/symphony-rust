@@ -1989,6 +1989,31 @@ pre {
   white-space: nowrap;
 }
 
+.repo-workflow-pill {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 8px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.repo-workflow-pill.source-repository {
+  background: var(--success);
+  border-color: color-mix(in srgb, var(--success-foreground) 24%, var(--border));
+  color: var(--success-foreground);
+}
+
+.repo-workflow-pill.source-default {
+  background: var(--warning);
+  border-color: color-mix(in srgb, var(--warning-solid) 28%, var(--border));
+  color: var(--warning-foreground);
+}
+
 .repo-card-actions {
   align-items: center;
   flex: 0 0 auto;

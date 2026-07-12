@@ -11,9 +11,10 @@ use symphony_storage::{
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
-    check_skills, resolve_workspace_root_dir, sanitize_key, SkillFile, SkillsInstallConfig,
+    check_repo_workflow, check_skills, resolve_repo_workflow_at_ref, resolve_workspace_root_dir,
+    sanitize_key, RepoWorkflowSource, RepoWorkflowStatus, SkillFile, SkillsInstallConfig,
     SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig,
-    WorkerStatus,
+    WorkerStatus, WorkflowTransferConfig, WorkflowTransferManager, WorkflowTransferStatus,
 };
 use tauri::{Emitter, Manager, State};
 
@@ -22,7 +23,7 @@ mod retro;
 mod settings;
 
 use retro::{
-    hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
+    clone_repo_snapshot, hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
     uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
     INTERRUPTED_RETRO_MESSAGE,
 };
@@ -101,6 +102,7 @@ struct AppState {
     repo: Repository,
     worker: WorkerManager,
     skills_installer: SkillsInstaller,
+    workflow_transfer: WorkflowTransferManager,
     retro: RetroManager,
     app_data_dir: PathBuf,
     settings_path: PathBuf,
@@ -206,20 +208,11 @@ fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
     if let Some(error) = validate_repos(&settings.repos) {
         return Some(error);
     }
-    if settings.prompt_template.trim().is_empty() {
-        return Some("The prompt template is empty.".to_string());
-    }
     if let Some(error) = validate_session_env(&settings.session_env) {
         return Some(error);
     }
-    let unknown = unknown_placeholders(&settings.prompt_template);
-    if !unknown.is_empty() {
-        return Some(format!(
-            "Unknown prompt placeholder{}: {}. Supported: {}.",
-            if unknown.len() == 1 { "" } else { "s" },
-            unknown.join(", "),
-            symphony_core::PROMPT_VARIABLES.join(", ")
-        ));
+    if let Err(error) = symphony_core::validate_prompt_template(&settings.prompt_template) {
+        return Some(error.replace("The workflow is empty.", "The prompt template is empty."));
     }
     None
 }
@@ -340,32 +333,6 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
         return Some("Only one repository can be marked as the default.".to_string());
     }
     None
-}
-
-/// Scan `{{...}}` placeholders in the prompt and report any that
-/// `render_prompt` would leave unresolved.
-fn unknown_placeholders(prompt: &str) -> Vec<String> {
-    let mut unknown = Vec::new();
-    let mut rest = prompt;
-    while let Some(start) = rest.find("{{") {
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find("}}") else { break };
-        let name = rest[..end].trim();
-        // Only flag plausible variable names; literal braces in prose (e.g.
-        // JSON examples) are not placeholders.
-        let looks_like_var = !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_');
-        if looks_like_var
-            && !symphony_core::PROMPT_VARIABLES.contains(&name)
-            && !unknown.iter().any(|seen| seen == name)
-        {
-            unknown.push(name.to_string());
-        }
-        rest = &rest[end + 2..];
-    }
-    unknown
 }
 
 fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
@@ -829,6 +796,89 @@ async fn apply_retro_workflow(
             .ok_or_else(|| "Workflow batch was not found.".to_string());
     }
 
+    // A prompt proposal targets the saved default only while every repository
+    // represented by the batch still falls back to that default. If a repo
+    // added a valid checked-in workflow after review, applying the old batch
+    // would update the wrong source of truth.
+    let source_check_root = resolve_workspace_root_dir(
+        &workflow_from_settings(&settings, linear_api_key().as_deref())
+            .front_matter
+            .workspace
+            .root,
+        &state.app_data_dir,
+    )
+    .join("_retro-source-check")
+    .join(&retro_id);
+    let mut checked_repos = BTreeSet::new();
+    let mut source_changed = None;
+    for suggestion in &suggestions {
+        if !checked_repos.insert(suggestion.repo_name.clone()) {
+            continue;
+        }
+        let repo_url = current_retro_repo_url(
+            &settings,
+            &suggestion.repo_name,
+            suggestion.repo_url.as_deref(),
+        );
+        let Some(repo_url) = repo_url else {
+            source_changed = Some(format!(
+                "Repository `{}` was removed or reconfigured.",
+                suggestion.repo_name
+            ));
+            break;
+        };
+        let workspace = source_check_root.join(sanitize_key(&suggestion.repo_name));
+        match clone_repo_snapshot(&repo_url, &workspace, &settings.session_env).await {
+            Ok(snapshot) => {
+                let resolved = resolve_repo_workflow_at_ref(
+                    &snapshot.root,
+                    &snapshot.head,
+                    &settings.prompt_template,
+                )
+                .await;
+                tokio::fs::remove_dir_all(&snapshot.root).await.ok();
+                if resolved.source != RepoWorkflowSource::Default {
+                    source_changed = Some(format!(
+                        "Repository `{}` now uses a checked-in workflow.",
+                        suggestion.repo_name
+                    ));
+                    break;
+                }
+            }
+            Err(error) => {
+                source_changed = Some(format!(
+                    "Could not confirm the workflow source for `{}`: {error}",
+                    suggestion.repo_name
+                ));
+                break;
+            }
+        }
+    }
+    tokio::fs::remove_dir_all(&source_check_root).await.ok();
+    if let Some(error) = source_changed {
+        state
+            .repo
+            .update_retro_batch(
+                &batch.id,
+                "stale",
+                Some("A repository workflow source changed."),
+                Some(&format!(
+                    "{error} Generate a new retro and review the updated diff."
+                )),
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        return state
+            .repo
+            .list_retro_batches(&retro_id)
+            .await
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .find(|item| item.id == batch.id)
+            .ok_or_else(|| "Workflow batch was not found.".to_string());
+    }
+
     let guidance = suggestions
         .iter()
         .map(|suggestion| suggestion.guidance.clone())
@@ -919,7 +969,7 @@ async fn start_retro_prs(
     let suggestions = all_suggestions
         .into_iter()
         .filter(|suggestion| {
-            suggestion.target_type == "skill"
+            matches!(suggestion.target_type.as_str(), "skill" | "repo_workflow")
                 && suggestion.decision == "accepted"
                 && suggestion.proposal_status == "ready"
         })
@@ -1100,6 +1150,52 @@ async fn install_skills(
         .map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+async fn get_repo_workflow_status(
+    repo_url: String,
+    session_env: BTreeMap<String, String>,
+) -> Result<RepoWorkflowStatus, String> {
+    if let Some(error) = validate_session_env(&session_env) {
+        return Err(error);
+    }
+    Ok(check_repo_workflow(&repo_url, &session_env).await)
+}
+
+#[tauri::command]
+async fn get_workflow_transfer_status(
+    state: State<'_, AppState>,
+) -> Result<WorkflowTransferStatus, String> {
+    Ok(state.workflow_transfer.status().await)
+}
+
+#[tauri::command]
+async fn transfer_workflow_to_repo(
+    state: State<'_, AppState>,
+    repo_url: String,
+) -> Result<WorkflowTransferStatus, String> {
+    let repo_url = repo_url.trim().to_string();
+    if repo_url.is_empty() {
+        return Err("Add a repository URL under Settings → Repositories first.".to_string());
+    }
+    let settings = load_settings_from_disk(&state).await?;
+    if let Some(error) = validate_workflow_settings(&settings) {
+        return Err(error);
+    }
+    let workflow = workflow_from_settings(&settings, linear_api_key().as_deref());
+    let workspace_root =
+        resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
+    state
+        .workflow_transfer
+        .start(WorkflowTransferConfig {
+            repo_url,
+            prompt_template: settings.prompt_template,
+            workspace_root,
+            env: build_install_env(),
+            session_env: settings.session_env,
+        })
+        .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // GUI launches inherit launchd's minimal PATH, which breaks hooks and
@@ -1137,6 +1233,7 @@ pub fn run() {
                 repo,
                 worker,
                 skills_installer: SkillsInstaller::new(),
+                workflow_transfer: WorkflowTransferManager::new(),
                 retro: RetroManager::new(),
                 app_data_dir: app_dir.clone(),
                 settings_path: app_dir.join("settings.json"),
@@ -1175,7 +1272,10 @@ pub fn run() {
             start_retro_prs,
             get_skills_status,
             get_skills_install_status,
-            install_skills
+            install_skills,
+            get_repo_workflow_status,
+            get_workflow_transfer_status,
+            transfer_workflow_to_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1311,6 +1411,9 @@ fn export_bindings() {
             specta::ts::export::<StorageEvent>(&conf),
             specta::ts::export::<SkillsStatus>(&conf),
             specta::ts::export::<SkillsInstallStatus>(&conf),
+            specta::ts::export::<symphony_worker::RepoWorkflowSource>(&conf),
+            specta::ts::export::<RepoWorkflowStatus>(&conf),
+            specta::ts::export::<WorkflowTransferStatus>(&conf),
             specta::ts::export::<RetroRow>(&conf),
             specta::ts::export::<RetroSuggestionRow>(&conf),
             specta::ts::export::<RetroBatchRow>(&conf),
@@ -1476,7 +1579,7 @@ mod tests {
         assert!(error.contains("issue.foo"), "unexpected error: {error}");
         // Known placeholders are not flagged.
         assert_eq!(
-            unknown_placeholders(&bad_prompt.prompt_template),
+            symphony_core::unknown_prompt_placeholders(&bad_prompt.prompt_template),
             vec!["issue.foo"]
         );
 
@@ -1621,10 +1724,14 @@ mod tests {
 
     #[test]
     fn placeholder_scan_ignores_non_variable_braces() {
-        assert!(
-            unknown_placeholders("code sample: {{\"key\": 1}} and {{ issue.title }}").is_empty()
+        assert!(symphony_core::unknown_prompt_placeholders(
+            "code sample: {{\"key\": 1}} and {{ issue.title }}"
+        )
+        .is_empty());
+        assert_eq!(
+            symphony_core::unknown_prompt_placeholders("{{issue.nope}}"),
+            vec!["issue.nope"]
         );
-        assert_eq!(unknown_placeholders("{{issue.nope}}"), vec!["issue.nope"]);
     }
 
     #[test]
@@ -1690,9 +1797,9 @@ mod tests {
     fn default_prompt_uses_supported_placeholders() {
         let prompt = default_prompt_template();
         assert!(
-            unknown_placeholders(&prompt).is_empty(),
+            symphony_core::unknown_prompt_placeholders(&prompt).is_empty(),
             "default prompt contains unsupported placeholders: {:?}",
-            unknown_placeholders(&prompt)
+            symphony_core::unknown_prompt_placeholders(&prompt)
         );
         for token in [
             "{{issue.identifier}}",

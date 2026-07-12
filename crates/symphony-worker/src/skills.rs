@@ -94,10 +94,10 @@ impl SkillsStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GithubRemote {
-    host: String,
-    owner: String,
-    name: String,
+pub(crate) struct GithubRemote {
+    pub(crate) host: String,
+    pub(crate) owner: String,
+    pub(crate) name: String,
 }
 
 impl GithubRemote {
@@ -105,7 +105,7 @@ impl GithubRemote {
         format!("{}/{}", self.owner, self.name)
     }
 
-    fn gh_repo_arg(&self) -> String {
+    pub(crate) fn gh_repo_arg(&self) -> String {
         if self.host == "github.com" {
             self.slug()
         } else {
@@ -133,7 +133,7 @@ impl GithubRemote {
         }
     }
 
-    fn auth_hint(&self) -> String {
+    pub(crate) fn auth_hint(&self) -> String {
         if self.host == "github.com" {
             "`gh auth status` or set `GITHUB_TOKEN`/`GH_TOKEN`".to_string()
         } else if is_ghe_dotcom_host(&self.host) {
@@ -159,7 +159,7 @@ const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GhAuthStatus {
+pub(crate) enum GhAuthStatus {
     Authenticated,
     MissingCli,
     Unauthenticated,
@@ -195,7 +195,10 @@ pub(crate) fn github_token_env_has_token_for_repo_url(
         .any(|key| env.get(*key).is_some_and(|value| !value.trim().is_empty()))
 }
 
-fn github_token_for_host(host: &str, session_env: &BTreeMap<String, String>) -> Option<String> {
+pub(crate) fn github_token_for_host(
+    host: &str,
+    session_env: &BTreeMap<String, String>,
+) -> Option<String> {
     github_token_for_host_from_sources(host, env::vars(), session_env)
 }
 
@@ -224,7 +227,7 @@ fn github_token_for_host_from(
         .cloned()
 }
 
-async fn gh_auth_status(host: &str) -> GhAuthStatus {
+pub(crate) async fn gh_auth_status(host: &str) -> GhAuthStatus {
     let command = format!("gh auth status --hostname {}", shell_quote(host));
     gh_auth_status_from_output(run_shell(None, &command).await)
 }
@@ -243,7 +246,11 @@ fn gh_repo_access_error(stderr: &str) -> bool {
         || stderr.contains("HTTP 404")
 }
 
-async fn github_graphql(remote: &GithubRemote, token: &str, query: &str) -> Result<String, String> {
+pub(crate) async fn github_graphql(
+    remote: &GithubRemote,
+    token: &str,
+    query: &str,
+) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("symphony-rust")
         .build()
@@ -280,7 +287,11 @@ async fn github_graphql(remote: &GithubRemote, token: &str, query: &str) -> Resu
     Ok(body)
 }
 
-async fn github_open_pr_url(remote: &GithubRemote, token: &str) -> Result<Option<String>, String> {
+pub(crate) async fn github_open_pr_url(
+    remote: &GithubRemote,
+    token: &str,
+    branch: &str,
+) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .user_agent("symphony-rust")
         .build()
@@ -293,7 +304,7 @@ async fn github_open_pr_url(remote: &GithubRemote, token: &str) -> Result<Option
     ))
     .map_err(|err| format!("could not build GitHub PR URL: {err}"))?;
     url.query_pairs_mut()
-        .append_pair("head", &format!("{}:{}", remote.owner, INSTALL_BRANCH))
+        .append_pair("head", &format!("{}:{branch}", remote.owner))
         .append_pair("state", "open")
         .append_pair("per_page", "1");
 
@@ -331,7 +342,7 @@ fn parse_github_repo(url: &str) -> Option<String> {
 
 /// Extract the GitHub host and `owner/repo` from github.com or GHE.com remote
 /// URL forms users paste into Settings.
-fn parse_github_remote(url: &str) -> Option<GithubRemote> {
+pub(crate) fn parse_github_remote(url: &str) -> Option<GithubRemote> {
     let (host, rest) = remote_host_and_path(url)?;
     if !is_supported_github_host(&host) {
         return None;
@@ -528,7 +539,7 @@ pub async fn check_skills(
         }
     }
     if let Some(token) = token.as_deref() {
-        if let Ok(Some(url)) = github_open_pr_url(&remote, token).await {
+        if let Ok(Some(url)) = github_open_pr_url(&remote, token, INSTALL_BRANCH).await {
             return SkillsStatus {
                 state: SkillsState::PrOpen,
                 missing,
@@ -781,7 +792,7 @@ async fn run_install(
     }
 }
 
-async fn resolve_default_branch(repo_url: &str) -> Result<String, String> {
+pub(crate) async fn resolve_default_branch(repo_url: &str) -> Result<String, String> {
     let output = run_shell(
         None,
         &format!("git ls-remote --symref {} HEAD", shell_quote(repo_url)),
@@ -812,7 +823,7 @@ fn default_branch_from_ls_remote(raw: &str) -> Option<String> {
     })
 }
 
-fn clone_default_branch_command(repo_url: &str, default_branch: &str) -> String {
+pub(crate) fn clone_default_branch_command(repo_url: &str, default_branch: &str) -> String {
     format!(
         "git clone --depth 1 --branch {} --single-branch -- {} .",
         shell_quote(default_branch),
@@ -927,7 +938,7 @@ fn install_run_request(
     }
 }
 
-fn install_agent_env(
+pub(crate) fn install_agent_env(
     repo_url: &str,
     env: &BTreeMap<String, String>,
     session_env: &BTreeMap<String, String>,
@@ -974,7 +985,7 @@ fn install_agent_env_from(
 
 /// Remove whatever exists at `path` — file, directory, or symlink — without
 /// following links. Missing paths are fine.
-async fn remove_existing(path: &Path) -> std::io::Result<()> {
+pub(crate) async fn remove_existing(path: &Path) -> std::io::Result<()> {
     match tokio::fs::symlink_metadata(path).await {
         // symlink_metadata never follows: is_dir() means a real directory.
         Ok(meta) if meta.is_dir() => tokio::fs::remove_dir_all(path).await,
@@ -1432,11 +1443,14 @@ Rules:
     )
 }
 
-async fn run_shell(dir: Option<&Path>, script: &str) -> std::io::Result<std::process::Output> {
+pub(crate) async fn run_shell(
+    dir: Option<&Path>,
+    script: &str,
+) -> std::io::Result<std::process::Output> {
     shell_command(dir, script).output().await
 }
 
-async fn run_shell_with_env(
+pub(crate) async fn run_shell_with_env(
     dir: Option<&Path>,
     script: &str,
     env: &[(String, String)],
@@ -1466,11 +1480,11 @@ fn shell_command(dir: Option<&Path>, script: &str) -> Command {
     cmd
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn tail(value: &str, max: usize) -> String {
+pub(crate) fn tail(value: &str, max: usize) -> String {
     let trimmed = value.trim();
     if trimmed.chars().count() <= max {
         return trimmed.to_string();

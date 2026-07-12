@@ -1440,7 +1440,7 @@ impl Repository {
                   and (
                     (retro_suggestions.target_type = 'prompt'
                       and b.kind = 'workflow_update')
-                    or (retro_suggestions.target_type = 'skill'
+                    or (retro_suggestions.target_type in ('skill', 'repo_workflow')
                       and b.kind = 'repo_pr'
                       and b.repo_name = retro_suggestions.repo_name)
                   )
@@ -1500,7 +1500,9 @@ impl Repository {
               and decision = 'accepted'
               and (
                 (?2 = 'workflow_update' and target_type = 'prompt')
-                or (?2 = 'repo_pr' and target_type = 'skill' and repo_name = ?3)
+                or (?2 = 'repo_pr'
+                    and target_type in ('skill', 'repo_workflow')
+                    and repo_name = ?3)
               )
             order by id
             "#,
@@ -1872,9 +1874,9 @@ mod tests {
             repo_name: "widgets".to_string(),
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             finding_index: 0,
-            target_type: "skill".to_string(),
-            target_id: "symphony-workpad".to_string(),
-            target_path: ".agents/skills/symphony-workpad/SKILL.md".to_string(),
+            target_type: "repo_workflow".to_string(),
+            target_id: "repository workflow".to_string(),
+            target_path: "SYMPHONY-WORKFLOW.md".to_string(),
             title: "Record prerequisites".to_string(),
             body: "Add guidance".to_string(),
             rationale: "Repeated twice".to_string(),
