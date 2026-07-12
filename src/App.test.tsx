@@ -1114,7 +1114,6 @@ describe("App settings", () => {
     tauriMocks.runtimeAvailable = true;
     tauriMocks.openUrl.mockResolvedValue(undefined);
     const settings = testSettings();
-    settings.agent_backend = "cursor";
     tauriMocks.invoke.mockImplementation(
       dashboardInvoke({
         settings,
@@ -1130,6 +1129,11 @@ describe("App settings", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
+    expect(await screen.findByText("Codex CLI")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Install Cursor" })).toBeNull();
+    fireEvent.click(screen.getByRole("combobox", { name: "Backend" }));
+    fireEvent.click(screen.getByRole("option", { name: "Cursor" }));
+
     const installButton = await screen.findByRole("button", { name: "Install Cursor" });
     expect(
       screen.getByText(
@@ -1140,7 +1144,7 @@ describe("App settings", () => {
     fireEvent.click(installButton);
 
     expect(tauriMocks.openUrl).toHaveBeenCalledWith(
-      "https://docs.cursor.com/en/cli/installation",
+      "https://cursor.com/docs/cli/installation",
     );
     expect(screen.queryByRole("button", { name: "Install Codex" })).toBeNull();
     expect(screen.queryByText("Claude Code CLI")).toBeNull();

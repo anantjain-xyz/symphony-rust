@@ -1615,8 +1615,8 @@ function App() {
     ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
       (savedFlash && savedLiveConfigKept));
 
-  // Revalidate when entering Settings (or once settings finish loading there),
-  // so CLI detection and workflow status are visible without a manual click.
+  // Revalidate when entering Settings, once settings finish loading there, or
+  // when the selected backend changes so its CLI status never disappears.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
     invoke<ValidationResult>("validate_settings", { settings })
@@ -1624,7 +1624,7 @@ function App() {
       .catch(() => undefined);
     refreshSkillsStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, runtimeAvailable, settings !== null]);
+  }, [view, runtimeAvailable, settings !== null, settings?.agent_backend]);
 
   function requestStop() {
     if (overview.active_runs.length > 0 && !confirmStop) {
@@ -4925,7 +4925,7 @@ const AGENT_CLI_OPTIONS = [
     key: "cursor",
     label: "Cursor",
     defaultCommand: "agent",
-    installUrl: "https://docs.cursor.com/en/cli/installation",
+    installUrl: "https://cursor.com/docs/cli/installation",
   },
   {
     key: "opencode",
