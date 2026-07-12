@@ -1687,6 +1687,9 @@ function App() {
     const batch = await call(() =>
       invoke<RetroBatchRow>("apply_retro_workflow", { retroId }),
     );
+    if (["queued", "running"].includes(batch.state)) {
+      setHasInProgressRetroBatches(true);
+    }
     setSelectedRetro((current) =>
       current?.row.id === retroId
         ? { ...current, batches: [...current.batches, batch] }
@@ -1703,6 +1706,9 @@ function App() {
     const batches = await call(() =>
       invoke<RetroBatchRow[]>("start_retro_prs", { retroId }),
     );
+    if (batches.some((batch) => ["queued", "running"].includes(batch.state))) {
+      setHasInProgressRetroBatches(true);
+    }
     setSelectedRetro((current) =>
       current?.row.id === retroId ? { ...current, batches } : current,
     );
