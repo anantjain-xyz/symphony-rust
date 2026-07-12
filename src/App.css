@@ -287,9 +287,9 @@ tr:focus-visible {
   border-radius: 999px;
   color: white;
   flex: 0 0 auto;
-  gap: 6px;
-  height: 32px;
-  min-height: 32px;
+  gap: 0;
+  height: 18px;
+  min-height: 18px;
   overflow: hidden;
   padding: 0;
   transition:
@@ -297,7 +297,7 @@ tr:focus-visible {
     border-color 120ms ease,
     width 180ms ease;
   white-space: nowrap;
-  width: 32px;
+  width: 18px;
 }
 
 .update-button:hover:not(:disabled),
@@ -308,10 +308,16 @@ tr:focus-visible {
 
 .update-button.available:hover:not(:disabled),
 .update-button.available:focus-visible:not(:disabled) {
-  width: 88px;
+  gap: 5px;
+  height: 26px;
+  min-height: 26px;
+  width: 72px;
 }
 
 .update-button.expanded {
+  gap: 6px;
+  height: 28px;
+  min-height: 28px;
   padding: 0 11px;
   width: auto;
 }
@@ -328,13 +334,13 @@ tr:focus-visible {
 
 .update-button-icon {
   display: block;
-  flex: 0 0 16px;
-  height: 16px;
-  width: 16px;
+  flex: 0 0 9px;
+  height: 9px;
+  width: 9px;
 }
 
 .update-button-label {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
 }
