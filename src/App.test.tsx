@@ -146,6 +146,8 @@ function settingsInvoke({
         };
       case "get_retro_detail":
         return null;
+      case "has_in_progress_retro_batches":
+        return false;
       case "get_worker_status":
         return { state: "stopped", started_at: null, last_error: null };
       case "validate_settings":
@@ -251,6 +253,8 @@ function dashboardInvoke({
         };
       case "get_retro_detail":
         return null;
+      case "has_in_progress_retro_batches":
+        return false;
       case "get_worker_status":
         return workerStatus;
       case "trigger_retry_now":

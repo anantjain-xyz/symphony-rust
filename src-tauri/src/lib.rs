@@ -636,6 +636,15 @@ async fn get_retro_detail(
 }
 
 #[tauri::command]
+async fn has_in_progress_retro_batches(state: State<'_, AppState>) -> Result<bool, String> {
+    state
+        .repo
+        .has_in_progress_retro_batches()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let deleted = state
         .repo
@@ -1204,6 +1213,8 @@ pub fn run() {
     let path_fix = path_env::fix();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let handle = app.handle().clone();
             let app_dir = app.path().app_data_dir()?;
@@ -1266,6 +1277,7 @@ pub fn run() {
             get_retro_status,
             list_retros,
             get_retro_detail,
+            has_in_progress_retro_batches,
             delete_retro,
             set_retro_suggestion_decision,
             apply_retro_workflow,

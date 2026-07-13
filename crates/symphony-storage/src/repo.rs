@@ -1637,6 +1637,14 @@ impl Repository {
         .await?)
     }
 
+    pub async fn has_in_progress_retro_batches(&self) -> Result<bool, StorageError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "select exists(select 1 from retro_batches where state in ('queued', 'running'))",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     pub async fn list_retro_runs(
         &self,
         since_at: &str,
@@ -2720,6 +2728,29 @@ mod tests {
             .iter()
             .all(|batch| batch.error.as_deref() == Some("Restarted before completion.")));
         assert!(batches.iter().all(|batch| batch.completed_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn detects_in_progress_retro_batches_across_retros() {
+        let repo = repo().await;
+        let retro = repo
+            .create_retro("1970-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        let suggestion = test_retro_suggestion(&retro.id, "accepted-suggestion", "accepted");
+        repo.insert_retro_suggestions(std::slice::from_ref(&suggestion))
+            .await
+            .unwrap();
+        let batch = test_retro_batch(&retro.id, "queued-batch", "repo_pr", Some("widgets"));
+        repo.reserve_retro_batch(&batch, std::slice::from_ref(&suggestion.id))
+            .await
+            .unwrap();
+
+        assert!(repo.has_in_progress_retro_batches().await.unwrap());
+        repo.update_retro_batch(&batch.id, "completed", Some("Done"), None, None)
+            .await
+            .unwrap();
+        assert!(!repo.has_in_progress_retro_batches().await.unwrap());
     }
 
     #[tokio::test]

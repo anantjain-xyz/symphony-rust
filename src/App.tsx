@@ -47,6 +47,8 @@ import {
   countMatches,
   highlightMatches,
 } from "./MarkdownText";
+import { AppUpdate } from "./AppUpdate";
+import type { UpdateSafety } from "./AppUpdate";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -868,6 +870,22 @@ function formSnapshot(settings: AppSettings) {
   return JSON.stringify(form);
 }
 
+function localValueFingerprint(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${value.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function updateSettingsFingerprint(settings: AppSettings, linearKey: string) {
+  return JSON.stringify({
+    settings: formSnapshot(settings),
+    pendingLinearKey: localValueFingerprint(linearKey),
+  });
+}
+
 function App() {
   const runtimeAvailable = isTauri();
   const [theme, toggleTheme] = useTheme();
@@ -921,6 +939,12 @@ function App() {
   const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
   const [workflowTransfer, setWorkflowTransfer] =
     useState<WorkflowTransferStatus | null>(null);
+  const [hasInProgressRetroBatches, setHasInProgressRetroBatches] = useState(
+    !runtimeAvailable &&
+      previewRetroDetail.batches.some((batch) =>
+        ["queued", "running"].includes(batch.state),
+      ),
+  );
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
   const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
     () => new Set(),
@@ -961,6 +985,7 @@ function App() {
       nextRetroStatus,
       nextRetros,
       nextRetroDetail,
+      nextHasInProgressRetroBatches,
     ] =
       await Promise.all([
         invoke<Overview>("get_overview"),
@@ -975,6 +1000,7 @@ function App() {
         retroDetailId
           ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
           : Promise.resolve(null),
+        invoke<boolean>("has_in_progress_retro_batches"),
       ]);
     setOverview(nextOverview);
     setRuns(nextRuns);
@@ -982,6 +1008,7 @@ function App() {
     setWorker(nextWorker);
     setRetroStatus(nextRetroStatus);
     setRetros(nextRetros);
+    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
     if (detailId && detailId === selectedRunIdRef.current) {
       setSelectedRun(nextDetail);
       if (!nextDetail) selectedRunIdRef.current = null;
@@ -1677,6 +1704,9 @@ function App() {
     const batch = await call(() =>
       invoke<RetroBatchRow>("apply_retro_workflow", { retroId }),
     );
+    if (["queued", "running"].includes(batch.state)) {
+      setHasInProgressRetroBatches(true);
+    }
     setSelectedRetro((current) =>
       current?.row.id === retroId
         ? { ...current, batches: [...current.batches, batch] }
@@ -1693,6 +1723,9 @@ function App() {
     const batches = await call(() =>
       invoke<RetroBatchRow[]>("start_retro_prs", { retroId }),
     );
+    if (batches.some((batch) => ["queued", "running"].includes(batch.state))) {
+      setHasInProgressRetroBatches(true);
+    }
     setSelectedRetro((current) =>
       current?.row.id === retroId ? { ...current, batches } : current,
     );
@@ -1793,6 +1826,99 @@ function App() {
         ? "Worker is stopping"
         : "Start worker";
 
+  const updateBackgroundWork = [
+    retroStatus.state === "running" ? "the active Retro" : null,
+    skillsInstall?.state === "running" ? "the skills installation" : null,
+    workflowTransfer?.state === "running" ? "the workflow transfer" : null,
+    hasInProgressRetroBatches ? "an active Retro change batch" : null,
+  ].filter((item): item is string => item !== null);
+
+  async function prepareForUpdateInstall() {
+    const [installWorker, installOverview] = await Promise.all([
+      invoke<WorkerStatus>("get_worker_status"),
+      invoke<Overview>("get_overview"),
+    ]);
+    setWorker(installWorker);
+    setOverview(installOverview);
+    const workerWasRunning = installWorker.state === "running";
+    const restoreWorker = async () => {
+      if (!workerWasRunning) return;
+      const status = await invoke<WorkerStatus>("get_worker_status");
+      if (status.state === "stopped") {
+        setWorker(await invoke<WorkerStatus>("start_worker"));
+      }
+    };
+    const restoreWorkerWhenStopped = async () => {
+      if (!workerWasRunning) return;
+      for (;;) {
+        try {
+          const status = await invoke<WorkerStatus>("get_worker_status");
+          setWorker(status);
+          if (status.state === "stopped") {
+            await restoreWorker();
+            return;
+          }
+        } catch {
+          // A transient read/start failure must not abandon restoration after
+          // the updater has already requested worker shutdown.
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+    };
+
+    if (installWorker.state !== "stopped") {
+      setWorker(await invoke<WorkerStatus>("stop_worker"));
+      try {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          const [nextWorker, nextOverview] = await Promise.all([
+            invoke<WorkerStatus>("get_worker_status"),
+            invoke<Overview>("get_overview"),
+          ]);
+          setWorker(nextWorker);
+          setOverview(nextOverview);
+          if (
+            nextWorker.state === "stopped" &&
+            nextOverview.active_runs.length === 0
+          ) {
+            return restoreWorker;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+      } catch (error) {
+        void restoreWorkerWhenStopped().catch(() => undefined);
+        throw error;
+      }
+      void restoreWorkerWhenStopped().catch(() => undefined);
+      throw new Error("Symphony could not stop active work safely within 30 seconds.");
+    }
+
+    return restoreWorker;
+  }
+
+  async function verifyUpdateInstallSafety(): Promise<UpdateSafety> {
+    const [nextOverview, nextHasInProgressRetroBatches] = await Promise.all([
+      invoke<Overview>("get_overview"),
+      invoke<boolean>("has_in_progress_retro_batches"),
+    ]);
+    setOverview(nextOverview);
+    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
+    return {
+      activeRunCount: nextOverview.active_runs.length,
+      activeRunIds: nextOverview.active_runs.map((run) => run.id),
+      backgroundWork: [
+        retroStatus.state === "running" ? "the active Retro" : null,
+        skillsInstall?.state === "running" ? "the skills installation" : null,
+        workflowTransfer?.state === "running" ? "the workflow transfer" : null,
+        nextHasInProgressRetroBatches ? "an active Retro change batch" : null,
+      ].filter((item): item is string => item !== null),
+      hasUnsavedSettings: dirty,
+      settingsFingerprint:
+        dirty && settings ? updateSettingsFingerprint(settings, linearKey) : null,
+      transientBusy: busy,
+    };
+  }
+
   return (
     <main className="app">
       <header className="topbar">
@@ -1807,6 +1933,24 @@ function App() {
                 Dev
               </span>
             ) : null}
+            <AppUpdate
+              enabled={runtimeAvailable && !IS_LOCAL_DEV}
+              safety={{
+                activeRunCount: overview.active_runs.length,
+                activeRunIds: overview.active_runs.map((run) => run.id),
+                backgroundWork: updateBackgroundWork,
+                hasUnsavedSettings: dirty,
+                settingsFingerprint:
+                  dirty && settings
+                    ? updateSettingsFingerprint(settings, linearKey)
+                    : null,
+                transientBusy: busy,
+              }}
+              verifyInstallSafety={verifyUpdateInstallSafety}
+              prepareForInstall={prepareForUpdateInstall}
+              onInstallLockChange={setBusy}
+              onActionError={setError}
+            />
           </div>
 
           <nav className="topnav" aria-label="Primary">
