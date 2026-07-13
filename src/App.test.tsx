@@ -577,6 +577,7 @@ describe("App settings", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     const repoNameInput = screen.getByLabelText(/^Name/, { selector: "input" });
     expectLiteralInput(repoNameInput);
@@ -624,7 +625,7 @@ describe("App settings", () => {
     expect(defaultToggles[1].checked).toBe(true);
   });
 
-  it("expands only the repository being edited", async () => {
+  it("starts with all repositories collapsed and expands only the repository being edited", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = {
       ...testSettings(),
@@ -645,10 +646,10 @@ describe("App settings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
     const widgetsToggle = await screen.findByRole("button", {
-      name: "Collapse widgets repository",
+      name: "Edit widgets repository",
     });
-    expect(widgetsToggle.getAttribute("aria-expanded")).toBe("true");
-    expect(await screen.findByDisplayValue("git@github.com:acme/widgets.git")).toBeTruthy();
+    expect(widgetsToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByDisplayValue("git@github.com:acme/widgets.git")).toBeNull();
     expect(screen.queryByDisplayValue("git@github.com:acme/backend.git")).toBeNull();
 
     const backendToggle = await screen.findByRole("button", {
@@ -673,12 +674,21 @@ describe("App settings", () => {
         "aria-expanded",
       ),
     ).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse api repository" }));
+    expect(
+      screen.getByRole("button", { name: "Edit api repository" }).getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("false");
+    expect(screen.queryByDisplayValue("git@github.com:acme/backend.git")).toBeNull();
   });
 
   it("uses literal input behavior for settings config fields", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     const fields = [
       screen.getByLabelText(/^Repo URL/, { selector: "input" }),
@@ -1045,6 +1055,7 @@ describe("App settings", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     expect(screen.getByText("Repository does not ship all agent skills.")).toBeTruthy();
     expect(screen.getByText("7 of 7 bundled skills are missing.")).toBeTruthy();
@@ -1069,6 +1080,7 @@ describe("App settings", () => {
     );
     const { container } = render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
     expect(await screen.findByText("Using the saved default workflow.")).toBeTruthy();
     const transfer = screen.getByRole("button", { name: "Transfer workflow to repo" });
     await waitFor(() => expect(transfer.getAttribute("disabled")).toBeNull());
@@ -1099,6 +1111,7 @@ describe("App settings", () => {
     );
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
     expect(await screen.findByText("Using symphony-workflow.md.")).toBeTruthy();
     expect(screen.queryByText("Workflow: repository")).toBeNull();
   });
@@ -1130,6 +1143,7 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     expect(
       await screen.findByText("Repository does not ship all agent skills."),
@@ -1251,6 +1265,7 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
     fireEvent.click(await screen.findByRole("button", { name: "Mark installed" }));
     expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
 
@@ -1300,6 +1315,7 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     expect(await screen.findByText("An install PR is waiting for review.")).toBeTruthy();
     const viewPrButton = screen.getByRole("button", { name: "View PR" });
@@ -1464,6 +1480,7 @@ describe("App settings", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
     expect(
       await screen.findByText("Repository does not ship all agent skills."),
     ).toBeTruthy();

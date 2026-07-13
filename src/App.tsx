@@ -4037,14 +4037,12 @@ function SettingsView({
   onTransferWorkflow: (repoUrl: string) => void;
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
-  const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(
-    settings.repos.length > 0 ? 0 : null,
-  );
+  const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(null);
 
   useEffect(() => {
     setExpandedRepoIndex((index) => {
       if (settings.repos.length === 0) return null;
-      if (index === null) return 0;
+      if (index === null) return null;
       return Math.min(index, settings.repos.length - 1);
     });
   }, [settings.repos.length]);
@@ -4079,7 +4077,7 @@ function SettingsView({
     setExpandedRepoIndex((current) => {
       const nextLength = settings.repos.length - 1;
       if (nextLength <= 0) return null;
-      if (current === null) return 0;
+      if (current === null) return null;
       if (current === index) return Math.min(index, nextLength - 1);
       if (current > index) return current - 1;
       return Math.min(current, nextLength - 1);
@@ -4170,7 +4168,9 @@ function SettingsView({
                     aria-controls={expanded ? bodyId : undefined}
                     aria-label={toggleLabel}
                     title={toggleLabel}
-                    onClick={() => setExpandedRepoIndex(index)}
+                    onClick={() =>
+                      setExpandedRepoIndex((current) => (current === index ? null : index))
+                    }
                   >
                     <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
                       <path
