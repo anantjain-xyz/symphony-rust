@@ -182,7 +182,7 @@ export function AppUpdate({
       return;
     }
     if (phase === "ready") {
-      void installAndRestart();
+      void requestInstall();
     } else {
       void download();
     }

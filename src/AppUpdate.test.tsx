@@ -153,11 +153,13 @@ describe("AppUpdate", () => {
     });
     tauriMocks.check.mockResolvedValue(candidate);
     const prepareForInstall = vi.fn().mockResolvedValue(vi.fn());
+    const verifyInstallSafety = vi.fn().mockResolvedValue(safe);
     const onActionError = vi.fn();
     const { rerender } = render(
       <AppUpdate
         enabled
         safety={safe}
+        verifyInstallSafety={verifyInstallSafety}
         prepareForInstall={prepareForInstall}
         onActionError={onActionError}
       />,
@@ -268,11 +270,13 @@ describe("AppUpdate", () => {
     });
     tauriMocks.check.mockResolvedValue(candidate);
     const prepareForInstall = vi.fn().mockResolvedValue(vi.fn());
+    const verifyInstallSafety = vi.fn().mockResolvedValue(safe);
     const onActionError = vi.fn();
     const { rerender } = render(
       <AppUpdate
         enabled
         safety={safe}
+        verifyInstallSafety={verifyInstallSafety}
         prepareForInstall={prepareForInstall}
         onActionError={onActionError}
       />,
@@ -286,6 +290,7 @@ describe("AppUpdate", () => {
       <AppUpdate
         enabled
         safety={{ ...safe, transientBusy: true }}
+        verifyInstallSafety={verifyInstallSafety}
         prepareForInstall={prepareForInstall}
         onActionError={onActionError}
       />,
@@ -302,6 +307,7 @@ describe("AppUpdate", () => {
       <AppUpdate
         enabled
         safety={safe}
+        verifyInstallSafety={verifyInstallSafety}
         prepareForInstall={prepareForInstall}
         onActionError={onActionError}
       />,
@@ -309,6 +315,7 @@ describe("AppUpdate", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Update Symphony to v0.1.12" }),
     );
+    await waitFor(() => expect(verifyInstallSafety).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(candidate.install).toHaveBeenCalledTimes(1));
   });
 

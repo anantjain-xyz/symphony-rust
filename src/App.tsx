@@ -870,6 +870,22 @@ function formSnapshot(settings: AppSettings) {
   return JSON.stringify(form);
 }
 
+function localValueFingerprint(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${value.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function updateSettingsFingerprint(settings: AppSettings, linearKey: string) {
+  return JSON.stringify({
+    settings: formSnapshot(settings),
+    pendingLinearKey: localValueFingerprint(linearKey),
+  });
+}
+
 function App() {
   const runtimeAvailable = isTauri();
   const [theme, toggleTheme] = useTheme();
@@ -1897,7 +1913,8 @@ function App() {
         nextHasInProgressRetroBatches ? "an active Retro change batch" : null,
       ].filter((item): item is string => item !== null),
       hasUnsavedSettings: dirty,
-      settingsFingerprint: dirty && settings ? formSnapshot(settings) : null,
+      settingsFingerprint:
+        dirty && settings ? updateSettingsFingerprint(settings, linearKey) : null,
       transientBusy: busy,
     };
   }
@@ -1923,7 +1940,10 @@ function App() {
                 activeRunIds: overview.active_runs.map((run) => run.id),
                 backgroundWork: updateBackgroundWork,
                 hasUnsavedSettings: dirty,
-                settingsFingerprint: dirty && settings ? formSnapshot(settings) : null,
+                settingsFingerprint:
+                  dirty && settings
+                    ? updateSettingsFingerprint(settings, linearKey)
+                    : null,
                 transientBusy: busy,
               }}
               verifyInstallSafety={verifyUpdateInstallSafety}
