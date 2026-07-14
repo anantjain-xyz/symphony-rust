@@ -1042,24 +1042,13 @@ async fn execute_repo_pr_batch(
         .repo_url
         .as_deref()
         .ok_or_else(|| "Batch has no repository URL.".to_string())?;
-    let snapshot = clone_repo_snapshot(repo_url, workspace, session_env).await?;
-    let expected_refs = suggestions
-        .iter()
-        .filter_map(|suggestion| suggestion.base_ref.as_deref())
-        .collect::<BTreeSet<_>>();
-    if expected_refs.len() != 1 || !expected_refs.contains(snapshot.head.as_str()) {
-        repository
-            .update_retro_batch(
-                &batch.id,
-                "stale",
-                Some("The default branch changed since review."),
-                Some("Generate a new retro and review the updated diff."),
-                None,
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        return Ok(());
-    }
+    // Clone the current default branch. We intentionally do NOT reject the batch
+    // just because the branch HEAD moved since review — unrelated commits should
+    // not invalidate a batch. Freshness is enforced per-file below by comparing
+    // each reviewed file's content hash against the stored `base_hash`, which is
+    // the property we actually care about (we apply the diff to the same content
+    // that was reviewed).
+    clone_repo_snapshot(repo_url, workspace, session_env).await?;
 
     let branch_output = command_output(
         "git",
