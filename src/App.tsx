@@ -843,6 +843,128 @@ function anyRepoConfigured(settings: AppSettings): boolean {
   return settings.repos.some((repo) => repo.url.trim() !== "");
 }
 
+type DashboardSnapshot = {
+  overview: Overview;
+  runs: RunWithIssueRow[];
+  issues: IssueRow[];
+  worker: WorkerStatus;
+  retroStatus: RetroStatus;
+  retros: RetroRow[];
+  hasInProgressRetroBatches: boolean;
+  requestedRunId: string | null;
+  selectedRun: RunDetail | null;
+  requestedRetroId: string | null;
+  selectedRetroId: string | null;
+  selectedRetro: RetroDetail | null;
+};
+
+type DashboardSnapshotSelection = {
+  selectedRunId?: string | null;
+  selectedRetroId?: string | null;
+};
+
+export async function loadDashboardSnapshot({
+  selectedRunId = null,
+  selectedRetroId = null,
+}: DashboardSnapshotSelection = {}): Promise<DashboardSnapshot> {
+  const [
+    overview,
+    runs,
+    issues,
+    worker,
+    selectedRun,
+    retroStatus,
+    retros,
+    requestedRetro,
+    hasInProgressRetroBatches,
+  ] = await Promise.all([
+    invoke<Overview>("get_overview"),
+    invoke<RunWithIssueRow[]>("list_runs"),
+    invoke<IssueRow[]>("list_issues"),
+    invoke<WorkerStatus>("get_worker_status"),
+    selectedRunId
+      ? invoke<RunDetail | null>("get_run_detail", { id: selectedRunId })
+      : Promise.resolve(null),
+    invoke<RetroStatus>("get_retro_status"),
+    invoke<RetroRow[]>("list_retros"),
+    selectedRetroId
+      ? invoke<RetroDetail | null>("get_retro_detail", { id: selectedRetroId })
+      : Promise.resolve(null),
+    invoke<boolean>("has_in_progress_retro_batches"),
+  ]);
+
+  const nextSelectedRetroId = selectedRetroId ?? retros[0]?.id ?? null;
+  const selectedRetro =
+    selectedRetroId || !nextSelectedRetroId
+      ? requestedRetro
+      : await invoke<RetroDetail | null>("get_retro_detail", {
+          id: nextSelectedRetroId,
+        });
+
+  return {
+    overview,
+    runs,
+    issues,
+    worker,
+    retroStatus,
+    retros,
+    hasInProgressRetroBatches,
+    requestedRunId: selectedRunId,
+    selectedRun,
+    requestedRetroId: selectedRetroId,
+    selectedRetroId: nextSelectedRetroId,
+    selectedRetro,
+  };
+}
+
+type BootstrapResult = {
+  settings: AppSettings;
+  dashboard: DashboardSnapshot;
+  autoStart: Promise<WorkerStatus> | null;
+};
+
+let bootstrapPromise: Promise<BootstrapResult> | null = null;
+
+function loadBootstrap(): Promise<BootstrapResult> {
+  if (bootstrapPromise) return bootstrapPromise;
+
+  const pending = (async () => {
+    const [settings, dashboard] = await Promise.all([
+      invoke<AppSettings>("load_settings"),
+      loadDashboardSnapshot(),
+    ]);
+    const autoStart =
+      !settings.linear_api_key_set ||
+      !anyRepoConfigured(settings) ||
+      dashboard.worker.state !== "stopped" ||
+      dashboard.worker.last_error
+        ? null
+        : invoke<WorkerStatus>("start_worker");
+    return { settings, dashboard, autoStart };
+  })();
+  bootstrapPromise = pending;
+  void pending.then(
+    ({ autoStart }) => {
+      if (!autoStart) {
+        if (bootstrapPromise === pending) bootstrapPromise = null;
+        return;
+      }
+      void autoStart.then(
+        () => {
+          if (bootstrapPromise === pending) bootstrapPromise = null;
+        },
+        () => {
+          if (bootstrapPromise === pending) bootstrapPromise = null;
+        },
+      );
+    },
+    () => {
+      if (bootstrapPromise === pending) bootstrapPromise = null;
+    },
+  );
+  return pending;
+}
+
 // Unique trimmed URLs of the configured repos — the key space for per-repo
 // skills statuses (two cards with the same URL share one status).
 function configuredRepoUrls(settings: AppSettings): string[] {
@@ -963,67 +1085,48 @@ function App() {
   const selectedRetroIdRef = useRef<string | null>(
     runtimeAvailable ? null : previewRetroReport.id,
   );
-  const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
 
+  function commitDashboardSnapshot(snapshot: DashboardSnapshot) {
+    setOverview(snapshot.overview);
+    setRuns(snapshot.runs);
+    setIssues(snapshot.issues);
+    setWorker(snapshot.worker);
+    setRetroStatus(snapshot.retroStatus);
+    setRetros(snapshot.retros);
+    setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
+    if (
+      snapshot.requestedRunId &&
+      snapshot.requestedRunId === selectedRunIdRef.current
+    ) {
+      setSelectedRun(snapshot.selectedRun);
+      if (!snapshot.selectedRun) selectedRunIdRef.current = null;
+    }
+    if (
+      snapshot.requestedRetroId &&
+      snapshot.requestedRetroId === selectedRetroIdRef.current
+    ) {
+      setSelectedRetro(snapshot.selectedRetro);
+      if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
+    } else if (!snapshot.requestedRetroId && selectedRetroIdRef.current === null) {
+      selectedRetroIdRef.current = snapshot.selectedRetroId;
+      setSelectedRetro(snapshot.selectedRetro);
+    }
+  }
+
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
   async function refreshDashboard() {
     if (!runtimeAvailable) return;
-    const detailId = selectedRunIdRef.current;
-    const retroDetailId = selectedRetroIdRef.current;
-    const [
-      nextOverview,
-      nextRuns,
-      nextIssues,
-      nextWorker,
-      nextDetail,
-      nextRetroStatus,
-      nextRetros,
-      nextRetroDetail,
-      nextHasInProgressRetroBatches,
-    ] =
-      await Promise.all([
-        invoke<Overview>("get_overview"),
-        invoke<RunWithIssueRow[]>("list_runs"),
-        invoke<IssueRow[]>("list_issues"),
-        invoke<WorkerStatus>("get_worker_status"),
-        detailId
-          ? invoke<RunDetail | null>("get_run_detail", { id: detailId })
-          : Promise.resolve(null),
-        invoke<RetroStatus>("get_retro_status"),
-        invoke<RetroRow[]>("list_retros"),
-        retroDetailId
-          ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
-          : Promise.resolve(null),
-        invoke<boolean>("has_in_progress_retro_batches"),
-      ]);
-    setOverview(nextOverview);
-    setRuns(nextRuns);
-    setIssues(nextIssues);
-    setWorker(nextWorker);
-    setRetroStatus(nextRetroStatus);
-    setRetros(nextRetros);
-    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
-    if (detailId && detailId === selectedRunIdRef.current) {
-      setSelectedRun(nextDetail);
-      if (!nextDetail) selectedRunIdRef.current = null;
-    }
-    if (retroDetailId && retroDetailId === selectedRetroIdRef.current) {
-      setSelectedRetro(nextRetroDetail);
-      if (!nextRetroDetail) selectedRetroIdRef.current = null;
-    } else if (!retroDetailId && nextRetros.length > 0) {
-      const newest = nextRetros[0];
-      selectedRetroIdRef.current = newest.id;
-      const detail = await invoke<RetroDetail | null>("get_retro_detail", {
-        id: newest.id,
-      });
-      setSelectedRetro(detail);
-    }
+    const snapshot = await loadDashboardSnapshot({
+      selectedRunId: selectedRunIdRef.current,
+      selectedRetroId: selectedRetroIdRef.current,
+    });
+    commitDashboardSnapshot(snapshot);
   }
 
   useEffect(() => {
@@ -1042,21 +1145,24 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable) return;
 
-    const boot = async () => {
-      const loaded = await invoke<AppSettings>("load_settings");
-      setSettings(loaded);
-      setSavedSnapshot(formSnapshot(loaded));
-      await refreshDashboard();
-      // The worker should be running whenever the app is open, so start it
-      // on launch once setup is complete; the topbar toggle stops it.
-      if (autoStartDone.current) return;
-      autoStartDone.current = true;
-      if (!loaded.linear_api_key_set || !anyRepoConfigured(loaded)) return;
-      const status = await invoke<WorkerStatus>("get_worker_status");
-      if (status.state !== "stopped" || status.last_error) return;
-      setWorker(await invoke<WorkerStatus>("start_worker"));
-    };
-    boot().catch((err) => setError(formatError(err)));
+    let cancelled = false;
+    loadBootstrap()
+      .then(({ settings: loaded, dashboard, autoStart }) => {
+        if (cancelled) return;
+        setSettings(loaded);
+        setSavedSnapshot(formSnapshot(loaded));
+        commitDashboardSnapshot(dashboard);
+        autoStart
+          ?.then((nextWorker) => {
+            if (!cancelled) setWorker(nextWorker);
+          })
+          .catch((err) => {
+            if (!cancelled) setError(formatError(err));
+          });
+      })
+      .catch((err) => {
+        if (!cancelled) setError(formatError(err));
+      });
 
     // Agent events arrive in bursts; coalesce them into a single refresh.
     let timer: number | null = null;
@@ -1076,6 +1182,7 @@ function App() {
       return [];
     });
     return () => {
+      cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
@@ -1095,7 +1202,6 @@ function App() {
         .catch(() => undefined);
     };
 
-    refreshWorker();
     const interval = window.setInterval(
       refreshWorker,
       worker.state === "stopping" ? 500 : 2000,
