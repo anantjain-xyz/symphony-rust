@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { InputHTMLAttributes } from "react";
+import type { InputHTMLAttributes, RefObject } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -952,6 +952,36 @@ type BootstrapResult = {
   autoStart: Promise<WorkerStatus> | null;
 };
 
+type BootState =
+  | { status: "loading" }
+  | { status: "ready"; payload: BootstrapResult }
+  | { status: "error"; message: string };
+
+const previewBootstrap: BootstrapResult = {
+  settings: previewSettings,
+  dashboard: {
+    overview: previewOverview,
+    runs: previewRuns,
+    issues: previewIssues,
+    worker: {
+      state: "running",
+      started_at: previewActiveStartedAt,
+      last_error: null,
+    },
+    retroStatus: previewRetroStatus,
+    retros: previewRetros,
+    hasInProgressRetroBatches: previewRetroDetail.batches.some((batch) =>
+      ["queued", "running"].includes(batch.state),
+    ),
+    requestedRunId: null,
+    selectedRun: null,
+    requestedRetroId: null,
+    selectedRetroId: previewRetroReport.id,
+    selectedRetro: previewRetroDetail,
+  },
+  autoStart: null,
+};
+
 let bootstrapPromise: Promise<BootstrapResult> | null = null;
 
 function loadBootstrap(): Promise<BootstrapResult> {
@@ -992,6 +1022,10 @@ function loadBootstrap(): Promise<BootstrapResult> {
     },
   );
   return pending;
+}
+
+function resetBootstrap() {
+  bootstrapPromise = null;
 }
 
 // Unique trimmed URLs of the configured repos — the key space for per-repo
@@ -1075,6 +1109,12 @@ function App() {
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bootState, setBootState] = useState<BootState>(
+    runtimeAvailable
+      ? { status: "loading" }
+      : { status: "ready", payload: previewBootstrap },
+  );
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [bootstrapSettled, setBootstrapSettled] = useState(!runtimeAvailable);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -1105,6 +1145,7 @@ function App() {
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
+  const retryButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!runtimeAvailable) return;
@@ -1320,6 +1361,12 @@ function App() {
 
   useEffect(() => {
     if (!runtimeAvailable) return;
+
+    if (bootState.status === "error") retryButtonRef.current?.focus();
+  }, [bootState.status, runtimeAvailable]);
+
+  useEffect(() => {
+    if (!runtimeAvailable) return;
     let cancelled = false;
     let bootstrapPending = true;
     let refreshQueuedDuringBootstrap = false;
@@ -1343,7 +1390,7 @@ function App() {
       if (cancelled) return;
       bootstrapPending = false;
       if (ready) setBootstrapSettled(true);
-      if (refreshQueuedDuringBootstrap) {
+      if (ready && refreshQueuedDuringBootstrap) {
         refreshQueuedDuringBootstrap = false;
         scheduleRefresh();
       }
@@ -1352,14 +1399,19 @@ function App() {
     const bootstrap = loadBootstrap();
     bootstrapDashboardRef.current = bootstrap;
     Promise.all([bootstrap, requestDashboardRefresh()])
-      .then(([{ settings: loaded, autoStart }]) => {
+      .then(([{ settings: loaded, dashboard, autoStart }]) => {
         if (cancelled) return;
         if (bootstrapDashboardRef.current === bootstrap) {
           bootstrapDashboardRef.current = null;
         }
         setSettings(loaded);
         setSavedSnapshot(formSnapshot(loaded));
+        setBootState({
+          status: "ready",
+          payload: { settings: loaded, dashboard, autoStart },
+        });
         if (!autoStart) {
+          setBootstrapSettled(true);
           releaseBootstrapRefreshGate(true);
           return;
         }
@@ -1377,7 +1429,7 @@ function App() {
           if (bootstrapDashboardRef.current === bootstrap) {
             bootstrapDashboardRef.current = null;
           }
-          setError(formatError(err));
+          setBootState({ status: "error", message: normalizeBootstrapError(err) });
           releaseBootstrapRefreshGate(false);
         }
       });
@@ -1396,10 +1448,21 @@ function App() {
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
   }, [
+    bootstrapAttempt,
     requestBackgroundDashboardRefresh,
     requestDashboardRefresh,
     runtimeAvailable,
   ]);
+
+  function retryBootstrap() {
+    if (bootState.status !== "error") return;
+    resetBootstrap();
+    setError(null);
+    setBootstrapSettled(false);
+    setBootState({ status: "loading" });
+    setView("overview");
+    setBootstrapAttempt((attempt) => attempt + 1);
+  }
 
   useEffect(() => {
     if (!runtimeAvailable || worker.state === "stopped") return;
@@ -2134,6 +2197,14 @@ function App() {
         ? "Worker is stopping"
         : "Start worker";
 
+  const bootReady = bootState.status === "ready";
+  const bootNavigationReason =
+    bootState.status === "loading"
+      ? "Live views are unavailable while Symphony connects."
+      : bootState.status === "error"
+        ? "Live views are unavailable until Symphony reconnects."
+        : null;
+
   const updateBackgroundWork = [
     retroStatus.state === "running" ? "the active Retro" : null,
     skillsInstall?.state === "running" ? "the skills installation" : null,
@@ -2241,7 +2312,7 @@ function App() {
                 Dev
               </span>
             ) : null}
-            <AppUpdate
+            {bootReady ? <AppUpdate
               enabled={runtimeAvailable && !IS_LOCAL_DEV}
               safety={{
                 activeRunCount: overview.active_runs.length,
@@ -2258,7 +2329,7 @@ function App() {
               prepareForInstall={prepareForUpdateInstall}
               onInstallLockChange={setBusy}
               onActionError={setError}
-            />
+            /> : null}
           </div>
 
           <nav className="topnav" aria-label="Primary">
@@ -2267,12 +2338,19 @@ function App() {
                 key={item}
                 className={view === item ? "nav-active" : ""}
                 aria-current={view === item ? "page" : undefined}
+                aria-describedby={!bootReady && item !== "overview" ? "boot-nav-reason" : undefined}
+                disabled={!bootReady && item !== "overview"}
                 onClick={() => setView(item)}
               >
                 {label(item)}
               </button>
             ))}
           </nav>
+          {bootNavigationReason ? (
+            <span className="boot-nav-reason" id="boot-nav-reason">
+              {bootNavigationReason}
+            </span>
+          ) : null}
         </div>
 
         <div className="topbar-actions">
@@ -2297,7 +2375,7 @@ function App() {
           >
             {theme === "dark" ? <SunIcon /> : <MoonIcon />}
           </button>
-          <button
+          {bootReady ? <button
             type="button"
             className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
             disabled={
@@ -2326,21 +2404,30 @@ function App() {
                     : "Start"}
               </span>
             )}
-          </button>
+          </button> : null}
         </div>
       </header>
 
       <section
         className={view === "runs" ? "content content-viewport" : "content"}
+        aria-busy={bootState.status === "loading" ? "true" : undefined}
       >
-        {!runtimeAvailable ? (
+        {bootState.status === "loading" ? <BootLoading /> : null}
+        {bootState.status === "error" ? (
+          <BootError
+            message={bootState.message}
+            onRetry={retryBootstrap}
+            retryButtonRef={retryButtonRef}
+          />
+        ) : null}
+        {bootReady && !runtimeAvailable ? (
           <RuntimeBanner
             title="Desktop runtime unavailable"
             message="This browser preview is disconnected from Tauri commands. Launch the desktop app to load live data, save settings, and start the worker."
           />
         ) : null}
-        {error ? <div className="banner error">{error}</div> : null}
-        {worker.last_error ? (
+        {bootReady && error ? <div className="banner error">{error}</div> : null}
+        {bootReady && worker.last_error ? (
           <div className="banner error">
             <strong>
               {worker.state === "running" ? "Worker configuration" : "Worker stopped"}
@@ -2349,7 +2436,7 @@ function App() {
           </div>
         ) : null}
 
-        {view === "overview" ? (
+        {bootReady && view === "overview" ? (
           <OverviewView
             overview={overview}
             canStartWorker={
@@ -2370,7 +2457,7 @@ function App() {
             onOpenIssues={() => setView("issues")}
           />
         ) : null}
-        {view === "runs" ? (
+        {bootReady && view === "runs" ? (
           <RunsView
             runs={runs}
             selected={selectedRun}
@@ -2384,14 +2471,14 @@ function App() {
             stoppingRunIds={stoppingRunIds}
           />
         ) : null}
-        {view === "issues" ? (
+        {bootReady && view === "issues" ? (
           <IssuesView
             issues={issues}
             linearWorkspace={settings?.tracker_workspace ?? null}
             onOpenSettings={() => setView("settings")}
           />
         ) : null}
-        {view === "retro" ? (
+        {bootReady && view === "retro" ? (
           <RetroView
             retros={retros}
             status={retroStatus}
@@ -2408,7 +2495,7 @@ function App() {
             onCreatePrs={startRetroPrs}
           />
         ) : null}
-        {view === "settings" && settings ? (
+        {bootReady && view === "settings" && settings ? (
           <SettingsView
             settings={settings}
             setSettings={setSettings}
@@ -2445,6 +2532,53 @@ function App() {
         ) : null}
       </section>
     </main>
+  );
+}
+
+function BootLoading() {
+  return (
+    <div className="boot-surface boot-loading">
+      <div className="boot-copy">
+        <h2 role="status">Connecting to local worker…</h2>
+        <p>Loading settings and the latest desktop activity.</p>
+      </div>
+      <div className="boot-skeleton" aria-hidden="true">
+        <div className="boot-skeleton-header" />
+        <div className="boot-skeleton-kpis">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="boot-skeleton-panels">
+          <span />
+          <span />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BootError({
+  message,
+  onRetry,
+  retryButtonRef,
+}: {
+  message: string;
+  onRetry: () => void;
+  retryButtonRef: RefObject<HTMLButtonElement | null>;
+}) {
+  return (
+    <div className="boot-surface boot-error" role="alert">
+      <div className="boot-error-panel">
+        <div>
+          <h2>Couldn’t load Symphony</h2>
+          <p>{message}</p>
+        </div>
+        <button ref={retryButtonRef} type="button" className="primary" onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -6743,6 +6877,11 @@ function formatError(err: unknown) {
     return "Unable to reach the Symphony desktop runtime. Open the Tauri app to use live worker actions.";
   }
   return friendlyError(message);
+}
+
+function normalizeBootstrapError(err: unknown) {
+  const message = formatError(err).replace(/^Error:\s*/i, "").trim();
+  return message || "The desktop runtime did not return startup data.";
 }
 
 export default App;
