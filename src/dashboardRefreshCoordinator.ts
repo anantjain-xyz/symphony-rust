@@ -4,14 +4,20 @@ export type DashboardRefreshContext<Key extends string> = {
   isAuthoritative: (key: Key) => boolean;
 };
 
+type DashboardRefreshInstrumentation = {
+  enabled: boolean;
+  log?: (event: string, details: Record<string, unknown>) => void;
+  now?: () => number;
+};
+
 type DashboardRefreshCoordinatorOptions<Key extends string> = {
   execute: (context: DashboardRefreshContext<Key>) => Promise<void>;
   onFailure?: (error: unknown, keys: readonly Key[]) => void;
-  instrumentation?: {
-    enabled: boolean;
-    log?: (event: string, details: Record<string, unknown>) => void;
-    now?: () => number;
-  };
+  instrumentation?: DashboardRefreshInstrumentation;
+};
+
+type DashboardRefreshRequestOptions = {
+  reportFailure?: boolean;
 };
 
 export type DashboardRefreshCoordinator<Key extends string> = {
@@ -19,7 +25,7 @@ export type DashboardRefreshCoordinator<Key extends string> = {
   dispose: () => void;
   request: (
     keys: Iterable<Key>,
-    options?: { reportFailure?: boolean },
+    options?: DashboardRefreshRequestOptions,
   ) => Promise<void>;
 };
 
@@ -64,6 +70,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
         Math.max(settledGenerations.get(key) ?? 0, generation),
       );
     });
+
     const completed = requestWaiters.filter((waiter) =>
       [...waiter.generations].every(
         ([key, requestedGeneration]) =>
@@ -71,6 +78,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       ),
     );
     requestWaiters = requestWaiters.filter((waiter) => !completed.includes(waiter));
+
     if (didFail) {
       const reportableKeys = new Set<Key>();
       completed.forEach((waiter) => {
@@ -86,11 +94,13 @@ export function createDashboardRefreshCoordinator<Key extends string>({
           log("failure-observer-error", {
             activeGeneration: generation,
             queuedKeys: [...queuedKeys],
-            observerError,
+            failure: true,
+            observerError: true,
           });
         }
       }
     }
+
     completed.forEach(({ resolve }) => resolve());
   };
 
@@ -98,15 +108,21 @@ export function createDashboardRefreshCoordinator<Key extends string>({
     active = true;
     activeGeneration = generation;
     const startedAt = now();
-    log("start", { activeGeneration: generation, keys, queuedKeys: [...queuedKeys] });
+    log("start", {
+      activeGeneration: generation,
+      queuedKeys: [...queuedKeys],
+    });
+
     const isAuthoritative = (key: Key) =>
       !disposed && authoritativeGenerations.get(key) === generation;
+
     let execution: Promise<void>;
     try {
       execution = execute({ generation, keys, isAuthoritative });
     } catch (error) {
       execution = Promise.reject(error);
     }
+
     let failure: unknown;
     let didFail = false;
     void execution
@@ -115,15 +131,14 @@ export function createDashboardRefreshCoordinator<Key extends string>({
         didFail = true;
         log("failure", {
           activeGeneration: generation,
-          keys,
           queuedKeys: [...queuedKeys],
           durationMs: now() - startedAt,
+          failure: true,
         });
       })
       .finally(() => {
         log("settle", {
           activeGeneration: generation,
-          keys,
           queuedKeys: [...queuedKeys],
           durationMs: now() - startedAt,
         });
@@ -143,6 +158,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
             authoritativeGenerations.set(key, nextBatchGeneration),
           );
           start(nextKeys, nextBatchGeneration);
+          return;
         }
       });
   };
@@ -162,6 +178,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
     request(keys, options) {
       const requestedKeys = [...new Set(keys)];
       if (disposed || requestedKeys.length === 0) return Promise.resolve();
+
       const requestedGeneration = ++nextGeneration;
       const settled = new Promise<void>((resolve) =>
         requestWaiters.push({
@@ -172,9 +189,13 @@ export function createDashboardRefreshCoordinator<Key extends string>({
           resolve,
         }),
       );
+
       if (active) {
         requestedKeys.forEach((key) => queuedKeys.add(key));
-        log("queue", { activeGeneration, requestedKeys, queuedKeys: [...queuedKeys] });
+        log("queue", {
+          activeGeneration,
+          queuedKeys: [...queuedKeys],
+        });
       } else {
         requestedKeys.forEach((key) =>
           authoritativeGenerations.set(key, requestedGeneration),

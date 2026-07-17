@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { retroRepoBatchState } from "./App";
@@ -108,6 +108,16 @@ function expectLiteralInput(element: Element) {
   expect(element.getAttribute("autocorrect")).toBe("off");
   expect(element.getAttribute("autocapitalize")).toBe("none");
   expect(element.getAttribute("spellcheck")).toBe("false");
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 // A `tauri.invoke` stand-in for the settings screen: it serves the commands the
@@ -370,16 +380,6 @@ function runRow(overrides: Partial<RunWithIssueRow> = {}): RunWithIssueRow {
     issue_state: "Todo",
     ...overrides,
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
 }
 
 function commandCount(command: string) {
@@ -1118,6 +1118,160 @@ describe("App settings", () => {
     fireEvent.click(generateButton!);
 
     await waitFor(() => expect(tauriMocks.invoke).toHaveBeenCalledWith("start_retro"));
+  });
+
+  it("bounds dashboard commands when Tauri refresh events burst during a request", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const firstOverview = deferred<Overview>();
+      const baseInvoke = dashboardInvoke({ settings });
+      let overviewRequests = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_overview" && overviewRequests++ === 0) {
+          return firstOverview.promise;
+        }
+        return baseInvoke(command, args);
+      });
+      const eventListeners = new Map<string, (event: { payload: unknown }) => void>();
+      const unlisten = vi.fn();
+      tauriMocks.listen.mockImplementation(async (event, listener) => {
+        eventListeners.set(event, listener);
+        return unlisten;
+      });
+
+      const rendered = render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_overview");
+      expect([...eventListeners.keys()].sort()).toEqual([
+        "agent_event",
+        "db_changed",
+        "rate_limit_changed",
+      ]);
+
+      act(() => {
+        for (let index = 0; index < 10; index += 1) {
+          eventListeners.get("db_changed")!({
+            payload: { type: "db_changed", table: "future_table", op: "update" },
+          });
+          eventListeners.get("agent_event")!({
+            payload: {
+              type: "agent_event",
+              event: {
+                id: index,
+                run_id: "other-run",
+                kind: "status",
+                payload: "{}",
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          });
+          eventListeners.get("rate_limit_changed")!({
+            payload: { type: "rate_limit_changed", source: "codex" },
+          });
+        }
+        vi.advanceTimersByTime(300);
+      });
+
+      firstOverview.resolve({
+        active_runs: [],
+        retry_queue: [],
+        recent_failures: [],
+        live_sessions: [],
+        worker_heartbeat: null,
+        rate_limits: [],
+        token_usage: [],
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      act(() => vi.advanceTimersByTime(300));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      for (const command of ["get_overview", "get_worker_status"]) {
+        expect(
+          tauriMocks.invoke.mock.calls.filter(([called]) => called === command),
+          command,
+        ).toHaveLength(command === "get_overview" ? 3 : 2);
+      }
+      for (const command of [
+        "list_runs",
+        "list_issues",
+        "get_retro_status",
+        "list_retros",
+        "has_in_progress_retro_batches",
+      ]) {
+        expect(
+          tauriMocks.invoke.mock.calls.filter(([called]) => called === command),
+          command,
+        ).toHaveLength(1);
+      }
+      rendered.unmount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(unlisten).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not pin an error banner for a transient background refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({
+        settings,
+        workerStatus: { state: "stopped", started_at: null, last_error: null },
+      });
+      let overviewRequests = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_overview" && overviewRequests++ === 1) {
+          return Promise.reject(new Error("transient refresh failure"));
+        }
+        return baseInvoke(command, args);
+      });
+      const eventListeners = new Map<string, (event: { payload: unknown }) => void>();
+      tauriMocks.listen.mockImplementation(async (event, listener) => {
+        eventListeners.set(event, listener);
+        return vi.fn();
+      });
+
+      const rendered = render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => {
+        eventListeners.get("db_changed")!({
+          payload: { type: "db_changed", table: "token_usage", op: "update" },
+        });
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(overviewRequests).toBe(2);
+      expect(screen.queryByText(/transient refresh failure/)).toBeNull();
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("marks local development builds distinctly", () => {
@@ -2155,5 +2309,56 @@ describe("App settings", () => {
         issueId: "lin-cancelled-1",
       }),
     );
+  });
+
+  it("clears stopping state when the post-stop dashboard refresh fails", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const activeRun = runRow();
+    const failedRefresh = deferred<Overview>();
+    const overview = {
+      active_runs: [activeRun],
+      retry_queue: [],
+      recent_failures: [],
+      live_sessions: [],
+      worker_heartbeat: null,
+      rate_limits: [],
+      token_usage: [],
+    } satisfies Overview;
+    const baseInvoke = dashboardInvoke({
+      settings,
+      overview,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
+    let overviewRequests = 0;
+    tauriMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "get_overview") {
+        overviewRequests += 1;
+        if (overviewRequests === 2) return failedRefresh.promise;
+      }
+      if (command === "list_runs") return [activeRun];
+      if (command === "get_run_detail" && args?.id === activeRun.id) {
+        return { run: activeRun, events: [] };
+      }
+      if (command === "stop_run" && args?.id === activeRun.id) {
+        return { run: activeRun, events: [] };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+
+    expect(await screen.findByRole("button", { name: "Stopping..." })).toBeTruthy();
+    failedRefresh.reject(new Error("post-stop refresh failed"));
+
+    const stopButton = await screen.findByRole("button", { name: "Stop run" });
+    expect(stopButton.getAttribute("disabled")).toBeNull();
+    expect(await screen.findByText(/post-stop refresh failed/)).toBeTruthy();
   });
 });

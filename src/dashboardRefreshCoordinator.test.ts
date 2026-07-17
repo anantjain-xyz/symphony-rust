@@ -17,51 +17,179 @@ async function flushPromises() {
 }
 
 describe("dashboard refresh coordinator", () => {
-  it("unions a burst into one bounded follow-up without losing keys", async () => {
+  it("coalesces ten signals during one request into one merged follow-up", async () => {
     const batches = [deferred(), deferred()];
-    const seen: string[][] = [];
-    let index = 0;
-    const coordinator = createDashboardRefreshCoordinator<string>({
-      execute: ({ keys }) => {
-        seen.push([...keys]);
-        return batches[index++].promise;
-      },
+    let batchIndex = 0;
+    const seenKeys: string[][] = [];
+    const execute = vi.fn((context: { keys: readonly string[] }) => {
+      seenKeys.push([...context.keys]);
+      return batches[batchIndex++].promise;
     });
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
 
-    const first = coordinator.request(["overview"]);
-    for (let signal = 0; signal < 20; signal += 1) {
-      void coordinator.request([signal % 2 === 0 ? "runs" : "issues"]);
+    const drained = coordinator.request(["overview"]);
+    for (let index = 0; index < 10; index += 1) {
+      void coordinator.request([index % 2 === 0 ? "runs" : "issues"]);
     }
-    expect(seen).toEqual([["overview"]]);
+
+    expect(execute).toHaveBeenCalledTimes(1);
     batches[0].resolve();
     await flushPromises();
-    expect(seen).toHaveLength(2);
-    expect(new Set(seen[1])).toEqual(new Set(["runs", "issues"]));
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(new Set(seenKeys[1])).toEqual(new Set(["runs", "issues"]));
     batches[1].resolve();
-    await first;
+    await drained;
   });
 
-  it("rejects stale commits by resource and drains after failure", async () => {
+  it("keeps the active result authoritative until the queued follow-up starts", async () => {
     const batches = [deferred(), deferred()];
-    const commits: number[] = [];
+    const committed: number[] = [];
+    const execute = vi.fn(async (context) => {
+      const batchIndex = execute.mock.calls.length - 1;
+      await batches[batchIndex].promise;
+      if (context.isAuthoritative("overview")) committed.push(context.generation);
+    });
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+
+    const drained = coordinator.request(["overview"]);
+    void coordinator.request(["overview"]);
+    batches[0].resolve();
+    await flushPromises();
+    expect(committed).toHaveLength(1);
+    batches[1].resolve();
+    await drained;
+    expect(committed).toHaveLength(2);
+  });
+
+  it("does not starve commits when recurring signals outpace each batch", async () => {
+    const batches = [deferred(), deferred(), deferred()];
+    const committed: number[] = [];
+    const execute = vi.fn(async (context) => {
+      const batchIndex = execute.mock.calls.length - 1;
+      await batches[batchIndex].promise;
+      if (context.isAuthoritative("worker")) committed.push(context.generation);
+    });
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+
+    const initial = coordinator.request(["worker"]);
+    for (let index = 0; index < 10; index += 1) {
+      void coordinator.request(["worker"], { reportFailure: false });
+    }
+    batches[0].resolve();
+    await flushPromises();
+    expect(committed).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    for (let index = 0; index < 10; index += 1) {
+      void coordinator.request(["worker"], { reportFailure: false });
+    }
+    batches[1].resolve();
+    await flushPromises();
+    expect(committed).toHaveLength(2);
+    expect(execute).toHaveBeenCalledTimes(3);
+
+    batches[2].resolve();
+    await initial;
+    expect(committed).toHaveLength(3);
+  });
+
+  it("continues with queued keys after a rejected request", async () => {
+    const first = deferred();
+    const second = deferred();
     const failure = vi.fn();
-    let index = 0;
-    const coordinator = createDashboardRefreshCoordinator<string>({
-      execute: async (context) => {
-        const current = index++;
-        await batches[current].promise;
-        if (context.isAuthoritative("selectedRun")) commits.push(current);
-      },
+    const execute = vi
+      .fn<(context: { keys: readonly string[] }) => Promise<void>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const coordinator = createDashboardRefreshCoordinator({
+      execute,
       onFailure: failure,
     });
-    const first = coordinator.request(["selectedRun"]);
-    const second = coordinator.request(["selectedRun"]);
-    batches[0].reject(new Error("stale failure"));
+
+    const drained = coordinator.request(["overview"]);
+    void coordinator.request(["runs"]);
+    first.reject(new Error("offline"));
     await flushPromises();
-    expect(failure).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[1][0].keys).toEqual(["runs"]);
+    second.resolve();
+    await drained;
+    expect(failure).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles a queued caller after its batch while later polling work runs", async () => {
+    const batches = [deferred(), deferred(), deferred()];
+    let batchIndex = 0;
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+    let mutationSettled = false;
+
+    void coordinator.request(["worker"]);
+    const mutation = coordinator.request(["overview", "runs"]).then(() => {
+      mutationSettled = true;
+    });
+
+    batches[0].resolve();
+    await flushPromises();
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    void coordinator.request(["worker"]);
     batches[1].resolve();
-    await Promise.all([first, second]);
-    expect(commits).toEqual([1]);
+    await mutation;
+
+    expect(mutationSettled).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(3);
+    batches[2].resolve();
+    await flushPromises();
+  });
+
+  it("suppresses background failures without suppressing requested failures", async () => {
+    const batches = [deferred(), deferred()];
+    let batchIndex = 0;
+    const failure = vi.fn();
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({
+      execute,
+      onFailure: failure,
+    });
+
+    const background = coordinator.request(["worker"], {
+      reportFailure: false,
+    });
+    batches[0].reject(new Error("transient poll failure"));
+    await background;
+    expect(failure).not.toHaveBeenCalled();
+
+    const requested = coordinator.request(["overview"]);
+    batches[1].reject(new Error("requested refresh failure"));
+    await requested;
+    expect(failure).toHaveBeenCalledOnce();
+    expect(failure.mock.calls[0][1]).toEqual(["overview"]);
+  });
+
+  it("reports a requested failure when background work supersedes the same key", async () => {
+    const batches = [deferred(), deferred()];
+    let batchIndex = 0;
+    const failure = vi.fn();
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({
+      execute,
+      onFailure: failure,
+    });
+
+    const requested = coordinator.request(["overview"]);
+    const background = coordinator.request(["overview"], {
+      reportFailure: false,
+    });
+
+    batches[0].reject(new Error("requested refresh failure"));
+    await requested;
+    expect(failure).toHaveBeenCalledOnce();
+    expect(failure.mock.calls[0][1]).toEqual(["overview"]);
+
+    batches[1].reject(new Error("transient poll failure"));
+    await background;
+    expect(failure).toHaveBeenCalledOnce();
   });
 
   it("does not commit or start queued work after disposal", async () => {
@@ -72,12 +200,14 @@ describe("dashboard refresh coordinator", () => {
       if (context.isAuthoritative("overview")) committed();
     });
     const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+
     const drained = coordinator.request(["overview"]);
     void coordinator.request(["runs"]);
     coordinator.dispose();
     await drained;
     active.resolve();
     await flushPromises();
+
     expect(committed).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledTimes(1);
   });
