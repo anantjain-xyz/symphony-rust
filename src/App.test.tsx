@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { retroRepoBatchState } from "./App";
 import type {
@@ -150,6 +151,12 @@ function settingsInvoke({
         return false;
       case "get_worker_status":
         return { state: "stopped", started_at: null, last_error: null };
+      case "start_worker":
+        return {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: null,
+        };
       case "validate_settings":
         return {
           ...validation,
@@ -257,6 +264,12 @@ function dashboardInvoke({
         return false;
       case "get_worker_status":
         return workerStatus;
+      case "start_worker":
+        return {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error: null,
+        };
       case "trigger_retry_now":
         return true;
       case "get_skills_status":
@@ -356,6 +369,21 @@ function runRow(overrides: Partial<RunWithIssueRow> = {}): RunWithIssueRow {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function commandCount(command: string) {
+  return tauriMocks.invoke.mock.calls.filter(([calledCommand]) => calledCommand === command)
+    .length;
+}
+
 describe("App settings", () => {
   afterEach(() => {
     cleanup();
@@ -396,6 +424,248 @@ describe("App settings", () => {
         clear: vi.fn(() => localStorageItems.clear()),
       },
     });
+  });
+
+  it("keeps browser preview deterministic without invoking Tauri commands", async () => {
+    render(<App />);
+
+    await Promise.resolve();
+
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
+  });
+
+  it("starts settings and dashboard reads together and commits only after both resolve", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const settingsRead = deferred<AppSettings>();
+    const overviewRead = deferred<Overview>();
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: {
+        state: "stopped",
+        started_at: null,
+        last_error: null,
+      },
+    });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "load_settings") return settingsRead.promise;
+      if (command === "get_overview") return overviewRead.promise;
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    expect(commandCount("load_settings")).toBe(1);
+    expect(commandCount("get_overview")).toBe(1);
+    expect(commandCount("get_worker_status")).toBe(1);
+    expect(commandCount("start_worker")).toBe(0);
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    expect(workerButton.disabled).toBe(true);
+    fireEvent.click(workerButton);
+    expect(commandCount("start_worker")).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+
+    settingsRead.resolve(settings);
+    await Promise.resolve();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(commandCount("start_worker")).toBe(0);
+
+    overviewRead.resolve({
+      active_runs: [],
+      retry_queue: [],
+      recent_failures: [],
+      live_sessions: [],
+      worker_heartbeat: null,
+      rate_limits: [],
+      token_usage: [],
+    });
+    expect(await screen.findByRole("button", { name: "Save" })).toBeTruthy();
+    expect(commandCount("start_worker")).toBe(1);
+  });
+
+  it.each([
+    ["normal mode", false],
+    ["StrictMode", true],
+  ])("bootstraps and auto-starts exactly once in %s", async (_label, strict) => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        workerStatus: { state: "stopped", started_at: null, last_error: null },
+      }),
+    );
+
+    render(strict ? (
+      <StrictMode>
+        <App />
+      </StrictMode>
+    ) : (
+      <App />
+    ));
+
+    await waitFor(() => expect(commandCount("start_worker")).toBe(1));
+    expect(commandCount("load_settings")).toBe(1);
+    expect(commandCount("get_overview")).toBe(1);
+    expect(commandCount("get_worker_status")).toBe(1);
+  });
+
+  it("keeps worker actions disabled until the bootstrap auto-start settles", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const autoStart = deferred<WorkerStatus>();
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "start_worker") return autoStart.promise;
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(commandCount("start_worker")).toBe(1));
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    expect(workerButton.disabled).toBe(true);
+    fireEvent.click(workerButton);
+    expect(commandCount("start_worker")).toBe(1);
+
+    autoStart.resolve({ state: "running", started_at: null, last_error: null });
+    const stopButton = await screen.findByRole("button", { name: "Stop worker" });
+    expect((stopButton as HTMLButtonElement).disabled).toBe(false);
+    expect(commandCount("start_worker")).toBe(1);
+    expect(commandCount("get_worker_status")).toBe(1);
+  });
+
+  it("defers event refreshes so bootstrap cannot overwrite newer dashboard data", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const settingsRead = deferred<AppSettings>();
+    let overviewReads = 0;
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "load_settings") return settingsRead.promise;
+      if (command === "get_overview") {
+        overviewReads += 1;
+        return {
+          active_runs: overviewReads === 1 ? [] : [runRow()],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
+      ([event]) => event === "db_changed",
+    )?.[1] as () => void;
+    onDatabaseChanged();
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+
+    expect(overviewReads).toBe(1);
+    expect(screen.queryByText("Build widgets")).toBeNull();
+
+    settingsRead.resolve(settings);
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    await waitFor(() => expect(workerButton.disabled).toBe(false));
+    expect(await screen.findByText("Build widgets")).toBeTruthy();
+    expect(overviewReads).toBe(2);
+  });
+
+  it("drains deferred event refreshes after bootstrap fails without declaring ready", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const initialOverview = deferred<Overview>();
+    let overviewReads = 0;
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_overview") {
+        overviewReads += 1;
+        if (overviewReads === 1) return initialOverview.promise;
+        return {
+          active_runs: [runRow()],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
+      ([event]) => event === "db_changed",
+    )?.[1] as () => void;
+    onDatabaseChanged();
+    initialOverview.reject(new Error("dashboard failed"));
+
+    expect(await screen.findByText("Error: dashboard failed")).toBeTruthy();
+    expect(await screen.findByText("Build widgets")).toBeTruthy();
+    expect(overviewReads).toBe(2);
+    expect(commandCount("start_worker")).toBe(0);
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>(".worker-toggle")!.disabled).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ["auto-start is disabled", false, "stopped", null],
+    ["the worker is running", true, "running", null],
+    ["the worker is stopping", true, "stopping", null],
+    ["the stopped worker has an error", true, "stopped", "configuration failed"],
+  ] as const)("does not auto-start when %s", async (_label, enabled, state, lastError) => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: enabled };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        workerStatus: { state, started_at: null, last_error: lastError },
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByRole("button", { name: "Save" })).toBeTruthy();
+    expect(commandCount("start_worker")).toBe(0);
+    expect(commandCount("get_worker_status")).toBe(1);
+  });
+
+  it("does not commit or auto-start when a required dashboard read fails", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_overview") return Promise.reject(new Error("dashboard failed"));
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByText("Error: dashboard failed")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(commandCount("start_worker")).toBe(0);
+    expect(commandCount("load_settings")).toBe(1);
   });
 
   it("reviews exact Retro diffs and gates change batches until every suggestion is decided", () => {
