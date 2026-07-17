@@ -384,6 +384,12 @@ function commandCount(command: string) {
     .length;
 }
 
+async function openSettings() {
+  const button = screen.getByRole("button", { name: "Settings" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(button);
+}
+
 describe("App settings", () => {
   afterEach(() => {
     cleanup();
@@ -460,11 +466,18 @@ describe("App settings", () => {
     expect(commandCount("get_overview")).toBe(1);
     expect(commandCount("get_worker_status")).toBe(1);
     expect(commandCount("start_worker")).toBe(0);
-    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
-    expect(workerButton.disabled).toBe(true);
-    fireEvent.click(workerButton);
-    expect(commandCount("start_worker")).toBe(0);
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("status").textContent).toBe("Connecting to local worker…");
+    expect(document.querySelector(".content")?.getAttribute("aria-busy")).toBe("true");
+    expect(document.querySelector(".boot-skeleton")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
+    expect(document.querySelector(".worker-toggle")).toBeNull();
+    expect(screen.queryByText("No active runs")).toBeNull();
+    expect(screen.queryByText("0")).toBeNull();
+    const settingsButton = screen.getByRole("button", { name: "Settings" });
+    expect((settingsButton as HTMLButtonElement).disabled).toBe(true);
+    expect(settingsButton.getAttribute("aria-describedby")).toBe("boot-nav-reason");
+    expect(screen.getByText("Live views are unavailable while Symphony connects.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 
     settingsRead.resolve(settings);
@@ -481,6 +494,9 @@ describe("App settings", () => {
       rate_limits: [],
       token_usage: [],
     });
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(document.querySelector(".content")?.hasAttribute("aria-busy")).toBe(false);
+    fireEvent.click(settingsButton);
     expect(await screen.findByRole("button", { name: "Save" })).toBeTruthy();
     expect(commandCount("start_worker")).toBe(1);
   });
@@ -535,7 +551,9 @@ describe("App settings", () => {
 
     autoStart.resolve({ state: "running", started_at: null, last_error: null });
     const stopButton = await screen.findByRole("button", { name: "Stop worker" });
-    expect((stopButton as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() =>
+      expect((stopButton as HTMLButtonElement).disabled).toBe(false),
+    );
     expect(commandCount("start_worker")).toBe(1);
     expect(commandCount("get_worker_status")).toBe(1);
   });
@@ -576,22 +594,30 @@ describe("App settings", () => {
     expect(screen.queryByText("Build widgets")).toBeNull();
 
     settingsRead.resolve(settings);
-    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
-    await waitFor(() => expect(workerButton.disabled).toBe(false));
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
+        false,
+      ),
+    );
     expect(await screen.findByText("Build widgets")).toBeTruthy();
     expect(overviewReads).toBe(2);
   });
 
-  it("drains deferred event refreshes after bootstrap fails without declaring ready", async () => {
+  it("keeps a bootstrap failure blocking and retries with a fresh atomic snapshot", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true };
     const initialOverview = deferred<Overview>();
+    const retryOverview = deferred<Overview>();
     let overviewReads = 0;
-    const baseInvoke = dashboardInvoke({ settings });
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
     tauriMocks.invoke.mockImplementation((command, args) => {
       if (command === "get_overview") {
         overviewReads += 1;
         if (overviewReads === 1) return initialOverview.promise;
+        if (overviewReads === 2) return retryOverview.promise;
         return {
           active_runs: [runRow()],
           retry_queue: [],
@@ -614,14 +640,34 @@ describe("App settings", () => {
     onDatabaseChanged();
     initialOverview.reject(new Error("dashboard failed"));
 
-    expect(await screen.findByText("Error: dashboard failed")).toBeTruthy();
-    expect(await screen.findByText("Build widgets")).toBeTruthy();
-    expect(overviewReads).toBe(2);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn’t load Symphony");
+    expect(alert.textContent).toContain("dashboard failed");
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(document.activeElement).toBe(retry);
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("Build widgets")).toBeNull();
+    expect(overviewReads).toBe(1);
     expect(commandCount("start_worker")).toBe(0);
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-    expect(document.querySelector<HTMLButtonElement>(".worker-toggle")!.disabled).toBe(
-      true,
-    );
+    expect(document.querySelector(".worker-toggle")).toBeNull();
+
+    fireEvent.click(retry);
+    expect(screen.getByRole("status").textContent).toBe("Connecting to local worker…");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await waitFor(() => expect(overviewReads).toBe(2));
+    retryOverview.resolve({
+      active_runs: [runRow()],
+      retry_queue: [],
+      recent_failures: [],
+      live_sessions: [],
+      worker_heartbeat: null,
+      rate_limits: [],
+      token_usage: [],
+    });
+    expect(await screen.findByText("Build widgets")).toBeTruthy();
+    expect(commandCount("load_settings")).toBe(2);
+    await waitFor(() => expect(commandCount("start_worker")).toBe(1));
   });
 
   it.each([
@@ -640,7 +686,7 @@ describe("App settings", () => {
     );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
 
     expect(await screen.findByRole("button", { name: "Save" })).toBeTruthy();
     expect(commandCount("start_worker")).toBe(0);
@@ -660,9 +706,10 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByText("Error: dashboard failed")).toBeTruthy();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("dashboard failed");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry" }));
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(commandCount("start_worker")).toBe(0);
     expect(commandCount("load_settings")).toBe(1);
@@ -877,7 +924,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     const defaultToggles = (await screen.findAllByLabelText("Default", {
       selector: "input",
     })) as HTMLInputElement[];
@@ -1481,7 +1528,7 @@ describe("App settings", () => {
     );
 
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
 
     expect(await screen.findByText("Codex CLI")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Install Cursor" })).toBeNull();
@@ -1653,7 +1700,7 @@ describe("App settings", () => {
 
     const { container } = render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     const apiKey = await screen.findByLabelText(/^API key/, { selector: "input" });
     fireEvent.change(apiKey, { target: { value: "lin_api_test" } });
 
@@ -1691,7 +1738,7 @@ describe("App settings", () => {
 
     const { container } = render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     const apiKey = await screen.findByLabelText(/^API key/, { selector: "input" });
     fireEvent.change(apiKey, { target: { value: "lin_api_test" } });
 
