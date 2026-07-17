@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { InputHTMLAttributes, RefObject } from "react";
 import type {
   AgentEventRow,
@@ -49,11 +49,38 @@ import {
 } from "./MarkdownText";
 import { AppUpdate } from "./AppUpdate";
 import type { UpdateSafety } from "./AppUpdate";
+import {
+  createDashboardRefreshCoordinator,
+  type DashboardRefreshContext,
+  type DashboardRefreshCoordinator,
+} from "./dashboardRefreshCoordinator";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
 type Theme = "light" | "dark";
 type IssueViewMode = "list" | "dependencies";
+type DashboardResourceKey =
+  | "overview"
+  | "runs"
+  | "issues"
+  | "worker"
+  | "runDetail"
+  | "retroStatus"
+  | "retros"
+  | "retroDetail"
+  | "retroBatches";
+
+const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
+  "overview",
+  "runs",
+  "issues",
+  "worker",
+  "runDetail",
+  "retroStatus",
+  "retros",
+  "retroDetail",
+  "retroBatches",
+];
 
 const DEPENDENCY_NODE_WIDTH = 216;
 const DEPENDENCY_NODE_HEIGHT = 86;
@@ -65,6 +92,8 @@ const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
 const IS_LOCAL_DEV = import.meta.env.DEV;
+const DASHBOARD_REFRESH_INSTRUMENTATION_ENABLED =
+  IS_LOCAL_DEV && import.meta.env.MODE !== "test";
 const literalInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -1133,15 +1162,35 @@ function App() {
   const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
 
-  function commitDashboardSnapshot(snapshot: DashboardSnapshot) {
-    setOverview(snapshot.overview);
-    setRuns(snapshot.runs);
-    setIssues(snapshot.issues);
-    setWorker(snapshot.worker);
-    setRetroStatus(snapshot.retroStatus);
-    setRetros(snapshot.retros);
-    setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
+  const bootstrapDashboardRef = useRef<Promise<BootstrapResult> | null>(null);
+
+  function commitDashboardSnapshot(
+    snapshot: DashboardSnapshot,
+    requested: ReadonlySet<DashboardResourceKey>,
+    isAuthoritative: (key: DashboardResourceKey) => boolean,
+  ) {
+    if (requested.has("overview") && isAuthoritative("overview")) {
+      setOverview(snapshot.overview);
+    }
+    if (requested.has("runs") && isAuthoritative("runs")) setRuns(snapshot.runs);
+    if (requested.has("issues") && isAuthoritative("issues")) {
+      setIssues(snapshot.issues);
+    }
+    if (requested.has("worker") && isAuthoritative("worker")) {
+      setWorker(snapshot.worker);
+    }
+    if (requested.has("retroStatus") && isAuthoritative("retroStatus")) {
+      setRetroStatus(snapshot.retroStatus);
+    }
+    if (requested.has("retros") && isAuthoritative("retros")) {
+      setRetros(snapshot.retros);
+    }
+    if (requested.has("retroBatches") && isAuthoritative("retroBatches")) {
+      setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
+    }
     if (
+      requested.has("runDetail") &&
+      isAuthoritative("runDetail") &&
       snapshot.requestedRunId &&
       snapshot.requestedRunId === selectedRunIdRef.current
     ) {
@@ -1149,27 +1198,153 @@ function App() {
       if (!snapshot.selectedRun) selectedRunIdRef.current = null;
     }
     if (
+      requested.has("retroDetail") &&
+      isAuthoritative("retroDetail") &&
       snapshot.requestedRetroId &&
       snapshot.requestedRetroId === selectedRetroIdRef.current
     ) {
       setSelectedRetro(snapshot.selectedRetro);
       if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
-    } else if (!snapshot.requestedRetroId && selectedRetroIdRef.current === null) {
+    } else if (
+      requested.has("retroDetail") &&
+      isAuthoritative("retroDetail") &&
+      !snapshot.requestedRetroId &&
+      selectedRetroIdRef.current === null
+    ) {
       selectedRetroIdRef.current = snapshot.selectedRetroId;
       setSelectedRetro(snapshot.selectedRetro);
     }
   }
 
+  const dashboardRefreshExecutor = useRef<
+    (context: DashboardRefreshContext<DashboardResourceKey>) => Promise<void>
+  >(async () => undefined);
+  const dashboardRefreshCoordinator = useRef<
+    DashboardRefreshCoordinator<DashboardResourceKey> | undefined
+  >(undefined);
+  if (!dashboardRefreshCoordinator.current) {
+    dashboardRefreshCoordinator.current = createDashboardRefreshCoordinator({
+      execute: (context) => dashboardRefreshExecutor.current(context),
+      onFailure: (refreshError) => setError(formatError(refreshError)),
+      instrumentation: { enabled: DASHBOARD_REFRESH_INSTRUMENTATION_ENABLED },
+    });
+  }
+
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
-  async function refreshDashboard() {
+  dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
-    const snapshot = await loadDashboardSnapshot({
-      selectedRunId: selectedRunIdRef.current,
-      selectedRetroId: selectedRetroIdRef.current,
-    });
-    commitDashboardSnapshot(snapshot);
-  }
+    const requested = new Set(keys);
+    const bootstrap = bootstrapDashboardRef.current;
+    if (bootstrap) {
+      const { dashboard } = await bootstrap;
+      commitDashboardSnapshot(dashboard, requested, isAuthoritative);
+      return;
+    }
+    const detailId = selectedRunIdRef.current;
+    const retroDetailId = selectedRetroIdRef.current;
+    const [
+      nextOverview,
+      nextRuns,
+      nextIssues,
+      nextWorker,
+      nextDetail,
+      nextRetroStatus,
+      nextRetros,
+      nextRetroDetail,
+      nextHasInProgressRetroBatches,
+    ] =
+      await Promise.all([
+        requested.has("overview") ? invoke<Overview>("get_overview") : undefined,
+        requested.has("runs") ? invoke<RunWithIssueRow[]>("list_runs") : undefined,
+        requested.has("issues") ? invoke<IssueRow[]>("list_issues") : undefined,
+        requested.has("worker")
+          ? invoke<WorkerStatus>("get_worker_status")
+          : undefined,
+        requested.has("runDetail") && detailId
+          ? invoke<RunDetail | null>("get_run_detail", { id: detailId })
+          : undefined,
+        requested.has("retroStatus")
+          ? invoke<RetroStatus>("get_retro_status")
+          : undefined,
+        requested.has("retros") ? invoke<RetroRow[]>("list_retros") : undefined,
+        requested.has("retroDetail") && retroDetailId
+          ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
+          : undefined,
+        requested.has("retroBatches")
+          ? invoke<boolean>("has_in_progress_retro_batches")
+          : undefined,
+      ]);
+    if (nextOverview !== undefined && isAuthoritative("overview")) {
+      setOverview(nextOverview);
+    }
+    if (nextRuns !== undefined && isAuthoritative("runs")) setRuns(nextRuns);
+    if (nextIssues !== undefined && isAuthoritative("issues")) setIssues(nextIssues);
+    if (nextWorker !== undefined && isAuthoritative("worker")) setWorker(nextWorker);
+    if (nextRetroStatus !== undefined && isAuthoritative("retroStatus")) {
+      setRetroStatus(nextRetroStatus);
+    }
+    if (nextRetros !== undefined && isAuthoritative("retros")) setRetros(nextRetros);
+    if (
+      nextHasInProgressRetroBatches !== undefined &&
+      isAuthoritative("retroBatches")
+    ) {
+      setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
+    }
+    if (
+      detailId &&
+      nextDetail !== undefined &&
+      isAuthoritative("runDetail") &&
+      detailId === selectedRunIdRef.current
+    ) {
+      setSelectedRun(nextDetail);
+      if (!nextDetail) selectedRunIdRef.current = null;
+    }
+    if (
+      retroDetailId &&
+      nextRetroDetail !== undefined &&
+      isAuthoritative("retroDetail") &&
+      retroDetailId === selectedRetroIdRef.current
+    ) {
+      setSelectedRetro(nextRetroDetail);
+      if (!nextRetroDetail) selectedRetroIdRef.current = null;
+    } else if (
+      requested.has("retroDetail") &&
+      !retroDetailId &&
+      nextRetros &&
+      nextRetros.length > 0 &&
+      isAuthoritative("retroDetail") &&
+      selectedRetroIdRef.current === null
+    ) {
+      const newest = nextRetros[0];
+      const detail = await invoke<RetroDetail | null>("get_retro_detail", {
+        id: newest.id,
+      });
+      if (isAuthoritative("retroDetail") && selectedRetroIdRef.current === null) {
+        selectedRetroIdRef.current = newest.id;
+        setSelectedRetro(detail);
+      }
+    }
+  };
+
+  const requestDashboardRefresh = useCallback(
+    (keys: Iterable<DashboardResourceKey> = DASHBOARD_RESOURCE_KEYS) =>
+      dashboardRefreshCoordinator.current!.request(keys),
+    [],
+  );
+  const requestBackgroundDashboardRefresh = useCallback(
+    (keys: Iterable<DashboardResourceKey> = DASHBOARD_RESOURCE_KEYS) =>
+      dashboardRefreshCoordinator.current!.request(keys, {
+        reportFailure: false,
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    const coordinator = dashboardRefreshCoordinator.current!;
+    coordinator.activate();
+    return () => coordinator.dispose();
+  }, []);
 
   useEffect(() => {
     setStoppingRunIds((prev) => {
@@ -1192,7 +1367,6 @@ function App() {
 
   useEffect(() => {
     if (!runtimeAvailable) return;
-
     let cancelled = false;
     let bootstrapPending = true;
     let refreshQueuedDuringBootstrap = false;
@@ -1209,7 +1383,7 @@ function App() {
       if (timer !== null) return;
       timer = window.setTimeout(() => {
         timer = null;
-        refreshDashboard().catch(() => undefined);
+        void requestBackgroundDashboardRefresh();
       }, 300);
     };
     const releaseBootstrapRefreshGate = (ready: boolean) => {
@@ -1222,12 +1396,16 @@ function App() {
       }
     };
 
-    loadBootstrap()
-      .then(({ settings: loaded, dashboard, autoStart }) => {
+    const bootstrap = loadBootstrap();
+    bootstrapDashboardRef.current = bootstrap;
+    Promise.all([bootstrap, requestDashboardRefresh()])
+      .then(([{ settings: loaded, dashboard, autoStart }]) => {
         if (cancelled) return;
+        if (bootstrapDashboardRef.current === bootstrap) {
+          bootstrapDashboardRef.current = null;
+        }
         setSettings(loaded);
         setSavedSnapshot(formSnapshot(loaded));
-        commitDashboardSnapshot(dashboard);
         setBootState({
           status: "ready",
           payload: { settings: loaded, dashboard, autoStart },
@@ -1249,6 +1427,9 @@ function App() {
       .catch((err) => {
         if (!cancelled) {
           setBootState({ status: "error", message: normalizeBootstrapError(err) });
+          if (bootstrapDashboardRef.current === bootstrap) {
+            bootstrapDashboardRef.current = null;
+          }
           releaseBootstrapRefreshGate(false);
         }
       });
@@ -1258,7 +1439,7 @@ function App() {
       listen("agent_event", scheduleRefresh),
       listen("rate_limit_changed", scheduleRefresh),
     ]).catch((err) => {
-      setError(formatError(err));
+      if (!cancelled) setError(formatError(err));
       return [];
     });
     return () => {
@@ -1266,7 +1447,12 @@ function App() {
       if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, [bootstrapAttempt, runtimeAvailable]);
+  }, [
+    bootstrapAttempt,
+    requestBackgroundDashboardRefresh,
+    requestDashboardRefresh,
+    runtimeAvailable,
+  ]);
 
   function retryBootstrap() {
     if (bootState.status !== "error") return;
@@ -1281,15 +1467,8 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable || worker.state === "stopped") return;
 
-    let cancelled = false;
     const refreshWorker = () => {
-      invoke<WorkerStatus>("get_worker_status")
-        .then((nextWorker) => {
-          if (!cancelled) {
-            setWorker(nextWorker);
-          }
-        })
-        .catch(() => undefined);
+      void requestBackgroundDashboardRefresh(["worker"]);
     };
 
     const interval = window.setInterval(
@@ -1298,10 +1477,9 @@ function App() {
     );
 
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
     };
-  }, [runtimeAvailable, worker.state]);
+  }, [requestBackgroundDashboardRefresh, runtimeAvailable, worker.state]);
 
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
@@ -1781,8 +1959,10 @@ function App() {
         invoke<RunDetail | null>("stop_run", { id }),
       );
       if (selectedRunIdRef.current === id) setSelectedRun(detail);
-      await refreshDashboard();
+      await requestDashboardRefresh();
     } catch {
+      // call() or the refresh coordinator has already surfaced the failure.
+    } finally {
       setStoppingRunIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -1795,7 +1975,7 @@ function App() {
     setTriggeringRetryIds((prev) => new Set(prev).add(issueId));
     try {
       await call(() => invoke<boolean>("trigger_retry_now", { issueId }));
-      await refreshDashboard();
+      await requestDashboardRefresh();
     } catch {
       // call() has already surfaced the error banner.
     } finally {
@@ -1821,7 +2001,7 @@ function App() {
     setRetroStatus(status);
     selectedRetroIdRef.current = status.retro_id;
     setSelectedRetro(null);
-    await refreshDashboard();
+    await requestDashboardRefresh();
     setView("retro");
   }
 
@@ -1860,7 +2040,7 @@ function App() {
     }
     selectedRetroIdRef.current = nextRetro?.id ?? null;
     setSelectedRetro(null);
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   async function decideRetroSuggestion(id: string, decision: string) {
@@ -1913,7 +2093,7 @@ function App() {
     const saved = await invoke<AppSettings>("load_settings");
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   async function startRetroPrs(retroId: string) {
@@ -1927,26 +2107,19 @@ function App() {
     setSelectedRetro((current) =>
       current?.row.id === retroId ? { ...current, batches } : current,
     );
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   useEffect(() => {
     if (!runtimeAvailable || retroStatus.state !== "running") return;
-    let cancelled = false;
     const interval = window.setInterval(() => {
-      refreshDashboard().catch(() => {
-        if (!cancelled) {
-          // The command wrapper will surface explicit action errors; polling
-          // failures are transient and should not pin a banner over the app.
-        }
-      });
+      void requestBackgroundDashboardRefresh();
     }, 1500);
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAvailable, retroStatus.state]);
+  }, [requestBackgroundDashboardRefresh, runtimeAvailable, retroStatus.state]);
 
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
