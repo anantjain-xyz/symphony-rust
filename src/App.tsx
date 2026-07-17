@@ -150,10 +150,8 @@ const BUNDLED_SKILL_COUNT = BUNDLED_SKILL_NAMES.length;
 const BUNDLED_SKILL_EXAMPLES = "symphony-workpad, symphony-commit, symphony-push";
 
 function getInitialTheme(): Theme {
-  if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-  if (stored === "light" || stored === "dark") return stored;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  if (typeof document === "undefined") return "light";
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
 function useTheme(): [Theme, () => void] {
@@ -162,8 +160,13 @@ function useTheme(): [Theme, () => void] {
   useEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("dark", theme === "dark");
+    root.dataset.theme = theme;
     root.style.colorScheme = theme;
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // The root theme still updates when storage is unavailable.
+    }
   }, [theme]);
 
   const toggle = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));

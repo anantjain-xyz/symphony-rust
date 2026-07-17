@@ -122,10 +122,22 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
 body {
   margin: 0;
+  min-height: 100vh;
   background: var(--background);
   color: var(--foreground);
+}
+
+#root {
+  min-height: 100vh;
+  background: var(--background);
 }
 
 .tnum {

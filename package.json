@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.mjs",
     "release:mac": "bash scripts/release-macos.sh",
@@ -24,6 +25,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@tauri-apps/cli": "^2",
     "@testing-library/react": "^16.3.0",
     "@types/react": "^19.1.8",
