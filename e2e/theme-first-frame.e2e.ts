@@ -12,7 +12,7 @@ test("saved dark theme paints dark before the React module loads", async ({ page
     markModuleRequested = resolve;
   });
 
-  await page.route("**/src/main.tsx", async (route) => {
+  await page.route("**/assets/index-*.js", async (route) => {
     markModuleRequested();
     await moduleReleased;
     await route.continue();
@@ -28,9 +28,15 @@ test("saved dark theme paints dark before the React module loads", async ({ page
           classIsDark: document.documentElement.classList.contains("dark"),
           theme: document.documentElement.dataset.theme,
           colorScheme: document.documentElement.style.colorScheme,
+          background: getComputedStyle(document.documentElement).backgroundColor,
         })),
       )
-      .toEqual({ classIsDark: true, theme: "dark", colorScheme: "dark" });
+      .toEqual({
+        classIsDark: true,
+        theme: "dark",
+        colorScheme: "dark",
+        background: "rgb(9, 9, 11)",
+      });
 
     const screenshot = await page.screenshot({
       fullPage: true,
