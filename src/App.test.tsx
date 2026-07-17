@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { retroRepoBatchState } from "./App";
 import type {
@@ -104,6 +104,16 @@ function expectLiteralInput(element: Element) {
   expect(element.getAttribute("autocorrect")).toBe("off");
   expect(element.getAttribute("autocapitalize")).toBe("none");
   expect(element.getAttribute("spellcheck")).toBe("false");
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 // A `tauri.invoke` stand-in for the settings screen: it serves the commands the
@@ -558,6 +568,86 @@ describe("App settings", () => {
     fireEvent.click(generateButton!);
 
     await waitFor(() => expect(tauriMocks.invoke).toHaveBeenCalledWith("start_retro"));
+  });
+
+  it("bounds dashboard commands when Tauri refresh events burst during a request", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const firstOverview = deferred<Overview>();
+      const baseInvoke = dashboardInvoke({ settings });
+      let overviewRequests = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_overview" && overviewRequests++ === 0) {
+          return firstOverview.promise;
+        }
+        return baseInvoke(command, args);
+      });
+      const eventListeners = new Map<string, () => void>();
+      const unlisten = vi.fn();
+      tauriMocks.listen.mockImplementation(async (event, listener) => {
+        eventListeners.set(event, listener);
+        return unlisten;
+      });
+
+      const rendered = render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_overview");
+      expect([...eventListeners.keys()].sort()).toEqual([
+        "agent_event",
+        "db_changed",
+        "rate_limit_changed",
+      ]);
+
+      act(() => {
+        for (let index = 0; index < 10; index += 1) {
+          eventListeners.get("db_changed")!();
+          eventListeners.get("agent_event")!();
+          eventListeners.get("rate_limit_changed")!();
+        }
+        vi.advanceTimersByTime(300);
+      });
+
+      firstOverview.resolve({
+        active_runs: [],
+        retry_queue: [],
+        recent_failures: [],
+        live_sessions: [],
+        worker_heartbeat: null,
+        rate_limits: [],
+        token_usage: [],
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      for (const command of [
+        "get_overview",
+        "list_runs",
+        "list_issues",
+        "get_retro_status",
+        "list_retros",
+        "has_in_progress_retro_batches",
+      ]) {
+        expect(
+          tauriMocks.invoke.mock.calls.filter(([called]) => called === command),
+          command,
+        ).toHaveLength(2);
+      }
+      rendered.unmount();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(unlisten).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("marks local development builds distinctly", () => {

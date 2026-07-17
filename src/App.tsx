@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { InputHTMLAttributes } from "react";
 import type {
   AgentEventRow,
@@ -49,11 +49,38 @@ import {
 } from "./MarkdownText";
 import { AppUpdate } from "./AppUpdate";
 import type { UpdateSafety } from "./AppUpdate";
+import {
+  createDashboardRefreshCoordinator,
+  type DashboardRefreshContext,
+  type DashboardRefreshCoordinator,
+} from "./dashboardRefreshCoordinator";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
 type Theme = "light" | "dark";
 type IssueViewMode = "list" | "dependencies";
+type DashboardResourceKey =
+  | "overview"
+  | "runs"
+  | "issues"
+  | "worker"
+  | "runDetail"
+  | "retroStatus"
+  | "retros"
+  | "retroDetail"
+  | "retroBatches";
+
+const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
+  "overview",
+  "runs",
+  "issues",
+  "worker",
+  "runDetail",
+  "retroStatus",
+  "retros",
+  "retroDetail",
+  "retroBatches",
+];
 
 const DEPENDENCY_NODE_WIDTH = 216;
 const DEPENDENCY_NODE_HEIGHT = 86;
@@ -65,6 +92,8 @@ const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
 const IS_LOCAL_DEV = import.meta.env.DEV;
+const DASHBOARD_REFRESH_INSTRUMENTATION_ENABLED =
+  IS_LOCAL_DEV && import.meta.env.MODE !== "test";
 const literalInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -970,10 +999,25 @@ function App() {
   const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
 
+  const dashboardRefreshExecutor = useRef<
+    (context: DashboardRefreshContext<DashboardResourceKey>) => Promise<void>
+  >(async () => undefined);
+  const dashboardRefreshCoordinator = useRef<
+    DashboardRefreshCoordinator<DashboardResourceKey> | undefined
+  >(undefined);
+  if (!dashboardRefreshCoordinator.current) {
+    dashboardRefreshCoordinator.current = createDashboardRefreshCoordinator({
+      execute: (context) => dashboardRefreshExecutor.current(context),
+      onFailure: (refreshError) => setError(formatError(refreshError)),
+      instrumentation: { enabled: DASHBOARD_REFRESH_INSTRUMENTATION_ENABLED },
+    });
+  }
+
   // Dashboard data refreshes on worker events; settings load separately so
   // in-progress edits are never overwritten by background activity.
-  async function refreshDashboard() {
+  dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
+    const requested = new Set(keys);
     const detailId = selectedRunIdRef.current;
     const retroDetailId = selectedRetroIdRef.current;
     const [
@@ -988,43 +1032,89 @@ function App() {
       nextHasInProgressRetroBatches,
     ] =
       await Promise.all([
-        invoke<Overview>("get_overview"),
-        invoke<RunWithIssueRow[]>("list_runs"),
-        invoke<IssueRow[]>("list_issues"),
-        invoke<WorkerStatus>("get_worker_status"),
-        detailId
+        requested.has("overview") ? invoke<Overview>("get_overview") : undefined,
+        requested.has("runs") ? invoke<RunWithIssueRow[]>("list_runs") : undefined,
+        requested.has("issues") ? invoke<IssueRow[]>("list_issues") : undefined,
+        requested.has("worker")
+          ? invoke<WorkerStatus>("get_worker_status")
+          : undefined,
+        requested.has("runDetail") && detailId
           ? invoke<RunDetail | null>("get_run_detail", { id: detailId })
-          : Promise.resolve(null),
-        invoke<RetroStatus>("get_retro_status"),
-        invoke<RetroRow[]>("list_retros"),
-        retroDetailId
+          : undefined,
+        requested.has("retroStatus")
+          ? invoke<RetroStatus>("get_retro_status")
+          : undefined,
+        requested.has("retros") ? invoke<RetroRow[]>("list_retros") : undefined,
+        requested.has("retroDetail") && retroDetailId
           ? invoke<RetroDetail | null>("get_retro_detail", { id: retroDetailId })
-          : Promise.resolve(null),
-        invoke<boolean>("has_in_progress_retro_batches"),
+          : undefined,
+        requested.has("retroBatches")
+          ? invoke<boolean>("has_in_progress_retro_batches")
+          : undefined,
       ]);
-    setOverview(nextOverview);
-    setRuns(nextRuns);
-    setIssues(nextIssues);
-    setWorker(nextWorker);
-    setRetroStatus(nextRetroStatus);
-    setRetros(nextRetros);
-    setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
-    if (detailId && detailId === selectedRunIdRef.current) {
+    if (nextOverview !== undefined && isAuthoritative("overview")) {
+      setOverview(nextOverview);
+    }
+    if (nextRuns !== undefined && isAuthoritative("runs")) setRuns(nextRuns);
+    if (nextIssues !== undefined && isAuthoritative("issues")) setIssues(nextIssues);
+    if (nextWorker !== undefined && isAuthoritative("worker")) setWorker(nextWorker);
+    if (nextRetroStatus !== undefined && isAuthoritative("retroStatus")) {
+      setRetroStatus(nextRetroStatus);
+    }
+    if (nextRetros !== undefined && isAuthoritative("retros")) setRetros(nextRetros);
+    if (
+      nextHasInProgressRetroBatches !== undefined &&
+      isAuthoritative("retroBatches")
+    ) {
+      setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
+    }
+    if (
+      detailId &&
+      nextDetail !== undefined &&
+      isAuthoritative("runDetail") &&
+      detailId === selectedRunIdRef.current
+    ) {
       setSelectedRun(nextDetail);
       if (!nextDetail) selectedRunIdRef.current = null;
     }
-    if (retroDetailId && retroDetailId === selectedRetroIdRef.current) {
+    if (
+      retroDetailId &&
+      nextRetroDetail !== undefined &&
+      isAuthoritative("retroDetail") &&
+      retroDetailId === selectedRetroIdRef.current
+    ) {
       setSelectedRetro(nextRetroDetail);
       if (!nextRetroDetail) selectedRetroIdRef.current = null;
-    } else if (!retroDetailId && nextRetros.length > 0) {
+    } else if (
+      requested.has("retroDetail") &&
+      !retroDetailId &&
+      nextRetros &&
+      nextRetros.length > 0 &&
+      isAuthoritative("retroDetail") &&
+      selectedRetroIdRef.current === null
+    ) {
       const newest = nextRetros[0];
-      selectedRetroIdRef.current = newest.id;
       const detail = await invoke<RetroDetail | null>("get_retro_detail", {
         id: newest.id,
       });
-      setSelectedRetro(detail);
+      if (isAuthoritative("retroDetail") && selectedRetroIdRef.current === null) {
+        selectedRetroIdRef.current = newest.id;
+        setSelectedRetro(detail);
+      }
     }
-  }
+  };
+
+  const requestDashboardRefresh = useCallback(
+    (keys: Iterable<DashboardResourceKey> = DASHBOARD_RESOURCE_KEYS) =>
+      dashboardRefreshCoordinator.current!.request(keys),
+    [],
+  );
+
+  useEffect(() => {
+    const coordinator = dashboardRefreshCoordinator.current!;
+    coordinator.activate();
+    return () => coordinator.dispose();
+  }, []);
 
   useEffect(() => {
     setStoppingRunIds((prev) => {
@@ -1041,22 +1131,29 @@ function App() {
 
   useEffect(() => {
     if (!runtimeAvailable) return;
+    let cancelled = false;
 
     const boot = async () => {
       const loaded = await invoke<AppSettings>("load_settings");
+      if (cancelled) return;
       setSettings(loaded);
       setSavedSnapshot(formSnapshot(loaded));
-      await refreshDashboard();
+      await requestDashboardRefresh();
+      if (cancelled) return;
       // The worker should be running whenever the app is open, so start it
       // on launch once setup is complete; the topbar toggle stops it.
       if (autoStartDone.current) return;
       autoStartDone.current = true;
       if (!loaded.linear_api_key_set || !anyRepoConfigured(loaded)) return;
       const status = await invoke<WorkerStatus>("get_worker_status");
+      if (cancelled) return;
       if (status.state !== "stopped" || status.last_error) return;
-      setWorker(await invoke<WorkerStatus>("start_worker"));
+      const startedWorker = await invoke<WorkerStatus>("start_worker");
+      if (!cancelled) setWorker(startedWorker);
     };
-    boot().catch((err) => setError(formatError(err)));
+    boot().catch((err) => {
+      if (!cancelled) setError(formatError(err));
+    });
 
     // Agent events arrive in bursts; coalesce them into a single refresh.
     let timer: number | null = null;
@@ -1064,7 +1161,7 @@ function App() {
       if (timer !== null) return;
       timer = window.setTimeout(() => {
         timer = null;
-        refreshDashboard().catch(() => undefined);
+        void requestDashboardRefresh();
       }, 300);
     };
     const unsubs = Promise.all([
@@ -1072,27 +1169,21 @@ function App() {
       listen("agent_event", scheduleRefresh),
       listen("rate_limit_changed", scheduleRefresh),
     ]).catch((err) => {
-      setError(formatError(err));
+      if (!cancelled) setError(formatError(err));
       return [];
     });
     return () => {
+      cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, [runtimeAvailable]);
+  }, [requestDashboardRefresh, runtimeAvailable]);
 
   useEffect(() => {
     if (!runtimeAvailable || worker.state === "stopped") return;
 
-    let cancelled = false;
     const refreshWorker = () => {
-      invoke<WorkerStatus>("get_worker_status")
-        .then((nextWorker) => {
-          if (!cancelled) {
-            setWorker(nextWorker);
-          }
-        })
-        .catch(() => undefined);
+      void requestDashboardRefresh(["worker"]);
     };
 
     refreshWorker();
@@ -1102,10 +1193,9 @@ function App() {
     );
 
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
     };
-  }, [runtimeAvailable, worker.state]);
+  }, [requestDashboardRefresh, runtimeAvailable, worker.state]);
 
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
@@ -1583,7 +1673,7 @@ function App() {
         invoke<RunDetail | null>("stop_run", { id }),
       );
       if (selectedRunIdRef.current === id) setSelectedRun(detail);
-      await refreshDashboard();
+      await requestDashboardRefresh();
     } catch {
       setStoppingRunIds((prev) => {
         const next = new Set(prev);
@@ -1597,7 +1687,7 @@ function App() {
     setTriggeringRetryIds((prev) => new Set(prev).add(issueId));
     try {
       await call(() => invoke<boolean>("trigger_retry_now", { issueId }));
-      await refreshDashboard();
+      await requestDashboardRefresh();
     } catch {
       // call() has already surfaced the error banner.
     } finally {
@@ -1623,7 +1713,7 @@ function App() {
     setRetroStatus(status);
     selectedRetroIdRef.current = status.retro_id;
     setSelectedRetro(null);
-    await refreshDashboard();
+    await requestDashboardRefresh();
     setView("retro");
   }
 
@@ -1662,7 +1752,7 @@ function App() {
     }
     selectedRetroIdRef.current = nextRetro?.id ?? null;
     setSelectedRetro(null);
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   async function decideRetroSuggestion(id: string, decision: string) {
@@ -1715,7 +1805,7 @@ function App() {
     const saved = await invoke<AppSettings>("load_settings");
     setSettings(saved);
     setSavedSnapshot(formSnapshot(saved));
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   async function startRetroPrs(retroId: string) {
@@ -1729,22 +1819,15 @@ function App() {
     setSelectedRetro((current) =>
       current?.row.id === retroId ? { ...current, batches } : current,
     );
-    await refreshDashboard();
+    await requestDashboardRefresh();
   }
 
   useEffect(() => {
     if (!runtimeAvailable || retroStatus.state !== "running") return;
-    let cancelled = false;
     const interval = window.setInterval(() => {
-      refreshDashboard().catch(() => {
-        if (!cancelled) {
-          // The command wrapper will surface explicit action errors; polling
-          // failures are transient and should not pin a banner over the app.
-        }
-      });
+      void requestDashboardRefresh();
     }, 1500);
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
