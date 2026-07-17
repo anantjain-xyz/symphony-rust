@@ -18,6 +18,7 @@ type DashboardRefreshCoordinatorOptions<Key extends string> = {
 
 type DashboardRefreshRequestOptions = {
   reportFailure?: boolean;
+  rejectOnFailure?: boolean;
 };
 
 export type DashboardRefreshCoordinator<Key extends string> = {
@@ -44,7 +45,9 @@ export function createDashboardRefreshCoordinator<Key extends string>({
   let requestWaiters: Array<{
     generations: Map<Key, number>;
     reportFailure: boolean;
+    rejectOnFailure: boolean;
     resolve: () => void;
+    reject: (error: unknown) => void;
   }> = [];
   const now = instrumentation?.now ?? (() => performance.now());
   const log = (event: string, details: Record<string, unknown>) => {
@@ -101,7 +104,13 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       }
     }
 
-    completed.forEach(({ resolve }) => resolve());
+    completed.forEach(({ reject, rejectOnFailure, resolve }) => {
+      if (didFail && rejectOnFailure) {
+        reject(failure);
+      } else {
+        resolve();
+      }
+    });
   };
 
   const start = (keys: Key[], generation: number) => {
@@ -180,13 +189,15 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       if (disposed || requestedKeys.length === 0) return Promise.resolve();
 
       const requestedGeneration = ++nextGeneration;
-      const settled = new Promise<void>((resolve) =>
+      const settled = new Promise<void>((resolve, reject) =>
         requestWaiters.push({
           generations: new Map(
             requestedKeys.map((key): [Key, number] => [key, requestedGeneration]),
           ),
           reportFailure: options?.reportFailure ?? true,
+          rejectOnFailure: options?.rejectOnFailure ?? false,
           resolve,
+          reject,
         }),
       );
 

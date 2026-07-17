@@ -167,6 +167,20 @@ describe("dashboard refresh coordinator", () => {
     expect(failure.mock.calls[0][1]).toEqual(["overview"]);
   });
 
+  it("can reject a polling request so resource state records the failure", async () => {
+    const failure = new Error("poll failed");
+    const coordinator = createDashboardRefreshCoordinator<string>({
+      execute: async () => Promise.reject(failure),
+    });
+
+    await expect(
+      coordinator.request(["worker"], {
+        rejectOnFailure: true,
+        reportFailure: false,
+      }),
+    ).rejects.toBe(failure);
+  });
+
   it("reports a requested failure when background work supersedes the same key", async () => {
     const batches = [deferred(), deferred()];
     let batchIndex = 0;
