@@ -1147,6 +1147,34 @@ function App() {
     if (!runtimeAvailable) return;
 
     let cancelled = false;
+    let bootstrapComplete = false;
+    let refreshQueuedDuringBootstrap = false;
+
+    // Agent events arrive in bursts; coalesce them into a single refresh. An
+    // event during bootstrap must run afterward so the initial snapshot cannot
+    // overwrite newer dashboard data.
+    let timer: number | null = null;
+    const scheduleRefresh = () => {
+      if (!bootstrapComplete) {
+        refreshQueuedDuringBootstrap = true;
+        return;
+      }
+      if (timer !== null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        refreshDashboard().catch(() => undefined);
+      }, 300);
+    };
+    const settleBootstrap = () => {
+      if (cancelled) return;
+      bootstrapComplete = true;
+      setBootstrapSettled(true);
+      if (refreshQueuedDuringBootstrap) {
+        refreshQueuedDuringBootstrap = false;
+        scheduleRefresh();
+      }
+    };
+
     loadBootstrap()
       .then(({ settings: loaded, dashboard, autoStart }) => {
         if (cancelled) return;
@@ -1154,7 +1182,7 @@ function App() {
         setSavedSnapshot(formSnapshot(loaded));
         commitDashboardSnapshot(dashboard);
         if (!autoStart) {
-          setBootstrapSettled(true);
+          settleBootstrap();
           return;
         }
         void autoStart
@@ -1164,23 +1192,12 @@ function App() {
           .catch((err) => {
             if (!cancelled) setError(formatError(err));
           })
-          .finally(() => {
-            if (!cancelled) setBootstrapSettled(true);
-          });
+          .finally(settleBootstrap);
       })
       .catch((err) => {
         if (!cancelled) setError(formatError(err));
       });
 
-    // Agent events arrive in bursts; coalesce them into a single refresh.
-    let timer: number | null = null;
-    const scheduleRefresh = () => {
-      if (timer !== null) return;
-      timer = window.setTimeout(() => {
-        timer = null;
-        refreshDashboard().catch(() => undefined);
-      }, 300);
-    };
     const unsubs = Promise.all([
       listen("db_changed", scheduleRefresh),
       listen("agent_event", scheduleRefresh),

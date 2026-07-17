@@ -540,6 +540,48 @@ describe("App settings", () => {
     expect(commandCount("get_worker_status")).toBe(1);
   });
 
+  it("defers event refreshes so bootstrap cannot overwrite newer dashboard data", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const settingsRead = deferred<AppSettings>();
+    let overviewReads = 0;
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "load_settings") return settingsRead.promise;
+      if (command === "get_overview") {
+        overviewReads += 1;
+        return {
+          active_runs: overviewReads === 1 ? [] : [runRow()],
+          retry_queue: [],
+          recent_failures: [],
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
+      ([event]) => event === "db_changed",
+    )?.[1] as () => void;
+    onDatabaseChanged();
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+
+    expect(overviewReads).toBe(1);
+    expect(screen.queryByText("Build widgets")).toBeNull();
+
+    settingsRead.resolve(settings);
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    await waitFor(() => expect(workerButton.disabled).toBe(false));
+    expect(await screen.findByText("Build widgets")).toBeTruthy();
+    expect(overviewReads).toBe(2);
+  });
+
   it.each([
     ["auto-start is disabled", false, "stopped", null],
     ["the worker is running", true, "running", null],
