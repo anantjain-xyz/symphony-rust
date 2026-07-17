@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { InputHTMLAttributes, RefObject } from "react";
 import type {
   AgentEventRow,
@@ -36,10 +36,8 @@ import {
   priorityLabel,
   providerRateLimits,
   providerTokenUsage,
-  relativeTime,
   shortTime,
   statusSlug,
-  timeOnly,
 } from "./format";
 import {
   MarkdownText,
@@ -49,6 +47,7 @@ import {
 } from "./MarkdownText";
 import { AppUpdate } from "./AppUpdate";
 import type { UpdateSafety } from "./AppUpdate";
+import { AbsoluteTime, RelativeTime } from "./RelativeTime";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -1366,13 +1365,6 @@ function App() {
     linearKey,
   ]);
 
-  // Keep relative timestamps fresh while the dashboard is otherwise idle.
-  const [, tick] = useReducer((x: number) => x + 1, 0);
-  useEffect(() => {
-    const id = window.setInterval(tick, 30_000);
-    return () => window.clearInterval(id);
-  }, []);
-
   async function call<T>(fn: () => Promise<T>) {
     if (!runtimeAvailable) {
       setError("Connect through the Symphony desktop app to run this action.");
@@ -2606,8 +2598,8 @@ function OverviewView({
                       <small>{retry.issue_title}</small>
                     </td>
                     <td>#{retry.run_number}</td>
-                    <td className="tnum" title={shortTime(retry.due_at)}>
-                      {relativeTime(retry.due_at)}
+                    <td className="tnum">
+                      <RelativeTime value={retry.due_at} />
                     </td>
                     <td className="row-actions">
                       <button
@@ -2650,25 +2642,22 @@ function OverviewView({
                   <td>
                     <strong>{row.label}</strong>
                     {row.limit ? (
-                      <small title={shortTime(row.limit.updated_at)}>
-                        signal {relativeTime(row.limit.updated_at)}
+                      <small>
+                        signal <RelativeTime value={row.limit.updated_at} />
                       </small>
                     ) : (
                       <small>no limits hit</small>
                     )}
                   </td>
                   <td className="tnum">{row.limit?.remaining ?? "—"}</td>
-                  <td
-                    className="tnum"
-                    title={
-                      row.limit?.reset_at
-                        ? shortTime(row.limit.reset_at)
-                        : undefined
-                    }
-                  >
+                  <td className="tnum">
                     {row.limit
                       ? row.limit.reset_at
-                        ? `resets ${relativeTime(row.limit.reset_at)}`
+                        ? (
+                          <>
+                            resets <RelativeTime value={row.limit.reset_at} />
+                          </>
+                        )
                         : "no reset reported"
                       : "—"}
                   </td>
@@ -2693,10 +2682,10 @@ function OverviewView({
                   <td>
                     <strong>{row.label}</strong>
                     {row.usage ? (
-                      <small title={shortTime(row.usage.updated_at)}>
+                      <small>
                         {row.usage.run_count}{" "}
                         {row.usage.run_count === 1 ? "run" : "runs"} · last{" "}
-                        {relativeTime(row.usage.updated_at)}
+                        <RelativeTime value={row.usage.updated_at} />
                       </small>
                     ) : (
                       <small>no usage yet</small>
@@ -3218,8 +3207,8 @@ function IssuesTable({
               <Badge status={issue.state} />
             </td>
             <td>{priorityLabel(issue.priority)}</td>
-            <td className="tnum" title={shortTime(issue.last_seen_at)}>
-              {relativeTime(issue.last_seen_at)}
+            <td className="tnum">
+              <RelativeTime value={issue.last_seen_at} />
             </td>
             {linearWorkspace ? (
               <td className="row-actions">
@@ -3669,7 +3658,9 @@ function RetroView({
                     }}
                   >
                     <td>
-                      <strong>{relativeTime(retro.created_at)}</strong>
+                      <strong>
+                        <RelativeTime value={retro.created_at} />
+                      </strong>
                       <small>
                         {shortTime(retro.since_at)} to {shortTime(retro.until_at)}
                       </small>
@@ -6426,9 +6417,7 @@ function EventStream({
                     <em>no details</em>
                   )}
                 </div>
-                <time title={shortTime(event.created_at)}>
-                  {timeOnly(event.created_at)}
-                </time>
+                <AbsoluteTime value={event.created_at} />
               </div>
               <details>
                 <summary>payload</summary>
@@ -6539,20 +6528,13 @@ function RunTable({
             </td>
             <td>#{run.run_number}</td>
             <td><Badge status={run.status} /></td>
-            <td className="tnum" title={shortTime(run.created_at)}>
-              {relativeTime(run.created_at)}
+            <td className="tnum">
+              <RelativeTime value={run.created_at} />
             </td>
             {lastActivity ? (
-              <td
-                className="tnum"
-                title={
-                  lastActivity.has(run.id)
-                    ? shortTime(lastActivity.get(run.id)!)
-                    : undefined
-                }
-              >
+              <td className="tnum">
                 {lastActivity.has(run.id)
-                  ? relativeTime(lastActivity.get(run.id)!)
+                  ? <RelativeTime value={lastActivity.get(run.id)!} />
                   : "—"}
               </td>
             ) : null}
