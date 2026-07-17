@@ -16,10 +16,17 @@ type DashboardRefreshCoordinatorOptions<Key extends string> = {
   instrumentation?: DashboardRefreshInstrumentation;
 };
 
+type DashboardRefreshRequestOptions = {
+  reportFailure?: boolean;
+};
+
 export type DashboardRefreshCoordinator<Key extends string> = {
   activate: () => void;
   dispose: () => void;
-  request: (keys: Iterable<Key>) => Promise<void>;
+  request: (
+    keys: Iterable<Key>,
+    options?: DashboardRefreshRequestOptions,
+  ) => Promise<void>;
 };
 
 export function createDashboardRefreshCoordinator<Key extends string>({
@@ -32,18 +39,70 @@ export function createDashboardRefreshCoordinator<Key extends string>({
   let disposed = false;
   let nextGeneration = 0;
   const authoritativeGenerations = new Map<Key, number>();
+  const settledGenerations = new Map<Key, number>();
   const queuedKeys = new Set<Key>();
-  let drainWaiters: Array<() => void> = [];
+  let requestWaiters: Array<{
+    generations: Map<Key, number>;
+    reportFailure: boolean;
+    resolve: () => void;
+  }> = [];
   const now = instrumentation?.now ?? (() => performance.now());
   const log = (event: string, details: Record<string, unknown>) => {
     if (!instrumentation?.enabled) return;
     (instrumentation.log ?? console.debug)(`[dashboard-refresh] ${event}`, details);
   };
 
-  const resolveDrainWaiters = () => {
-    const waiters = drainWaiters;
-    drainWaiters = [];
-    waiters.forEach((resolve) => resolve());
+  const resolveAllWaiters = () => {
+    const waiters = requestWaiters;
+    requestWaiters = [];
+    waiters.forEach(({ resolve }) => resolve());
+  };
+
+  const settleWaiters = (
+    keys: readonly Key[],
+    generation: number,
+    didFail: boolean,
+    failure: unknown,
+    failedKeys: readonly Key[],
+  ) => {
+    keys.forEach((key) => {
+      settledGenerations.set(
+        key,
+        Math.max(settledGenerations.get(key) ?? 0, generation),
+      );
+    });
+
+    const completed = requestWaiters.filter((waiter) =>
+      [...waiter.generations].every(
+        ([key, requestedGeneration]) =>
+          (settledGenerations.get(key) ?? 0) >= requestedGeneration,
+      ),
+    );
+    requestWaiters = requestWaiters.filter((waiter) => !completed.includes(waiter));
+
+    if (didFail) {
+      const reportableKeys = new Set<Key>();
+      completed.forEach((waiter) => {
+        if (!waiter.reportFailure) return;
+        failedKeys.forEach((key) => {
+          if (waiter.generations.has(key)) reportableKeys.add(key);
+        });
+      });
+      if (reportableKeys.size > 0) {
+        try {
+          onFailure?.(failure, [...reportableKeys]);
+        } catch (observerError) {
+          log("failure-observer-error", {
+            activeGeneration: generation,
+            queuedKeys: [...queuedKeys],
+            failure: true,
+            observerError: true,
+          });
+        }
+      }
+    }
+
+    completed.forEach(({ resolve }) => resolve());
   };
 
   const start = (keys: Key[], generation: number) => {
@@ -65,16 +124,18 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       execution = Promise.reject(error);
     }
 
+    let failure: unknown;
+    let didFail = false;
     void execution
       .catch((error: unknown) => {
-        const failedKeys = keys.filter(isAuthoritative);
+        failure = error;
+        didFail = true;
         log("failure", {
           activeGeneration: generation,
           queuedKeys: [...queuedKeys],
           durationMs: now() - startedAt,
           failure: true,
         });
-        if (failedKeys.length > 0) onFailure?.(error, failedKeys);
       })
       .finally(() => {
         log("settle", {
@@ -84,9 +145,16 @@ export function createDashboardRefreshCoordinator<Key extends string>({
         });
         active = false;
         activeGeneration = null;
+        settleWaiters(
+          keys,
+          generation,
+          didFail,
+          failure,
+          didFail ? keys.filter(isAuthoritative) : [],
+        );
         if (disposed) {
           queuedKeys.clear();
-          resolveDrainWaiters();
+          resolveAllWaiters();
           return;
         }
         if (queuedKeys.size > 0) {
@@ -99,7 +167,6 @@ export function createDashboardRefreshCoordinator<Key extends string>({
           start(nextKeys, nextBatchGeneration);
           return;
         }
-        resolveDrainWaiters();
       });
   };
 
@@ -111,10 +178,11 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       disposed = true;
       queuedKeys.clear();
       authoritativeGenerations.clear();
-      if (!active) resolveDrainWaiters();
+      settledGenerations.clear();
+      resolveAllWaiters();
       log("dispose", { activeGeneration, queuedKeys: [] });
     },
-    request(keys) {
+    request(keys, options) {
       const requestedKeys = [...new Set(keys)];
       if (disposed || requestedKeys.length === 0) return Promise.resolve();
 
@@ -122,7 +190,15 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       requestedKeys.forEach((key) =>
         authoritativeGenerations.set(key, requestedGeneration),
       );
-      const drained = new Promise<void>((resolve) => drainWaiters.push(resolve));
+      const settled = new Promise<void>((resolve) =>
+        requestWaiters.push({
+          generations: new Map(
+            requestedKeys.map((key): [Key, number] => [key, requestedGeneration]),
+          ),
+          reportFailure: options?.reportFailure ?? true,
+          resolve,
+        }),
+      );
 
       if (active) {
         requestedKeys.forEach((key) => queuedKeys.add(key));
@@ -133,7 +209,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       } else {
         start(requestedKeys, requestedGeneration);
       }
-      return drained;
+      return settled;
     },
   };
 }

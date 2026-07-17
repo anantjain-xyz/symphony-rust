@@ -85,6 +85,56 @@ describe("dashboard refresh coordinator", () => {
     expect(failure).toHaveBeenCalledTimes(1);
   });
 
+  it("settles a queued caller after its batch while later polling work runs", async () => {
+    const batches = [deferred(), deferred(), deferred()];
+    let batchIndex = 0;
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+    let mutationSettled = false;
+
+    void coordinator.request(["worker"]);
+    const mutation = coordinator.request(["overview", "runs"]).then(() => {
+      mutationSettled = true;
+    });
+
+    batches[0].resolve();
+    await flushPromises();
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    void coordinator.request(["worker"]);
+    batches[1].resolve();
+    await mutation;
+
+    expect(mutationSettled).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(3);
+    batches[2].resolve();
+    await flushPromises();
+  });
+
+  it("suppresses background failures without suppressing requested failures", async () => {
+    const batches = [deferred(), deferred()];
+    let batchIndex = 0;
+    const failure = vi.fn();
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({
+      execute,
+      onFailure: failure,
+    });
+
+    const background = coordinator.request(["worker"], {
+      reportFailure: false,
+    });
+    batches[0].reject(new Error("transient poll failure"));
+    await background;
+    expect(failure).not.toHaveBeenCalled();
+
+    const requested = coordinator.request(["overview"]);
+    batches[1].reject(new Error("requested refresh failure"));
+    await requested;
+    expect(failure).toHaveBeenCalledOnce();
+    expect(failure.mock.calls[0][1]).toEqual(["overview"]);
+  });
+
   it("does not commit or start queued work after disposal", async () => {
     const active = deferred();
     const committed = vi.fn();
@@ -97,8 +147,9 @@ describe("dashboard refresh coordinator", () => {
     const drained = coordinator.request(["overview"]);
     void coordinator.request(["runs"]);
     coordinator.dispose();
-    active.resolve();
     await drained;
+    active.resolve();
+    await flushPromises();
 
     expect(committed).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledTimes(1);

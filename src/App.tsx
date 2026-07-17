@@ -1109,6 +1109,13 @@ function App() {
       dashboardRefreshCoordinator.current!.request(keys),
     [],
   );
+  const requestBackgroundDashboardRefresh = useCallback(
+    (keys: Iterable<DashboardResourceKey> = DASHBOARD_RESOURCE_KEYS) =>
+      dashboardRefreshCoordinator.current!.request(keys, {
+        reportFailure: false,
+      }),
+    [],
+  );
 
   useEffect(() => {
     const coordinator = dashboardRefreshCoordinator.current!;
@@ -1161,7 +1168,7 @@ function App() {
       if (timer !== null) return;
       timer = window.setTimeout(() => {
         timer = null;
-        void requestDashboardRefresh();
+        void requestBackgroundDashboardRefresh();
       }, 300);
     };
     const unsubs = Promise.all([
@@ -1177,13 +1184,17 @@ function App() {
       if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, [requestDashboardRefresh, runtimeAvailable]);
+  }, [
+    requestBackgroundDashboardRefresh,
+    requestDashboardRefresh,
+    runtimeAvailable,
+  ]);
 
   useEffect(() => {
     if (!runtimeAvailable || worker.state === "stopped") return;
 
     const refreshWorker = () => {
-      void requestDashboardRefresh(["worker"]);
+      void requestBackgroundDashboardRefresh(["worker"]);
     };
 
     refreshWorker();
@@ -1195,7 +1206,7 @@ function App() {
     return () => {
       window.clearInterval(interval);
     };
-  }, [requestDashboardRefresh, runtimeAvailable, worker.state]);
+  }, [requestBackgroundDashboardRefresh, runtimeAvailable, worker.state]);
 
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
@@ -1825,13 +1836,13 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable || retroStatus.state !== "running") return;
     const interval = window.setInterval(() => {
-      void requestDashboardRefresh();
+      void requestBackgroundDashboardRefresh();
     }, 1500);
     return () => {
       window.clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAvailable, retroStatus.state]);
+  }, [requestBackgroundDashboardRefresh, runtimeAvailable, retroStatus.state]);
 
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches

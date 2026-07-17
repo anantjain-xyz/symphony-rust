@@ -650,6 +650,53 @@ describe("App settings", () => {
     }
   });
 
+  it("does not pin an error banner for a transient background refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({
+        settings,
+        workerStatus: { state: "stopped", started_at: null, last_error: null },
+      });
+      let overviewRequests = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_overview" && overviewRequests++ === 1) {
+          return Promise.reject(new Error("transient refresh failure"));
+        }
+        return baseInvoke(command, args);
+      });
+      const eventListeners = new Map<string, () => void>();
+      tauriMocks.listen.mockImplementation(async (event, listener) => {
+        eventListeners.set(event, listener);
+        return vi.fn();
+      });
+
+      const rendered = render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      act(() => {
+        eventListeners.get("db_changed")!();
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(overviewRequests).toBe(2);
+      expect(screen.queryByText(/transient refresh failure/)).toBeNull();
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks local development builds distinctly", () => {
     const { container } = render(<App />);
 
