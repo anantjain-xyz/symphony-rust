@@ -54,11 +54,17 @@ import {
   type DashboardRefreshContext,
   type DashboardRefreshCoordinator,
 } from "./dashboardRefreshCoordinator";
+import {
+  createPollController,
+  type PollController,
+  type PollResourceState,
+} from "./pollController";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
 type Theme = "light" | "dark";
 type IssueViewMode = "list" | "dependencies";
+type PollKey = "worker" | "retro" | "skillsInstall" | "workflowTransfer";
 type DashboardResourceKey =
   | "overview"
   | "runs"
@@ -81,6 +87,12 @@ const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
   "retroDetail",
   "retroBatches",
 ];
+const POLL_LABELS: Record<PollKey, string> = {
+  worker: "worker status",
+  retro: "Retro progress",
+  skillsInstall: "skills installation",
+  workflowTransfer: "workflow transfer",
+};
 
 const DEPENDENCY_NODE_WIDTH = 216;
 const DEPENDENCY_NODE_HEIGHT = 86;
@@ -1036,6 +1048,55 @@ function configuredRepoUrls(settings: AppSettings): string[] {
   );
 }
 
+function retroRowRenderedFields(row: RetroRow) {
+  return {
+    id: row.id,
+    sinceAt: row.since_at,
+    untilAt: row.until_at,
+    status: row.status,
+    runCount: row.run_count,
+    issueCount: row.issue_count,
+    error: row.error_message,
+    createdAt: row.created_at,
+  };
+}
+
+function retroDetailRenderedFields(detail: RetroDetail | null | undefined) {
+  if (!detail) return null;
+  return {
+    row: retroRowRenderedFields(detail.row),
+    report: detail.report,
+    suggestions: detail.suggestions.map((suggestion) => ({
+      id: suggestion.id,
+      repoName: suggestion.repo_name,
+      findingIndex: suggestion.finding_index,
+      targetType: suggestion.target_type,
+      targetId: suggestion.target_id,
+      targetPath: suggestion.target_path,
+      title: suggestion.title,
+      body: suggestion.body,
+      rationale: suggestion.rationale,
+      confidence: suggestion.confidence,
+      guidance: suggestion.guidance,
+      beforeContent: suggestion.before_content,
+      afterContent: suggestion.after_content,
+      unifiedDiff: suggestion.unified_diff,
+      proposalStatus: suggestion.proposal_status,
+      proposalError: suggestion.proposal_error,
+      decision: suggestion.decision,
+      decidedAt: suggestion.decided_at,
+    })),
+    batches: detail.batches.map((batch) => ({
+      id: batch.id,
+      repoName: batch.repo_name,
+      state: batch.state,
+      progress: batch.progress,
+      error: batch.error,
+      prUrl: batch.pr_url,
+    })),
+  };
+}
+
 function stableSessionEnvKey(env: AppSettings["session_env"]): string {
   return JSON.stringify(
     Object.entries(env).sort(([left], [right]) => left.localeCompare(right)),
@@ -1131,6 +1192,9 @@ function App() {
   const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
   const [workflowTransfer, setWorkflowTransfer] =
     useState<WorkflowTransferStatus | null>(null);
+  const [pollingStates, setPollingStates] = useState<
+    Partial<Record<PollKey, PollResourceState>>
+  >({});
   const [hasInProgressRetroBatches, setHasInProgressRetroBatches] = useState(
     !runtimeAvailable &&
       previewRetroDetail.batches.some((batch) =>
@@ -1161,6 +1225,10 @@ function App() {
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
+  const pollControllers = useRef<Partial<Record<PollKey, PollController>>>({});
+  const dashboardResourceValues = useRef(
+    new Map<DashboardResourceKey, unknown>(),
+  );
 
   const bootstrapDashboardRef = useRef<Promise<BootstrapResult> | null>(null);
 
@@ -1170,22 +1238,34 @@ function App() {
     isAuthoritative: (key: DashboardResourceKey) => boolean,
   ) {
     if (requested.has("overview") && isAuthoritative("overview")) {
+      dashboardResourceValues.current.set("overview", snapshot.overview);
       setOverview(snapshot.overview);
     }
-    if (requested.has("runs") && isAuthoritative("runs")) setRuns(snapshot.runs);
+    if (requested.has("runs") && isAuthoritative("runs")) {
+      dashboardResourceValues.current.set("runs", snapshot.runs);
+      setRuns(snapshot.runs);
+    }
     if (requested.has("issues") && isAuthoritative("issues")) {
+      dashboardResourceValues.current.set("issues", snapshot.issues);
       setIssues(snapshot.issues);
     }
     if (requested.has("worker") && isAuthoritative("worker")) {
+      dashboardResourceValues.current.set("worker", snapshot.worker);
       setWorker(snapshot.worker);
     }
     if (requested.has("retroStatus") && isAuthoritative("retroStatus")) {
+      dashboardResourceValues.current.set("retroStatus", snapshot.retroStatus);
       setRetroStatus(snapshot.retroStatus);
     }
     if (requested.has("retros") && isAuthoritative("retros")) {
+      dashboardResourceValues.current.set("retros", snapshot.retros);
       setRetros(snapshot.retros);
     }
     if (requested.has("retroBatches") && isAuthoritative("retroBatches")) {
+      dashboardResourceValues.current.set(
+        "retroBatches",
+        snapshot.hasInProgressRetroBatches,
+      );
       setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
     }
     if (
@@ -1194,6 +1274,7 @@ function App() {
       snapshot.requestedRunId &&
       snapshot.requestedRunId === selectedRunIdRef.current
     ) {
+      dashboardResourceValues.current.set("runDetail", snapshot.selectedRun);
       setSelectedRun(snapshot.selectedRun);
       if (!snapshot.selectedRun) selectedRunIdRef.current = null;
     }
@@ -1203,6 +1284,7 @@ function App() {
       snapshot.requestedRetroId &&
       snapshot.requestedRetroId === selectedRetroIdRef.current
     ) {
+      dashboardResourceValues.current.set("retroDetail", snapshot.selectedRetro);
       setSelectedRetro(snapshot.selectedRetro);
       if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
     } else if (
@@ -1212,6 +1294,7 @@ function App() {
       selectedRetroIdRef.current === null
     ) {
       selectedRetroIdRef.current = snapshot.selectedRetroId;
+      dashboardResourceValues.current.set("retroDetail", snapshot.selectedRetro);
       setSelectedRetro(snapshot.selectedRetro);
     }
   }
@@ -1276,19 +1359,37 @@ function App() {
           : undefined,
       ]);
     if (nextOverview !== undefined && isAuthoritative("overview")) {
+      dashboardResourceValues.current.set("overview", nextOverview);
       setOverview(nextOverview);
     }
-    if (nextRuns !== undefined && isAuthoritative("runs")) setRuns(nextRuns);
-    if (nextIssues !== undefined && isAuthoritative("issues")) setIssues(nextIssues);
-    if (nextWorker !== undefined && isAuthoritative("worker")) setWorker(nextWorker);
+    if (nextRuns !== undefined && isAuthoritative("runs")) {
+      dashboardResourceValues.current.set("runs", nextRuns);
+      setRuns(nextRuns);
+    }
+    if (nextIssues !== undefined && isAuthoritative("issues")) {
+      dashboardResourceValues.current.set("issues", nextIssues);
+      setIssues(nextIssues);
+    }
+    if (nextWorker !== undefined && isAuthoritative("worker")) {
+      dashboardResourceValues.current.set("worker", nextWorker);
+      setWorker(nextWorker);
+    }
     if (nextRetroStatus !== undefined && isAuthoritative("retroStatus")) {
+      dashboardResourceValues.current.set("retroStatus", nextRetroStatus);
       setRetroStatus(nextRetroStatus);
     }
-    if (nextRetros !== undefined && isAuthoritative("retros")) setRetros(nextRetros);
+    if (nextRetros !== undefined && isAuthoritative("retros")) {
+      dashboardResourceValues.current.set("retros", nextRetros);
+      setRetros(nextRetros);
+    }
     if (
       nextHasInProgressRetroBatches !== undefined &&
       isAuthoritative("retroBatches")
     ) {
+      dashboardResourceValues.current.set(
+        "retroBatches",
+        nextHasInProgressRetroBatches,
+      );
       setHasInProgressRetroBatches(nextHasInProgressRetroBatches);
     }
     if (
@@ -1297,6 +1398,7 @@ function App() {
       isAuthoritative("runDetail") &&
       detailId === selectedRunIdRef.current
     ) {
+      dashboardResourceValues.current.set("runDetail", nextDetail);
       setSelectedRun(nextDetail);
       if (!nextDetail) selectedRunIdRef.current = null;
     }
@@ -1306,6 +1408,7 @@ function App() {
       isAuthoritative("retroDetail") &&
       retroDetailId === selectedRetroIdRef.current
     ) {
+      dashboardResourceValues.current.set("retroDetail", nextRetroDetail);
       setSelectedRetro(nextRetroDetail);
       if (!nextRetroDetail) selectedRetroIdRef.current = null;
     } else if (
@@ -1322,6 +1425,7 @@ function App() {
       });
       if (isAuthoritative("retroDetail") && selectedRetroIdRef.current === null) {
         selectedRetroIdRef.current = newest.id;
+        dashboardResourceValues.current.set("retroDetail", detail);
         setSelectedRetro(detail);
       }
     }
@@ -1339,6 +1443,33 @@ function App() {
       }),
     [],
   );
+  const pollDashboardResources = useCallback(
+    async (keys: readonly DashboardResourceKey[]) => {
+      await dashboardRefreshCoordinator.current!.request(keys, {
+        rejectOnFailure: true,
+        reportFailure: false,
+      });
+      return Object.fromEntries(
+        keys.map((key) => [key, dashboardResourceValues.current.get(key)]),
+      ) as Partial<Record<DashboardResourceKey, unknown>>;
+    },
+    [],
+  );
+
+  const updatePollingState = useCallback(
+    (key: PollKey, status: PollResourceState) => {
+      setPollingStates((current) => ({ ...current, [key]: status }));
+    },
+    [],
+  );
+  const clearPollingState = useCallback((key: PollKey) => {
+    setPollingStates((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const coordinator = dashboardRefreshCoordinator.current!;
@@ -1376,6 +1507,8 @@ function App() {
     // overwrite newer dashboard data.
     let timer: number | null = null;
     const scheduleRefresh = () => {
+      pollControllers.current.worker?.reset();
+      pollControllers.current.retro?.reset();
       if (bootstrapPending) {
         refreshQueuedDuringBootstrap = true;
         return;
@@ -1466,20 +1599,45 @@ function App() {
 
   useEffect(() => {
     if (!runtimeAvailable || worker.state === "stopped") return;
-
-    const refreshWorker = () => {
-      void requestBackgroundDashboardRefresh(["worker"]);
-    };
-
-    const interval = window.setInterval(
-      refreshWorker,
-      worker.state === "stopping" ? 500 : 2000,
-    );
-
+    const stopping = worker.state === "stopping";
+    const controller = createPollController({
+      poll: () => pollDashboardResources(["worker"]),
+      fingerprint: (resources) => {
+        const status = resources.worker as WorkerStatus | undefined;
+        return JSON.stringify(
+          status
+            ? {
+                state: status.state,
+                startedAt: status.started_at,
+                lastError: status.last_error,
+              }
+            : null,
+        );
+      },
+      baselineMs: stopping ? 500 : 2_000,
+      unchangedBackoffMs: stopping ? [] : [4_000, 8_000, 10_000],
+      pauseWhenHidden: !stopping,
+      failureMaxMs: stopping ? 10_000 : 30_000,
+      onResult: (resources) =>
+        (resources.worker as WorkerStatus | undefined)?.state !== "stopped",
+      onStatus: (status) => updatePollingState("worker", status),
+    });
+    pollControllers.current.worker = controller;
+    controller.start();
     return () => {
-      window.clearInterval(interval);
+      controller.dispose();
+      clearPollingState("worker");
+      if (pollControllers.current.worker === controller) {
+        delete pollControllers.current.worker;
+      }
     };
-  }, [requestBackgroundDashboardRefresh, runtimeAvailable, worker.state]);
+  }, [
+    clearPollingState,
+    pollDashboardResources,
+    runtimeAvailable,
+    updatePollingState,
+    worker.state,
+  ]);
 
   const activeRunIds = useMemo(
     () => new Set(overview.active_runs.map((run) => run.id)),
@@ -1827,45 +1985,86 @@ function App() {
   // its repo so that card's status flips to "PR open" with the link.
   useEffect(() => {
     if (!runtimeAvailable || skillsInstall?.state !== "running") return;
-    let cancelled = false;
-    const interval = window.setInterval(() => {
-      invoke<SkillsInstallStatus>("get_skills_install_status")
-        .then((status) => {
-          if (cancelled) return;
-          setSkillsInstall(status);
-          if (status.state === "completed" && status.repo_url) {
-            checkRepoSkills(status.repo_url);
-          }
-        })
-        .catch(() => undefined);
-    }, 2000);
+    const controller = createPollController({
+      poll: () => invoke<SkillsInstallStatus>("get_skills_install_status"),
+      fingerprint: (status) =>
+        JSON.stringify({
+          state: status.state,
+          repoUrl: status.repo_url,
+          message: status.message,
+          prUrl: status.pr_url,
+          error: status.error,
+        }),
+      baselineMs: 2_000,
+      unchangedBackoffMs: [4_000, 8_000, 10_000],
+      pauseWhenHidden: true,
+      onResult: (status) => {
+        setSkillsInstall(status);
+        if (status.state === "completed" && status.repo_url) {
+          checkRepoSkills(status.repo_url);
+        }
+        return status.state === "running";
+      },
+      onStatus: (status) => updatePollingState("skillsInstall", status),
+    });
+    pollControllers.current.skillsInstall = controller;
+    controller.start();
     return () => {
-      cancelled = true;
-      window.clearInterval(interval);
+      controller.dispose();
+      clearPollingState("skillsInstall");
+      if (pollControllers.current.skillsInstall === controller) {
+        delete pollControllers.current.skillsInstall;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAvailable, skillsInstall?.state]);
+  }, [
+    clearPollingState,
+    runtimeAvailable,
+    skillsInstall?.state,
+    updatePollingState,
+  ]);
 
   useEffect(() => {
     if (!runtimeAvailable || workflowTransfer?.state !== "running") return;
-    let cancelled = false;
-    const interval = window.setInterval(() => {
-      invoke<WorkflowTransferStatus>("get_workflow_transfer_status")
-        .then((status) => {
-          if (cancelled) return;
-          setWorkflowTransfer(status);
-          if (status.state === "completed" && status.repo_url) {
-            checkRepoWorkflow(status.repo_url);
-          }
-        })
-        .catch(() => undefined);
-    }, 2000);
+    const controller = createPollController({
+      poll: () =>
+        invoke<WorkflowTransferStatus>("get_workflow_transfer_status"),
+      fingerprint: (status) =>
+        JSON.stringify({
+          state: status.state,
+          repoUrl: status.repo_url,
+          message: status.message,
+          prUrl: status.pr_url,
+          error: status.error,
+        }),
+      baselineMs: 2_000,
+      unchangedBackoffMs: [4_000, 8_000, 10_000],
+      pauseWhenHidden: true,
+      onResult: (status) => {
+        setWorkflowTransfer(status);
+        if (status.state === "completed" && status.repo_url) {
+          checkRepoWorkflow(status.repo_url);
+        }
+        return status.state === "running";
+      },
+      onStatus: (status) => updatePollingState("workflowTransfer", status),
+    });
+    pollControllers.current.workflowTransfer = controller;
+    controller.start();
     return () => {
-      cancelled = true;
-      window.clearInterval(interval);
+      controller.dispose();
+      clearPollingState("workflowTransfer");
+      if (pollControllers.current.workflowTransfer === controller) {
+        delete pollControllers.current.workflowTransfer;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAvailable, workflowTransfer?.state]);
+  }, [
+    clearPollingState,
+    runtimeAvailable,
+    updatePollingState,
+    workflowTransfer?.state,
+  ]);
 
   async function removeLinearKey() {
     if (!settings) return;
@@ -2111,15 +2310,68 @@ function App() {
   }
 
   useEffect(() => {
-    if (!runtimeAvailable || retroStatus.state !== "running") return;
-    const interval = window.setInterval(() => {
-      void requestBackgroundDashboardRefresh();
-    }, 1500);
+    if (
+      !runtimeAvailable ||
+      (retroStatus.state !== "running" && !hasInProgressRetroBatches)
+    ) {
+      return;
+    }
+    const keys: DashboardResourceKey[] = [
+      "retroStatus",
+      "retros",
+      "retroBatches",
+    ];
+    if (view === "retro" && selectedRetroIdRef.current) keys.push("retroDetail");
+    const controller = createPollController({
+      poll: () => pollDashboardResources(keys),
+      fingerprint: (resources) =>
+        JSON.stringify({
+          status: (() => {
+            const status = resources.retroStatus as RetroStatus | undefined;
+            return status
+              ? {
+                  state: status.state,
+                  retroId: status.retro_id,
+                  message: status.message,
+                  report: status.report,
+                  error: status.error,
+                }
+              : null;
+          })(),
+          retros: (resources.retros as RetroRow[] | undefined)?.map(
+            retroRowRenderedFields,
+          ),
+          detail: retroDetailRenderedFields(
+            resources.retroDetail as RetroDetail | null | undefined,
+          ),
+          hasInProgressBatches: resources.retroBatches,
+        }),
+      baselineMs: 1_500,
+      unchangedBackoffMs: [3_000, 6_000],
+      pauseWhenHidden: true,
+      onResult: (resources) =>
+        (resources.retroStatus as RetroStatus | undefined)?.state === "running" ||
+        resources.retroBatches === true,
+      onStatus: (status) => updatePollingState("retro", status),
+    });
+    pollControllers.current.retro = controller;
+    controller.start();
     return () => {
-      window.clearInterval(interval);
+      controller.dispose();
+      clearPollingState("retro");
+      if (pollControllers.current.retro === controller) {
+        delete pollControllers.current.retro;
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requestBackgroundDashboardRefresh, runtimeAvailable, retroStatus.state]);
+  }, [
+    hasInProgressRetroBatches,
+    clearPollingState,
+    pollDashboardResources,
+    retroStatus.state,
+    runtimeAvailable,
+    updatePollingState,
+    view,
+  ]);
 
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
@@ -2211,6 +2463,9 @@ function App() {
     workflowTransfer?.state === "running" ? "the workflow transfer" : null,
     hasInProgressRetroBatches ? "an active Retro change batch" : null,
   ].filter((item): item is string => item !== null);
+  const stalePollingEntries = (
+    Object.entries(pollingStates) as [PollKey, PollResourceState][]
+  ).filter(([, status]) => status.stale);
 
   async function prepareForUpdateInstall() {
     const [installWorker, installOverview] = await Promise.all([
@@ -2427,6 +2682,19 @@ function App() {
           />
         ) : null}
         {bootReady && error ? <div className="banner error">{error}</div> : null}
+        {bootReady && stalePollingEntries.length > 0 ? (
+          <div className="banner error" role="status">
+            <strong>Background updates delayed</strong>
+            <span>
+              {stalePollingEntries
+                .map(
+                  ([key, status]) =>
+                    `${POLL_LABELS[key]}: ${formatError(status.error)}`,
+                )
+                .join(" · ")}
+            </span>
+          </div>
+        ) : null}
         {bootReady && worker.last_error ? (
           <div className="banner error">
             <strong>
