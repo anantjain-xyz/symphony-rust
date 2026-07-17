@@ -49,6 +49,29 @@ describe("format helpers", () => {
     expect(relativeTime("not a date", now)).toBe("not a date");
   });
 
+  it("snapshots representative relative-time transitions", () => {
+    const now = Date.UTC(2026, 5, 10, 12, 0, 0);
+    const at = (ms: number) => new Date(now - ms).toISOString();
+
+    expect([
+      relativeTime(at(44_000), now),
+      relativeTime(at(45_000), now),
+      relativeTime(at(59 * 60_000), now),
+      relativeTime(at(60 * 60_000), now),
+      relativeTime(at(23 * 3_600_000), now),
+      relativeTime(at(24 * 3_600_000), now),
+    ]).toMatchInlineSnapshot(`
+      [
+        "just now",
+        "1m ago",
+        "59m ago",
+        "1h ago",
+        "23h ago",
+        "1d ago",
+      ]
+    `);
+  });
+
   it("falls back to a date for ages older than a week", () => {
     const now = Date.UTC(2026, 5, 10, 12, 0, 0);
     const old = new Date(now - 30 * 86_400_000).toISOString();
