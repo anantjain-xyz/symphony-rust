@@ -1559,10 +1559,10 @@ function App() {
       })
       .catch((err) => {
         if (!cancelled) {
-          setBootState({ status: "error", message: normalizeBootstrapError(err) });
           if (bootstrapDashboardRef.current === bootstrap) {
             bootstrapDashboardRef.current = null;
           }
+          setBootState({ status: "error", message: normalizeBootstrapError(err) });
           releaseBootstrapRefreshGate(false);
         }
       });
