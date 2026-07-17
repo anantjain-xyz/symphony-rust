@@ -774,6 +774,40 @@ describe("App settings", () => {
     await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(3));
   });
 
+  it("fetches the bootstrap-selected Retro detail only when Retro opens", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const retro: RetroRow = {
+      id: "retro-1",
+      since_at: "2026-01-01T00:00:00.000Z",
+      until_at: "2026-01-02T00:00:00.000Z",
+      status: "completed",
+      run_count: 1,
+      issue_count: 1,
+      report_json: null,
+      error_message: null,
+      created_at: "2026-01-02T00:00:00.000Z",
+      completed_at: "2026-01-02T00:00:00.000Z",
+    };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_retros") return [retro];
+      if (command === "get_retro_detail") {
+        return { row: retro, report: null, suggestions: [], batches: [] };
+      }
+      return baseInvoke(command, args);
+    });
+    render(<App />);
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
+        false,
+      ),
+    );
+    expect(commandCount("get_retro_detail")).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
+  });
+
   it("appends and deduplicates typed events only for the active selected run", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
@@ -831,6 +865,17 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     expect(commandCount("get_run_detail")).toBe(detailReads);
+
+    listeners.get("agent_event")!({
+      payload: { type: "agent_event", event: { ...event, id: 101 } },
+    });
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "agent_events", op: "insert" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(commandCount("get_run_detail")).toBe(detailReads);
+    fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+    await waitFor(() => expect(commandCount("get_run_detail")).toBe(detailReads + 1));
   });
 
   it("uses the conservative fallback without fetching hidden selected detail", async () => {
@@ -911,6 +956,45 @@ describe("App settings", () => {
     secondDetail.resolve({ run: secondRun, events: [] });
     expect(await screen.findByText("Second selection")).toBeTruthy();
     expect(screen.getByText("SYM-2 · Run #2")).toBeTruthy();
+  });
+
+  it("retains a queued Runs invalidation when the follow-up becomes hidden", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const activeRun = runRow();
+    const delayedRuns = deferred<RunWithIssueRow[]>();
+    const baseInvoke = dashboardInvoke({ settings });
+    let runReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") {
+        runReads += 1;
+        if (runReads === 2) return delayedRuns.promise;
+        return [activeRun];
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+    render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "update" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    await waitFor(() => expect(runReads).toBe(2));
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "update" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    delayedRuns.resolve([activeRun]);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+    await waitFor(() => expect(runReads).toBe(3));
   });
 
   it.each([

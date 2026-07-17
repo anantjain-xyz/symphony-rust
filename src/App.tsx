@@ -1152,6 +1152,11 @@ function App() {
   const viewRef = useRef<View>(view);
   viewRef.current = view;
   const dirtyResourcesRef = useRef<Set<DashboardResourceKey>>(new Set());
+  const dirtyResourceVersionsRef = useRef<Partial<Record<DashboardResourceKey, number>>>(
+    {},
+  );
+  const selectedRunRef = useRef<RunDetail | null>(selectedRun);
+  selectedRunRef.current = selectedRun;
   const workflowReadinessDirtyRef = useRef(false);
   const typedAgentEventAwaitingDbChangeRef = useRef(false);
   const resourceCommandCounts = useRef<Record<string, number>>({});
@@ -1185,7 +1190,16 @@ function App() {
     } else if (!snapshot.requestedRetroId && selectedRetroIdRef.current === null) {
       selectedRetroIdRef.current = snapshot.selectedRetroId;
       setSelectedRetro(snapshot.selectedRetro);
+      if (snapshot.selectedRetroId !== null && snapshot.selectedRetro === null) {
+        markResourceDirty("selectedRetro");
+      }
     }
+  }
+
+  function markResourceDirty(key: DashboardResourceKey) {
+    dirtyResourcesRef.current.add(key);
+    dirtyResourceVersionsRef.current[key] =
+      (dirtyResourceVersionsRef.current[key] ?? 0) + 1;
   }
 
   async function invokeDashboardResource<T>(
@@ -1219,6 +1233,7 @@ function App() {
     if (!runtimeAvailable) return;
     await Promise.all(
       keys.map(async (key) => {
+        const dirtyVersion = dirtyResourceVersionsRef.current[key] ?? 0;
         const selectedRunId = selectedRunIdRef.current;
         const selectedRetroId = selectedRetroIdRef.current;
         if (
@@ -1247,7 +1262,20 @@ function App() {
           }
           case "issues": {
             const next = await invokeDashboardResource<IssueRow[]>(key, "list_issues");
-            if (isAuthoritative(key)) setIssues(next);
+            if (isAuthoritative(key)) {
+              setIssues(next);
+              const byId = new Map(next.map((issue) => [issue.id, issue]));
+              const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
+                const issue = byId.get(run.issue_id);
+                return issue
+                  ? { ...run, issue_title: issue.title, issue_state: issue.state }
+                  : run;
+              };
+              setRuns((current) => current.map(updateRunIssue));
+              setSelectedRun((current) =>
+                current ? { ...current, run: updateRunIssue(current.run) } : current,
+              );
+            }
             break;
           }
           case "worker": {
@@ -1269,7 +1297,7 @@ function App() {
               if (selectedRetroIdRef.current === null) {
                 selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
                 if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
-                  dirtyResourcesRef.current.add("selectedRetro");
+                  markResourceDirty("selectedRetro");
                   void dashboardRefreshCoordinator.current!.request(["selectedRetro"], {
                     reportFailure: false,
                   });
@@ -1319,7 +1347,12 @@ function App() {
             break;
           }
         }
-        if (isAuthoritative(key)) dirtyResourcesRef.current.delete(key);
+        if (
+          isAuthoritative(key) &&
+          (dirtyResourceVersionsRef.current[key] ?? 0) === dirtyVersion
+        ) {
+          dirtyResourcesRef.current.delete(key);
+        }
       }),
     );
   };
@@ -1328,9 +1361,10 @@ function App() {
     (
       keys: Iterable<DashboardResourceKey>,
       options: { reportFailure?: boolean } = { reportFailure: false },
+      markDirty = true,
     ) => {
       const invalidated = [...new Set(keys)];
-      invalidated.forEach((key) => dirtyResourcesRef.current.add(key));
+      if (markDirty) invalidated.forEach(markResourceDirty);
       const fetchable = visibleResources(
         invalidated,
         viewRef.current,
@@ -1344,6 +1378,16 @@ function App() {
 
   const refreshDashboard = useCallback(
     () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
+    [requestInvalidatedResources],
+  );
+  const refreshRetroInBackground = useCallback(
+    () =>
+      requestInvalidatedResources([
+        "overview",
+        "retroList",
+        "retroBatches",
+        "selectedRetro",
+      ]),
     [requestInvalidatedResources],
   );
 
@@ -1386,7 +1430,7 @@ function App() {
     let timer: number | null = null;
     const scheduleRefresh = (keys: Iterable<DashboardResourceKey>) => {
       for (const key of keys) {
-        dirtyResourcesRef.current.add(key);
+        markResourceDirty(key);
         pendingKeys.add(key);
       }
       if (bootstrapPending) {
@@ -1398,7 +1442,7 @@ function App() {
         timer = null;
         const queued = [...pendingKeys];
         pendingKeys.clear();
-        void requestInvalidatedResources(queued);
+        void requestInvalidatedResources(queued, { reportFailure: false }, false);
       }, 300);
     };
     const releaseBootstrapRefreshGate = (ready: boolean) => {
@@ -1460,20 +1504,16 @@ function App() {
       }),
       listen<AgentEvent>("agent_event", ({ payload }) => {
         const nextEvent = payload.event;
-        typedAgentEventAwaitingDbChangeRef.current = true;
+        const current = selectedRunRef.current;
         if (
           viewRef.current === "runs" &&
-          nextEvent.run_id === selectedRunIdRef.current
+          current?.run.id === nextEvent.run_id &&
+          !current.events.some((event) => event.id === nextEvent.id)
         ) {
-          setSelectedRun((current) => {
-            if (
-              current?.run.id !== nextEvent.run_id ||
-              current.events.some((event) => event.id === nextEvent.id)
-            ) {
-              return current;
-            }
-            return { ...current, events: [...current.events, nextEvent] };
-          });
+          const updated = { ...current, events: [...current.events, nextEvent] };
+          selectedRunRef.current = updated;
+          setSelectedRun(updated);
+          typedAgentEventAwaitingDbChangeRef.current = true;
         }
         scheduleRefresh(["overview"]);
       }),
@@ -1496,7 +1536,7 @@ function App() {
     const viewKeys = resourcesForView(view).filter((key) =>
       dirtyResourcesRef.current.has(key),
     );
-    void requestInvalidatedResources(viewKeys);
+    void requestInvalidatedResources(viewKeys, { reportFailure: false }, false);
     if (view === "settings" && workflowReadinessDirtyRef.current) {
       workflowReadinessDirtyRef.current = false;
       refreshWorkflowStatus();
@@ -2176,21 +2216,14 @@ function App() {
 
   useEffect(() => {
     if (!runtimeAvailable || retroStatus.state !== "running") return;
-    let cancelled = false;
     const interval = window.setInterval(() => {
-      refreshDashboard().catch(() => {
-        if (!cancelled) {
-          // The command wrapper will surface explicit action errors; polling
-          // failures are transient and should not pin a banner over the app.
-        }
-      });
+      void refreshRetroInBackground();
     }, 1500);
     return () => {
-      cancelled = true;
       window.clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeAvailable, retroStatus.state]);
+  }, [refreshRetroInBackground, runtimeAvailable, retroStatus.state]);
 
   // `blocked` covers the hard requirements without which runs cannot work;
   // it gates the worker-start affordances, overview onboarding, and matches
