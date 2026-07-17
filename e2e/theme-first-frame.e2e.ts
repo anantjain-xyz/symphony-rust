@@ -18,7 +18,7 @@ test("saved dark theme paints dark before the React module loads", async ({ page
     await route.continue();
   });
 
-  const navigation = page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.goto("/", { waitUntil: "commit" });
   await moduleRequested;
 
   try {
@@ -45,7 +45,7 @@ test("saved dark theme paints dark before the React module loads", async ({ page
     expect(screenshot.byteLength).toBeGreaterThan(0);
   } finally {
     releaseModule();
-    await navigation;
+    await page.waitForLoadState("domcontentloaded");
   }
 });
 
