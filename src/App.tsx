@@ -872,6 +872,128 @@ function anyRepoConfigured(settings: AppSettings): boolean {
   return settings.repos.some((repo) => repo.url.trim() !== "");
 }
 
+type DashboardSnapshot = {
+  overview: Overview;
+  runs: RunWithIssueRow[];
+  issues: IssueRow[];
+  worker: WorkerStatus;
+  retroStatus: RetroStatus;
+  retros: RetroRow[];
+  hasInProgressRetroBatches: boolean;
+  requestedRunId: string | null;
+  selectedRun: RunDetail | null;
+  requestedRetroId: string | null;
+  selectedRetroId: string | null;
+  selectedRetro: RetroDetail | null;
+};
+
+type DashboardSnapshotSelection = {
+  selectedRunId?: string | null;
+  selectedRetroId?: string | null;
+};
+
+export async function loadDashboardSnapshot({
+  selectedRunId = null,
+  selectedRetroId = null,
+}: DashboardSnapshotSelection = {}): Promise<DashboardSnapshot> {
+  const [
+    overview,
+    runs,
+    issues,
+    worker,
+    selectedRun,
+    retroStatus,
+    retros,
+    requestedRetro,
+    hasInProgressRetroBatches,
+  ] = await Promise.all([
+    invoke<Overview>("get_overview"),
+    invoke<RunWithIssueRow[]>("list_runs"),
+    invoke<IssueRow[]>("list_issues"),
+    invoke<WorkerStatus>("get_worker_status"),
+    selectedRunId
+      ? invoke<RunDetail | null>("get_run_detail", { id: selectedRunId })
+      : Promise.resolve(null),
+    invoke<RetroStatus>("get_retro_status"),
+    invoke<RetroRow[]>("list_retros"),
+    selectedRetroId
+      ? invoke<RetroDetail | null>("get_retro_detail", { id: selectedRetroId })
+      : Promise.resolve(null),
+    invoke<boolean>("has_in_progress_retro_batches"),
+  ]);
+
+  const nextSelectedRetroId = selectedRetroId ?? retros[0]?.id ?? null;
+  const selectedRetro =
+    selectedRetroId || !nextSelectedRetroId
+      ? requestedRetro
+      : await invoke<RetroDetail | null>("get_retro_detail", {
+          id: nextSelectedRetroId,
+        });
+
+  return {
+    overview,
+    runs,
+    issues,
+    worker,
+    retroStatus,
+    retros,
+    hasInProgressRetroBatches,
+    requestedRunId: selectedRunId,
+    selectedRun,
+    requestedRetroId: selectedRetroId,
+    selectedRetroId: nextSelectedRetroId,
+    selectedRetro,
+  };
+}
+
+type BootstrapResult = {
+  settings: AppSettings;
+  dashboard: DashboardSnapshot;
+  autoStart: Promise<WorkerStatus> | null;
+};
+
+let bootstrapPromise: Promise<BootstrapResult> | null = null;
+
+function loadBootstrap(): Promise<BootstrapResult> {
+  if (bootstrapPromise) return bootstrapPromise;
+
+  const pending = (async () => {
+    const [settings, dashboard] = await Promise.all([
+      invoke<AppSettings>("load_settings"),
+      loadDashboardSnapshot(),
+    ]);
+    const autoStart =
+      !settings.linear_api_key_set ||
+      !anyRepoConfigured(settings) ||
+      dashboard.worker.state !== "stopped" ||
+      dashboard.worker.last_error
+        ? null
+        : invoke<WorkerStatus>("start_worker");
+    return { settings, dashboard, autoStart };
+  })();
+  bootstrapPromise = pending;
+  void pending.then(
+    ({ autoStart }) => {
+      if (!autoStart) {
+        if (bootstrapPromise === pending) bootstrapPromise = null;
+        return;
+      }
+      void autoStart.then(
+        () => {
+          if (bootstrapPromise === pending) bootstrapPromise = null;
+        },
+        () => {
+          if (bootstrapPromise === pending) bootstrapPromise = null;
+        },
+      );
+    },
+    () => {
+      if (bootstrapPromise === pending) bootstrapPromise = null;
+    },
+  );
+  return pending;
+}
+
 // Unique trimmed URLs of the configured repos — the key space for per-repo
 // skills statuses (two cards with the same URL share one status).
 function configuredRepoUrls(settings: AppSettings): string[] {
@@ -953,6 +1075,7 @@ function App() {
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bootstrapSettled, setBootstrapSettled] = useState(!runtimeAvailable);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
@@ -992,12 +1115,65 @@ function App() {
   const selectedRetroIdRef = useRef<string | null>(
     runtimeAvailable ? null : previewRetroReport.id,
   );
-  const autoStartDone = useRef(false);
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
   const linearViewerSeq = useRef(0);
+
+  const bootstrapDashboardRef = useRef<Promise<BootstrapResult> | null>(null);
+
+  function commitDashboardSnapshot(
+    snapshot: DashboardSnapshot,
+    requested: ReadonlySet<DashboardResourceKey>,
+    isAuthoritative: (key: DashboardResourceKey) => boolean,
+  ) {
+    if (requested.has("overview") && isAuthoritative("overview")) {
+      setOverview(snapshot.overview);
+    }
+    if (requested.has("runs") && isAuthoritative("runs")) setRuns(snapshot.runs);
+    if (requested.has("issues") && isAuthoritative("issues")) {
+      setIssues(snapshot.issues);
+    }
+    if (requested.has("worker") && isAuthoritative("worker")) {
+      setWorker(snapshot.worker);
+    }
+    if (requested.has("retroStatus") && isAuthoritative("retroStatus")) {
+      setRetroStatus(snapshot.retroStatus);
+    }
+    if (requested.has("retros") && isAuthoritative("retros")) {
+      setRetros(snapshot.retros);
+    }
+    if (requested.has("retroBatches") && isAuthoritative("retroBatches")) {
+      setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
+    }
+    if (
+      requested.has("runDetail") &&
+      isAuthoritative("runDetail") &&
+      snapshot.requestedRunId &&
+      snapshot.requestedRunId === selectedRunIdRef.current
+    ) {
+      setSelectedRun(snapshot.selectedRun);
+      if (!snapshot.selectedRun) selectedRunIdRef.current = null;
+    }
+    if (
+      requested.has("retroDetail") &&
+      isAuthoritative("retroDetail") &&
+      snapshot.requestedRetroId &&
+      snapshot.requestedRetroId === selectedRetroIdRef.current
+    ) {
+      setSelectedRetro(snapshot.selectedRetro);
+      if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
+    } else if (
+      requested.has("retroDetail") &&
+      isAuthoritative("retroDetail") &&
+      !snapshot.requestedRetroId &&
+      selectedRetroIdRef.current === null
+    ) {
+      selectedRetroIdRef.current = snapshot.selectedRetroId;
+      setSelectedRetro(snapshot.selectedRetro);
+    }
+  }
 
   const dashboardRefreshExecutor = useRef<
     (context: DashboardRefreshContext<DashboardResourceKey>) => Promise<void>
@@ -1018,6 +1194,12 @@ function App() {
   dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
     const requested = new Set(keys);
+    const bootstrap = bootstrapDashboardRef.current;
+    if (bootstrap) {
+      const { dashboard } = await bootstrap;
+      commitDashboardSnapshot(dashboard, requested, isAuthoritative);
+      return;
+    }
     const detailId = selectedRunIdRef.current;
     const retroDetailId = selectedRetroIdRef.current;
     const [
@@ -1139,38 +1321,67 @@ function App() {
   useEffect(() => {
     if (!runtimeAvailable) return;
     let cancelled = false;
+    let bootstrapPending = true;
+    let refreshQueuedDuringBootstrap = false;
 
-    const boot = async () => {
-      const loaded = await invoke<AppSettings>("load_settings");
-      if (cancelled) return;
-      setSettings(loaded);
-      setSavedSnapshot(formSnapshot(loaded));
-      await requestDashboardRefresh();
-      if (cancelled) return;
-      // The worker should be running whenever the app is open, so start it
-      // on launch once setup is complete; the topbar toggle stops it.
-      if (autoStartDone.current) return;
-      autoStartDone.current = true;
-      if (!loaded.linear_api_key_set || !anyRepoConfigured(loaded)) return;
-      const status = await invoke<WorkerStatus>("get_worker_status");
-      if (cancelled) return;
-      if (status.state !== "stopped" || status.last_error) return;
-      const startedWorker = await invoke<WorkerStatus>("start_worker");
-      if (!cancelled) setWorker(startedWorker);
-    };
-    boot().catch((err) => {
-      if (!cancelled) setError(formatError(err));
-    });
-
-    // Agent events arrive in bursts; coalesce them into a single refresh.
+    // Agent events arrive in bursts; coalesce them into a single refresh. An
+    // event during bootstrap must run afterward so the initial snapshot cannot
+    // overwrite newer dashboard data.
     let timer: number | null = null;
     const scheduleRefresh = () => {
+      if (bootstrapPending) {
+        refreshQueuedDuringBootstrap = true;
+        return;
+      }
       if (timer !== null) return;
       timer = window.setTimeout(() => {
         timer = null;
         void requestBackgroundDashboardRefresh();
       }, 300);
     };
+    const releaseBootstrapRefreshGate = (ready: boolean) => {
+      if (cancelled) return;
+      bootstrapPending = false;
+      if (ready) setBootstrapSettled(true);
+      if (refreshQueuedDuringBootstrap) {
+        refreshQueuedDuringBootstrap = false;
+        scheduleRefresh();
+      }
+    };
+
+    const bootstrap = loadBootstrap();
+    bootstrapDashboardRef.current = bootstrap;
+    Promise.all([bootstrap, requestDashboardRefresh()])
+      .then(([{ settings: loaded, autoStart }]) => {
+        if (cancelled) return;
+        if (bootstrapDashboardRef.current === bootstrap) {
+          bootstrapDashboardRef.current = null;
+        }
+        setSettings(loaded);
+        setSavedSnapshot(formSnapshot(loaded));
+        if (!autoStart) {
+          releaseBootstrapRefreshGate(true);
+          return;
+        }
+        void autoStart
+          .then((nextWorker) => {
+            if (!cancelled) setWorker(nextWorker);
+          })
+          .catch((err) => {
+            if (!cancelled) setError(formatError(err));
+          })
+          .finally(() => releaseBootstrapRefreshGate(true));
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          if (bootstrapDashboardRef.current === bootstrap) {
+            bootstrapDashboardRef.current = null;
+          }
+          setError(formatError(err));
+          releaseBootstrapRefreshGate(false);
+        }
+      });
+
     const unsubs = Promise.all([
       listen("db_changed", scheduleRefresh),
       listen("agent_event", scheduleRefresh),
@@ -1197,7 +1408,6 @@ function App() {
       void requestBackgroundDashboardRefresh(["worker"]);
     };
 
-    refreshWorker();
     const interval = window.setInterval(
       refreshWorker,
       worker.state === "stopping" ? 500 : 2000,
@@ -1612,11 +1822,13 @@ function App() {
   }
 
   async function startWorker() {
+    if (!bootstrapSettled) return;
     const status = await call(() => invoke<WorkerStatus>("start_worker"));
     setWorker(status);
   }
 
   async function stopWorker() {
+    if (!bootstrapSettled) return;
     const status = await call(() => invoke<WorkerStatus>("stop_worker"));
     setWorker(status);
   }
@@ -2088,7 +2300,12 @@ function App() {
           <button
             type="button"
             className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
-            disabled={busy || !runtimeAvailable || worker.state === "stopping"}
+            disabled={
+              !bootstrapSettled ||
+              busy ||
+              !runtimeAvailable ||
+              worker.state === "stopping"
+            }
             onClick={worker.state === "running" ? requestStop : startWorker}
             title={workerTitle}
             aria-label={workerTitle}
@@ -2135,7 +2352,12 @@ function App() {
         {view === "overview" ? (
           <OverviewView
             overview={overview}
-            canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            canStartWorker={
+              bootstrapSettled &&
+              runtimeAvailable &&
+              !busy &&
+              worker.state === "stopped"
+            }
             canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
             workerRunning={worker.state === "running"}
             setup={setup}
