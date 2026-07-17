@@ -42,3 +42,25 @@ test("saved dark theme paints dark before the React module loads", async ({ page
     await navigation;
   }
 });
+
+test("theme toggle updates both rendered color schemes", async ({ page }, testInfo) => {
+  await page.addInitScript(() => localStorage.setItem("symphony-theme", "light"));
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("light-browser-preview.png"),
+  });
+
+  await page.getByRole("button", { name: "Switch to dark theme" }).click();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.style.colorScheme))
+    .toBe("dark");
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("dark-after-toggle.png"),
+  });
+});
