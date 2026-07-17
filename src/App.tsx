@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { InputHTMLAttributes, RefObject } from "react";
 import type {
   AgentEventRow,
@@ -49,6 +49,20 @@ import {
 } from "./MarkdownText";
 import { AppUpdate } from "./AppUpdate";
 import type { UpdateSafety } from "./AppUpdate";
+import {
+  createDashboardRefreshCoordinator,
+  type DashboardRefreshContext,
+  type DashboardRefreshCoordinator,
+} from "./dashboardRefreshCoordinator";
+import {
+  resourcesForDbChange,
+  resourcesForView,
+  visibleResources,
+  type AgentEvent,
+  type DashboardResourceKey,
+  type DbChanged,
+  type RateLimitChanged,
+} from "./dashboardResources";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -65,6 +79,18 @@ const THEME_STORAGE_KEY = "symphony-theme";
 const GITHUB_URL = "https://github.com/anantjain-xyz/symphony-rust";
 const SETTINGS_FORM_ID = "settings-form";
 const IS_LOCAL_DEV = import.meta.env.DEV;
+const DASHBOARD_COMMAND_TRACE_ENABLED =
+  IS_LOCAL_DEV && import.meta.env.MODE !== "test";
+const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
+  "overview",
+  "runs",
+  "issues",
+  "worker",
+  "retroList",
+  "retroBatches",
+  "selectedRun",
+  "selectedRetro",
+];
 const literalInputProps = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -894,12 +920,7 @@ export async function loadDashboardSnapshot({
   ]);
 
   const nextSelectedRetroId = selectedRetroId ?? retros[0]?.id ?? null;
-  const selectedRetro =
-    selectedRetroId || !nextSelectedRetroId
-      ? requestedRetro
-      : await invoke<RetroDetail | null>("get_retro_detail", {
-          id: nextSelectedRetroId,
-        });
+  const selectedRetro = selectedRetroId ? requestedRetro : null;
 
   return {
     overview,
@@ -1099,6 +1120,7 @@ function App() {
   const [workflowStatuses, setWorkflowStatuses] = useState<
     Record<string, RepoWorkflowStatus>
   >(runtimeAvailable ? {} : previewWorkflowStatuses);
+  const [workflowReadinessEpoch, setWorkflowReadinessEpoch] = useState(0);
   const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
   const [workflowTransfer, setWorkflowTransfer] =
     useState<WorkflowTransferStatus | null>(null);
@@ -1127,6 +1149,12 @@ function App() {
   const selectedRetroIdRef = useRef<string | null>(
     runtimeAvailable ? null : previewRetroReport.id,
   );
+  const viewRef = useRef<View>(view);
+  viewRef.current = view;
+  const dirtyResourcesRef = useRef<Set<DashboardResourceKey>>(new Set());
+  const workflowReadinessDirtyRef = useRef(false);
+  const typedAgentEventAwaitingDbChangeRef = useRef(false);
+  const resourceCommandCounts = useRef<Record<string, number>>({});
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
   const workflowCheckSeq = useRef<Record<string, number>>({});
@@ -1160,16 +1188,170 @@ function App() {
     }
   }
 
-  // Dashboard data refreshes on worker events; settings load separately so
-  // in-progress edits are never overwritten by background activity.
-  async function refreshDashboard() {
-    if (!runtimeAvailable) return;
-    const snapshot = await loadDashboardSnapshot({
-      selectedRunId: selectedRunIdRef.current,
-      selectedRetroId: selectedRetroIdRef.current,
-    });
-    commitDashboardSnapshot(snapshot);
+  async function invokeDashboardResource<T>(
+    key: DashboardResourceKey,
+    command: string,
+    args?: Record<string, unknown>,
+  ): Promise<T> {
+    if (DASHBOARD_COMMAND_TRACE_ENABLED) {
+      const count = (resourceCommandCounts.current[key] ?? 0) + 1;
+      resourceCommandCounts.current[key] = count;
+      console.debug("[dashboard-resource] command", { key, command, count });
+    }
+    return invoke<T>(command, args);
   }
+
+  const dashboardRefreshExecutor = useRef<
+    (context: DashboardRefreshContext<DashboardResourceKey>) => Promise<void>
+  >(async () => undefined);
+  const dashboardRefreshCoordinator = useRef<
+    DashboardRefreshCoordinator<DashboardResourceKey> | undefined
+  >(undefined);
+  if (!dashboardRefreshCoordinator.current) {
+    dashboardRefreshCoordinator.current = createDashboardRefreshCoordinator({
+      execute: (context) => dashboardRefreshExecutor.current(context),
+      onFailure: (refreshError) => setError(formatError(refreshError)),
+      instrumentation: { enabled: DASHBOARD_COMMAND_TRACE_ENABLED },
+    });
+  }
+
+  dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
+    if (!runtimeAvailable) return;
+    await Promise.all(
+      keys.map(async (key) => {
+        const selectedRunId = selectedRunIdRef.current;
+        const selectedRetroId = selectedRetroIdRef.current;
+        if (
+          visibleResources(
+            [key],
+            viewRef.current,
+            selectedRunId,
+            selectedRetroId,
+          ).length === 0
+        ) {
+          return;
+        }
+        switch (key) {
+          case "overview": {
+            const next = await invokeDashboardResource<Overview>(key, "get_overview");
+            if (isAuthoritative(key)) setOverview(next);
+            break;
+          }
+          case "runs": {
+            const next = await invokeDashboardResource<RunWithIssueRow[]>(
+              key,
+              "list_runs",
+            );
+            if (isAuthoritative(key)) setRuns(next);
+            break;
+          }
+          case "issues": {
+            const next = await invokeDashboardResource<IssueRow[]>(key, "list_issues");
+            if (isAuthoritative(key)) setIssues(next);
+            break;
+          }
+          case "worker": {
+            const next = await invokeDashboardResource<WorkerStatus>(
+              key,
+              "get_worker_status",
+            );
+            if (isAuthoritative(key)) setWorker(next);
+            break;
+          }
+          case "retroList": {
+            const [nextStatus, nextRetros] = await Promise.all([
+              invokeDashboardResource<RetroStatus>(key, "get_retro_status"),
+              invokeDashboardResource<RetroRow[]>(key, "list_retros"),
+            ]);
+            if (isAuthoritative(key)) {
+              setRetroStatus(nextStatus);
+              setRetros(nextRetros);
+              if (selectedRetroIdRef.current === null) {
+                selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
+                if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
+                  dirtyResourcesRef.current.add("selectedRetro");
+                  void dashboardRefreshCoordinator.current!.request(["selectedRetro"], {
+                    reportFailure: false,
+                  });
+                }
+              }
+            }
+            break;
+          }
+          case "retroBatches": {
+            const next = await invokeDashboardResource<boolean>(
+              key,
+              "has_in_progress_retro_batches",
+            );
+            if (isAuthoritative(key)) setHasInProgressRetroBatches(next);
+            break;
+          }
+          case "selectedRun": {
+            if (!selectedRunId) break;
+            const next = await invokeDashboardResource<RunDetail | null>(
+              key,
+              "get_run_detail",
+              { id: selectedRunId },
+            );
+            if (
+              isAuthoritative(key) &&
+              selectedRunId === selectedRunIdRef.current
+            ) {
+              setSelectedRun(next);
+              if (!next) selectedRunIdRef.current = null;
+            }
+            break;
+          }
+          case "selectedRetro": {
+            if (!selectedRetroId) break;
+            const next = await invokeDashboardResource<RetroDetail | null>(
+              key,
+              "get_retro_detail",
+              { id: selectedRetroId },
+            );
+            if (
+              isAuthoritative(key) &&
+              selectedRetroId === selectedRetroIdRef.current
+            ) {
+              setSelectedRetro(next);
+              if (!next) selectedRetroIdRef.current = null;
+            }
+            break;
+          }
+        }
+        if (isAuthoritative(key)) dirtyResourcesRef.current.delete(key);
+      }),
+    );
+  };
+
+  const requestInvalidatedResources = useCallback(
+    (
+      keys: Iterable<DashboardResourceKey>,
+      options: { reportFailure?: boolean } = { reportFailure: false },
+    ) => {
+      const invalidated = [...new Set(keys)];
+      invalidated.forEach((key) => dirtyResourcesRef.current.add(key));
+      const fetchable = visibleResources(
+        invalidated,
+        viewRef.current,
+        selectedRunIdRef.current,
+        selectedRetroIdRef.current,
+      );
+      return dashboardRefreshCoordinator.current!.request(fetchable, options);
+    },
+    [],
+  );
+
+  const refreshDashboard = useCallback(
+    () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
+    [requestInvalidatedResources],
+  );
+
+  useEffect(() => {
+    const coordinator = dashboardRefreshCoordinator.current!;
+    coordinator.activate();
+    return () => coordinator.dispose();
+  }, []);
 
   useEffect(() => {
     setStoppingRunIds((prev) => {
@@ -1196,12 +1378,17 @@ function App() {
     let cancelled = false;
     let bootstrapPending = true;
     let refreshQueuedDuringBootstrap = false;
+    const pendingKeys = new Set<DashboardResourceKey>();
 
     // Agent events arrive in bursts; coalesce them into a single refresh. An
     // event during bootstrap must run afterward so the initial snapshot cannot
     // overwrite newer dashboard data.
     let timer: number | null = null;
-    const scheduleRefresh = () => {
+    const scheduleRefresh = (keys: Iterable<DashboardResourceKey>) => {
+      for (const key of keys) {
+        dirtyResourcesRef.current.add(key);
+        pendingKeys.add(key);
+      }
       if (bootstrapPending) {
         refreshQueuedDuringBootstrap = true;
         return;
@@ -1209,7 +1396,9 @@ function App() {
       if (timer !== null) return;
       timer = window.setTimeout(() => {
         timer = null;
-        refreshDashboard().catch(() => undefined);
+        const queued = [...pendingKeys];
+        pendingKeys.clear();
+        void requestInvalidatedResources(queued);
       }, 300);
     };
     const releaseBootstrapRefreshGate = (ready: boolean) => {
@@ -1218,7 +1407,7 @@ function App() {
       if (ready) setBootstrapSettled(true);
       if (ready && refreshQueuedDuringBootstrap) {
         refreshQueuedDuringBootstrap = false;
-        scheduleRefresh();
+        scheduleRefresh([]);
       }
     };
 
@@ -1254,9 +1443,43 @@ function App() {
       });
 
     const unsubs = Promise.all([
-      listen("db_changed", scheduleRefresh),
-      listen("agent_event", scheduleRefresh),
-      listen("rate_limit_changed", scheduleRefresh),
+      listen<DbChanged>("db_changed", ({ payload }) => {
+        if (payload.table === "workflows") {
+          workflowReadinessDirtyRef.current = true;
+          setWorkflowReadinessEpoch((epoch) => epoch + 1);
+        }
+        let keys = resourcesForDbChange(payload.table);
+        if (
+          payload.table === "agent_events" &&
+          typedAgentEventAwaitingDbChangeRef.current
+        ) {
+          typedAgentEventAwaitingDbChangeRef.current = false;
+          keys = keys.filter((key) => key !== "selectedRun");
+        }
+        scheduleRefresh(keys);
+      }),
+      listen<AgentEvent>("agent_event", ({ payload }) => {
+        const nextEvent = payload.event;
+        typedAgentEventAwaitingDbChangeRef.current = true;
+        if (
+          viewRef.current === "runs" &&
+          nextEvent.run_id === selectedRunIdRef.current
+        ) {
+          setSelectedRun((current) => {
+            if (
+              current?.run.id !== nextEvent.run_id ||
+              current.events.some((event) => event.id === nextEvent.id)
+            ) {
+              return current;
+            }
+            return { ...current, events: [...current.events, nextEvent] };
+          });
+        }
+        scheduleRefresh(["overview"]);
+      }),
+      listen<RateLimitChanged>("rate_limit_changed", () => {
+        scheduleRefresh(["overview"]);
+      }),
     ]).catch((err) => {
       setError(formatError(err));
       return [];
@@ -1266,7 +1489,28 @@ function App() {
       if (timer !== null) window.clearTimeout(timer);
       unsubs.then((items) => items.forEach((unlisten) => unlisten()));
     };
-  }, [bootstrapAttempt, runtimeAvailable]);
+  }, [bootstrapAttempt, requestInvalidatedResources, runtimeAvailable]);
+
+  useEffect(() => {
+    if (!runtimeAvailable || bootState.status !== "ready") return;
+    const viewKeys = resourcesForView(view).filter((key) =>
+      dirtyResourcesRef.current.has(key),
+    );
+    void requestInvalidatedResources(viewKeys);
+    if (view === "settings" && workflowReadinessDirtyRef.current) {
+      workflowReadinessDirtyRef.current = false;
+      refreshWorkflowStatus();
+    }
+    // refreshWorkflowStatus intentionally refreshes readiness only; it never
+    // replaces the editable Settings draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    bootState.status,
+    requestInvalidatedResources,
+    runtimeAvailable,
+    view,
+    workflowReadinessEpoch,
+  ]);
 
   function retryBootstrap() {
     if (bootState.status !== "error") return;
@@ -1727,12 +1971,11 @@ function App() {
       setView("runs");
       return;
     }
-    const detail = await call(() =>
-      invoke<RunDetail | null>("get_run_detail", { id }),
-    );
-    selectedRunIdRef.current = detail?.run.id ?? null;
-    setSelectedRun(detail);
+    selectedRunIdRef.current = id;
+    setSelectedRun(null);
+    viewRef.current = "runs";
     setView("runs");
+    await requestInvalidatedResources(["selectedRun"], { reportFailure: true });
   }
 
   async function stopRun(id: string) {
@@ -1832,12 +2075,11 @@ function App() {
       setView("retro");
       return;
     }
-    const detail = await call(() =>
-      invoke<RetroDetail | null>("get_retro_detail", { id }),
-    );
-    selectedRetroIdRef.current = detail?.row.id ?? null;
-    setSelectedRetro(detail);
+    selectedRetroIdRef.current = id;
+    setSelectedRetro(null);
+    viewRef.current = "retro";
     setView("retro");
+    await requestInvalidatedResources(["selectedRetro"], { reportFailure: true });
   }
 
   async function deleteRetro(id: string) {

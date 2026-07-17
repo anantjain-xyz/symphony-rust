@@ -6,9 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { retroRepoBatchState } from "./App";
 import type {
   AppSettings,
+  AgentEventRow,
   IssueRow,
   Overview,
   RetroBatchRow,
+  RetroRow,
+  RunDetail,
   RunWithIssueRow,
   SkillsStatus,
   RepoWorkflowStatus,
@@ -586,8 +589,12 @@ describe("App settings", () => {
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
-    )?.[1] as () => void;
-    onDatabaseChanged();
+    )?.[1] as (event: {
+      payload: { type: "db_changed"; table: string; op: string };
+    }) => void;
+    onDatabaseChanged({
+      payload: { type: "db_changed", table: "runs", op: "insert" },
+    });
     await new Promise((resolve) => window.setTimeout(resolve, 350));
 
     expect(overviewReads).toBe(1);
@@ -636,8 +643,12 @@ describe("App settings", () => {
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
-    )?.[1] as () => void;
-    onDatabaseChanged();
+    )?.[1] as (event: {
+      payload: { type: "db_changed"; table: string; op: string };
+    }) => void;
+    onDatabaseChanged({
+      payload: { type: "db_changed", table: "runs", op: "insert" },
+    });
     initialOverview.reject(new Error("dashboard failed"));
 
     const alert = await screen.findByRole("alert");
@@ -668,6 +679,238 @@ describe("App settings", () => {
     expect(await screen.findByText("Build widgets")).toBeTruthy();
     expect(commandCount("load_settings")).toBe(2);
     await waitFor(() => expect(commandCount("start_worker")).toBe(1));
+  });
+
+  it("refreshes exact signal resources and defers hidden summaries until activation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const retro: RetroRow = {
+      id: "retro-1",
+      since_at: "2026-01-01T00:00:00.000Z",
+      until_at: "2026-01-02T00:00:00.000Z",
+      status: "completed",
+      run_count: 1,
+      issue_count: 1,
+      report_json: null,
+      error_message: null,
+      created_at: "2026-01-02T00:00:00.000Z",
+      completed_at: "2026-01-02T00:00:00.000Z",
+    };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_retros") return [retro];
+      if (command === "get_retro_detail") {
+        return { row: retro, report: null, suggestions: [], batches: [] };
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return unlisten;
+    });
+
+    const rendered = render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
+        false,
+      ),
+    );
+    const beforeRate = new Map(
+      tauriMocks.invoke.mock.calls.map(([command]) => [command, commandCount(command)]),
+    );
+    for (let signal = 0; signal < 10; signal += 1) {
+      listeners.get("rate_limit_changed")!({
+        payload: { type: "rate_limit_changed", source: "codex" },
+      });
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    await waitFor(() =>
+      expect(commandCount("get_overview")).toBe(
+        (beforeRate.get("get_overview") ?? 0) + 1,
+      ),
+    );
+    for (const command of [
+      "list_runs",
+      "list_issues",
+      "get_worker_status",
+      "get_retro_status",
+      "list_retros",
+      "has_in_progress_retro_batches",
+      "get_run_detail",
+      "get_retro_detail",
+    ]) {
+      expect(commandCount(command), command).toBe(beforeRate.get(command) ?? 0);
+    }
+
+    const hiddenRuns = commandCount("list_runs");
+    const hiddenIssues = commandCount("list_issues");
+    const hiddenRetros = commandCount("list_retros");
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "insert" },
+    });
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "issues", op: "update" },
+    });
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "retros", op: "insert" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(commandCount("list_runs")).toBe(hiddenRuns);
+    expect(commandCount("list_issues")).toBe(hiddenIssues);
+    expect(commandCount("list_retros")).toBe(hiddenRetros);
+
+    fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+    await waitFor(() => expect(commandCount("list_runs")).toBe(hiddenRuns + 1));
+    fireEvent.click(screen.getByRole("button", { name: "Issues" }));
+    await waitFor(() => expect(commandCount("list_issues")).toBe(hiddenIssues + 1));
+    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    await waitFor(() => expect(commandCount("list_retros")).toBe(hiddenRetros + 1));
+    await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
+
+    rendered.unmount();
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(3));
+  });
+
+  it("appends and deduplicates typed events only for the active selected run", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const activeRun = runRow();
+    const otherRun = runRow({
+      id: "run-2",
+      issue_identifier: "SYM-2",
+      issue_title: "Other work",
+    });
+    const detail: RunDetail = { run: activeRun, events: [] };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") return [activeRun, otherRun];
+      if (command === "get_run_detail") return detail;
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
+    const detailReads = commandCount("get_run_detail");
+    const event: AgentEventRow = {
+      id: 99,
+      run_id: activeRun.id,
+      kind: "status",
+      payload: JSON.stringify({ message: "streamed once" }),
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    listeners.get("agent_event")!({ payload: { type: "agent_event", event } });
+    listeners.get("agent_event")!({ payload: { type: "agent_event", event } });
+    expect((await screen.findAllByText("streamed once")).length).toBe(1);
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(commandCount("get_run_detail")).toBe(detailReads);
+
+    listeners.get("agent_event")!({
+      payload: {
+        type: "agent_event",
+        event: { ...event, id: 100, run_id: otherRun.id, payload: "other run" },
+      },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(screen.queryByText("other run")).toBeNull();
+    expect(commandCount("get_run_detail")).toBe(detailReads);
+
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "update" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(commandCount("get_run_detail")).toBe(detailReads);
+  });
+
+  it("uses the conservative fallback without fetching hidden selected detail", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation(baseInvoke);
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+    render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
+        false,
+      ),
+    );
+    const baseline = {
+      overview: commandCount("get_overview"),
+      worker: commandCount("get_worker_status"),
+      runs: commandCount("list_runs"),
+      issues: commandCount("list_issues"),
+      retros: commandCount("list_retros"),
+      batches: commandCount("has_in_progress_retro_batches"),
+    };
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "future_table", op: "update" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    await waitFor(() => expect(commandCount("get_overview")).toBe(baseline.overview + 1));
+    expect(commandCount("get_worker_status")).toBe(baseline.worker + 1);
+    expect(commandCount("list_runs")).toBe(baseline.runs);
+    expect(commandCount("list_issues")).toBe(baseline.issues);
+    expect(commandCount("list_retros")).toBe(baseline.retros);
+    expect(commandCount("has_in_progress_retro_batches")).toBe(baseline.batches);
+    expect(commandCount("get_run_detail")).toBe(0);
+    expect(commandCount("get_retro_detail")).toBe(0);
+  });
+
+  it("cannot populate a changed selection from a late run detail response", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const firstRun = runRow();
+    const secondRun = runRow({
+      id: "run-2",
+      issue_id: "issue-sym-2",
+      issue_identifier: "SYM-2",
+      issue_title: "Second selection",
+      run_number: 2,
+    });
+    const firstDetail = deferred<RunDetail | null>();
+    const secondDetail = deferred<RunDetail | null>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") return [firstRun, secondRun];
+      if (command === "get_run_detail" && args?.id === firstRun.id) {
+        return firstDetail.promise;
+      }
+      if (command === "get_run_detail" && args?.id === secondRun.id) {
+        return secondDetail.promise;
+      }
+      return baseInvoke(command, args);
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-2 number 2" }),
+    );
+    firstDetail.resolve({ run: firstRun, events: [] });
+    await waitFor(() => expect(commandCount("get_run_detail")).toBe(2));
+    expect(screen.queryByText("SYM-1 · Run #1")).toBeNull();
+    secondDetail.resolve({ run: secondRun, events: [] });
+    expect(await screen.findByText("Second selection")).toBeTruthy();
+    expect(screen.getByText("SYM-2 · Run #2")).toBeTruthy();
   });
 
   it.each([
