@@ -180,9 +180,6 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       if (disposed || requestedKeys.length === 0) return Promise.resolve();
 
       const requestedGeneration = ++nextGeneration;
-      requestedKeys.forEach((key) =>
-        authoritativeGenerations.set(key, requestedGeneration),
-      );
       const settled = new Promise<void>((resolve) =>
         requestWaiters.push({
           generations: new Map(
@@ -200,6 +197,9 @@ export function createDashboardRefreshCoordinator<Key extends string>({
           queuedKeys: [...queuedKeys],
         });
       } else {
+        requestedKeys.forEach((key) =>
+          authoritativeGenerations.set(key, requestedGeneration),
+        );
         start(requestedKeys, requestedGeneration);
       }
       return settled;

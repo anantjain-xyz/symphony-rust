@@ -41,7 +41,7 @@ describe("dashboard refresh coordinator", () => {
     await drained;
   });
 
-  it("rejects a superseded result for a resource before the follow-up starts", async () => {
+  it("keeps the active result authoritative until the queued follow-up starts", async () => {
     const batches = [deferred(), deferred()];
     const committed: number[] = [];
     const execute = vi.fn(async (context) => {
@@ -55,10 +55,42 @@ describe("dashboard refresh coordinator", () => {
     void coordinator.request(["overview"]);
     batches[0].resolve();
     await flushPromises();
-    expect(committed).toEqual([]);
+    expect(committed).toHaveLength(1);
     batches[1].resolve();
     await drained;
+    expect(committed).toHaveLength(2);
+  });
+
+  it("does not starve commits when recurring signals outpace each batch", async () => {
+    const batches = [deferred(), deferred(), deferred()];
+    const committed: number[] = [];
+    const execute = vi.fn(async (context) => {
+      const batchIndex = execute.mock.calls.length - 1;
+      await batches[batchIndex].promise;
+      if (context.isAuthoritative("worker")) committed.push(context.generation);
+    });
+    const coordinator = createDashboardRefreshCoordinator<string>({ execute });
+
+    const initial = coordinator.request(["worker"]);
+    for (let index = 0; index < 10; index += 1) {
+      void coordinator.request(["worker"], { reportFailure: false });
+    }
+    batches[0].resolve();
+    await flushPromises();
     expect(committed).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    for (let index = 0; index < 10; index += 1) {
+      void coordinator.request(["worker"], { reportFailure: false });
+    }
+    batches[1].resolve();
+    await flushPromises();
+    expect(committed).toHaveLength(2);
+    expect(execute).toHaveBeenCalledTimes(3);
+
+    batches[2].resolve();
+    await initial;
+    expect(committed).toHaveLength(3);
   });
 
   it("continues with queued keys after a rejected request", async () => {
