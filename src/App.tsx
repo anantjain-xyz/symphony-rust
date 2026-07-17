@@ -1147,7 +1147,7 @@ function App() {
     if (!runtimeAvailable) return;
 
     let cancelled = false;
-    let bootstrapComplete = false;
+    let bootstrapPending = true;
     let refreshQueuedDuringBootstrap = false;
 
     // Agent events arrive in bursts; coalesce them into a single refresh. An
@@ -1155,7 +1155,7 @@ function App() {
     // overwrite newer dashboard data.
     let timer: number | null = null;
     const scheduleRefresh = () => {
-      if (!bootstrapComplete) {
+      if (bootstrapPending) {
         refreshQueuedDuringBootstrap = true;
         return;
       }
@@ -1165,10 +1165,10 @@ function App() {
         refreshDashboard().catch(() => undefined);
       }, 300);
     };
-    const settleBootstrap = () => {
+    const releaseBootstrapRefreshGate = (ready: boolean) => {
       if (cancelled) return;
-      bootstrapComplete = true;
-      setBootstrapSettled(true);
+      bootstrapPending = false;
+      if (ready) setBootstrapSettled(true);
       if (refreshQueuedDuringBootstrap) {
         refreshQueuedDuringBootstrap = false;
         scheduleRefresh();
@@ -1182,7 +1182,7 @@ function App() {
         setSavedSnapshot(formSnapshot(loaded));
         commitDashboardSnapshot(dashboard);
         if (!autoStart) {
-          settleBootstrap();
+          releaseBootstrapRefreshGate(true);
           return;
         }
         void autoStart
@@ -1192,10 +1192,13 @@ function App() {
           .catch((err) => {
             if (!cancelled) setError(formatError(err));
           })
-          .finally(settleBootstrap);
+          .finally(() => releaseBootstrapRefreshGate(true));
       })
       .catch((err) => {
-        if (!cancelled) setError(formatError(err));
+        if (!cancelled) {
+          setError(formatError(err));
+          releaseBootstrapRefreshGate(false);
+        }
       });
 
     const unsubs = Promise.all([
