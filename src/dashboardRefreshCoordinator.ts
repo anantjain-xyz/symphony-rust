@@ -63,7 +63,6 @@ export function createDashboardRefreshCoordinator<Key extends string>({
     generation: number,
     didFail: boolean,
     failure: unknown,
-    failedKeys: readonly Key[],
   ) => {
     keys.forEach((key) => {
       settledGenerations.set(
@@ -84,7 +83,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       const reportableKeys = new Set<Key>();
       completed.forEach((waiter) => {
         if (!waiter.reportFailure) return;
-        failedKeys.forEach((key) => {
+        keys.forEach((key) => {
           if (waiter.generations.has(key)) reportableKeys.add(key);
         });
       });
@@ -145,13 +144,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
         });
         active = false;
         activeGeneration = null;
-        settleWaiters(
-          keys,
-          generation,
-          didFail,
-          failure,
-          didFail ? keys.filter(isAuthoritative) : [],
-        );
+        settleWaiters(keys, generation, didFail, failure);
         if (disposed) {
           queuedKeys.clear();
           resolveAllWaiters();

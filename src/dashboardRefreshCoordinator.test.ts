@@ -135,6 +135,31 @@ describe("dashboard refresh coordinator", () => {
     expect(failure.mock.calls[0][1]).toEqual(["overview"]);
   });
 
+  it("reports a requested failure when background work supersedes the same key", async () => {
+    const batches = [deferred(), deferred()];
+    let batchIndex = 0;
+    const failure = vi.fn();
+    const execute = vi.fn(() => batches[batchIndex++].promise);
+    const coordinator = createDashboardRefreshCoordinator<string>({
+      execute,
+      onFailure: failure,
+    });
+
+    const requested = coordinator.request(["overview"]);
+    const background = coordinator.request(["overview"], {
+      reportFailure: false,
+    });
+
+    batches[0].reject(new Error("requested refresh failure"));
+    await requested;
+    expect(failure).toHaveBeenCalledOnce();
+    expect(failure.mock.calls[0][1]).toEqual(["overview"]);
+
+    batches[1].reject(new Error("transient poll failure"));
+    await background;
+    expect(failure).toHaveBeenCalledOnce();
+  });
+
   it("does not commit or start queued work after disposal", async () => {
     const active = deferred();
     const committed = vi.fn();

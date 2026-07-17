@@ -1686,6 +1686,8 @@ function App() {
       if (selectedRunIdRef.current === id) setSelectedRun(detail);
       await requestDashboardRefresh();
     } catch {
+      // call() or the refresh coordinator has already surfaced the failure.
+    } finally {
       setStoppingRunIds((prev) => {
         const next = new Set(prev);
         next.delete(id);

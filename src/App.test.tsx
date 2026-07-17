@@ -1733,4 +1733,55 @@ describe("App settings", () => {
       }),
     );
   });
+
+  it("clears stopping state when the post-stop dashboard refresh fails", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const activeRun = runRow();
+    const failedRefresh = deferred<Overview>();
+    const overview = {
+      active_runs: [activeRun],
+      retry_queue: [],
+      recent_failures: [],
+      live_sessions: [],
+      worker_heartbeat: null,
+      rate_limits: [],
+      token_usage: [],
+    } satisfies Overview;
+    const baseInvoke = dashboardInvoke({
+      settings,
+      overview,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
+    let overviewRequests = 0;
+    tauriMocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "get_overview") {
+        overviewRequests += 1;
+        if (overviewRequests === 2) return failedRefresh.promise;
+      }
+      if (command === "list_runs") return [activeRun];
+      if (command === "get_run_detail" && args?.id === activeRun.id) {
+        return { run: activeRun, events: [] };
+      }
+      if (command === "stop_run" && args?.id === activeRun.id) {
+        return { run: activeRun, events: [] };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+
+    expect(await screen.findByRole("button", { name: "Stopping..." })).toBeTruthy();
+    failedRefresh.reject(new Error("post-stop refresh failed"));
+
+    const stopButton = await screen.findByRole("button", { name: "Stop run" });
+    expect(stopButton.getAttribute("disabled")).toBeNull();
+    expect(await screen.findByText(/post-stop refresh failed/)).toBeTruthy();
+  });
 });
