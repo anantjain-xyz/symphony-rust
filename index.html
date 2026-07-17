@@ -6,6 +6,29 @@
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Symphony</title>
+    <script>
+      (() => {
+        const root = document.documentElement;
+        const apply = (theme) => {
+          root.classList.toggle("dark", theme === "dark");
+          root.dataset.theme = theme;
+          root.style.colorScheme = theme;
+        };
+
+        try {
+          const saved = localStorage.getItem("symphony-theme");
+          const theme =
+            saved === "light" || saved === "dark"
+              ? saved
+              : matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          apply(theme);
+        } catch {
+          apply("light");
+        }
+      })();
+    </script>
   </head>
 
   <body>

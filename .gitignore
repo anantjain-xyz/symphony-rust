@@ -16,6 +16,8 @@ target
 
 # Playwright MCP screenshot/snapshot artifacts
 .playwright-mcp
+playwright-report
+test-results
 
 # OhMyOpenCode agent working directory
 .omo
