@@ -144,6 +144,68 @@ describe("poll controller", () => {
     controller.dispose();
   });
 
+  it("does not issue a second immediate poll when an in-flight request settles hidden", async () => {
+    const first = deferred<string>();
+    const poll = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValue("same");
+    const controller = createPollController({
+      poll,
+      fingerprint: (value) => value,
+      baselineMs: 2_000,
+      unchangedBackoffMs: [4_000, 8_000, 10_000],
+      pauseWhenHidden: true,
+      onResult: vi.fn(),
+      onStatus: vi.fn(),
+    });
+    controller.start();
+    await advance(2_000);
+    setHidden(true);
+    first.resolve("same");
+    await advance(0);
+
+    setHidden(false);
+    await advance(0);
+    expect(poll).toHaveBeenCalledTimes(2);
+    await advance(0);
+    expect(poll).toHaveBeenCalledTimes(2);
+    await advance(1_999);
+    expect(poll).toHaveBeenCalledTimes(2);
+    await advance(1);
+    expect(poll).toHaveBeenCalledTimes(3);
+    controller.dispose();
+  });
+
+  it("keeps stale resource state through a schedule reset until recovery succeeds", async () => {
+    const statuses: PollResourceState[] = [];
+    const poll = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue("recovered");
+    const controller = createPollController({
+      poll,
+      fingerprint: (value) => value,
+      baselineMs: 2_000,
+      unchangedBackoffMs: [4_000, 8_000, 10_000],
+      pauseWhenHidden: true,
+      onResult: vi.fn(),
+      onStatus: (status) => statuses.push(status),
+    });
+    controller.start();
+    await advance(2_000);
+    expect(statuses[statuses.length - 1]).toMatchObject({ stale: true });
+
+    controller.reset();
+    expect(statuses[statuses.length - 1]).toMatchObject({ stale: true });
+    await advance(2_000);
+    expect(statuses[statuses.length - 1]).toMatchObject({
+      consecutiveFailures: 0,
+      stale: false,
+    });
+    controller.dispose();
+  });
+
   it("continues stopping polls while hidden and caps repeated failures at ten seconds", async () => {
     const failure = new Error("offline");
     const poll = vi.fn(async () => Promise.reject(failure));

@@ -174,6 +174,7 @@ export function createPollController<T>({
       immediateAfterSettlement = true;
       return;
     }
+    immediateAfterSettlement = false;
     schedule(0);
   };
 
@@ -197,8 +198,6 @@ export function createPollController<T>({
       if (disposed || !started) return;
       lastFingerprint = null;
       unchangedCount = 0;
-      consecutiveFailures = 0;
-      lastError = null;
       clearTimer();
       if (inFlight) {
         resetAfterSettlement = true;
