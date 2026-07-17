@@ -1046,6 +1046,7 @@ function App() {
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [bootstrapSettled, setBootstrapSettled] = useState(!runtimeAvailable);
   const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
@@ -1152,12 +1153,19 @@ function App() {
         setSettings(loaded);
         setSavedSnapshot(formSnapshot(loaded));
         commitDashboardSnapshot(dashboard);
-        autoStart
-          ?.then((nextWorker) => {
+        if (!autoStart) {
+          setBootstrapSettled(true);
+          return;
+        }
+        void autoStart
+          .then((nextWorker) => {
             if (!cancelled) setWorker(nextWorker);
           })
           .catch((err) => {
             if (!cancelled) setError(formatError(err));
+          })
+          .finally(() => {
+            if (!cancelled) setBootstrapSettled(true);
           });
       })
       .catch((err) => {
@@ -1617,11 +1625,13 @@ function App() {
   }
 
   async function startWorker() {
+    if (!bootstrapSettled) return;
     const status = await call(() => invoke<WorkerStatus>("start_worker"));
     setWorker(status);
   }
 
   async function stopWorker() {
+    if (!bootstrapSettled) return;
     const status = await call(() => invoke<WorkerStatus>("stop_worker"));
     setWorker(status);
   }
@@ -2098,7 +2108,12 @@ function App() {
           <button
             type="button"
             className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
-            disabled={busy || !runtimeAvailable || worker.state === "stopping"}
+            disabled={
+              !bootstrapSettled ||
+              busy ||
+              !runtimeAvailable ||
+              worker.state === "stopping"
+            }
             onClick={worker.state === "running" ? requestStop : startWorker}
             title={workerTitle}
             aria-label={workerTitle}
@@ -2145,7 +2160,12 @@ function App() {
         {view === "overview" ? (
           <OverviewView
             overview={overview}
-            canStartWorker={runtimeAvailable && !busy && worker.state === "stopped"}
+            canStartWorker={
+              bootstrapSettled &&
+              runtimeAvailable &&
+              !busy &&
+              worker.state === "stopped"
+            }
             canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
             workerRunning={worker.state === "running"}
             setup={setup}

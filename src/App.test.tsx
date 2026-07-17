@@ -460,6 +460,10 @@ describe("App settings", () => {
     expect(commandCount("get_overview")).toBe(1);
     expect(commandCount("get_worker_status")).toBe(1);
     expect(commandCount("start_worker")).toBe(0);
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    expect(workerButton.disabled).toBe(true);
+    fireEvent.click(workerButton);
+    expect(commandCount("start_worker")).toBe(0);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 
@@ -505,6 +509,34 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("start_worker")).toBe(1));
     expect(commandCount("load_settings")).toBe(1);
     expect(commandCount("get_overview")).toBe(1);
+    expect(commandCount("get_worker_status")).toBe(1);
+  });
+
+  it("keeps worker actions disabled until the bootstrap auto-start settles", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const autoStart = deferred<WorkerStatus>();
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: { state: "stopped", started_at: null, last_error: null },
+    });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "start_worker") return autoStart.promise;
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(commandCount("start_worker")).toBe(1));
+    const workerButton = document.querySelector<HTMLButtonElement>(".worker-toggle")!;
+    expect(workerButton.disabled).toBe(true);
+    fireEvent.click(workerButton);
+    expect(commandCount("start_worker")).toBe(1);
+
+    autoStart.resolve({ state: "running", started_at: null, last_error: null });
+    const stopButton = await screen.findByRole("button", { name: "Stop worker" });
+    expect((stopButton as HTMLButtonElement).disabled).toBe(false);
+    expect(commandCount("start_worker")).toBe(1);
     expect(commandCount("get_worker_status")).toBe(1);
   });
 
