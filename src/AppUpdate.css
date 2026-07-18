@@ -56,6 +56,10 @@
   width: 9px;
 }
 
+.update-button.available .update-button-icon {
+  transform: translateX(-0.5px);
+}
+
 .update-button-label {
   font-size: 12px;
   font-weight: 600;
