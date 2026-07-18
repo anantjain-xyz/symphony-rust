@@ -20,10 +20,6 @@ export type DashboardResourceEnvelope<T> = {
   error: DashboardResourceError | null;
 };
 
-export type WorkerConnectivity = "healthy" | "stale" | "disconnected" | "stopped";
-
-type WorkerState = "stopped" | "running" | "stopping";
-
 const SECRET_ASSIGNMENT =
   /((?:api[_-]?key|token|secret|password|authorization|cookie)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)/gi;
 const ENV_SECRET_ASSIGNMENT =
@@ -154,20 +150,4 @@ export function normalizeResourceError(
     summary: `${resourceLabel} could not be refreshed.`,
     technicalDetails: sanitizeTechnicalDetails(error),
   };
-}
-
-export function workerConnectivity(
-  state: WorkerState,
-  lastBeatAt: string | null,
-  nowMs: number,
-): WorkerConnectivity {
-  if (state === "stopped") return "stopped";
-  const beatMs = lastBeatAt === null ? Number.NaN : Date.parse(lastBeatAt);
-  if (!Number.isFinite(beatMs)) {
-    return state === "running" ? "disconnected" : "stale";
-  }
-  const ageMs = Math.max(0, nowMs - beatMs);
-  if (ageMs <= 6_000) return "healthy";
-  if (ageMs <= 30_000 || state === "stopping") return "stale";
-  return "disconnected";
 }

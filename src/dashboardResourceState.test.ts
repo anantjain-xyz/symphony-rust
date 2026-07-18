@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   beginResourceRefresh,
   completeResourceRefresh,
@@ -7,7 +7,6 @@ import {
   markResourceDirty,
   normalizeResourceError,
   staleDirtyResource,
-  workerConnectivity,
 } from "./dashboardResourceState";
 
 const START = "2026-07-18T12:00:00.000Z";
@@ -86,31 +85,5 @@ describe("dashboard resource envelopes", () => {
     expect(normalized.technicalDetails).not.toContain("top-secret");
     expect(normalized.technicalDetails).not.toContain("abc123");
     expect(normalized.technicalDetails).not.toContain("hidden");
-  });
-});
-
-describe("worker connectivity", () => {
-  const beat = "2026-07-18T12:00:00.000Z";
-
-  afterEach(() => vi.useRealTimers());
-
-  it("uses exact healthy, stale, and disconnected boundaries", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(beat);
-    vi.advanceTimersByTime(6_000);
-    expect(workerConnectivity("running", beat, Date.now())).toBe("healthy");
-    vi.advanceTimersByTime(1);
-    expect(workerConnectivity("running", beat, Date.now())).toBe("stale");
-    vi.advanceTimersByTime(23_999);
-    expect(workerConnectivity("running", beat, Date.now())).toBe("stale");
-    vi.advanceTimersByTime(1);
-    expect(workerConnectivity("running", beat, Date.now())).toBe("disconnected");
-  });
-
-  it("always reports an explicitly stopped worker as stopped", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(beat);
-    vi.advanceTimersByTime(90_000);
-    expect(workerConnectivity("stopped", null, Date.now())).toBe("stopped");
   });
 });
