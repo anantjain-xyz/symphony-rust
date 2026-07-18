@@ -154,6 +154,8 @@ describe("format helpers", () => {
     expect(formatTokens(9_281)).toBe("9.3k");
     expect(formatTokens(184_223)).toBe("184k");
     expect(formatTokens(1_350_000)).toBe("1.4M");
+    expect(formatTokens(1_434_300_000)).toBe("1.4B");
+    expect(formatTokens(2_750_000_000_000)).toBe("2.8T");
   });
 
   it("maps Linear priorities to labels", () => {
