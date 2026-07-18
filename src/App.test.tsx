@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { retroRepoBatchState } from "./App";
+import App, { reconcileSettingsDraft, retroRepoBatchState } from "./App";
 import type {
   AppSettings,
   IssueRow,
@@ -444,6 +444,91 @@ describe("App settings", () => {
         clear: vi.fn(() => localStorageItems.clear()),
       },
     });
+  });
+
+  it("keeps clean drafts synchronized with reloads and protects dirty drafts", () => {
+    const saved = testSettings();
+    const reloaded = { ...saved, prompt_template: "Reloaded" };
+    const dirty = { ...saved, prompt_template: "Unsaved" };
+    expect(reconcileSettingsDraft(reloaded, saved, false)).toBe(reloaded);
+    expect(reconcileSettingsDraft(reloaded, dirty, true)).toBe(dirty);
+  });
+
+  it("preserves an unsaved prompt across Settings navigation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Unsaved navigation draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
+      "Unsaved navigation draft",
+    );
+  });
+
+  it("does not rerender the app shell for every prompt keystroke", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
+    const onRender = vi.fn();
+    const { container } = render(<App onRender={onRender} />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    const before = onRender.mock.calls.length;
+    for (let index = 1; index <= 10; index += 1) {
+      fireEvent.change(prompt, { target: { value: "x".repeat(index) } });
+    }
+    expect(onRender.mock.calls.length - before).toBe(1);
+  });
+
+  it("saves the exact prompt draft revision that passed validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Exact validated draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings.prompt_template).toBe("Exact validated draft");
+  });
+
+  it("does not save when the draft is superseded during authoritative validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const validation = deferred<ValidationResult>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "validate_settings" ? validation.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea")!;
+    fireEvent.change(prompt, { target: { value: "Revision to validate" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        tauriMocks.invoke.mock.calls.some(([command]) => command === "validate_settings"),
+      ).toBe(true),
+    );
+    fireEvent.change(prompt, { target: { value: "Newer unsaved revision" } });
+    validation.resolve({
+      workflow_ok: true,
+      workflow_blocking: false,
+      workflow_error: null,
+    } as ValidationResult);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
+    ).toBe(false);
   });
 
   it("keeps browser preview deterministic without invoking Tauri commands", async () => {
@@ -2017,6 +2102,14 @@ describe("App settings", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() => expect(screen.getByText(validationError)).toBeTruthy());
+    await waitFor(() =>
+      expect(document.activeElement?.id).toBe("settings-validation-summary"),
+    );
+    const activeStates = screen.getByLabelText(/^Active states/, { selector: "input" });
+    expect(activeStates.getAttribute("aria-invalid")).toBe("true");
+    expect(activeStates.getAttribute("aria-describedby")).toBe(
+      "settings-validation-summary",
+    );
     expect(tauriMocks.invoke).toHaveBeenCalledWith("validate_settings", { settings });
     expect(
       tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
