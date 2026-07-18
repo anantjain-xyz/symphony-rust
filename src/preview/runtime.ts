@@ -12,6 +12,7 @@ import type {
   RunWithIssueRow,
   SkillsStatus,
 } from "../bindings";
+import { createEventStressFixture } from "./eventStressFixture";
 
 const BUNDLED_SKILL_NAMES = [
   "symphony-commit",
@@ -185,8 +186,24 @@ const previewSuccessRun: RunWithIssueRow = {
   issue_state: "Done",
 };
 
+const previewStressRun: RunWithIssueRow = {
+  ...previewSuccessRun,
+  id: "preview-run-stress",
+  issue_id: "preview-issue-stress",
+  run_number: 1,
+  workspace_path: "/tmp/symphony-workspaces/widgets/SYM-5000",
+  status: "success",
+  started_at: previewActiveStartedAt,
+  ended_at: previewActiveLastEventAt,
+  created_at: previewActiveStartedAt,
+  issue_identifier: "SYM-5000",
+  issue_title: "5,000-event performance stress fixture",
+  issue_state: "In Review",
+};
+
 const previewRuns: RunWithIssueRow[] = [
   previewActiveRun,
+  previewStressRun,
   previewFailedRun,
   previewSuccessRun,
 ];
@@ -273,6 +290,7 @@ const previewIssues: IssueRow[] = [
 ];
 
 const previewEventsByRunId: Record<string, AgentEventRow[]> = {
+  "preview-run-stress": createEventStressFixture(),
   "preview-run-active": [
     {
       id: 1,

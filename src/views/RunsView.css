@@ -115,12 +115,9 @@
 }
 
 .events article {
+  box-sizing: border-box;
   border-bottom: 1px solid var(--border);
   padding: 10px 15px;
-}
-
-.events article:last-of-type {
-  border-bottom: 0;
 }
 
 .event-line {
@@ -311,8 +308,9 @@ mark.search-hit.current {
   font-size: 12px;
   left: 50%;
   min-height: 28px;
-  position: sticky;
+  position: absolute;
   transform: translateX(-50%);
+  z-index: 2;
 }
 
 pre {
