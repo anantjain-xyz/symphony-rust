@@ -20,7 +20,9 @@ const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   rate_limit_state: ["overview"],
   token_usage: ["overview"],
   worker_heartbeat: ["worker"],
-  issues: ["issues", "overview"],
+  // Runs and run detail join issue title/state, so issue row updates must also
+  // invalidate those caches even when the Issues view remains hidden.
+  issues: ["issues", "overview", "runs", "selectedRun"],
   issue_dispatch_suppressions: ["issues", "overview"],
   retry_queue: ["issues", "overview"],
   runs: ["runs", "overview", "selectedRun"],
