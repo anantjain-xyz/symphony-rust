@@ -23,7 +23,9 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
   await capture(page, testInfo, "01-preview-loading");
 
   releasePreview();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true }),
+  ).toBeVisible();
   await capture(page, testInfo, "02-overview");
 
   let releaseRuns!: () => void;
@@ -42,7 +44,7 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
   await capture(page, testInfo, "03-runs-cold-loading");
 
   releaseRuns();
-  await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Runs", exact: true })).toBeVisible();
   await capture(page, testInfo, "04-runs");
 
   const issuesButton = page.getByRole("button", { name: "Issues" });
@@ -50,7 +52,7 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
   await issuesButton.focus();
   await issuesResponse;
   await issuesButton.click();
-  await expect(page.getByRole("heading", { name: "Issues" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Issues", exact: true })).toBeVisible();
   await capture(page, testInfo, "05-issues-preloaded-by-focus");
 
   const dependenciesButton = page.getByRole("tab", { name: "Dependencies" });
@@ -64,16 +66,20 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
   await capture(page, testInfo, "06-dependency-graph");
 
   await page.getByRole("button", { name: "Retro" }).click();
-  await expect(page.getByRole("heading", { name: "Retro" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Retro", exact: true })).toBeVisible();
   await capture(page, testInfo, "07-retro");
 
   await page.getByRole("button", { name: "Settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Settings", exact: true }),
+  ).toBeVisible();
   await capture(page, testInfo, "08-settings");
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Overview" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true }),
+  ).toBeVisible();
   await capture(page, testInfo, "09-overview-mobile");
 
   await page.setViewportSize({ width: 1280, height: 720 });
@@ -83,7 +89,9 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
 
 test("keeps the shell visible when a lazy chunk fails", async ({ page }, testInfo) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true }),
+  ).toBeVisible();
   await page.route(/\/assets\/RetroView-[^/]+\.js$/, (route) =>
     route.abort("failed"),
   );
