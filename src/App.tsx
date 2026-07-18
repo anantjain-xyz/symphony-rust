@@ -1417,12 +1417,31 @@ function App() {
             );
             if (
               isAuthoritative(key) &&
-              selectedRunId === selectedRunIdRef.current &&
-              localAppendVersionRef.current === appendVersion
+              selectedRunId === selectedRunIdRef.current
             ) {
-              dashboardResourceValues.current.set("selectedRun", next);
-              setSelectedRun(next);
-              if (!next) selectedRunIdRef.current = null;
+              const current = selectedRunRef.current;
+              let committed = next;
+              if (
+                localAppendVersionRef.current !== appendVersion &&
+                current?.run.id === selectedRunId
+              ) {
+                if (!next) {
+                  committed = current;
+                } else {
+                  const eventIds = new Set(next.events.map((event) => event.id));
+                  committed = {
+                    ...next,
+                    events: [
+                      ...next.events,
+                      ...current.events.filter((event) => !eventIds.has(event.id)),
+                    ],
+                  };
+                }
+              }
+              selectedRunRef.current = committed;
+              dashboardResourceValues.current.set("selectedRun", committed);
+              setSelectedRun(committed);
+              if (!committed) selectedRunIdRef.current = null;
             }
             break;
           }

@@ -955,7 +955,7 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(detailReads + 1));
   });
 
-  it("supersedes an in-flight get_run_detail when a typed agent event arrives", async () => {
+  it("merges fresh run metadata with an event appended during get_run_detail", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
     const activeRun = runRow();
@@ -1004,10 +1004,19 @@ describe("App settings", () => {
     });
     await new Promise((resolve) => window.setTimeout(resolve, 350));
 
-    staleResolve!(initialDetail);
+    staleResolve!({
+      run: runRow({
+        status: "success",
+        issue_title: "Updated while detail was loading",
+        ended_at: "2026-01-01T00:00:02.000Z",
+      }),
+      events: [],
+    });
     await new Promise((resolve) => window.setTimeout(resolve, 50));
 
     expect(screen.queryByText("streamed event")).not.toBeNull();
+    expect(screen.queryByText("Updated while detail was loading")).not.toBeNull();
+    expect(screen.queryByText("success")).not.toBeNull();
   });
 
   it("uses the conservative fallback without fetching hidden selected detail", async () => {
