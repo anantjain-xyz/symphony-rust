@@ -1370,22 +1370,6 @@ td strong {
     width: 100%;
   }
 
-  .dependency-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .dependency-stat:nth-child(2n) {
-    border-right: 0;
-  }
-
-  .dependency-stat:nth-child(n + 3) {
-    border-top: 1px solid var(--border);
-  }
-
-  .dependency-graph-shell {
-    margin-inline: -1px;
-  }
-
   .kpi {
     min-width: 0;
     padding: 10px 12px;

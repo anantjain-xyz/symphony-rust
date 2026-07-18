@@ -9,6 +9,10 @@
   <img alt="Symphony dashboard showing active agent runs, the retry queue, and provider rate limits" src="docs/overview-light.png">
 </picture>
 
+### Dependency graph
+
+![Symphony Issues view showing the dependency graph between watched Linear issues](docs/issues-dependency-graph.png)
+
 ## How it works
 
 1. **Poll** — a local worker polls Linear for issues in the states you mark as active (e.g. `Todo`, `In Progress`, `Rework`).

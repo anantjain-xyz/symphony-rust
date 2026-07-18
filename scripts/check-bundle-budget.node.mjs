@@ -25,7 +25,7 @@ test("lazy payload accounting includes transitive static chunks but excludes eag
 });
 
 test("Vite manifest isolates hidden views, preview, and updater modules", async () => {
-  const { manifest, eagerGraph } = await inspectBundle();
+  const { manifest, entryKey, eagerGraph } = await inspectBundle();
   for (const entry of LAZY_ENTRIES) {
     assert.equal(manifest[entry]?.isDynamicEntry, true, `${entry} must be lazy`);
     assert.equal(eagerGraph.has(entry), false, `${entry} must not be eager`);
@@ -36,8 +36,24 @@ test("Vite manifest isolates hidden views, preview, and updater modules", async 
   }
   assert.deepEqual(
     manifest["src/views/IssuesView.tsx"].dynamicImports,
-    ["src/views/DependencyGraphView.tsx"],
+    ["src/views/DependencyGraphPanel.tsx"],
   );
+
+  const graphCss = manifest["src/views/DependencyGraphPanel.tsx"].css ?? [];
+  assert.equal(graphCss.length, 1, "the graph owns a dedicated stylesheet");
+  assert.match(graphCss[0], /DependencyGraphPanel-.+\.css$/);
+
+  const eagerCss = new Set(
+    [...eagerGraph].flatMap((key) => manifest[key]?.css ?? []),
+  );
+  const issuesGraph = collectStaticGraph(manifest, "src/views/IssuesView.tsx");
+  const issuesCss = new Set(
+    [...issuesGraph].flatMap((key) => manifest[key]?.css ?? []),
+  );
+  for (const file of graphCss) {
+    assert.equal(eagerCss.has(file), false, `${file} must not load eagerly from ${entryKey}`);
+    assert.equal(issuesCss.has(file), false, `${file} must not load with Issues List`);
+  }
 });
 
 test("shared table primitives stay in the eager stylesheet", async () => {
