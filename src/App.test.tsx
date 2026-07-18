@@ -531,6 +531,80 @@ describe("App settings", () => {
     ).toBe(false);
   });
 
+  it("preserves a newer prompt edit while save_settings is in flight", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const save = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "save_settings" ? save.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea")!;
+    fireEvent.change(prompt, { target: { value: "Revision being saved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
+      ).toBe(true),
+    );
+
+    fireEvent.change(prompt, { target: { value: "Newer unsaved revision" } });
+    save.resolve({ ...settings, prompt_template: "Revision being saved" });
+    await act(async () => {
+      await save.promise;
+      await Promise.resolve();
+    });
+
+    expect((prompt as HTMLTextAreaElement).value).toBe("Newer unsaved revision");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
+      "Newer unsaved revision",
+    );
+  });
+
+  it("does not save when the Linear key changes during authoritative validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const validation = deferred<ValidationResult>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "validate_settings" ? validation.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Revision to validate" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        tauriMocks.invoke.mock.calls.some(([command]) => command === "validate_settings"),
+      ).toBe(true),
+    );
+    fireEvent.change(screen.getByLabelText(/^API key/, { selector: "input" }), {
+      target: { value: "lin_api_newer" },
+    });
+    validation.resolve({
+      workflow_ok: true,
+      workflow_blocking: false,
+      workflow_error: null,
+    } as ValidationResult);
+    await act(async () => {
+      await validation.promise;
+      await Promise.resolve();
+    });
+
+    expect(
+      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
+    ).toBe(false);
+  });
+
   it("keeps browser preview deterministic without invoking Tauri commands", async () => {
     render(<App />);
 
@@ -1900,6 +1974,40 @@ describe("App settings", () => {
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl,
         sessionEnv: { GITHUB_TOKEN: "from-session" },
+      }),
+    );
+  });
+
+  it("installs skills using the exact current settings draft", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "install_skills") {
+        return {
+          state: "running",
+          repo_url: settings.repos[0].url,
+          message: "Installing",
+          pr_url: null,
+          error: null,
+        };
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    await openSettings();
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=from-draft" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create install PR" }));
+
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("install_skills", {
+        settings: { ...settings, session_env: { GITHUB_TOKEN: "from-draft" } },
+        repoUrl: settings.repos[0].url,
       }),
     );
   });

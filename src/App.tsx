@@ -1769,10 +1769,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       }),
     );
     setSettings(saved);
-    settingsDraftRef.current = saved;
-    linearKeyDraftRef.current = "";
-    settingsDirtyRef.current = false;
-    setSettingsDirty(false);
     let refreshedWorker: WorkerStatus | null = null;
     try {
       refreshedWorker = await invoke<WorkerStatus>("get_worker_status");
@@ -1874,11 +1870,10 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     for (const url of configuredRepoUrls(target)) checkRepoSkills(url, target.session_env);
   }
 
-  async function startSkillsInstall(url: string) {
-    if (!settings) return;
+  async function startSkillsInstall(exactSettings: AppSettings, url: string) {
     const status = await call(() =>
       invoke<SkillsInstallStatus>("install_skills", {
-        settings,
+        settings: exactSettings,
         repoUrl: url.trim(),
       }),
     );
@@ -4738,7 +4733,7 @@ type SettingsFeatureProps = {
   onRemoveKey: () => Promise<boolean | undefined>;
   onResetPrompt: () => Promise<string>;
   onRefreshSkills: (repoUrl: string) => void;
-  onInstallSkills: (repoUrl: string) => void;
+  onInstallSkills: (settings: AppSettings, repoUrl: string) => void;
   onRefreshWorkflow: (repoUrl: string) => void;
   onTransferWorkflow: (repoUrl: string) => void;
 };
@@ -4844,6 +4839,7 @@ function SettingsFeature({
     (next: string) => {
       setLinearKeyState(next);
       linearKeyRef.current = next;
+      revisionRef.current += 1;
       const current = draftRef.current ?? draft;
       onDraftChange(current, next, current);
       updateDirty(current, next);
@@ -4873,6 +4869,7 @@ function SettingsFeature({
 
   const handleSave = useCallback(async () => {
     const exactSettings = draftRef.current ?? draft;
+    const exactLinearKey = linearKeyRef.current;
     const exactRevision = { id: revisionRef.current, settings: exactSettings };
     const result = await controller.validateNow(exactRevision);
     if (!result || revisionRef.current !== exactRevision.id) return;
@@ -4880,14 +4877,15 @@ function SettingsFeature({
       setFocusInvalidSummary(true);
       return;
     }
-    const saved = await onSave(exactSettings, linearKeyRef.current, result);
+    const saved = await onSave(exactSettings, exactLinearKey, result);
     if (!saved || revisionRef.current !== exactRevision.id) return;
     draftRef.current = saved;
     setDraft(saved);
     linearKeyRef.current = "";
     setLinearKeyState("");
     dirtyRef.current = false;
-  }, [controller, draft, draftRef, linearKeyRef, onSave]);
+    onDirtyChange(false);
+  }, [controller, draft, draftRef, linearKeyRef, onDirtyChange, onSave]);
 
   const handleRemoveKey = useCallback(async () => {
     const linearApiKeySet = await onRemoveKey();
@@ -4930,6 +4928,9 @@ function SettingsFeature({
       onTestConnection={() => onTestConnection(draftRef.current ?? draft, linearKeyRef.current)}
       onRemoveKey={handleRemoveKey}
       onResetPrompt={handleResetPrompt}
+      onInstallSkills={(repoUrl) =>
+        viewProps.onInstallSkills(draftRef.current ?? draft, repoUrl)
+      }
     />
   );
 }
