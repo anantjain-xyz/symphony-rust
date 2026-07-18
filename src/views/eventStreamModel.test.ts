@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentEventRow } from "../bindings";
 import { createEventStressFixture } from "../preview/eventStressFixture";
 import {
+  prepareEvent,
   prepareEvents,
   searchPreparedEvents,
   type PreparedEvent,
@@ -12,6 +13,17 @@ function event(id: number, kind: string, payload: string): AgentEventRow {
 }
 
 describe("prepared event model", () => {
+  it("parses a malformed payload once before reusing its failure result", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    const prepared = prepareEvent(event(1, "status", "malformed {"));
+
+    expect(prepared.parsedJson).toBeUndefined();
+    expect(prepared.summary).toBe("malformed {");
+    expect(prepared.prettyPayload).toBe("malformed {");
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockRestore();
+  });
+
   it("parses each stable revision once, reuses cloned rows, deduplicates IDs, and prunes stale cache entries", () => {
     const parsedPayload = vi.fn();
     const parsedMarkdown = vi.fn();
@@ -66,6 +78,15 @@ describe("prepared event model", () => {
     ]);
     expect(searchPreparedEvents(prepared, "missing").matches).toEqual([]);
     expect(searchPreparedEvents(prepared, "NeedleError").matches).toHaveLength(2);
+  });
+
+  it("uses the same locale-independent case folding as rendered highlights", () => {
+    const prepared = prepareEvents(
+      [event(1, "status", '{"message":"Istanbul"}')],
+      new Map<string, PreparedEvent>(),
+    );
+
+    expect(searchPreparedEvents(prepared, "I").matches).toHaveLength(2);
   });
 
   it("provides a production-like 5,000-event fixture", () => {

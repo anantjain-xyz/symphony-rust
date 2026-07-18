@@ -93,6 +93,15 @@ function EventRowComponent({
 
 export const EventRow = memo(EventRowComponent);
 
+export function measureEventElement(
+  element: HTMLElement | null,
+  eventCount: number,
+  measureElement: (element: HTMLElement | null) => void,
+) {
+  if (element) element.setAttribute("aria-setsize", String(eventCount));
+  measureElement(element);
+}
+
 function centerExactMatch(container: HTMLElement | null, matchIndex: number) {
   const mark = container?.querySelector(`mark[data-match-index="${matchIndex}"]`);
   if (mark instanceof HTMLElement) mark.scrollIntoView({ block: "center", inline: "nearest" });
@@ -154,12 +163,8 @@ export function EventStream({
     useFlushSync: false,
   });
   const measureElement = useCallback<RefCallback<HTMLElement>>(
-    (element) => {
-      if (element) {
-        element.setAttribute("aria-setsize", String(eventCountRef.current));
-        virtualizer.measureElement(element);
-      }
-    },
+    (element) =>
+      measureEventElement(element, eventCountRef.current, virtualizer.measureElement),
     [virtualizer],
   );
   const onExpandedChange = useCallback((key: string, expanded: boolean) => {

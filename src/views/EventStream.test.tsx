@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEventRow } from "../bindings";
 import { createEventStressFixture } from "../preview/eventStressFixture";
-import { EventRow, EventStream } from "./EventStream";
+import { EventRow, EventStream, measureEventElement } from "./EventStream";
 import { prepareEvent } from "./eventStreamModel";
 
 beforeEach(() => {
@@ -34,6 +34,18 @@ function event(id: number, message = `event ${id}`): AgentEventRow {
 }
 
 describe("EventStream virtualization", () => {
+  it("forwards detached row refs so the virtualizer can release measurements", () => {
+    const measureElement = vi.fn();
+    const article = document.createElement("article");
+
+    measureEventElement(article, 5_000, measureElement);
+    measureEventElement(null, 5_000, measureElement);
+
+    expect(article.getAttribute("aria-setsize")).toBe("5000");
+    expect(measureElement).toHaveBeenNthCalledWith(1, article);
+    expect(measureElement).toHaveBeenNthCalledWith(2, null);
+  });
+
   it("bounds mounted article count for 5,000 events and exposes list position metadata", () => {
     const { container } = render(<EventStream events={createEventStressFixture()} live />);
     const articles = container.querySelectorAll("article");

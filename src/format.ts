@@ -140,11 +140,16 @@ export type EventSummary = {
 
 export type ParsedEventPayload = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
-export function parseEventPayload(payload: string): ParsedEventPayload | undefined {
+export const EVENT_PAYLOAD_PARSE_FAILED = Symbol("event-payload-parse-failed");
+export type EventPayloadParseResult =
+  | ParsedEventPayload
+  | typeof EVENT_PAYLOAD_PARSE_FAILED;
+
+export function parseEventPayload(payload: string): EventPayloadParseResult {
   try {
     return JSON.parse(payload) as ParsedEventPayload;
   } catch {
-    return undefined;
+    return EVENT_PAYLOAD_PARSE_FAILED;
   }
 }
 
@@ -162,7 +167,7 @@ function toolCallDetail(resultSummary: string | null, command: string | null) {
 export function describeEvent(
   kind: string,
   payload: string,
-  parsed: ParsedEventPayload | undefined = parseEventPayload(payload),
+  parsed: EventPayloadParseResult = parseEventPayload(payload),
 ): EventSummary {
   const data =
     parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -215,9 +220,9 @@ export function describeEvent(
 
 export function prettyPayload(
   value: string,
-  parsed: ParsedEventPayload | undefined = parseEventPayload(value),
+  parsed: EventPayloadParseResult = parseEventPayload(value),
 ) {
-  return parsed === undefined ? value : JSON.stringify(parsed, null, 2);
+  return parsed === EVENT_PAYLOAD_PARSE_FAILED ? value : JSON.stringify(parsed, null, 2);
 }
 
 export function nullable(value: string) {

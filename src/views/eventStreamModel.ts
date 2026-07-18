@@ -5,6 +5,7 @@ import {
 } from "../MarkdownText";
 import {
   describeEvent,
+  EVENT_PAYLOAD_PARSE_FAILED,
   parseEventPayload,
   prettyPayload,
   type ParsedEventPayload,
@@ -67,14 +68,14 @@ export function prepareEvent(
   instrumentation?.parsedMarkdown?.();
   const summaryBlocks = parseMarkdownBlocks(summary);
   const normalizedSections = {
-    label: label.toLocaleLowerCase(),
-    summary: markdownSegments(summaryBlocks).map((text) => text.toLocaleLowerCase()),
-    payload: pretty.toLocaleLowerCase(),
+    label: label.toLowerCase(),
+    summary: markdownSegments(summaryBlocks).map((text) => text.toLowerCase()),
+    payload: pretty.toLowerCase(),
   };
   return {
     event,
     key: eventRevisionKey(event),
-    parsedJson,
+    parsedJson: parsedJson === EVENT_PAYLOAD_PARSE_FAILED ? undefined : parsedJson,
     label,
     tone,
     summary,
@@ -126,7 +127,7 @@ function countNormalizedMatches(text: string, needle: string) {
 }
 
 export function searchPreparedEvents(events: PreparedEvent[], query: string) {
-  const needle = query.toLocaleLowerCase();
+  const needle = query.toLowerCase();
   const matches: EventMatch[] = [];
   const starts = new Map<string, EventMatchStarts>();
   if (!needle) return { needle, matches, starts };
