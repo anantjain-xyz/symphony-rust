@@ -387,6 +387,19 @@ function commandCount(command: string) {
     .length;
 }
 
+async function flushPromises() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function setDocumentHidden(hidden: boolean) {
+  Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
 async function openSettings() {
   const button = screen.getByRole("button", { name: "Settings" });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
@@ -406,6 +419,7 @@ describe("App settings", () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.openUrl.mockReset();
     tauriMocks.revealItemInDir.mockReset();
+    setDocumentHidden(false);
 
     Object.defineProperty(window, "matchMedia", {
       writable: true,
@@ -1202,6 +1216,168 @@ describe("App settings", () => {
     fireEvent.click(generateButton!);
 
     await waitFor(() => expect(tauriMocks.invoke).toHaveBeenCalledWith("start_retro"));
+  });
+
+  it("integrates worker polling with visibility pause and one immediate resume", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = { ...testSettings(), linear_api_key_set: false };
+      tauriMocks.invoke.mockImplementation(
+        dashboardInvoke({
+          settings,
+          workerStatus: {
+            state: "running",
+            started_at: "2026-01-01T00:00:00.000Z",
+            last_error: null,
+          },
+        }),
+      );
+
+      const rendered = render(<App />);
+      await flushPromises();
+      expect(commandCount("get_worker_status")).toBe(1);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(commandCount("get_worker_status")).toBe(2);
+
+      act(() => setDocumentHidden(true));
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(commandCount("get_worker_status")).toBe(2);
+      act(() => setDocumentHidden(false));
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(commandCount("get_worker_status")).toBe(3);
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("integrates Retro polling without full-dashboard or hidden-detail commands", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({ settings });
+      let retroReads = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_retro_status") {
+          retroReads += 1;
+          return {
+            state: retroReads === 1 ? "running" : "completed",
+            retro_id: "retro-1",
+            message: null,
+            report: null,
+            error: null,
+          };
+        }
+        return baseInvoke(command, args);
+      });
+
+      const rendered = render(<App />);
+      await flushPromises();
+      expect(retroReads).toBe(1);
+      await act(() => vi.advanceTimersByTimeAsync(1_500));
+      expect(retroReads).toBe(2);
+      expect(commandCount("get_overview")).toBe(1);
+      expect(commandCount("list_runs")).toBe(1);
+      expect(commandCount("list_issues")).toBe(1);
+      expect(commandCount("get_retro_detail")).toBe(0);
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(retroReads).toBe(2);
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("integrates skills-install polling and stops on completion", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({ settings });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "install_skills") {
+          return {
+            state: "running",
+            repo_url: settings.repos[0].url,
+            message: "Installing",
+            pr_url: null,
+            error: null,
+          };
+        }
+        if (command === "get_skills_install_status") {
+          return {
+            state: "completed",
+            repo_url: settings.repos[0].url,
+            message: "Done",
+            pr_url: "https://github.com/acme/widgets/pull/1",
+            error: null,
+          };
+        }
+        return baseInvoke(command, args);
+      });
+
+      const rendered = render(<App />);
+      await flushPromises();
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+      await act(() => vi.advanceTimersByTimeAsync(600));
+      fireEvent.click(screen.getByRole("button", { name: "Create install PR" }));
+      await flushPromises();
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(commandCount("get_skills_install_status")).toBe(1);
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(commandCount("get_skills_install_status")).toBe(1);
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("integrates workflow-transfer polling and stops on completion", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({ settings });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "transfer_workflow_to_repo") {
+          return {
+            state: "running",
+            repo_url: settings.repos[0].url,
+            message: "Transferring",
+            pr_url: null,
+            error: null,
+          };
+        }
+        if (command === "get_workflow_transfer_status") {
+          return {
+            state: "completed",
+            repo_url: settings.repos[0].url,
+            message: "Done",
+            pr_url: "https://github.com/acme/widgets/pull/2",
+            error: null,
+          };
+        }
+        return baseInvoke(command, args);
+      });
+
+      const rendered = render(<App />);
+      await flushPromises();
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+      await act(() => vi.advanceTimersByTimeAsync(600));
+      fireEvent.click(screen.getByRole("button", { name: "Transfer workflow to repo" }));
+      await flushPromises();
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(commandCount("get_workflow_transfer_status")).toBe(1);
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(commandCount("get_workflow_transfer_status")).toBe(1);
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds dashboard commands when Tauri refresh events burst during a request", async () => {
