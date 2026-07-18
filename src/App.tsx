@@ -2,7 +2,14 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { InputHTMLAttributes, RefObject, SetStateAction } from "react";
 import type {
   AgentEventRow,
@@ -82,6 +89,10 @@ import {
   type PollController,
   type PollResourceState,
 } from "./pollController";
+import {
+  SettingsValidationController,
+  type SettingsValidationState,
+} from "./settingsValidationController";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -1227,14 +1238,24 @@ function updateSettingsFingerprint(settings: AppSettings, linearKey: string) {
   });
 }
 
-function App() {
+function App({ onRender }: { onRender?: () => void } = {}) {
+  onRender?.();
   const runtimeAvailable = isTauri();
   const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
   const [settings, setSettings] = useState<AppSettings | null>(
     runtimeAvailable ? null : previewSettings,
   );
-  const [linearKey, setLinearKey] = useState("");
+  const settingsDraftRef = useRef<AppSettings | null>(
+    runtimeAvailable ? null : previewSettings,
+  );
+  const settingsRevisionRef = useRef(0);
+  const linearKeyDraftRef = useRef("");
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const settingsDirtyRef = useRef(false);
+  const [settingsSavePending, setSettingsSavePending] = useState(false);
+  const settingsSavePendingRef = useRef(false);
+  const settingsSaveControllerRef = useRef<SettingsValidationController | null>(null);
   const [linearViewer, setLinearViewer] = useState<LinearViewerProfile | null>(null);
   const [linearViewerLoading, setLinearViewerLoading] = useState(false);
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
@@ -1270,7 +1291,6 @@ function App() {
   );
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [bootstrapSettled, setBootstrapSettled] = useState(!runtimeAvailable);
-  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
@@ -1324,8 +1344,11 @@ function App() {
   const resourceCommandCounts = useRef<Record<string, number>>({});
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
+  const skillsInstallSettingsRef = useRef<AppSettings | null>(null);
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
+  const repoStatusRefreshTimer = useRef<number | null>(null);
+  const queueRepoStatusRefreshRef = useRef<(target: AppSettings) => void>(() => undefined);
   const linearViewerSeq = useRef(0);
   const pollControllers = useRef<Partial<Record<PollKey, PollController>>>({});
   const refreshAffordanceTimers = useRef(
@@ -1881,7 +1904,7 @@ function App() {
       .then(({ settings: loaded, dashboard, autoStart }) => {
         if (cancelled) return;
         setSettings(loaded);
-        setSavedSnapshot(formSnapshot(loaded));
+        if (!settingsDirtyRef.current) settingsDraftRef.current = loaded;
         commitDashboardSnapshot(dashboard);
         setBootState({
           status: "ready",
@@ -2046,8 +2069,8 @@ function App() {
     [settings, runs],
   );
 
-  useEffect(() => {
-    if (!runtimeAvailable || !settings?.tracker_assigned_to_me) {
+  const refreshLinearViewer = useCallback((exactSettings: AppSettings, exactKey: string) => {
+    if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
       linearViewerSeq.current += 1;
       setLinearViewer(null);
       setLinearViewerLoading(false);
@@ -2055,8 +2078,8 @@ function App() {
       return;
     }
 
-    const typedKey = linearKey.trim();
-    if (!settings.linear_api_key_set && typedKey === "") {
+    const typedKey = exactKey.trim();
+    if (!exactSettings.linear_api_key_set && typedKey === "") {
       linearViewerSeq.current += 1;
       setLinearViewer(null);
       setLinearViewerLoading(false);
@@ -2070,7 +2093,7 @@ function App() {
     setLinearViewerError(null);
     invoke<LinearViewerProfile>("get_linear_viewer", {
       request: {
-        settings,
+        settings: exactSettings,
         linear_api_key: typedKey ? typedKey : null,
       },
     })
@@ -2087,12 +2110,30 @@ function App() {
         if (linearViewerSeq.current !== seq) return;
         setLinearViewerLoading(false);
       });
-  }, [
-    runtimeAvailable,
-    settings?.tracker_assigned_to_me,
-    settings?.linear_api_key_set,
-    linearKey,
-  ]);
+  }, [runtimeAvailable]);
+
+  useEffect(() => {
+    if (settings) refreshLinearViewer(settings, linearKeyDraftRef.current);
+  }, [refreshLinearViewer, settings]);
+
+  const handleSettingsDraftChange = useCallback(
+    (next: AppSettings, nextKey: string, previous: AppSettings) => {
+      if (
+        next === previous ||
+        next.tracker_assigned_to_me !== previous.tracker_assigned_to_me ||
+        next.linear_api_key_set !== previous.linear_api_key_set
+      ) {
+        refreshLinearViewer(next, nextKey);
+      }
+      if (
+        stableSessionEnvKey(next.session_env) !== stableSessionEnvKey(previous.session_env) ||
+        configuredRepoUrls(next).join("\n") !== configuredRepoUrls(previous).join("\n")
+      ) {
+        queueRepoStatusRefreshRef.current(next);
+      }
+    },
+    [refreshLinearViewer],
+  );
 
   async function call<T>(fn: () => Promise<T>) {
     if (!runtimeAvailable) {
@@ -2111,25 +2152,22 @@ function App() {
     }
   }
 
-  async function saveSettings() {
-    if (!settings) return;
-    // Validate first, but only abort on a genuine configuration mistake. An
-    // unfinished setup (e.g. saving a Linear key before any repo exists) is
-    // tracked by the setup checklist and must stay saveable, so a non-blocking
-    // validation error still proceeds to save.
-    const result = await validate();
-    if (!result || result.workflow_blocking) return;
+  async function saveSettings(
+    exactSettings: AppSettings,
+    exactLinearKey: string,
+    result: ValidationResult,
+  ) {
+    setValidation(result);
+    if (result.workflow_blocking) return;
     const saved = await call(() =>
       invoke<AppSettings>("save_settings", {
         request: {
-          settings,
-          linear_api_key: linearKey.trim() ? linearKey : null,
+          settings: exactSettings,
+          linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
         },
       }),
     );
     setSettings(saved);
-    setSavedSnapshot(formSnapshot(saved));
-    setLinearKey("");
     let refreshedWorker: WorkerStatus | null = null;
     try {
       refreshedWorker = await invoke<WorkerStatus>("get_worker_status");
@@ -2143,8 +2181,12 @@ function App() {
       liveWorkerState === "running" &&
         (!result.workflow_ok || refreshedWorker?.last_error !== null),
     );
-    refreshSkillsStatus(saved);
-    refreshWorkflowStatus(saved);
+    const currentDraft = settingsDraftRef.current;
+    const refreshTarget =
+      currentDraft && formSnapshot(currentDraft) !== formSnapshot(exactSettings)
+        ? currentDraft
+        : saved;
+    queueRepoStatusRefreshRef.current(refreshTarget);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
@@ -2153,24 +2195,15 @@ function App() {
       setSavedFlash(false);
       setSavedLiveConfigKept(false);
     }, 2500);
+    return saved;
   }
 
-  async function validate() {
-    if (!settings) return;
-    const result = await call(() =>
-      invoke<ValidationResult>("validate_settings", { settings }),
-    );
-    setValidation(result);
-    return result;
-  }
-
-  async function testConnection() {
-    if (!settings) return;
+  async function testConnection(exactSettings: AppSettings, exactLinearKey: string) {
     const result = await call(() =>
       invoke<TrackerTestResult>("test_tracker_connection", {
         request: {
-          settings,
-          linear_api_key: linearKey.trim() ? linearKey : null,
+          settings: exactSettings,
+          linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
         },
       }),
     );
@@ -2240,11 +2273,11 @@ function App() {
     for (const url of configuredRepoUrls(target)) checkRepoSkills(url, target.session_env);
   }
 
-  async function startSkillsInstall(url: string) {
-    if (!settings) return;
+  async function startSkillsInstall(exactSettings: AppSettings, url: string) {
+    skillsInstallSettingsRef.current = exactSettings;
     const status = await call(() =>
       invoke<SkillsInstallStatus>("install_skills", {
-        settings,
+        settings: exactSettings,
         repoUrl: url.trim(),
       }),
     );
@@ -2312,59 +2345,54 @@ function App() {
     setWorkflowTransfer(status);
   }
 
-  // Check every configured URL once edits settle (covers the initial settings
-  // load, a newly added card, an edited URL, and Session env auth changes).
-  // Debounced so typing doesn't spam gh; URLs that drop out of the config
-  // simply leave unused cache keys.
-  const repoUrlsKey = settings === null ? null : configuredRepoUrls(settings).join("\n");
-  const sessionEnvKey = settings === null ? null : stableSessionEnvKey(settings.session_env);
-  useEffect(() => {
-    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
-    const sessionEnv = settings?.session_env ?? {};
-    const urls = repoUrlsKey.split("\n");
-    for (const url of urls) {
-      skillsCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
+  // Check the latest draft context once URL/auth edits settle. The ref-backed
+  // scheduler lets Settings publish frequent draft changes without subscribing
+  // App state to them, while replacing one pending timer with the newest full
+  // settings snapshot. Updating context refs immediately also prevents an
+  // already-running check from rendering against superseding credentials.
+  queueRepoStatusRefreshRef.current = (target) => {
+    if (repoStatusRefreshTimer.current !== null) {
+      window.clearTimeout(repoStatusRefreshTimer.current);
+      repoStatusRefreshTimer.current = null;
     }
-    setSkillsStatuses((prev) => {
-      const next = { ...prev };
-      for (const url of urls) delete next[url];
-      return next;
-    });
-    setSkillsChecking((prev) => {
-      const next = { ...prev };
-      for (const url of urls) next[url] = true;
-      return next;
-    });
-    const handle = window.setTimeout(() => {
-      for (const url of urls) checkRepoSkills(url, sessionEnv);
+    if (!runtimeAvailable) return;
+    const urls = configuredRepoUrls(target);
+    const sessionEnv = target.session_env;
+    for (const url of urls) {
+      const contextKey = skillsCheckContextKey(url, sessionEnv);
+      skillsCheckContext.current[url] = contextKey;
+      workflowCheckContext.current[url] = contextKey;
+    }
+    if (urls.length === 0) return;
+    repoStatusRefreshTimer.current = window.setTimeout(() => {
+      repoStatusRefreshTimer.current = null;
+      for (const url of urls) {
+        checkRepoSkills(url, sessionEnv);
+        checkRepoWorkflow(url, sessionEnv);
+      }
     }, 600);
-    return () => window.clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
+  };
 
+  const savedRepoStatusKey =
+    settings === null
+      ? null
+      : `${configuredRepoUrls(settings).join("\n")}\n${stableSessionEnvKey(settings.session_env)}`;
   useEffect(() => {
-    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
-    const sessionEnv = settings?.session_env ?? {};
-    const urls = repoUrlsKey.split("\n");
-    for (const url of urls) {
-      workflowCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
-    }
-    setWorkflowStatuses((prev) => {
-      const next = { ...prev };
-      for (const url of urls) delete next[url];
-      return next;
-    });
-    setWorkflowChecking((prev) => {
-      const next = { ...prev };
-      for (const url of urls) next[url] = true;
-      return next;
-    });
-    const handle = window.setTimeout(() => {
-      for (const url of urls) checkRepoWorkflow(url, sessionEnv);
-    }, 600);
-    return () => window.clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
+    if (!settings || savedRepoStatusKey === null) return;
+    const target = settingsDirtyRef.current
+      ? settingsDraftRef.current ?? settings
+      : settings;
+    queueRepoStatusRefreshRef.current(target);
+  }, [savedRepoStatusKey, settings]);
+
+  useEffect(
+    () => () => {
+      if (repoStatusRefreshTimer.current !== null) {
+        window.clearTimeout(repoStatusRefreshTimer.current);
+      }
+    },
+    [],
+  );
 
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
@@ -2386,8 +2414,12 @@ function App() {
       onResult: (status) => {
         setSkillsInstall(status);
         if (status.state === "completed" && status.repo_url) {
-          checkRepoSkills(status.repo_url);
+          checkRepoSkills(
+            status.repo_url,
+            skillsInstallSettingsRef.current?.session_env,
+          );
         }
+        if (status.state !== "running") skillsInstallSettingsRef.current = null;
         return status.state === "running";
       },
       onStatus: (status) => updatePollingState("skillsInstall", status),
@@ -2452,20 +2484,19 @@ function App() {
   ]);
 
   async function removeLinearKey() {
-    if (!settings) return;
     const fromDisk = await call(() =>
       invoke<AppSettings>("remove_linear_api_key"),
     );
-    // Keep in-progress form edits; only the key flag changed.
-    setSettings({ ...settings, linear_api_key_set: fromDisk.linear_api_key_set });
-    setLinearKey("");
+    setSettings((current) =>
+      current ? { ...current, linear_api_key_set: fromDisk.linear_api_key_set } : current,
+    );
+    linearKeyDraftRef.current = "";
     setTrackerTest(null);
+    return fromDisk.linear_api_key_set;
   }
 
   async function resetPrompt() {
-    if (!settings) return;
-    const prompt = await call(() => invoke<string>("get_default_prompt"));
-    setSettings({ ...settings, prompt_template: prompt });
+    return call(() => invoke<string>("get_default_prompt"));
   }
 
   async function startWorker() {
@@ -2674,7 +2705,7 @@ function App() {
     );
     const saved = await invoke<AppSettings>("load_settings");
     setSettings(saved);
-    setSavedSnapshot(formSnapshot(saved));
+    if (!settingsDirtyRef.current) settingsDraftRef.current = saved;
     await refreshDashboard();
   }
 
@@ -2771,36 +2802,21 @@ function App() {
     repoConfigured: settings !== null && anyRepoConfigured(settings),
   };
 
-  const dirty =
-    settings !== null &&
-    savedSnapshot !== null &&
-    (formSnapshot(settings) !== savedSnapshot || linearKey.trim() !== "");
+  const dirty = settingsDirty;
   const liveReconfigureSkipped =
     worker.state === "running" &&
     ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
       (savedFlash && savedLiveConfigKept));
 
-  // Keep validation current while Settings are edited so the selected CLI's
-  // status and install action do not disappear after backend or command changes.
-  useEffect(() => {
-    if (!runtimeAvailable || view !== "settings" || !settings) return;
-    let cancelled = false;
-    invoke<ValidationResult>("validate_settings", { settings })
-      .then((result) => {
-        if (!cancelled) setValidation(result);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [view, runtimeAvailable, settings]);
-
   // Repo skill detection does not depend on the selected agent or its command,
   // so it only needs refreshing when Settings are entered or first loaded.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
-    refreshSkillsStatus();
-    refreshWorkflowStatus();
+    const target = settingsDirtyRef.current
+      ? settingsDraftRef.current ?? settings
+      : settings;
+    refreshSkillsStatus(target);
+    refreshWorkflowStatus(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
@@ -2943,7 +2959,9 @@ function App() {
       ].filter((item): item is string => item !== null),
       hasUnsavedSettings: dirty,
       settingsFingerprint:
-        dirty && settings ? updateSettingsFingerprint(settings, linearKey) : null,
+        dirty && settingsDraftRef.current
+          ? updateSettingsFingerprint(settingsDraftRef.current, linearKeyDraftRef.current)
+          : null,
       transientBusy: busy,
     };
   }
@@ -2977,8 +2995,11 @@ function App() {
                 backgroundWork: updateBackgroundWork,
                 hasUnsavedSettings: dirty,
                 settingsFingerprint:
-                  dirty && settings
-                    ? updateSettingsFingerprint(settings, linearKey)
+                  dirty && settingsDraftRef.current
+                    ? updateSettingsFingerprint(
+                        settingsDraftRef.current,
+                        linearKeyDraftRef.current,
+                      )
                     : null,
                 transientBusy: busy,
               }}
@@ -3019,7 +3040,7 @@ function App() {
               workerRunning={worker.state === "running"}
               workerConfigError={worker.state === "running" && worker.last_error !== null}
               liveReconfigureSkipped={liveReconfigureSkipped}
-              busy={busy}
+              busy={busy || settingsSavePending}
               runtimeAvailable={runtimeAvailable}
             />
           ) : null}
@@ -3190,15 +3211,14 @@ function App() {
           />
         ) : null}
         {bootReady && view === "settings" && settings ? (
-          <SettingsView
-            settings={settings}
-            setSettings={setSettings}
-            linearKey={linearKey}
-            setLinearKey={setLinearKey}
+          <SettingsFeature
+            savedSettings={settings}
+            draftRef={settingsDraftRef}
+            revisionRef={settingsRevisionRef}
+            linearKeyRef={linearKeyDraftRef}
             linearViewer={linearViewer}
             linearViewerLoading={linearViewerLoading}
             linearViewerError={linearViewerError}
-            validation={validation}
             trackerTest={trackerTest}
             skillsStatuses={skillsStatuses}
             skillsChecking={skillsChecking}
@@ -3214,6 +3234,17 @@ function App() {
             busy={busy}
             runtimeAvailable={runtimeAvailable}
             appVersion={appVersion}
+            onDirtyChange={(nextDirty) => {
+              if (settingsDirtyRef.current === nextDirty) return;
+              settingsDirtyRef.current = nextDirty;
+              setSettingsDirty(nextDirty);
+            }}
+            savePendingRef={settingsSavePendingRef}
+            saveControllerRef={settingsSaveControllerRef}
+            savePending={settingsSavePending}
+            onSavePendingChange={setSettingsSavePending}
+            onValidationResult={setValidation}
+            onDraftChange={handleSettingsDraftChange}
             onSave={saveSettings}
             onTestConnection={testConnection}
             onRemoveKey={removeLinearKey}
@@ -5336,6 +5367,352 @@ function uniqueIdentifiers(identifiers: string[]): string[] {
   return Array.from(new Set(identifiers));
 }
 
+type SettingsFeatureProps = {
+  savedSettings: AppSettings;
+  draftRef: { current: AppSettings | null };
+  revisionRef: { current: number };
+  linearKeyRef: { current: string };
+  linearViewer: LinearViewerProfile | null;
+  linearViewerLoading: boolean;
+  linearViewerError: string | null;
+  trackerTest: TrackerTestResult | null;
+  skillsStatuses: Record<string, SkillsStatus>;
+  skillsChecking: Record<string, boolean>;
+  skillsInstall: SkillsInstallStatus | null;
+  workflowStatuses: Record<string, RepoWorkflowStatus>;
+  workflowChecking: Record<string, boolean>;
+  workflowTransfer: WorkflowTransferStatus | null;
+  settingsDirty: boolean;
+  workerRunning: boolean;
+  workerConfigError: boolean;
+  liveReconfigureSkipped: boolean;
+  activeRunCount: number;
+  busy: boolean;
+  runtimeAvailable: boolean;
+  appVersion: string | null;
+  onDirtyChange: (dirty: boolean) => void;
+  savePendingRef: { current: boolean };
+  saveControllerRef: { current: SettingsValidationController | null };
+  savePending: boolean;
+  onSavePendingChange: (pending: boolean) => void;
+  onValidationResult: (result: ValidationResult) => void;
+  onDraftChange: (
+    next: AppSettings,
+    linearKey: string,
+    previous: AppSettings,
+  ) => void;
+  onSave: (
+    settings: AppSettings,
+    linearKey: string,
+    result: ValidationResult,
+  ) => Promise<AppSettings | undefined>;
+  onTestConnection: (settings: AppSettings, linearKey: string) => void;
+  onRemoveKey: () => Promise<boolean | undefined>;
+  onResetPrompt: () => Promise<string>;
+  onRefreshSkills: (
+    repoUrl: string,
+    sessionEnv: AppSettings["session_env"],
+  ) => void;
+  onInstallSkills: (settings: AppSettings, repoUrl: string) => void;
+  onRefreshWorkflow: (
+    repoUrl: string,
+    sessionEnv: AppSettings["session_env"],
+  ) => void;
+  onTransferWorkflow: (repoUrl: string) => void;
+};
+
+function validationFieldId(result: ValidationResult | null) {
+  const message = result?.workflow_error?.toLowerCase() ?? "";
+  if (message.includes("active state")) return "settings-active-states";
+  if (message.includes("prompt") || message.includes("placeholder")) {
+    return "settings-prompt-template";
+  }
+  if (message.includes("repo")) return "settings-repositories";
+  return null;
+}
+
+export function reconcileSettingsDraft(
+  saved: AppSettings,
+  draft: AppSettings,
+  dirty: boolean,
+) {
+  return dirty ? draft : saved;
+}
+
+function SettingsFeature({
+  savedSettings,
+  draftRef,
+  revisionRef,
+  linearKeyRef,
+  onDirtyChange,
+  savePendingRef,
+  saveControllerRef,
+  savePending,
+  onSavePendingChange,
+  onValidationResult,
+  onDraftChange,
+  onSave,
+  onTestConnection,
+  onRemoveKey,
+  onResetPrompt,
+  onRefreshSkills,
+  onInstallSkills,
+  onRefreshWorkflow,
+  ...viewProps
+}: SettingsFeatureProps) {
+  const [draft, setDraft] = useState(() => draftRef.current ?? savedSettings);
+  const [linearKey, setLinearKeyState] = useState(() => linearKeyRef.current);
+  const [validationState, setValidationState] = useState<SettingsValidationState>(
+    viewProps.runtimeAvailable
+      ? { status: "idle", result: null, stale: false }
+      : { status: "unavailable", result: null, stale: false },
+  );
+  const dirtyRef = useRef(viewProps.settingsDirty);
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const [focusInvalidSummary, setFocusInvalidSummary] = useState(false);
+  const [promptSeedRevision, setPromptSeedRevision] = useState(0);
+  const deferredValidationRef = useRef(false);
+  const controller = useMemo(
+    () =>
+      new SettingsValidationController(
+        viewProps.runtimeAvailable,
+        (settings) => invoke<ValidationResult>("validate_settings", { settings }),
+        (state) => {
+          startTransition(() => setValidationState(state));
+          if (state.result && state.status !== "pending") {
+            onValidationResult(state.result);
+          }
+        },
+      ),
+    [onValidationResult, viewProps.runtimeAvailable],
+  );
+  const scheduleValidation = useCallback(
+    (revision: { id: number; settings: AppSettings }) => {
+      if (
+        savePendingRef.current &&
+        saveControllerRef.current !== controller
+      ) {
+        deferredValidationRef.current = true;
+        return;
+      }
+      controller.schedule(revision);
+    },
+    [controller, saveControllerRef, savePendingRef],
+  );
+
+  const updateDirty = useCallback(
+    (next: AppSettings, nextKey: string) => {
+      const baseline = formSnapshot(savedSettings);
+      const dirty = formSnapshot(next) !== baseline || nextKey.trim() !== "";
+      if (dirtyRef.current === dirty) return;
+      dirtyRef.current = dirty;
+      onDirtyChange(dirty);
+    },
+    [onDirtyChange, savedSettings],
+  );
+
+  useEffect(() => {
+    dirtyRef.current = viewProps.settingsDirty;
+  }, [viewProps.settingsDirty]);
+
+  const setSettingsDraft = useCallback(
+    (next: AppSettings) => {
+      const previous = draftRef.current ?? draft;
+      const normalized =
+        next.prompt_template === draft.prompt_template
+          ? { ...next, prompt_template: previous.prompt_template }
+          : next;
+      setDraft(normalized);
+      draftRef.current = normalized;
+      onDraftChange(normalized, linearKeyRef.current, previous);
+      const revision = { id: ++revisionRef.current, settings: normalized };
+      scheduleValidation(revision);
+      updateDirty(normalized, linearKeyRef.current);
+    },
+    [
+      draft,
+      draftRef,
+      linearKeyRef,
+      onDraftChange,
+      revisionRef,
+      scheduleValidation,
+      updateDirty,
+    ],
+  );
+
+  const setPromptDraft = useCallback(
+    (prompt: string) => {
+      const previous = draftRef.current ?? draft;
+      const next = { ...previous, prompt_template: prompt };
+      draftRef.current = next;
+      onDraftChange(next, linearKeyRef.current, previous);
+      scheduleValidation({ id: ++revisionRef.current, settings: next });
+      updateDirty(next, linearKeyRef.current);
+    },
+    [
+      draft,
+      draftRef,
+      linearKeyRef,
+      onDraftChange,
+      revisionRef,
+      scheduleValidation,
+      updateDirty,
+    ],
+  );
+
+  const setLinearKey = useCallback(
+    (next: string) => {
+      setLinearKeyState(next);
+      linearKeyRef.current = next;
+      revisionRef.current += 1;
+      const current = draftRef.current ?? draft;
+      onDraftChange(current, next, current);
+      updateDirty(current, next);
+    },
+    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, updateDirty],
+  );
+
+  useEffect(() => {
+    const current = draftRef.current;
+    if (!current) return () => controller.dispose();
+    scheduleValidation({ id: revisionRef.current, settings: current });
+    return () => controller.dispose();
+  }, [controller, draftRef, revisionRef, scheduleValidation]);
+
+  useEffect(() => {
+    if (savePending) {
+      if (saveControllerRef.current !== controller) {
+        deferredValidationRef.current = true;
+      }
+      return;
+    }
+    if (!deferredValidationRef.current) return;
+    deferredValidationRef.current = false;
+    const current = draftRef.current ?? savedSettings;
+    controller.schedule({ id: revisionRef.current, settings: current });
+  }, [
+    controller,
+    draftRef,
+    revisionRef,
+    saveControllerRef,
+    savePending,
+    savedSettings,
+  ]);
+
+  useEffect(() => {
+    const next = reconcileSettingsDraft(savedSettings, draftRef.current ?? draft, dirtyRef.current);
+    if (next === draftRef.current) return;
+    draftRef.current = next;
+    setDraft(next);
+  }, [draft, draftRef, savedSettings]);
+
+  useEffect(() => {
+    if (!focusInvalidSummary || validationState.status !== "invalid") return;
+    summaryRef.current?.focus();
+    setFocusInvalidSummary(false);
+  }, [focusInvalidSummary, validationState.status]);
+
+  const handleSave = useCallback(async () => {
+    if (savePendingRef.current) return;
+    savePendingRef.current = true;
+    saveControllerRef.current = controller;
+    onSavePendingChange(true);
+    try {
+      const exactSettings = draftRef.current ?? draft;
+      const exactLinearKey = linearKeyRef.current;
+      const exactRevision = { id: revisionRef.current, settings: exactSettings };
+      const result = await controller.validateNow(exactRevision);
+      if (!result || revisionRef.current !== exactRevision.id) return;
+      if (result.workflow_blocking) {
+        setFocusInvalidSummary(true);
+        return;
+      }
+      const saved = await onSave(exactSettings, exactLinearKey, result);
+      if (!saved || revisionRef.current !== exactRevision.id) return;
+      draftRef.current = saved;
+      setDraft(saved);
+      linearKeyRef.current = "";
+      setLinearKeyState("");
+      dirtyRef.current = false;
+      onDirtyChange(false);
+    } finally {
+      savePendingRef.current = false;
+      if (saveControllerRef.current === controller) {
+        saveControllerRef.current = null;
+      }
+      onSavePendingChange(false);
+    }
+  }, [
+    controller,
+    draft,
+    draftRef,
+    linearKeyRef,
+    onDirtyChange,
+    onSave,
+    onSavePendingChange,
+    saveControllerRef,
+    savePendingRef,
+  ]);
+
+  const handleRemoveKey = useCallback(async () => {
+    const linearApiKeySet = await onRemoveKey();
+    if (linearApiKeySet === undefined) return;
+    setLinearKey("");
+    setSettingsDraft({ ...draftRef.current!, linear_api_key_set: linearApiKeySet });
+  }, [draftRef, onRemoveKey, setLinearKey, setSettingsDraft]);
+
+  const handleResetPrompt = useCallback(async () => {
+    const prompt = await onResetPrompt();
+    const previous = draftRef.current ?? draft;
+    const next = { ...previous, prompt_template: prompt };
+    draftRef.current = next;
+    setDraft(next);
+    setPromptSeedRevision((revision) => revision + 1);
+    onDraftChange(next, linearKeyRef.current, previous);
+    scheduleValidation({ id: ++revisionRef.current, settings: next });
+    updateDirty(next, linearKeyRef.current);
+  }, [
+    draft,
+    draftRef,
+    linearKeyRef,
+    onDraftChange,
+    onResetPrompt,
+    revisionRef,
+    scheduleValidation,
+    updateDirty,
+  ]);
+
+  return (
+    <SettingsView
+      {...viewProps}
+      settings={draft}
+      setSettings={setSettingsDraft}
+      linearKey={linearKey}
+      setLinearKey={setLinearKey}
+      validation={validationState.result}
+      validationState={validationState}
+      validationSummaryRef={summaryRef}
+      promptSeedRevision={promptSeedRevision}
+      onPromptChange={setPromptDraft}
+      onSave={handleSave}
+      onTestConnection={() => onTestConnection(draftRef.current ?? draft, linearKeyRef.current)}
+      onRemoveKey={handleRemoveKey}
+      onResetPrompt={handleResetPrompt}
+      onRefreshSkills={(repoUrl) => {
+        const current = draftRef.current ?? draft;
+        onRefreshSkills(repoUrl, current.session_env);
+      }}
+      onInstallSkills={(repoUrl) =>
+        onInstallSkills(draftRef.current ?? draft, repoUrl)
+      }
+      onRefreshWorkflow={(repoUrl) => {
+        const current = draftRef.current ?? draft;
+        onRefreshWorkflow(repoUrl, current.session_env);
+      }}
+    />
+  );
+}
+
 function SettingsView({
   settings,
   setSettings,
@@ -5345,6 +5722,10 @@ function SettingsView({
   linearViewerLoading,
   linearViewerError,
   validation,
+  validationState,
+  validationSummaryRef,
+  promptSeedRevision,
+  onPromptChange,
   trackerTest,
   skillsStatuses,
   skillsChecking,
@@ -5377,6 +5758,10 @@ function SettingsView({
   linearViewerLoading: boolean;
   linearViewerError: string | null;
   validation: ValidationResult | null;
+  validationState: SettingsValidationState;
+  validationSummaryRef: { current: HTMLDivElement | null };
+  promptSeedRevision: number;
+  onPromptChange: (prompt: string) => void;
   trackerTest: TrackerTestResult | null;
   skillsStatuses: Record<string, SkillsStatus>;
   skillsChecking: Record<string, boolean>;
@@ -5504,8 +5889,51 @@ function SettingsView({
         </div>
       ) : null}
 
+      <div
+        ref={validationSummaryRef}
+        className={`banner ${validationState.status === "invalid" ? "error" : "info"}`}
+        id="settings-validation-summary"
+        role={validationState.status === "invalid" ? "alert" : "status"}
+        aria-live="polite"
+        aria-busy={validationState.status === "pending" ? "true" : undefined}
+        tabIndex={-1}
+      >
+        {validationState.status === "pending" ? (
+          <>
+            <strong>Checking latest changes…</strong>
+            {validationState.result ? <span>Previous result is stale.</span> : null}
+          </>
+        ) : validationState.status === "invalid" ? (
+          <>
+            <strong>Settings need attention</strong>
+            <span>{validationState.result.workflow_error}</span>
+            {validationFieldId(validationState.result) ? (
+              <a
+                href={`#${validationFieldId(validationState.result)}`}
+                onClick={() =>
+                  document
+                    .getElementById(validationFieldId(validationState.result)!)
+                    ?.focus()
+                }
+              >
+                Go to the first affected field
+              </a>
+            ) : null}
+          </>
+        ) : validationState.status === "unavailable" ? (
+          <>
+            <strong>Validation unavailable</strong>
+            <span>Desktop validation is not available in browser preview.</span>
+          </>
+        ) : validationState.status === "valid" ? (
+          <span>Latest settings are valid.</span>
+        ) : (
+          <span>Settings validation has not run yet.</span>
+        )}
+      </div>
+
       <div className="settings-grid">
-        <section className="settings-section">
+        <section className="settings-section" id="settings-repositories" tabIndex={-1}>
           <h3>Repositories</h3>
           <small className="hint">
             Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching
@@ -5838,11 +6266,22 @@ function SettingsView({
           <label>
             Active states
             <ListInput
+              id="settings-active-states"
               value={settings.active_states}
               disabled={!runtimeAvailable}
               separator="comma"
               placeholder="Todo, In Progress, Rework, Merging"
               onChange={(next) => setSettings({ ...settings, active_states: next })}
+              aria-invalid={
+                validationState.status === "invalid" &&
+                validationFieldId(validationState.result) === "settings-active-states"
+              }
+              aria-describedby={
+                validationState.status === "invalid" &&
+                validationFieldId(validationState.result) === "settings-active-states"
+                  ? "settings-validation-summary"
+                  : undefined
+              }
             />
             <small className="hint">
               Comma-separated Linear states the worker picks issues up from.
@@ -6410,9 +6849,21 @@ function SettingsView({
 
       <Panel title="Default workflow">
         <PromptEditor
+          id="settings-prompt-template"
           value={settings.prompt_template}
+          seedRevision={promptSeedRevision}
           disabled={!runtimeAvailable}
-          onChange={(next) => setSettings({ ...settings, prompt_template: next })}
+          onChange={onPromptChange}
+          aria-invalid={
+            validationState.status === "invalid" &&
+            validationFieldId(validationState.result) === "settings-prompt-template"
+          }
+          aria-describedby={
+            validationState.status === "invalid" &&
+            validationFieldId(validationState.result) === "settings-prompt-template"
+              ? "settings-validation-summary"
+              : undefined
+          }
         />
         <div className="section-row">
           <button
@@ -6469,19 +6920,25 @@ function SettingsView({
 // List fields keep a local text draft: round-tripping every keystroke through
 // join(parse(...)) would eat separators as the user types them.
 function ListInput({
+  id,
   value,
   onChange,
   disabled,
   separator,
   placeholder,
   rows,
+  "aria-invalid": ariaInvalid,
+  "aria-describedby": ariaDescribedBy,
 }: {
+  id?: string;
   value: string[];
   onChange: (next: string[]) => void;
   disabled: boolean;
   separator: "comma" | "newline";
   placeholder?: string;
   rows?: number;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
 }) {
   const join = (items: string[]) =>
     separator === "comma" ? items.join(", ") : items.join("\n");
@@ -6509,6 +6966,9 @@ function ListInput({
   if (separator === "newline") {
     return (
       <textarea
+        id={id}
+        aria-invalid={ariaInvalid}
+        aria-describedby={ariaDescribedBy}
         {...literalInputProps}
         className="mono-input"
         value={draft}
@@ -6521,6 +6981,9 @@ function ListInput({
   }
   return (
     <input
+      id={id}
+      aria-invalid={ariaInvalid}
+      aria-describedby={ariaDescribedBy}
       {...literalInputProps}
       value={draft}
       disabled={disabled}
@@ -6853,22 +7316,44 @@ function BackendSelect({
 }
 
 function PromptEditor({
+  id,
   value,
+  seedRevision,
   disabled,
   onChange,
+  "aria-invalid": ariaInvalid,
+  "aria-describedby": ariaDescribedBy,
 }: {
+  id?: string;
   value: string;
+  seedRevision: number;
   disabled: boolean;
   onChange: (next: string) => void;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const [draft, setDraft] = useState(value);
+  const lastEmitted = useRef(value);
+  const lastSeedRevision = useRef(seedRevision);
+
+  useEffect(() => {
+    if (value !== lastEmitted.current || seedRevision !== lastSeedRevision.current) {
+      setDraft(value);
+      lastEmitted.current = value;
+      lastSeedRevision.current = seedRevision;
+    }
+  }, [seedRevision, value]);
 
   function insertVariable(name: string) {
     const token = `{{${name}}}`;
     const el = ref.current;
-    const start = el?.selectionStart ?? value.length;
+    const start = el?.selectionStart ?? draft.length;
     const end = el?.selectionEnd ?? start;
-    onChange(value.slice(0, start) + token + value.slice(end));
+    const next = draft.slice(0, start) + token + draft.slice(end);
+    setDraft(next);
+    lastEmitted.current = next;
+    onChange(next);
     requestAnimationFrame(() => {
       el?.focus();
       el?.setSelectionRange(start + token.length, start + token.length);
@@ -6878,11 +7363,19 @@ function PromptEditor({
   return (
     <div className="prompt-editor">
       <textarea
+        id={id}
+        aria-invalid={ariaInvalid}
+        aria-describedby={ariaDescribedBy}
         ref={ref}
-        value={value}
+        value={draft}
         disabled={disabled}
         spellCheck={false}
-        onChange={(e) => onChange(e.currentTarget.value)}
+        onChange={(e) => {
+          const next = e.currentTarget.value;
+          setDraft(next);
+          lastEmitted.current = next;
+          onChange(next);
+        }}
       />
       <aside className="var-reference">
         <h4>Variables</h4>
