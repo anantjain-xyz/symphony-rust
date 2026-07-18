@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppUpdate } from "./AppUpdate";
-import type { UpdateSafety } from "./AppUpdate";
+import type { UpdateSafety } from "./appUpdateTypes";
 
 const tauriMocks = vi.hoisted(() => ({
   check: vi.fn(),

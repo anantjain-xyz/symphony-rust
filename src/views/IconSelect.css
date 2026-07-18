@@ -1,0 +1,70 @@
+.icon-select {
+  position: relative;
+}
+
+.icon-select-trigger {
+  background: var(--background);
+  border-color: var(--input);
+  border-radius: 6px;
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 36px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.icon-select-trigger:hover:not(:disabled) {
+  background: var(--background);
+}
+
+.icon-select-trigger:disabled {
+  background: var(--muted);
+  color: var(--muted-foreground);
+  opacity: 1;
+}
+
+.icon-select-trigger .chevron {
+  color: var(--muted-foreground);
+  margin-left: auto;
+}
+
+.icon-select-list {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
+  display: grid;
+  gap: 2px;
+  left: 0;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 30;
+}
+
+.icon-select-option {
+  align-items: center;
+  border-radius: 4px;
+  color: var(--foreground);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  font-weight: 500;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.icon-select-option.active {
+  background: var(--accent);
+}
+
+.icon-select-check {
+  color: var(--muted-foreground);
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  width: 14px;
+}

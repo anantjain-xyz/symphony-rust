@@ -1,0 +1,32 @@
+.issue-view-toggle {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 3px;
+}
+
+.issue-view-toggle button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted-foreground);
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.issue-view-toggle button:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.issue-view-toggle button.active,
+.issue-view-toggle button[aria-selected="true"] {
+  background: var(--card);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
+  color: var(--foreground);
+}
