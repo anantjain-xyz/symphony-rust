@@ -4732,9 +4732,15 @@ type SettingsFeatureProps = {
   onTestConnection: (settings: AppSettings, linearKey: string) => void;
   onRemoveKey: () => Promise<boolean | undefined>;
   onResetPrompt: () => Promise<string>;
-  onRefreshSkills: (repoUrl: string) => void;
+  onRefreshSkills: (
+    repoUrl: string,
+    sessionEnv: AppSettings["session_env"],
+  ) => void;
   onInstallSkills: (settings: AppSettings, repoUrl: string) => void;
-  onRefreshWorkflow: (repoUrl: string) => void;
+  onRefreshWorkflow: (
+    repoUrl: string,
+    sessionEnv: AppSettings["session_env"],
+  ) => void;
   onTransferWorkflow: (repoUrl: string) => void;
 };
 
@@ -4767,6 +4773,9 @@ function SettingsFeature({
   onTestConnection,
   onRemoveKey,
   onResetPrompt,
+  onRefreshSkills,
+  onInstallSkills,
+  onRefreshWorkflow,
   ...viewProps
 }: SettingsFeatureProps) {
   const [draft, setDraft] = useState(() => draftRef.current ?? savedSettings);
@@ -4928,9 +4937,17 @@ function SettingsFeature({
       onTestConnection={() => onTestConnection(draftRef.current ?? draft, linearKeyRef.current)}
       onRemoveKey={handleRemoveKey}
       onResetPrompt={handleResetPrompt}
+      onRefreshSkills={(repoUrl) => {
+        const current = draftRef.current ?? draft;
+        onRefreshSkills(repoUrl, current.session_env);
+      }}
       onInstallSkills={(repoUrl) =>
-        viewProps.onInstallSkills(draftRef.current ?? draft, repoUrl)
+        onInstallSkills(draftRef.current ?? draft, repoUrl)
       }
+      onRefreshWorkflow={(repoUrl) => {
+        const current = draftRef.current ?? draft;
+        onRefreshWorkflow(repoUrl, current.session_env);
+      }}
     />
   );
 }

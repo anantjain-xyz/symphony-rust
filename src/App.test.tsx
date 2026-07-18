@@ -1978,6 +1978,61 @@ describe("App settings", () => {
     );
   });
 
+  it("uses the exact draft environment for manual repository checks", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+    await screen.findByText("Using the saved default workflow.");
+    await screen.findByText("Repository does not ship all agent skills.");
+
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=from-draft" } },
+    );
+
+    await waitFor(() => {
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLButtonElement>(".workflow-field button"),
+        ).some((button) => button.textContent === "Check again"),
+      ).toBe(true);
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLButtonElement>(
+            ".skills-field:not(.workflow-field) button",
+          ),
+        ).some((button) => button.textContent === "Check again"),
+      ).toBe(true);
+    });
+
+    const workflowRefresh = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".workflow-field button"),
+    ).find((button) => button.textContent === "Check again");
+    const skillsRefresh = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".skills-field:not(.workflow-field) button"),
+    ).find((button) => button.textContent === "Check again");
+    expect(workflowRefresh).toBeTruthy();
+    expect(skillsRefresh).toBeTruthy();
+
+    tauriMocks.invoke.mockClear();
+    fireEvent.click(workflowRefresh!);
+    fireEvent.click(skillsRefresh!);
+
+    const exactContext = {
+      repoUrl: settings.repos[0].url,
+      sessionEnv: { GITHUB_TOKEN: "from-draft" },
+    };
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "get_repo_workflow_status",
+      exactContext,
+    );
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", exactContext);
+  });
+
   it("installs skills using the exact current settings draft", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
