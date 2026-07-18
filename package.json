@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",

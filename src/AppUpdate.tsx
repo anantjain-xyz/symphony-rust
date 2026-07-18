@@ -1,9 +1,149 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
+import { invoke } from "@tauri-apps/api/core";
 import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { useEffect, useRef, useState } from "react";
+import type { AppUpdateProps, UpdateSafety } from "./appUpdateTypes";
+import type { AppSettings, Overview, WorkerStatus } from "./bindings";
+import "./AppUpdate.css";
 
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+type AppUpdateFeatureProps = {
+  overview: Overview;
+  backgroundWork: string[];
+  hasInProgressRetroBatches: boolean;
+  hasUnsavedSettings: boolean;
+  settingsDraft: AppSettings | null;
+  pendingLinearKey: string;
+  transientBusy: boolean;
+  onWorkerChange: (worker: WorkerStatus) => void;
+  onOverviewChange: (overview: Overview) => void;
+  onRetroBatchWorkChange: (active: boolean) => void;
+  onInstallLockChange: (locked: boolean) => void;
+  onActionError: (message: string) => void;
+};
+
+function localValueFingerprint(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${value.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function settingsFingerprint(settings: AppSettings, linearKey: string) {
+  const { linear_api_key_set: _ignored, ...form } = settings;
+  return JSON.stringify({
+    settings: JSON.stringify(form),
+    pendingLinearKey: localValueFingerprint(linearKey),
+  });
+}
+
+export function AppUpdateFeature(props: AppUpdateFeatureProps) {
+  async function prepareForInstall() {
+    const [installWorker, installOverview] = await Promise.all([
+      invoke<WorkerStatus>("get_worker_status"),
+      invoke<Overview>("get_overview"),
+    ]);
+    props.onWorkerChange(installWorker);
+    props.onOverviewChange(installOverview);
+    const workerWasRunning = installWorker.state === "running";
+    const restoreWorker = async () => {
+      if (!workerWasRunning) return;
+      const status = await invoke<WorkerStatus>("get_worker_status");
+      if (status.state === "stopped") {
+        props.onWorkerChange(await invoke<WorkerStatus>("start_worker"));
+      }
+    };
+    const restoreWorkerWhenStopped = async () => {
+      if (!workerWasRunning) return;
+      for (;;) {
+        try {
+          const status = await invoke<WorkerStatus>("get_worker_status");
+          props.onWorkerChange(status);
+          if (status.state === "stopped") {
+            await restoreWorker();
+            return;
+          }
+        } catch {
+          // Keep trying after a transient read/start failure during restoration.
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+    };
+
+    if (installWorker.state !== "stopped") {
+      props.onWorkerChange(await invoke<WorkerStatus>("stop_worker"));
+      try {
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          const [nextWorker, nextOverview] = await Promise.all([
+            invoke<WorkerStatus>("get_worker_status"),
+            invoke<Overview>("get_overview"),
+          ]);
+          props.onWorkerChange(nextWorker);
+          props.onOverviewChange(nextOverview);
+          if (nextWorker.state === "stopped" && nextOverview.active_runs.length === 0) {
+            return restoreWorker;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+      } catch (error) {
+        void restoreWorkerWhenStopped().catch(() => undefined);
+        throw error;
+      }
+      void restoreWorkerWhenStopped().catch(() => undefined);
+      throw new Error("Symphony could not stop active work safely within 30 seconds.");
+    }
+    return restoreWorker;
+  }
+
+  async function verifyInstallSafety(): Promise<UpdateSafety> {
+    const [nextOverview, nextHasRetroBatches] = await Promise.all([
+      invoke<Overview>("get_overview"),
+      invoke<boolean>("has_in_progress_retro_batches"),
+    ]);
+    props.onOverviewChange(nextOverview);
+    props.onRetroBatchWorkChange(nextHasRetroBatches);
+    return {
+      activeRunCount: nextOverview.active_runs.length,
+      activeRunIds: nextOverview.active_runs.map((run) => run.id),
+      backgroundWork: [
+        ...props.backgroundWork.filter((item) => item !== "an active Retro change batch"),
+        ...(nextHasRetroBatches ? ["an active Retro change batch"] : []),
+      ],
+      hasUnsavedSettings: props.hasUnsavedSettings,
+      settingsFingerprint:
+        props.hasUnsavedSettings && props.settingsDraft
+          ? settingsFingerprint(props.settingsDraft, props.pendingLinearKey)
+          : null,
+      transientBusy: props.transientBusy,
+    };
+  }
+
+  return (
+    <AppUpdate
+      enabled
+      safety={{
+        activeRunCount: props.overview.active_runs.length,
+        activeRunIds: props.overview.active_runs.map((run) => run.id),
+        backgroundWork: props.backgroundWork,
+        hasUnsavedSettings: props.hasUnsavedSettings,
+        settingsFingerprint:
+          props.hasUnsavedSettings && props.settingsDraft
+            ? settingsFingerprint(props.settingsDraft, props.pendingLinearKey)
+            : null,
+        transientBusy: props.transientBusy,
+      }}
+      verifyInstallSafety={verifyInstallSafety}
+      prepareForInstall={prepareForInstall}
+      onInstallLockChange={props.onInstallLockChange}
+      onActionError={props.onActionError}
+    />
+  );
+}
 
 type UpdatePhase =
   | "hidden"
@@ -15,24 +155,6 @@ type UpdatePhase =
   | "restart-required";
 
 type ConfirmationStage = "start" | "install" | "restart";
-
-export type UpdateSafety = {
-  activeRunCount: number;
-  activeRunIds: string[];
-  backgroundWork: string[];
-  hasUnsavedSettings: boolean;
-  settingsFingerprint: string | null;
-  transientBusy: boolean;
-};
-
-type AppUpdateProps = {
-  enabled: boolean;
-  safety: UpdateSafety;
-  verifyInstallSafety?: () => Promise<UpdateSafety>;
-  prepareForInstall: () => Promise<() => Promise<void>>;
-  onInstallLockChange?: (locked: boolean) => void;
-  onActionError: (message: string) => void;
-};
 
 function hasUnsafeWork(safety: UpdateSafety) {
   return (

@@ -3,7 +3,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { reconcileSettingsDraft, retroRepoBatchState } from "./App";
+import App from "./App";
+import { reconcileSettingsDraft, retroRepoBatchState } from "./viewHelpers";
 import type {
   AppSettings,
   AgentEventRow,
@@ -400,10 +401,15 @@ function setDocumentHidden(hidden: boolean) {
   document.dispatchEvent(new Event("visibilitychange"));
 }
 
-async function openSettings() {
-  const button = screen.getByRole("button", { name: "Settings" });
+async function openView(name: "Runs" | "Issues" | "Retro" | "Settings") {
+  const button = screen.getByRole("button", { name });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(button);
+  await screen.findByRole("heading", { name });
+}
+
+async function openSettings() {
+  await openView("Settings");
 }
 
 describe("App settings", () => {
@@ -761,10 +767,11 @@ describe("App settings", () => {
   it("keeps browser preview deterministic without invoking Tauri commands", async () => {
     render(<App />);
 
-    await Promise.resolve();
-
+    expect(screen.getByRole("status").textContent).toBe("Loading preview…");
+    expect(screen.queryByText("Connecting to local worker…")).toBeNull();
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
-    expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(tauriMocks.invoke).not.toHaveBeenCalled();
   });
 
   it("starts settings and dashboard reads together and commits only after both resolve", async () => {
@@ -803,7 +810,7 @@ describe("App settings", () => {
     const settingsButton = screen.getByRole("button", { name: "Settings" });
     expect((settingsButton as HTMLButtonElement).disabled).toBe(true);
     expect(settingsButton.getAttribute("aria-describedby")).toBe("boot-nav-reason");
-    expect(screen.getByText("Live views are unavailable while Symphony connects.")).toBeTruthy();
+    expect(screen.getByText("Connecting.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 
     settingsRead.resolve(settings);
@@ -1718,10 +1725,10 @@ describe("App settings", () => {
     expect(commandCount("load_settings")).toBe(1);
   });
 
-  it("reviews exact Retro diffs and gates change batches until every suggestion is decided", () => {
+  it("reviews exact Retro diffs and gates change batches until every suggestion is decided", async () => {
     const { container } = render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    await openView("Retro");
 
     expect(
       Array.from(
@@ -1791,10 +1798,10 @@ describe("App settings", () => {
     expect(screen.getByText("3 of 4 reviewed")).toBeTruthy();
   });
 
-  it("explains when a Retro suggestion filter has no matching suggestions", () => {
+  it("explains when a Retro suggestion filter has no matching suggestions", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    await openView("Retro");
     fireEvent.click(screen.getByRole("button", { name: "Accepted" }));
 
     expect(screen.getByText("No accepted suggestions")).toBeTruthy();
@@ -1809,10 +1816,10 @@ describe("App settings", () => {
     expect(screen.getByText("Suggestions you reject will appear here.")).toBeTruthy();
   });
 
-  it("deletes a selected Retro only after confirmation", () => {
+  it("deletes a selected Retro only after confirmation", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Retro" }));
+    await openView("Retro");
     expect(
       screen.getAllByRole("button", { name: /Open retro from/ }),
     ).toHaveLength(2);
@@ -2211,10 +2218,10 @@ describe("App settings", () => {
     expect(screen.queryByText("Local dev")).toBeNull();
   });
 
-  it("does not auto-capitalize repository names", () => {
+  it("does not auto-capitalize repository names", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     const repoNameInput = screen.getByLabelText(/^Name/, { selector: "input" });
@@ -2322,10 +2329,10 @@ describe("App settings", () => {
     expect(screen.queryByDisplayValue("git@github.com:acme/backend.git")).toBeNull();
   });
 
-  it("uses literal input behavior for settings config fields", () => {
+  it("uses literal input behavior for settings config fields", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     const fields = [
@@ -2512,20 +2519,20 @@ describe("App settings", () => {
     expectLiteralInput(await screen.findByLabelText(/^Model/, { selector: "input" }));
   });
 
-  it("shows the mycode launch wrapper in the launch command helper", () => {
+  it("shows the mycode launch wrapper in the launch command helper", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
 
     const example = screen.getByText("mycode --agent codex");
     expect(example.tagName.toLowerCase()).toBe("code");
     expect(example.getAttribute("class")).toBe("command-example");
   });
 
-  it("keeps the settings save action in the app header", () => {
+  it("keeps the settings save action in the app header", async () => {
     const { container } = render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
 
     const topbar = container.querySelector(".topbar");
     const pageHeader = container.querySelector(".page-header");
@@ -2689,10 +2696,10 @@ describe("App settings", () => {
     );
   });
 
-  it("shows actionable agent skills install guidance in preview settings", () => {
+  it("shows actionable agent skills install guidance in preview settings", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await openSettings();
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
     expect(screen.getByText("Repository does not ship all agent skills.")).toBeTruthy();
@@ -3275,7 +3282,7 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
 
     expect(
-      screen.getByRole("group", { name: /Dependency graph with 3 nodes and 2 blocking links/ }),
+      await screen.findByRole("group", { name: /Dependency graph with 3 nodes and 2 blocking links/ }),
     ).toBeTruthy();
     expect(screen.getByText("Blocked issues")).toBeTruthy();
     expect(screen.getByLabelText("OPS-1, external blocker")).toBeTruthy();

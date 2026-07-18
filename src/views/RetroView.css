@@ -1,0 +1,511 @@
+.retro-layout {
+  align-items: start;
+  grid-template-columns: minmax(280px, 0.55fr) minmax(620px, 1.45fr);
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.panel h3 {
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+  padding: 13px 15px;
+}
+
+.retro-report {
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+
+.retro-repo-card {
+  min-width: 0;
+  padding: 16px;
+}
+
+.retro-repo-card + .retro-repo-card {
+  border-top: 1px solid var(--border);
+}
+
+.retro-repo-card > header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+
+.retro-repo-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.retro-repo-title .repo-badge {
+  margin-left: 0;
+}
+
+.retro-repo-card h5,
+.retro-repo-card p {
+  margin: 0;
+}
+
+.retro-mini-stats {
+  color: var(--muted-foreground);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.retro-columns {
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+}
+
+.retro-columns > section {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+}
+
+.retro-columns > section + section {
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+
+.retro-columns > section:first-child {
+  padding-right: 16px;
+}
+
+.retro-repo-card h5 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.retro-list {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.retro-item {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 0 0 14px;
+}
+
+.retro-item + .retro-item {
+  padding-top: 14px;
+}
+
+.retro-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.retro-item-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.retro-item-head strong {
+  flex: 1 1 180px;
+  font-size: 13px;
+  line-height: 1.35;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.retro-item p {
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.retro-item small {
+  overflow-wrap: anywhere;
+}
+
+.retro-target,
+.retro-occurrence-tag {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  display: inline-block;
+  flex: 0 1 auto;
+  font-size: 11px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retro-occurrence-tag {
+  flex: 0 0 auto;
+}
+
+.retro-evidence {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.retro-evidence li {
+  background: var(--muted);
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px;
+}
+
+.retro-evidence code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.retro-evidence span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.retro-review {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.retro-review-summary {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.retro-review-summary > div:first-child,
+.retro-action-bar > div:first-child,
+.retro-batch-row > div,
+.retro-review-repo > header > div:first-child,
+.retro-suggestion-card > header > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.retro-filter {
+  display: inline-flex;
+}
+
+.retro-filter button {
+  border-radius: 0;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.retro-filter button:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+
+.retro-filter button:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.retro-filter button + button {
+  margin-left: -1px;
+}
+
+.retro-filter button.active {
+  background: var(--accent);
+  border-color: var(--ring);
+  position: relative;
+}
+
+.retro-review-repo {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.retro-review-repo + .retro-review-repo {
+  border-top: 1px solid var(--border);
+}
+
+.retro-review-repo > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.retro-review-repo > header > div:first-child {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.retro-suggestion-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.retro-suggestion-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.retro-suggestion-card.decision-accepted {
+  border-color: var(--success-solid);
+}
+
+.retro-suggestion-card.decision-rejected {
+  background: var(--muted);
+  opacity: 0.82;
+}
+
+.retro-suggestion-card > header,
+.retro-suggestion-card > footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.retro-suggestion-card > header strong,
+.retro-batch-row strong {
+  overflow-wrap: anywhere;
+}
+
+.retro-suggestion-card > header small {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.retro-suggestion-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.retro-decision-state {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.retro-decision-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.retro-decision-label.accepted {
+  color: var(--success-solid);
+}
+
+.retro-decision-label.rejected {
+  color: var(--muted-foreground);
+}
+
+.retro-undo-button {
+  color: var(--muted-foreground);
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  width: 28px;
+}
+
+.retro-undo-button svg {
+  fill: none;
+  height: 15px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  width: 15px;
+}
+
+.retro-diff {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 360px;
+  min-width: 0;
+  overflow: auto;
+  padding: 0;
+  white-space: pre;
+}
+
+.retro-diff code,
+.retro-diff span {
+  display: block;
+  min-width: max-content;
+}
+
+.retro-diff span {
+  padding: 0 10px;
+}
+
+.retro-diff .diff-addition {
+  background: var(--success);
+  color: var(--success-foreground);
+}
+
+.retro-diff .diff-deletion {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.retro-diff .diff-meta {
+  color: var(--info-foreground);
+  font-weight: 600;
+}
+
+.retro-rationale {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.retro-rationale summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.retro-rationale p {
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
+.retro-rationale .retro-evidence {
+  margin-top: 8px;
+}
+
+.retro-proposal-error,
+.retro-legacy-banner {
+  margin: 0;
+}
+
+.retro-action-bar {
+  align-items: center;
+  background: var(--card);
+  border-top: 1px solid var(--border);
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px;
+  position: sticky;
+  z-index: 2;
+}
+
+.retro-batches {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 0;
+  padding: 16px;
+}
+
+.retro-batches h4 {
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+
+.retro-batch-row {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 10px 0;
+}
+
+.retro-batch-row:last-child {
+  padding-bottom: 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  padding: 10px 15px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+thead {
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+tr {
+  border-bottom: 1px solid var(--border);
+}
+
+tr:last-child {
+  border-bottom: 0;
+}
+
+td {
+  font-size: 13px;
+  padding: 12px 15px;
+  vertical-align: top;
+}
+
+tbody tr:hover {
+  background: var(--muted);
+}

@@ -1,0 +1,353 @@
+/* Views that pin to the viewport (Runs): panes scroll internally instead of
+   growing the page. The outer scrollbar only appears if the window is too
+   short to fit the split's minimum height. */
+.content-viewport {
+  display: flex;
+  flex-direction: column;
+}
+
+.content-viewport .split {
+  flex: 1 1 auto;
+  min-height: 320px;
+}
+
+.content-viewport .panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.panel-scroll thead th {
+  background: var(--muted);
+  /* border-collapse borders don't travel with sticky cells */
+  box-shadow: inset 0 -1px 0 var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.run-meta {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+}
+
+.run-meta-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.run-meta-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.run-meta-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 10px;
+}
+
+.run-meta-row.muted {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.session-chips {
+  gap: 6px;
+}
+
+.session-chip {
+  background: var(--muted);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.session-chip.mono {
+  font-family: var(--font-mono);
+}
+
+.run-meta-path {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-error {
+  background: var(--destructive);
+  border-radius: 6px;
+  color: var(--destructive-foreground);
+  display: grid;
+  font-size: 12px;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.run-error strong {
+  font-weight: 600;
+}
+
+.events {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+}
+
+.events article {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 15px;
+}
+
+.events article:last-of-type {
+  border-bottom: 0;
+}
+
+.event-line {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.event-kind {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  min-width: 64px;
+  text-transform: uppercase;
+}
+
+.event-summary {
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 1.45;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.event-summary.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.event-summary em {
+  color: var(--muted-foreground);
+}
+
+.event-error .event-summary {
+  color: var(--destructive-foreground);
+}
+
+.markdown-text {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.markdown-text p {
+  margin: 0;
+}
+
+.markdown-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-text table {
+  border: 1px solid var(--border);
+  border-collapse: collapse;
+  border-radius: 6px;
+  display: table;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  min-width: min(100%, 320px);
+  overflow: hidden;
+  width: max-content;
+}
+
+.markdown-text thead {
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-text tr {
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-text tr:last-child {
+  border-bottom: 0;
+}
+
+.markdown-text tbody tr:hover {
+  background: transparent;
+}
+
+.markdown-text th,
+.markdown-text td {
+  display: table-cell;
+  font-size: 12px;
+  letter-spacing: 0;
+  padding: 6px 8px;
+  text-align: left;
+  text-transform: none;
+  vertical-align: top;
+  white-space: normal;
+}
+
+.markdown-text th {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.markdown-text td {
+  color: inherit;
+}
+
+.markdown-code {
+  margin: 0;
+}
+
+.events time {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.events details {
+  margin-top: 4px;
+}
+
+.events details summary {
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  width: fit-content;
+}
+
+.events details summary:hover {
+  color: var(--foreground);
+}
+
+.events-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+
+.event-search {
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  position: absolute;
+  right: 14px;
+  top: 8px;
+  z-index: 2;
+}
+
+.event-search input {
+  font-size: 12px;
+  min-height: 26px;
+  padding: 4px 8px;
+  width: 170px;
+}
+
+.event-search-count {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.event-search button {
+  font-size: 12px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+mark.search-hit {
+  background: var(--search-hit);
+  border-radius: 2px;
+  color: inherit;
+}
+
+mark.search-hit.current {
+  background: var(--search-hit-current);
+}
+
+.jump-latest {
+  bottom: 10px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  left: 50%;
+  min-height: 28px;
+  position: sticky;
+  transform: translateX(-50%);
+}
+
+pre {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.repo-filter-select {
+  min-width: 180px;
+  width: min(260px, 100%);
+}
+
+.repo-filter-label,
+.repo-filter-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-filter-option-label {
+  flex: 1 1 auto;
+}
+
+.repo-filter-list {
+  max-height: min(280px, 50vh);
+  overflow-y: auto;
+}
