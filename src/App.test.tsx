@@ -480,8 +480,10 @@ describe("App settings", () => {
     fireEvent.change(prompt, { target: { value: "Unsaved navigation draft" } });
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
-      "Unsaved navigation draft",
+    await waitFor(() =>
+      expect(
+        (container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value,
+      ).toBe("Unsaved navigation draft"),
     );
   });
 
