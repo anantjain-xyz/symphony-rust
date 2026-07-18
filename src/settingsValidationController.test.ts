@@ -51,6 +51,26 @@ describe("SettingsValidationController", () => {
     expect(validate).toHaveBeenLastCalledWith(settings("three"));
   });
 
+  it("resolves an authoritative waiter when its queued revision is superseded", async () => {
+    vi.useFakeTimers();
+    const first = deferred<ValidationResult>();
+    const validate = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(valid());
+    const controller = new SettingsValidationController(true, validate, vi.fn());
+    controller.schedule({ id: 1, settings: settings("active") });
+    await vi.advanceTimersByTimeAsync(SETTINGS_VALIDATION_DEBOUNCE_MS);
+
+    const saveResult = controller.validateNow({ id: 2, settings: settings("save") });
+    controller.schedule({ id: 3, settings: settings("newer edit") });
+    await vi.advanceTimersByTimeAsync(SETTINGS_VALIDATION_DEBOUNCE_MS);
+
+    await expect(saveResult).resolves.toBeNull();
+    first.resolve(valid());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(validate).toHaveBeenLastCalledWith(settings("newer edit"));
+  });
+
   it("never publishes an older result for a newer draft", async () => {
     vi.useFakeTimers();
     const first = deferred<ValidationResult>();

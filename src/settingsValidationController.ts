@@ -85,10 +85,19 @@ export class SettingsValidationController {
 
   private enqueueOrRun(revision: SettingsRevision) {
     if (this.active) {
+      if (this.queued && this.queued.id !== revision.id) {
+        this.resolveWaiters(this.queued.id, null);
+      }
       this.queued = revision;
       return;
     }
     void this.run(revision);
+  }
+
+  private resolveWaiters(revisionId: number, result: ValidationResult | null) {
+    const resolvers = this.waiters.get(revisionId) ?? [];
+    this.waiters.delete(revisionId);
+    for (const resolve of resolvers) resolve(result);
   }
 
   private async run(revision: SettingsRevision) {
@@ -114,9 +123,7 @@ export class SettingsValidationController {
       }
     } finally {
       this.active = null;
-      const resolvers = this.waiters.get(revision.id) ?? [];
-      this.waiters.delete(revision.id);
-      for (const resolve of resolvers) resolve(result);
+      this.resolveWaiters(revision.id, result);
       const queued = this.queued;
       this.queued = null;
       if (queued && (!this.disposed || this.waiters.has(queued.id))) {

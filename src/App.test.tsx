@@ -601,6 +601,44 @@ describe("App settings", () => {
     expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull();
   });
 
+  it("keeps the next remounted edit dirty after an earlier Save completes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const save = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "save_settings" ? save.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Saved before remount" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    save.resolve({ ...settings, prompt_template: "Saved before remount" });
+    await act(async () => {
+      await save.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const prompt = container.querySelector(
+      ".prompt-editor textarea",
+    ) as HTMLTextAreaElement;
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull(),
+    );
+
+    fireEvent.change(prompt, { target: { value: "Dirty after completed Save" } });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+  });
+
   it("disables and deduplicates Save during authoritative validation", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -2636,6 +2674,45 @@ describe("App settings", () => {
     expect(commandCount("get_repo_workflow_status")).toBe(1);
   });
 
+  it("uses the dirty draft environment when Settings remounts", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+    render(<App />);
+
+    await openSettings();
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=remounted-draft" } },
+    );
+    await waitFor(() =>
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url,
+        sessionEnv: { GITHUB_TOKEN: "remounted-draft" },
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    tauriMocks.invoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url,
+        sessionEnv: { GITHUB_TOKEN: "remounted-draft" },
+      });
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_repo_workflow_status", {
+        repoUrl: settings.repos[0].url,
+        sessionEnv: { GITHUB_TOKEN: "remounted-draft" },
+      });
+    });
+    const repoCalls = tauriMocks.invoke.mock.calls.filter(([command]) =>
+      ["get_skills_status", "get_repo_workflow_status"].includes(command),
+    );
+    expect(repoCalls.every(([, args]) => args.sessionEnv.GITHUB_TOKEN === "remounted-draft"))
+      .toBe(true);
+  });
+
   it("automatically checks a newly edited draft repository URL", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -2787,6 +2864,59 @@ describe("App settings", () => {
         repoUrl: settings.repos[0].url,
       }),
     );
+  });
+
+  it("rechecks completed skills installation with the exact draft environment", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.runtimeAvailable = true;
+      const settings = testSettings();
+      const baseInvoke = dashboardInvoke({ settings });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "install_skills") {
+          return {
+            state: "running",
+            repo_url: settings.repos[0].url,
+            message: "Installing",
+            pr_url: null,
+            error: null,
+          };
+        }
+        if (command === "get_skills_install_status") {
+          return {
+            state: "completed",
+            repo_url: settings.repos[0].url,
+            message: "Done",
+            pr_url: "https://github.com/acme/widgets/pull/3",
+            error: null,
+          };
+        }
+        return baseInvoke(command, args);
+      });
+
+      render(<App />);
+      await flushPromises();
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+      fireEvent.change(
+        screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+        { target: { value: "GITHUB_TOKEN=install-draft" } },
+      );
+      await act(() => vi.advanceTimersByTimeAsync(600));
+      fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+      await flushPromises();
+      fireEvent.click(screen.getByRole("button", { name: "Create install PR" }));
+      await flushPromises();
+      tauriMocks.invoke.mockClear();
+
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: settings.repos[0].url,
+        sessionEnv: { GITHUB_TOKEN: "install-draft" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("links missing agent CLIs to their official installation guide", async () => {

@@ -1249,6 +1249,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const resourceCommandCounts = useRef<Record<string, number>>({});
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
+  const skillsInstallSettingsRef = useRef<AppSettings | null>(null);
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
   const repoStatusRefreshTimer = useRef<number | null>(null);
@@ -1986,6 +1987,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }
 
   async function startSkillsInstall(exactSettings: AppSettings, url: string) {
+    skillsInstallSettingsRef.current = exactSettings;
     const status = await call(() =>
       invoke<SkillsInstallStatus>("install_skills", {
         settings: exactSettings,
@@ -2125,8 +2127,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       onResult: (status) => {
         setSkillsInstall(status);
         if (status.state === "completed" && status.repo_url) {
-          checkRepoSkills(status.repo_url);
+          checkRepoSkills(
+            status.repo_url,
+            skillsInstallSettingsRef.current?.session_env,
+          );
         }
+        if (status.state !== "running") skillsInstallSettingsRef.current = null;
         return status.state === "running";
       },
       onStatus: (status) => updatePollingState("skillsInstall", status),
@@ -2519,8 +2525,11 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   // so it only needs refreshing when Settings are entered or first loaded.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
-    refreshSkillsStatus();
-    refreshWorkflowStatus();
+    const target = settingsDirtyRef.current
+      ? settingsDraftRef.current ?? settings
+      : settings;
+    refreshSkillsStatus(target);
+    refreshWorkflowStatus(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
@@ -4953,6 +4962,10 @@ function SettingsFeature({
     },
     [onDirtyChange, savedSettings],
   );
+
+  useEffect(() => {
+    dirtyRef.current = viewProps.settingsDirty;
+  }, [viewProps.settingsDirty]);
 
   const setSettingsDraft = useCallback(
     (next: AppSettings) => {
