@@ -62,10 +62,8 @@ import {
   normalizeResourceError,
   resourceIsStale,
   staleDirtyResource,
-  workerConnectivity,
   type DashboardResourceEnvelope,
   type DashboardResourceError,
-  type WorkerConnectivity,
 } from "./dashboardResourceState";
 import {
   createPollController,
@@ -290,13 +288,6 @@ const RESOURCE_LABELS: Record<DashboardResourceKey, string> = {
   selectedRun: "Run details",
   selectedRetro: "Retro details",
 };
-
-function coreResourceForView(view: View): DashboardResourceKey {
-  if (view === "runs") return "runs";
-  if (view === "issues") return "issues";
-  if (view === "retro") return "retroList";
-  return "overview";
-}
 
 function createInitialDashboardResources(): DashboardResourceEnvelopes {
   return {
@@ -2171,7 +2162,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const panelResourceKeys = resourcesForView(view).filter((key) =>
     visibleDashboardResourceKeys.includes(key),
   );
-  const visibleCoreResourceKey = coreResourceForView(view);
   const bootNavigationReason =
     bootState.status === "loading"
       ? runtimeAvailable
@@ -2273,13 +2263,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
                 />
               </Suspense>
             </ChunkErrorBoundary>
-          ) : null}
-          {bootReady ? (
-            <ShellHealthIndicator
-              resources={dashboardResources}
-              visibleKeys={visibleDashboardResourceKeys}
-              coreKey={visibleCoreResourceKey}
-            />
           ) : null}
           <button
             type="button"
@@ -2637,112 +2620,6 @@ function ResourceNotices({
   });
 
   return notices.length > 0 ? <>{notices}</> : null;
-}
-
-const WORKER_CONNECTIVITY_LABELS: Record<WorkerConnectivity, string> = {
-  healthy: "Healthy",
-  stale: "Stale",
-  disconnected: "Disconnected",
-  stopped: "Stopped",
-};
-
-function ShellHealthIndicator({
-  resources,
-  visibleKeys,
-  coreKey,
-}: {
-  resources: DashboardResourceEnvelopes;
-  visibleKeys: DashboardResourceKey[];
-  coreKey: DashboardResourceKey;
-}) {
-  const heartbeat = resources.overview.data?.worker_heartbeat ?? null;
-  const worker = resources.worker.data ?? {
-    state: "stopped" as const,
-    started_at: null,
-    last_error: null,
-  };
-  const [now, setNow] = useState(() => Date.now());
-  const lastBeatAt = heartbeat?.last_beat_at ?? null;
-
-  useEffect(() => {
-    const currentTime = Date.now();
-    setNow(currentTime);
-    if (worker.state === "stopped" || lastBeatAt === null) return;
-    const beatMs = Date.parse(lastBeatAt);
-    if (!Number.isFinite(beatMs)) return;
-    const timers = [beatMs + 6_001, beatMs + 30_001]
-      .filter((boundary) => boundary > currentTime)
-      .map((boundary) =>
-        window.setTimeout(
-          () => setNow(Date.now()),
-          Math.max(0, boundary - Date.now()),
-        ),
-      );
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [lastBeatAt, worker.state]);
-
-  const connectivity = workerConnectivity(worker.state, lastBeatAt, now);
-  const visibleResources = visibleKeys.map(
-    (key) => resources[key] as DashboardResourceEnvelope<unknown>,
-  );
-  const errorKeys = visibleKeys.filter(
-    (key) => resources[key].status === "error",
-  );
-  const staleKeys = visibleKeys.filter((key) =>
-    resourceIsStale(resources[key] as DashboardResourceEnvelope<unknown>),
-  );
-  const hasError = errorKeys.length > 0;
-  const hasStale = staleKeys.length > 0;
-  const hasRefreshing = visibleResources.some(
-    (resource) =>
-      resource.status === "loading" || resource.status === "refreshing",
-  );
-  const state =
-    connectivity === "disconnected"
-      ? "disconnected"
-      : hasError
-        ? "error"
-        : connectivity === "stale" || hasStale
-          ? "stale"
-          : hasRefreshing
-            ? "refreshing"
-            : connectivity === "stopped"
-              ? "stopped"
-              : "healthy";
-  const label = state.charAt(0).toUpperCase() + state.slice(1);
-  const coreResource = resources[coreKey] as DashboardResourceEnvelope<unknown>;
-
-  return (
-    <div className={`shell-health shell-health-${state}`} data-testid="shell-health">
-      <span className={`shell-health-dot ${state}`} aria-hidden="true" />
-      <div className="shell-health-copy">
-        <strong>{label}</strong>
-        <span>
-          Worker {WORKER_CONNECTIVITY_LABELS[connectivity]}
-          {lastBeatAt ? (
-            <>
-              {" "}· heartbeat <RelativeTime value={lastBeatAt} />
-            </>
-          ) : (
-            " · no heartbeat received"
-          )}
-          {errorKeys.length > 0
-            ? ` · ${errorKeys.map((key) => RESOURCE_LABELS[key]).join(", ")} unavailable`
-            : staleKeys.length > 0
-              ? ` · ${staleKeys.map((key) => RESOURCE_LABELS[key]).join(", ")} stale`
-              : null}
-          {coreResource.lastSuccessAt ? (
-            <>
-              {" "}· {RESOURCE_LABELS[coreKey]} refreshed{" "}
-              <RelativeTime value={coreResource.lastSuccessAt} />
-            </>
-          ) : (
-            ` · ${RESOURCE_LABELS[coreKey]} never refreshed`
-          )}
-        </span>
-      </div>
-    </div>
-  );
 }
 
 function BootLoading({ preview }: { preview: boolean }) {

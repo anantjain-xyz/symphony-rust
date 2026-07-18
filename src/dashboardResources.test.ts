@@ -10,7 +10,7 @@ describe("dashboard resource invalidation map", () => {
   it.each([
     ["rate_limit_state", ["overview"]],
     ["token_usage", ["overview"]],
-    ["worker_heartbeat", ["overview"]],
+    ["worker_heartbeat", []],
     ["issues", ["issues", "overview", "runs", "selectedRun"]],
     ["issue_dispatch_suppressions", ["issues", "overview"]],
     ["retry_queue", ["issues", "overview"]],
