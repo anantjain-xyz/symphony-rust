@@ -344,8 +344,9 @@ async fn run_worker(
     repo.upsert_workflow(&initial_config.workflow).await?;
     let tracker_config = initial_config.workflow.front_matter.tracker.clone();
     let tracker = LinearTracker::new(tracker_config.clone());
-    tracker.preflight().await?;
-    recover(&repo, &tracker, &initial_config).await?;
+    if !prepare_worker(&repo, &tracker, &initial_config, &stop).await? {
+        return Ok(());
+    }
     let started_at = now_iso();
     repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
         .await?;
@@ -371,6 +372,23 @@ async fn run_worker(
     })
     .await;
     Ok(())
+}
+
+/// Complete the worker's network-backed startup without making Stop wait for
+/// Linear's request timeout and retry budget. Local orphan recovery remains
+/// ordered and cancellation-safe; only tracker waits are abandoned.
+async fn prepare_worker<T: TrackerClient>(
+    repo: &Repository,
+    tracker: &T,
+    config: &RuntimeConfig,
+    stop: &CancellationToken,
+) -> Result<bool, WorkerError> {
+    let Some(preflight) = cancellable(stop, tracker.preflight()).await else {
+        return Ok(false);
+    };
+    preflight?;
+    recover(repo, tracker, config, stop).await?;
+    Ok(!stop.is_cancelled())
 }
 
 /// The worker's poll loop: tick, then wait for the next wake/interval/stop,
@@ -424,6 +442,7 @@ async fn recover<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
     config: &RuntimeConfig,
+    stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
     for run in repo.list_running().await? {
         warn!(run_id = %run.id, issue_id = %run.issue_id, "orphan run marked crashed");
@@ -470,8 +489,14 @@ async fn recover<T: TrackerClient>(
         .await?;
     }
     repo.delete_orphaned_pending_sessions().await.ok();
-    if let Ok(terminal) = tracker.fetch_terminal().await {
+    let Some(terminal) = cancellable(stop, tracker.fetch_terminal()).await else {
+        return Ok(());
+    };
+    if let Ok(terminal) = terminal {
         for issue in terminal {
+            if stop.is_cancelled() {
+                return Ok(());
+            }
             if !repo.has_active_run(&issue.id).await.unwrap_or(true) {
                 if let Some(repo_config) = route_issue(&config.repos, &issue) {
                     let _ = workspace_manager(config, repo_config).remove(&issue).await;
@@ -485,11 +510,10 @@ async fn recover<T: TrackerClient>(
 /// Await `fut`, but bail the moment `stop` is cancelled, returning `None`.
 ///
 /// The tracker's Linear calls take no cancellation token and can block for
-/// ~15s per attempt (~47s across retries), so a stop issued mid-tick would
-/// otherwise have to wait them out. Wrapping each tracker call lets `tick`
-/// abandon the network wait and unwind through its normal early returns instead
-/// of being force-dropped at an arbitrary await — which would not be
-/// cancellation-safe across [`reserve_and_dispatch`]'s reserve → spawn handoff.
+/// ~15s per attempt (~47s across retries), so a stop issued during startup or a
+/// tick would otherwise have to wait them out. Wrapping each tracker call lets
+/// the owning operation abandon the network wait and unwind through its normal
+/// early returns instead of force-dropping broader work at an arbitrary await.
 async fn cancellable<F>(stop: &CancellationToken, fut: F) -> Option<F::Output>
 where
     F: std::future::Future,
@@ -2545,6 +2569,94 @@ printf cloned > hook-ran
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "newer-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make newer"));
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BlockingStartupPhase {
+        Preflight,
+        Recovery,
+    }
+
+    struct BlockingStartupTracker {
+        phase: BlockingStartupPhase,
+        entered: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for BlockingStartupTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            if self.phase == BlockingStartupPhase::Preflight {
+                self.entered.notify_one();
+                return std::future::pending().await;
+            }
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            if self.phase == BlockingStartupPhase::Recovery {
+                self.entered.notify_one();
+                return std::future::pending().await;
+            }
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn assert_worker_startup_cancels(phase: BlockingStartupPhase) {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let stop = CancellationToken::new();
+        let entered = Arc::new(Notify::new());
+        let tracker = BlockingStartupTracker {
+            phase,
+            entered: entered.clone(),
+        };
+
+        let startup_repo = repo.clone();
+        let startup_stop = stop.clone();
+        let handle = tokio::spawn(async move {
+            prepare_worker(&startup_repo, &tracker, &config, &startup_stop).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("worker startup did not reach the blocking tracker request");
+        stop.cancel();
+
+        let should_start = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("worker startup did not return promptly after stop")
+            .expect("worker startup task panicked")
+            .expect("worker startup returned an error");
+        assert!(!should_start);
+    }
+
+    #[tokio::test]
+    async fn worker_startup_stops_promptly_while_preflight_is_blocked() {
+        assert_worker_startup_cancels(BlockingStartupPhase::Preflight).await;
+    }
+
+    #[tokio::test]
+    async fn worker_startup_stops_promptly_while_recovery_fetch_is_blocked() {
+        assert_worker_startup_cancels(BlockingStartupPhase::Recovery).await;
     }
 
     /// A tracker whose `fetch_active` never resolves, standing in for a Linear
