@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { InputHTMLAttributes, RefObject } from "react";
+import type { InputHTMLAttributes, RefObject, SetStateAction } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -69,6 +69,21 @@ import {
   type DbChanged,
   type RateLimitChanged,
 } from "./dashboardResources";
+import {
+  beginResourceRefresh,
+  completeResourceRefresh,
+  createResourceEnvelope,
+  failResourceRefresh,
+  hasResourceData,
+  markResourceDirty as markEnvelopeDirty,
+  normalizeResourceError,
+  resourceIsStale,
+  staleDirtyResource,
+  workerConnectivity,
+  type DashboardResourceEnvelope,
+  type DashboardResourceError,
+  type WorkerConnectivity,
+} from "./dashboardResourceState";
 import {
   createPollController,
   type PollController,
@@ -914,6 +929,85 @@ type DashboardSnapshotSelection = {
   selectedRetroId?: string | null;
 };
 
+type RetroListResource = {
+  retroStatus: RetroStatus;
+  retros: RetroRow[];
+};
+
+type DashboardResourceData = {
+  overview: Overview;
+  runs: RunWithIssueRow[];
+  issues: IssueRow[];
+  worker: WorkerStatus;
+  retroList: RetroListResource;
+  retroBatches: boolean;
+  selectedRun: RunDetail | null;
+  selectedRetro: RetroDetail | null;
+};
+
+type DashboardResourceEnvelopes = {
+  [Key in DashboardResourceKey]: DashboardResourceEnvelope<
+    DashboardResourceData[Key]
+  >;
+};
+
+const RESOURCE_LABELS: Record<DashboardResourceKey, string> = {
+  overview: "Overview",
+  runs: "Runs",
+  issues: "Issues",
+  worker: "Worker status",
+  retroList: "Retro history",
+  retroBatches: "Retro changes",
+  selectedRun: "Run details",
+  selectedRetro: "Retro details",
+};
+
+function coreResourceForView(view: View): DashboardResourceKey {
+  if (view === "runs") return "runs";
+  if (view === "issues") return "issues";
+  if (view === "retro") return "retroList";
+  return "overview";
+}
+
+function createInitialDashboardResources(
+  runtimeAvailable: boolean,
+): DashboardResourceEnvelopes {
+  if (runtimeAvailable) {
+    return {
+      overview: createResourceEnvelope<Overview>(),
+      runs: createResourceEnvelope<RunWithIssueRow[]>(),
+      issues: createResourceEnvelope<IssueRow[]>(),
+      worker: createResourceEnvelope<WorkerStatus>(),
+      retroList: createResourceEnvelope<RetroListResource>(),
+      retroBatches: createResourceEnvelope<boolean>(),
+      selectedRun: createResourceEnvelope<RunDetail | null>(),
+      selectedRetro: createResourceEnvelope<RetroDetail | null>(),
+    };
+  }
+  const now = new Date().toISOString();
+  return {
+    overview: createResourceEnvelope(previewOverview, now),
+    runs: createResourceEnvelope(previewRuns, now),
+    issues: createResourceEnvelope(previewIssues, now),
+    worker: createResourceEnvelope(
+      { state: "running", started_at: previewActiveStartedAt, last_error: null },
+      now,
+    ),
+    retroList: createResourceEnvelope(
+      { retroStatus: previewRetroStatus, retros: previewRetros },
+      now,
+    ),
+    retroBatches: createResourceEnvelope(
+      previewRetroDetail.batches.some((batch) =>
+        ["queued", "running"].includes(batch.state),
+      ),
+      now,
+    ),
+    selectedRun: createResourceEnvelope<RunDetail | null>(null, now),
+    selectedRetro: createResourceEnvelope<RetroDetail | null>(previewRetroDetail, now),
+  };
+}
+
 export async function loadDashboardSnapshot({
   selectedRunId = null,
   selectedRetroId = null,
@@ -973,6 +1067,13 @@ type BootState =
   | { status: "loading" }
   | { status: "ready"; payload: BootstrapResult }
   | { status: "error"; message: string };
+
+type ResourceFailureAnnouncement = {
+  id: number;
+  key: DashboardResourceKey;
+  role: "status" | "alert";
+  message: string;
+};
 
 const previewBootstrap: BootstrapResult = {
   settings: previewSettings,
@@ -1158,32 +1259,30 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [linearViewer, setLinearViewer] = useState<LinearViewerProfile | null>(null);
   const [linearViewerLoading, setLinearViewerLoading] = useState(false);
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
-  const [overview, setOverview] = useState<Overview>(
-    runtimeAvailable ? emptyOverview : previewOverview,
-  );
-  const [runs, setRuns] = useState<RunWithIssueRow[]>(
-    runtimeAvailable ? [] : previewRuns,
-  );
-  const [issues, setIssues] = useState<IssueRow[]>(
-    runtimeAvailable ? [] : previewIssues,
-  );
-  const [retros, setRetros] = useState<RetroRow[]>(
-    runtimeAvailable ? [] : previewRetros,
-  );
-  const [retroStatus, setRetroStatus] = useState<RetroStatus>(
-    runtimeAvailable ? emptyRetroStatus : previewRetroStatus,
-  );
-  const [worker, setWorker] = useState<WorkerStatus>({
-    state: runtimeAvailable ? "stopped" : "running",
-    started_at: runtimeAvailable ? null : previewActiveStartedAt,
+  const [dashboardResources, setDashboardResources] =
+    useState<DashboardResourceEnvelopes>(() =>
+      createInitialDashboardResources(runtimeAvailable),
+    );
+  const overview = dashboardResources.overview.data ?? emptyOverview;
+  const runs = dashboardResources.runs.data ?? [];
+  const issues = dashboardResources.issues.data ?? [];
+  const retros = dashboardResources.retroList.data?.retros ?? [];
+  const retroStatus =
+    dashboardResources.retroList.data?.retroStatus ?? emptyRetroStatus;
+  const worker = dashboardResources.worker.data ?? {
+    state: "stopped",
+    started_at: null,
     last_error: null,
-  });
+  };
   const [validation, setValidation] = useState<ValidationResult | null>(null);
-  const [selectedRun, setSelectedRun] = useState<RunDetail | null>(null);
-  const [selectedRetro, setSelectedRetro] = useState<RetroDetail | null>(
-    runtimeAvailable ? null : previewRetroDetail,
-  );
+  const selectedRun = dashboardResources.selectedRun.data ?? null;
+  const selectedRetro = dashboardResources.selectedRetro.data ?? null;
   const [error, setError] = useState<string | null>(null);
+  const [resourceAnnouncement, setResourceAnnouncement] =
+    useState<ResourceFailureAnnouncement | null>(null);
+  const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<
+    Set<DashboardResourceKey>
+  >(() => new Set());
   const [busy, setBusy] = useState(false);
   const [bootState, setBootState] = useState<BootState>(
     runtimeAvailable
@@ -1210,12 +1309,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [pollingStates, setPollingStates] = useState<
     Partial<Record<PollKey, PollResourceState>>
   >({});
-  const [hasInProgressRetroBatches, setHasInProgressRetroBatches] = useState(
-    !runtimeAvailable &&
-      previewRetroDetail.batches.some((batch) =>
-        ["queued", "running"].includes(batch.state),
-      ),
-  );
+  const hasInProgressRetroBatches =
+    dashboardResources.retroBatches.data ?? false;
   const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
   const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
     () => new Set(),
@@ -1256,51 +1351,185 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const queueRepoStatusRefreshRef = useRef<(target: AppSettings) => void>(() => undefined);
   const linearViewerSeq = useRef(0);
   const pollControllers = useRef<Partial<Record<PollKey, PollController>>>({});
+  const refreshAffordanceTimers = useRef(
+    new Map<DashboardResourceKey, number>(),
+  );
+  const userRetryKeys = useRef(new Set<DashboardResourceKey>());
+  const userFailureAnnouncedKeys = useRef(new Set<DashboardResourceKey>());
+  const resourceAnnouncementSequence = useRef(0);
+  const dashboardResourcesRef = useRef(dashboardResources);
+  dashboardResourcesRef.current = dashboardResources;
   const dashboardResourceValues = useRef(
     new Map<DashboardResourceKey, unknown>(),
   );
 
+  function updateDashboardResource<Key extends DashboardResourceKey>(
+    key: Key,
+    update: (
+      current: DashboardResourceEnvelope<DashboardResourceData[Key]>,
+    ) => DashboardResourceEnvelope<DashboardResourceData[Key]>,
+  ) {
+    const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
+      DashboardResourceData[Key]
+    >;
+    const next = {
+      ...dashboardResourcesRef.current,
+      [key]: update(current),
+    } as DashboardResourceEnvelopes;
+    dashboardResourcesRef.current = next;
+    setDashboardResources(next);
+  }
+
+  function setResourceData<Key extends DashboardResourceKey>(
+    key: Key,
+    update: SetStateAction<DashboardResourceData[Key]>,
+  ) {
+    updateDashboardResource(key, (resource) => ({
+      ...resource,
+      data:
+        typeof update === "function"
+          ? (update as (current: DashboardResourceData[Key]) => DashboardResourceData[Key])(
+              resource.data as DashboardResourceData[Key],
+            )
+          : update,
+    }));
+  }
+
+  const setOverview = (update: SetStateAction<Overview>) =>
+    setResourceData("overview", update);
+  const setRuns = (update: SetStateAction<RunWithIssueRow[]>) =>
+    setResourceData("runs", update);
+  const setWorker = (update: SetStateAction<WorkerStatus>) =>
+    setResourceData("worker", update);
+  const setRetroStatus = (update: SetStateAction<RetroStatus>) =>
+    setResourceData("retroList", (current) => ({
+      ...current,
+      retroStatus:
+        typeof update === "function" ? update(current.retroStatus) : update,
+    }));
+  const setRetros = (update: SetStateAction<RetroRow[]>) =>
+    setResourceData("retroList", (current) => ({
+      ...current,
+      retros: typeof update === "function" ? update(current.retros) : update,
+    }));
+  const setHasInProgressRetroBatches = (update: SetStateAction<boolean>) =>
+    setResourceData("retroBatches", update);
+  const setSelectedRun = (update: SetStateAction<RunDetail | null>) =>
+    setResourceData("selectedRun", update);
+  const setSelectedRetro = (update: SetStateAction<RetroDetail | null>) =>
+    setResourceData("selectedRetro", update);
+
+  function commitResourceSuccess<Key extends DashboardResourceKey>(
+    key: Key,
+    data: DashboardResourceData[Key],
+    now = new Date().toISOString(),
+  ) {
+    dashboardResourceValues.current.set(key, data);
+    updateDashboardResource(key, (resource) =>
+      completeResourceRefresh(resource, data, now),
+    );
+    userFailureAnnouncedKeys.current.delete(key);
+    setResourceAnnouncement((current) =>
+      current?.key === key ? null : current,
+    );
+  }
+
+  function resetDashboardResource<Key extends DashboardResourceKey>(key: Key) {
+    dashboardResourceValues.current.delete(key);
+    updateDashboardResource(key, () =>
+      createResourceEnvelope<DashboardResourceData[Key]>(),
+    );
+  }
+
+  function beginDashboardResourceRefresh(key: DashboardResourceKey) {
+    updateDashboardResource(key, (resource) =>
+      beginResourceRefresh(resource, new Date().toISOString()),
+    );
+    const priorTimer = refreshAffordanceTimers.current.get(key);
+    if (priorTimer !== undefined) window.clearTimeout(priorTimer);
+    const timer = window.setTimeout(() => {
+      refreshAffordanceTimers.current.delete(key);
+      setSlowRefreshingKeys((current) => new Set(current).add(key));
+    }, 250);
+    refreshAffordanceTimers.current.set(key, timer);
+  }
+
+  function finishDashboardResourceRefresh(key: DashboardResourceKey) {
+    const timer = refreshAffordanceTimers.current.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    refreshAffordanceTimers.current.delete(key);
+    setSlowRefreshingKeys((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }
+
+  function commitResourceFailure(
+    key: DashboardResourceKey,
+    refreshError: unknown,
+    userInitiated: boolean,
+  ) {
+    const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
+      DashboardResourceData[typeof key]
+    >;
+    const newlySurfaced = current.error === null;
+    const normalized = normalizeResourceError(RESOURCE_LABELS[key], refreshError);
+    updateDashboardResource(key, (resource) =>
+      failResourceRefresh(resource, normalized, new Date().toISOString()),
+    );
+    const hasData = hasResourceData(current);
+    const shouldAnnounce =
+      hasData &&
+      (newlySurfaced ||
+        (userInitiated && !userFailureAnnouncedKeys.current.has(key)));
+    if (shouldAnnounce) {
+      if (userInitiated) userFailureAnnouncedKeys.current.add(key);
+      setResourceAnnouncement({
+        id: ++resourceAnnouncementSequence.current,
+        key,
+        role: userInitiated ? "alert" : "status",
+        message: normalized.summary,
+      });
+    }
+  }
+
   function commitDashboardSnapshot(snapshot: DashboardSnapshot) {
-    dashboardResourceValues.current.set("overview", snapshot.overview);
-    setOverview(snapshot.overview);
-    dashboardResourceValues.current.set("runs", snapshot.runs);
-    setRuns(snapshot.runs);
-    dashboardResourceValues.current.set("issues", snapshot.issues);
-    setIssues(snapshot.issues);
-    dashboardResourceValues.current.set("worker", snapshot.worker);
-    setWorker(snapshot.worker);
-    dashboardResourceValues.current.set("retroList", {
+    const now = new Date().toISOString();
+    commitResourceSuccess("overview", snapshot.overview, now);
+    commitResourceSuccess("runs", snapshot.runs, now);
+    commitResourceSuccess("issues", snapshot.issues, now);
+    commitResourceSuccess("worker", snapshot.worker, now);
+    commitResourceSuccess("retroList", {
       retroStatus: snapshot.retroStatus,
       retros: snapshot.retros,
-    });
-    setRetroStatus(snapshot.retroStatus);
-    setRetros(snapshot.retros);
-    dashboardResourceValues.current.set(
+    }, now);
+    commitResourceSuccess(
       "retroBatches",
       snapshot.hasInProgressRetroBatches,
+      now,
     );
-    setHasInProgressRetroBatches(snapshot.hasInProgressRetroBatches);
     if (
       snapshot.requestedRunId &&
       snapshot.requestedRunId === selectedRunIdRef.current
     ) {
-      dashboardResourceValues.current.set("selectedRun", snapshot.selectedRun);
-      setSelectedRun(snapshot.selectedRun);
+      commitResourceSuccess("selectedRun", snapshot.selectedRun, now);
       if (!snapshot.selectedRun) selectedRunIdRef.current = null;
     }
     if (
       snapshot.requestedRetroId &&
       snapshot.requestedRetroId === selectedRetroIdRef.current
     ) {
-      dashboardResourceValues.current.set("selectedRetro", snapshot.selectedRetro);
-      setSelectedRetro(snapshot.selectedRetro);
+      commitResourceSuccess("selectedRetro", snapshot.selectedRetro, now);
       if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
     } else if (!snapshot.requestedRetroId && selectedRetroIdRef.current === null) {
       selectedRetroIdRef.current = snapshot.selectedRetroId;
-      dashboardResourceValues.current.set("selectedRetro", snapshot.selectedRetro);
-      setSelectedRetro(snapshot.selectedRetro);
       if (snapshot.selectedRetroId !== null && snapshot.selectedRetro === null) {
+        resetDashboardResource("selectedRetro");
         markResourceDirty("selectedRetro");
+      } else {
+        commitResourceSuccess("selectedRetro", snapshot.selectedRetro, now);
       }
     }
   }
@@ -1309,6 +1538,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     dirtyResourcesRef.current.add(key);
     dirtyResourceVersionsRef.current[key] =
       (dirtyResourceVersionsRef.current[key] ?? 0) + 1;
+    updateDashboardResource(key, (resource) =>
+      markEnvelopeDirty(resource, new Date().toISOString()),
+    );
   }
 
   async function invokeDashboardResource<T>(
@@ -1333,24 +1565,25 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   if (!dashboardRefreshCoordinator.current) {
     dashboardRefreshCoordinator.current = createDashboardRefreshCoordinator({
       execute: (context) => dashboardRefreshExecutor.current(context),
-      onFailure: (refreshError) => setError(formatError(refreshError)),
       instrumentation: { enabled: DASHBOARD_COMMAND_TRACE_ENABLED },
     });
   }
 
   dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
-    await Promise.all(
+    const results = await Promise.allSettled(
       keys.map(async (key) => {
+        const userInitiated = userRetryKeys.current.has(key);
         const dirtyVersion = dirtyResourceVersionsRef.current[key] ?? 0;
         const selectedRunId = selectedRunIdRef.current;
         const selectedRetroId = selectedRetroIdRef.current;
-        switch (key) {
+        if (isAuthoritative(key)) beginDashboardResourceRefresh(key);
+        try {
+          switch (key) {
           case "overview": {
             const next = await invokeDashboardResource<Overview>(key, "get_overview");
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("overview", next);
-              setOverview(next);
+              commitResourceSuccess("overview", next);
             }
             break;
           }
@@ -1360,16 +1593,14 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               "list_runs",
             );
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("runs", next);
-              setRuns(next);
+              commitResourceSuccess("runs", next);
             }
             break;
           }
           case "issues": {
             const next = await invokeDashboardResource<IssueRow[]>(key, "list_issues");
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("issues", next);
-              setIssues(next);
+              commitResourceSuccess("issues", next);
               const byId = new Map(next.map((issue) => [issue.id, issue]));
               const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
                 const issue = byId.get(run.issue_id);
@@ -1390,8 +1621,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               "get_worker_status",
             );
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("worker", next);
-              setWorker(next);
+              commitResourceSuccess("worker", next);
             }
             break;
           }
@@ -1401,12 +1631,10 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               invokeDashboardResource<RetroRow[]>(key, "list_retros"),
             ]);
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("retroList", {
+              commitResourceSuccess("retroList", {
                 retroStatus: nextStatus,
                 retros: nextRetros,
               });
-              setRetroStatus(nextStatus);
-              setRetros(nextRetros);
               if (selectedRetroIdRef.current === null) {
                 selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
                 if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
@@ -1425,8 +1653,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               "has_in_progress_retro_batches",
             );
             if (isAuthoritative(key)) {
-              dashboardResourceValues.current.set("retroBatches", next);
-              setHasInProgressRetroBatches(next);
+              commitResourceSuccess("retroBatches", next);
             }
             break;
           }
@@ -1462,8 +1689,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
                 }
               }
               selectedRunRef.current = committed;
-              dashboardResourceValues.current.set("selectedRun", committed);
-              setSelectedRun(committed);
+              commitResourceSuccess("selectedRun", committed);
               if (!committed) selectedRunIdRef.current = null;
             }
             break;
@@ -1479,21 +1705,38 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               isAuthoritative(key) &&
               selectedRetroId === selectedRetroIdRef.current
             ) {
-              dashboardResourceValues.current.set("selectedRetro", next);
-              setSelectedRetro(next);
+              commitResourceSuccess("selectedRetro", next);
               if (!next) selectedRetroIdRef.current = null;
             }
             break;
           }
-        }
-        if (
-          isAuthoritative(key) &&
-          (dirtyResourceVersionsRef.current[key] ?? 0) === dirtyVersion
-        ) {
-          dirtyResourcesRef.current.delete(key);
+          }
+          if (
+            isAuthoritative(key) &&
+            (dirtyResourceVersionsRef.current[key] ?? 0) === dirtyVersion
+          ) {
+            dirtyResourcesRef.current.delete(key);
+          }
+        } catch (refreshError) {
+          if (isAuthoritative(key)) {
+            commitResourceFailure(key, refreshError, userInitiated);
+          }
+          throw refreshError;
+        } finally {
+          if (isAuthoritative(key)) finishDashboardResourceRefresh(key);
         }
       }),
     );
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failures.length > 0) {
+      const failure = new Error(
+        `${failures.length} dashboard resource refresh ${failures.length === 1 ? "failed" : "failures"}`,
+      ) as Error & { causes: unknown[] };
+      failure.causes = failures.map((result) => result.reason);
+      throw failure;
+    }
   };
 
   const requestInvalidatedResources = useCallback(
@@ -1518,6 +1761,44 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const refreshDashboard = useCallback(
     () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
     [requestInvalidatedResources],
+  );
+  const retryDashboardResource = useCallback(async (key: DashboardResourceKey) => {
+    userRetryKeys.current.add(key);
+    markResourceDirty(key);
+    try {
+      await dashboardRefreshCoordinator.current!.request([key], {
+        rejectOnFailure: true,
+        reportFailure: false,
+      });
+    } catch {
+      // A user-triggered retry gets one assertive announcement per failure
+      // episode. Repeated retries stay quiet until a successful recovery.
+      if (!userFailureAnnouncedKeys.current.has(key)) {
+        const summary = dashboardResourcesRef.current[key].error?.summary;
+        if (summary) {
+          userFailureAnnouncedKeys.current.add(key);
+          setResourceAnnouncement({
+            id: ++resourceAnnouncementSequence.current,
+            key,
+            role: "alert",
+            message: summary,
+          });
+        }
+      }
+    } finally {
+      userRetryKeys.current.delete(key);
+    }
+  }, []);
+  const markVisibleResourceStale = useCallback(
+    (key: DashboardResourceKey, nowMs: number) => {
+      const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
+        DashboardResourceData[typeof key]
+      >;
+      const next = staleDirtyResource(current, nowMs, true);
+      if (next === current) return;
+      updateDashboardResource(key, () => next);
+    },
+    [],
   );
   const pollDashboardResources = useCallback(
     async (keys: readonly DashboardResourceKey[]) => {
@@ -1550,7 +1831,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   useEffect(() => {
     const coordinator = dashboardRefreshCoordinator.current!;
     coordinator.activate();
-    return () => coordinator.dispose();
+    return () => {
+      coordinator.dispose();
+      refreshAffordanceTimers.current.forEach((timer) =>
+        window.clearTimeout(timer),
+      );
+      refreshAffordanceTimers.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -2234,7 +2521,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       return;
     }
     selectedRunIdRef.current = id;
-    setSelectedRun(null);
+    resetDashboardResource("selectedRun");
     viewRef.current = "runs";
     setView("runs");
     await requestInvalidatedResources(["selectedRun"], { reportFailure: true });
@@ -2340,7 +2627,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       return;
     }
     selectedRetroIdRef.current = id;
-    setSelectedRetro(null);
+    resetDashboardResource("selectedRetro");
     viewRef.current = "retro";
     setView("retro");
     await requestInvalidatedResources(["selectedRetro"], { reportFailure: true });
@@ -2564,6 +2851,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         : "Start worker";
 
   const bootReady = bootState.status === "ready";
+  const visibleDashboardResourceKeys = visibleResources(
+    DASHBOARD_RESOURCE_KEYS,
+    view,
+    selectedRunIdRef.current,
+    selectedRetroIdRef.current,
+  );
+  const panelResourceKeys = resourcesForView(view).filter((key) =>
+    visibleDashboardResourceKeys.includes(key),
+  );
+  const visibleCoreResourceKey = coreResourceForView(view);
   const bootNavigationReason =
     bootState.status === "loading"
       ? "Live views are unavailable while Symphony connects."
@@ -2671,6 +2968,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   return (
     <main className="app">
+      {bootReady ? (
+        <ResourceStalenessMonitor
+          resources={dashboardResources}
+          visibleKeys={visibleDashboardResourceKeys}
+          onStale={markVisibleResourceStale}
+        />
+      ) : null}
       <header className="topbar">
         <div className="topbar-primary">
           <div className="brand">
@@ -2740,6 +3044,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               runtimeAvailable={runtimeAvailable}
             />
           ) : null}
+          {bootReady ? (
+            <ShellHealthIndicator
+              resources={dashboardResources}
+              visibleKeys={visibleDashboardResourceKeys}
+              coreKey={visibleCoreResourceKey}
+            />
+          ) : null}
           <button
             type="button"
             className="theme-toggle"
@@ -2800,6 +3111,15 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             message="This browser preview is disconnected from Tauri commands. Launch the desktop app to load live data, save settings, and start the worker."
           />
         ) : null}
+        {bootReady && resourceAnnouncement ? (
+          <div
+            key={resourceAnnouncement.id}
+            className="screen-reader-only"
+            role={resourceAnnouncement.role}
+          >
+            {resourceAnnouncement.message}
+          </div>
+        ) : null}
         {bootReady && error ? <div className="banner error">{error}</div> : null}
         {bootReady && stalePollingEntries.length > 0 ? (
           <div className="banner error" role="status">
@@ -2821,6 +3141,14 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             </strong>
             <span>{friendlyError(worker.last_error)}</span>
           </div>
+        ) : null}
+        {bootReady ? (
+          <ResourceNotices
+            resources={dashboardResources}
+            resourceKeys={panelResourceKeys}
+            slowRefreshingKeys={slowRefreshingKeys}
+            onRetry={retryDashboardResource}
+          />
         ) : null}
 
         {bootReady && view === "overview" ? (
@@ -2929,6 +3257,226 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         ) : null}
       </section>
     </main>
+  );
+}
+
+function ResourceStalenessMonitor({
+  resources,
+  visibleKeys,
+  onStale,
+}: {
+  resources: DashboardResourceEnvelopes;
+  visibleKeys: DashboardResourceKey[];
+  onStale: (key: DashboardResourceKey, nowMs: number) => void;
+}) {
+  const visibleKeySignature = visibleKeys.join("|");
+
+  useEffect(() => {
+    const timers: number[] = [];
+    const now = Date.now();
+    visibleKeys.forEach((key) => {
+      const resource = resources[key] as DashboardResourceEnvelope<unknown>;
+      if (
+        resource.data === undefined ||
+        resource.dirtySince === null ||
+        resourceIsStale(resource) ||
+        resource.status === "error"
+      ) {
+        return;
+      }
+      const dirtyAt = Date.parse(resource.dirtySince);
+      if (!Number.isFinite(dirtyAt)) return;
+      const delay = Math.max(0, dirtyAt + 60_000 - now);
+      timers.push(
+        window.setTimeout(() => onStale(key, Date.now()), delay),
+      );
+    });
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [onStale, resources, visibleKeySignature]);
+
+  return null;
+}
+
+function ResourceNotices({
+  resources,
+  resourceKeys,
+  slowRefreshingKeys,
+  onRetry,
+}: {
+  resources: DashboardResourceEnvelopes;
+  resourceKeys: DashboardResourceKey[];
+  slowRefreshingKeys: Set<DashboardResourceKey>;
+  onRetry: (key: DashboardResourceKey) => void;
+}) {
+  const notices = resourceKeys.flatMap((key) => {
+    const resource = resources[key] as DashboardResourceEnvelope<unknown>;
+    const hasData = hasResourceData(resource);
+    const stale = resourceIsStale(resource);
+    const noDataFailure = !hasData && resource.error !== null;
+    const refreshing =
+      resource.status === "loading" || resource.status === "refreshing";
+    const showRefreshing = slowRefreshingKeys.has(key) && refreshing;
+    if (!stale && !noDataFailure && !showRefreshing) return [];
+    const error = resource.error as DashboardResourceError | null;
+
+    return [
+      <section
+        key={key}
+        className={`resource-notice ${noDataFailure ? "resource-error" : stale ? "resource-stale" : "resource-refreshing"}`}
+        role={noDataFailure ? "alert" : undefined}
+        aria-busy={refreshing ? "true" : undefined}
+      >
+        <div className="resource-notice-copy">
+          <div className="resource-notice-title">
+            <strong>{RESOURCE_LABELS[key]}</strong>
+            {stale ? <span className="resource-stale-badge">Stale</span> : null}
+            {showRefreshing ? (
+              <span className="resource-refreshing-label">Refreshing…</span>
+            ) : null}
+          </div>
+          {noDataFailure ? (
+            <span>{error?.summary} No data is available.</span>
+          ) : stale ? (
+            <span>
+              Showing the last successful data
+              {resource.lastSuccessAt ? (
+                <>
+                  {" "}from <RelativeTime value={resource.lastSuccessAt} />
+                </>
+              ) : null}
+              .
+            </span>
+          ) : (
+            <span>Fetching the latest data while current content remains visible.</span>
+          )}
+          {error?.technicalDetails ? (
+            <details>
+              <summary>Technical details</summary>
+              <code>{error.technicalDetails}</code>
+            </details>
+          ) : null}
+        </div>
+        {stale || noDataFailure ? (
+          <button
+            type="button"
+            className="secondary"
+            disabled={refreshing}
+            aria-label={`Retry ${RESOURCE_LABELS[key]}`}
+            onClick={() => onRetry(key)}
+          >
+            Retry
+          </button>
+        ) : null}
+      </section>,
+    ];
+  });
+
+  return notices.length > 0 ? <>{notices}</> : null;
+}
+
+const WORKER_CONNECTIVITY_LABELS: Record<WorkerConnectivity, string> = {
+  healthy: "Healthy",
+  stale: "Stale",
+  disconnected: "Disconnected",
+  stopped: "Stopped",
+};
+
+function ShellHealthIndicator({
+  resources,
+  visibleKeys,
+  coreKey,
+}: {
+  resources: DashboardResourceEnvelopes;
+  visibleKeys: DashboardResourceKey[];
+  coreKey: DashboardResourceKey;
+}) {
+  const heartbeat = resources.overview.data?.worker_heartbeat ?? null;
+  const worker = resources.worker.data ?? {
+    state: "stopped" as const,
+    started_at: null,
+    last_error: null,
+  };
+  const [now, setNow] = useState(() => Date.now());
+  const lastBeatAt = heartbeat?.last_beat_at ?? null;
+
+  useEffect(() => {
+    const currentTime = Date.now();
+    setNow(currentTime);
+    if (worker.state === "stopped" || lastBeatAt === null) return;
+    const beatMs = Date.parse(lastBeatAt);
+    if (!Number.isFinite(beatMs)) return;
+    const timers = [beatMs + 6_001, beatMs + 30_001]
+      .filter((boundary) => boundary > currentTime)
+      .map((boundary) =>
+        window.setTimeout(
+          () => setNow(Date.now()),
+          Math.max(0, boundary - Date.now()),
+        ),
+      );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [lastBeatAt, worker.state]);
+
+  const connectivity = workerConnectivity(worker.state, lastBeatAt, now);
+  const visibleResources = visibleKeys.map(
+    (key) => resources[key] as DashboardResourceEnvelope<unknown>,
+  );
+  const errorKeys = visibleKeys.filter(
+    (key) => resources[key].status === "error",
+  );
+  const staleKeys = visibleKeys.filter((key) =>
+    resourceIsStale(resources[key] as DashboardResourceEnvelope<unknown>),
+  );
+  const hasError = errorKeys.length > 0;
+  const hasStale = staleKeys.length > 0;
+  const hasRefreshing = visibleResources.some(
+    (resource) =>
+      resource.status === "loading" || resource.status === "refreshing",
+  );
+  const state =
+    connectivity === "disconnected"
+      ? "disconnected"
+      : hasError
+        ? "error"
+        : connectivity === "stale" || hasStale
+          ? "stale"
+          : hasRefreshing
+            ? "refreshing"
+            : connectivity === "stopped"
+              ? "stopped"
+              : "healthy";
+  const label = state.charAt(0).toUpperCase() + state.slice(1);
+  const coreResource = resources[coreKey] as DashboardResourceEnvelope<unknown>;
+
+  return (
+    <div className={`shell-health shell-health-${state}`} data-testid="shell-health">
+      <span className={`shell-health-dot ${state}`} aria-hidden="true" />
+      <div className="shell-health-copy">
+        <strong>{label}</strong>
+        <span>
+          Worker {WORKER_CONNECTIVITY_LABELS[connectivity]}
+          {lastBeatAt ? (
+            <>
+              {" "}· heartbeat <RelativeTime value={lastBeatAt} />
+            </>
+          ) : (
+            " · no heartbeat received"
+          )}
+          {errorKeys.length > 0
+            ? ` · ${errorKeys.map((key) => RESOURCE_LABELS[key]).join(", ")} unavailable`
+            : staleKeys.length > 0
+              ? ` · ${staleKeys.map((key) => RESOURCE_LABELS[key]).join(", ")} stale`
+              : null}
+          {coreResource.lastSuccessAt ? (
+            <>
+              {" "}· {RESOURCE_LABELS[coreKey]} refreshed{" "}
+              <RelativeTime value={coreResource.lastSuccessAt} />
+            </>
+          ) : (
+            ` · ${RESOURCE_LABELS[coreKey]} never refreshed`
+          )}
+        </span>
+      </div>
+    </div>
   );
 }
 
