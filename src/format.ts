@@ -92,7 +92,11 @@ export function formatTokens(count: number) {
   if (count < 1_000) return String(count);
   if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
   if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
-  return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count < 1_000_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count < 1_000_000_000_000) {
+    return `${(count / 1_000_000_000).toFixed(1)}B`;
+  }
+  return `${(count / 1_000_000_000_000).toFixed(1)}T`;
 }
 
 const PRIORITY_LABELS = ["None", "Urgent", "High", "Medium", "Low"];
