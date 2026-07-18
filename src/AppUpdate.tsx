@@ -526,7 +526,7 @@ function UpdateIcon() {
   return (
     <svg
       className="update-button-icon"
-      viewBox="0 0 24 24"
+      viewBox="-1.333333 -1.333333 26.666666 26.666666"
       fill="none"
       stroke="currentColor"
       strokeWidth="2"

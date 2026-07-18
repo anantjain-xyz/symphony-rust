@@ -9,7 +9,6 @@
   min-height: 18px;
   overflow: hidden;
   padding: 0;
-  position: relative;
   transition:
     background 120ms ease,
     border-color 120ms ease,
@@ -52,16 +51,9 @@
 
 .update-button-icon {
   display: block;
-  flex: 0 0 9px;
-  height: 9px;
-  width: 9px;
-}
-
-.update-button.available:not(:hover):not(:focus-visible) .update-button-icon {
-  left: 50%;
-  position: absolute;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  flex: 0 0 10px;
+  height: 10px;
+  width: 10px;
 }
 
 .update-button-label {
