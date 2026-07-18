@@ -43,6 +43,23 @@ export type EventMatchStarts = {
 export type PrepareInstrumentation = {
   parsedPayload?: () => void;
   parsedMarkdown?: () => void;
+  builtRevisionKey?: () => void;
+};
+
+type PreparedEventCacheEntry = {
+  kind: string;
+  payload: string;
+  createdAt: string;
+  model: PreparedEvent;
+};
+
+export type PreparedEventCache = Map<number, PreparedEventCacheEntry>;
+
+type EventMatchSpan = {
+  eventIndex: number;
+  section: EventMatch["section"];
+  start: number;
+  count: number;
 };
 
 export function eventRevisionKey(event: AgentEventRow) {
@@ -72,6 +89,7 @@ export function prepareEvent(
     summary: markdownSegments(summaryBlocks).map((text) => text.toLowerCase()),
     payload: pretty.toLowerCase(),
   };
+  instrumentation?.builtRevisionKey?.();
   return {
     event,
     key: eventRevisionKey(event),
@@ -92,26 +110,36 @@ export function prepareEvent(
 
 export function prepareEvents(
   events: AgentEventRow[],
-  cache: Map<string, PreparedEvent>,
+  cache: PreparedEventCache,
   instrumentation?: PrepareInstrumentation,
 ) {
   const seenIds = new Set<number>();
-  const activeKeys = new Set<string>();
   const prepared: PreparedEvent[] = [];
   for (const event of events) {
     if (event.kind === "humanized" || seenIds.has(event.id)) continue;
     seenIds.add(event.id);
-    const key = eventRevisionKey(event);
-    activeKeys.add(key);
-    let model = cache.get(key);
-    if (!model) {
+    const cached = cache.get(event.id);
+    const unchanged =
+      cached &&
+      cached.kind === event.kind &&
+      cached.payload === event.payload &&
+      cached.createdAt === event.created_at;
+    let model: PreparedEvent;
+    if (unchanged) {
+      model = cached.model;
+    } else {
       model = prepareEvent(event, instrumentation);
-      cache.set(key, model);
+      cache.set(event.id, {
+        kind: event.kind,
+        payload: event.payload,
+        createdAt: event.created_at,
+        model,
+      });
     }
     prepared.push(model);
   }
-  for (const key of cache.keys()) {
-    if (!activeKeys.has(key)) cache.delete(key);
+  for (const id of cache.keys()) {
+    if (!seenIds.has(id)) cache.delete(id);
   }
   return prepared;
 }
@@ -128,36 +156,62 @@ function countNormalizedMatches(text: string, needle: string) {
 
 export function searchPreparedEvents(events: PreparedEvent[], query: string) {
   const needle = query.toLowerCase();
-  const matches: EventMatch[] = [];
+  const matchSpans: EventMatchSpan[] = [];
   const starts = new Map<string, EventMatchStarts>();
-  if (!needle) return { needle, matches, starts };
+  let totalMatches = 0;
+
+  const matchAt = (matchIndex: number): EventMatch | null => {
+    if (matchIndex < 0 || matchIndex >= totalMatches) return null;
+    let low = 0;
+    let high = matchSpans.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const span = matchSpans[middle];
+      if (matchIndex < span.start) high = middle - 1;
+      else if (matchIndex >= span.start + span.count) low = middle + 1;
+      else {
+        return {
+          eventIndex: span.eventIndex,
+          section: span.section,
+          localIndex: matchIndex - span.start,
+        };
+      }
+    }
+    return null;
+  };
+
+  if (!needle) return { needle, totalMatches, matchSpans, matchAt, starts };
+
+  const addSpan = (
+    eventIndex: number,
+    section: EventMatch["section"],
+    count: number,
+  ) => {
+    if (count === 0) return;
+    matchSpans.push({ eventIndex, section, start: totalMatches, count });
+    totalMatches += count;
+  };
 
   events.forEach((event, eventIndex) => {
     if (!event.normalizedSearchText.includes(needle)) return;
+    const eventStart = totalMatches;
     const eventStarts = {
-      label: matches.length,
+      label: totalMatches,
       summary: 0,
       payload: 0,
     };
     const labelMatches = countNormalizedMatches(event.normalizedSections.label, needle);
-    for (let localIndex = 0; localIndex < labelMatches; localIndex += 1) {
-      matches.push({ eventIndex, section: "label", localIndex });
-    }
-    eventStarts.summary = matches.length;
-    let summaryLocalIndex = 0;
+    addSpan(eventIndex, "label", labelMatches);
+    eventStarts.summary = totalMatches;
+    let summaryMatches = 0;
     for (const segment of event.normalizedSections.summary) {
-      const count = countNormalizedMatches(segment, needle);
-      for (let segmentIndex = 0; segmentIndex < count; segmentIndex += 1) {
-        matches.push({ eventIndex, section: "summary", localIndex: summaryLocalIndex });
-        summaryLocalIndex += 1;
-      }
+      summaryMatches += countNormalizedMatches(segment, needle);
     }
-    eventStarts.payload = matches.length;
+    addSpan(eventIndex, "summary", summaryMatches);
+    eventStarts.payload = totalMatches;
     const payloadMatches = countNormalizedMatches(event.normalizedSections.payload, needle);
-    for (let localIndex = 0; localIndex < payloadMatches; localIndex += 1) {
-      matches.push({ eventIndex, section: "payload", localIndex });
-    }
-    starts.set(event.key, eventStarts);
+    addSpan(eventIndex, "payload", payloadMatches);
+    if (totalMatches > eventStart) starts.set(event.key, eventStarts);
   });
-  return { needle, matches, starts };
+  return { needle, totalMatches, matchSpans, matchAt, starts };
 }

@@ -16,6 +16,7 @@ import {
   prepareEvents,
   searchPreparedEvents,
   type EventMatchStarts,
+  type PreparedEventCache,
   type PreparedEvent,
 } from "./eventStreamModel";
 
@@ -118,7 +119,7 @@ export function EventStream({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const preparedCacheRef = useRef(new Map<string, PreparedEvent>());
+  const preparedCacheRef = useRef<PreparedEventCache>(new Map());
   const shortcutHandlerRef = useRef<(event: KeyboardEvent) => void>(() => undefined);
   const readingMatchRef = useRef(false);
   const lastCenteredMatchRef = useRef("");
@@ -139,8 +140,12 @@ export function EventStream({
     () => searchPreparedEvents(prepared, deferredQuery),
     [prepared, deferredQuery],
   );
-  const totalMatches = search.matches.length;
-  const activeMatch = totalMatches > 0 ? search.matches[Math.min(current, totalMatches - 1)] : null;
+  const totalMatches = search.totalMatches;
+  const activeMatchIndex = Math.min(current, totalMatches - 1);
+  const activeMatch = useMemo(
+    () => search.matchAt(activeMatchIndex),
+    [activeMatchIndex, search],
+  );
 
   const virtualizer = useVirtualizer({
     count: prepared.length,
@@ -239,14 +244,21 @@ export function EventStream({
       readingMatchRef.current = true;
       setFollow(false);
       if (totalMatches === 1) {
-        const only = search.matches[0];
+        const only = search.matchAt(0);
+        if (!only) return;
+        const model = prepared[only.eventIndex];
+        if (only.section === "payload" && model) {
+          setExpandedKeys((keys) => (keys.has(model.key) ? keys : new Set(keys).add(model.key)));
+        }
         virtualizer.scrollToIndex(only.eventIndex, { align: "center" });
-        requestAnimationFrame(() => centerExactMatch(containerRef.current, 0));
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => centerExactMatch(containerRef.current, 0)),
+        );
         return;
       }
       setCurrent((previous) => (previous + direction + totalMatches) % totalMatches);
     },
-    [search.matches, totalMatches, virtualizer],
+    [prepared, search, totalMatches, virtualizer],
   );
 
   shortcutHandlerRef.current = (keyboardEvent) => {

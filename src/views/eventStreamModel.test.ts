@@ -5,7 +5,6 @@ import {
   prepareEvent,
   prepareEvents,
   searchPreparedEvents,
-  type PreparedEvent,
 } from "./eventStreamModel";
 
 function event(id: number, kind: string, payload: string): AgentEventRow {
@@ -27,8 +26,9 @@ describe("prepared event model", () => {
   it("parses each stable revision once, reuses cloned rows, deduplicates IDs, and prunes stale cache entries", () => {
     const parsedPayload = vi.fn();
     const parsedMarkdown = vi.fn();
-    const instrumentation = { parsedPayload, parsedMarkdown };
-    const cache = new Map<string, PreparedEvent>();
+    const builtRevisionKey = vi.fn();
+    const instrumentation = { parsedPayload, parsedMarkdown, builtRevisionKey };
+    const cache = new Map();
     const firstRows = [
       event(1, "status", '{"message":"first"}'),
       event(2, "status", '{"message":"second"}'),
@@ -43,6 +43,7 @@ describe("prepared event model", () => {
     expect(replacement[1]).toBe(first[1]);
     expect(parsedPayload).toHaveBeenCalledTimes(2);
     expect(parsedMarkdown).toHaveBeenCalledTimes(2);
+    expect(builtRevisionKey).toHaveBeenCalledTimes(2);
 
     const appended = prepareEvents([...firstRows, event(4, "status", "malformed {")], cache, instrumentation);
     expect(appended).toHaveLength(3);
@@ -50,13 +51,14 @@ describe("prepared event model", () => {
     expect(appended[2].prettyPayload).toBe("malformed {");
     expect(parsedPayload).toHaveBeenCalledTimes(3);
     expect(parsedMarkdown).toHaveBeenCalledTimes(3);
+    expect(builtRevisionKey).toHaveBeenCalledTimes(3);
 
     prepareEvents([firstRows[1]], cache, instrumentation);
     expect(cache.size).toBe(1);
   });
 
   it("returns every match across label, parsed Markdown, and payload in document order", () => {
-    const cache = new Map<string, PreparedEvent>();
+    const cache = new Map();
     const prepared = prepareEvents(
       [
         event(1, "status", '{"message":"needle first needle"}'),
@@ -66,7 +68,8 @@ describe("prepared event model", () => {
     );
     const result = searchPreparedEvents(prepared, "NeEdLe");
 
-    expect(result.matches).toEqual([
+    expect(result.totalMatches).toBe(8);
+    expect(Array.from({ length: result.totalMatches }, (_, index) => result.matchAt(index))).toEqual([
       { eventIndex: 0, section: "summary", localIndex: 0 },
       { eventIndex: 0, section: "summary", localIndex: 1 },
       { eventIndex: 0, section: "payload", localIndex: 0 },
@@ -76,17 +79,34 @@ describe("prepared event model", () => {
       { eventIndex: 1, section: "payload", localIndex: 0 },
       { eventIndex: 1, section: "payload", localIndex: 1 },
     ]);
-    expect(searchPreparedEvents(prepared, "missing").matches).toEqual([]);
-    expect(searchPreparedEvents(prepared, "NeedleError").matches).toHaveLength(2);
+    expect(result.matchSpans).toHaveLength(4);
+    expect(searchPreparedEvents(prepared, "missing").totalMatches).toBe(0);
+    expect(searchPreparedEvents(prepared, "NeedleError").totalMatches).toBe(2);
   });
 
   it("uses the same locale-independent case folding as rendered highlights", () => {
     const prepared = prepareEvents(
       [event(1, "status", '{"message":"Istanbul"}')],
-      new Map<string, PreparedEvent>(),
+      new Map(),
     );
 
-    expect(searchPreparedEvents(prepared, "I").matches).toHaveLength(2);
+    expect(searchPreparedEvents(prepared, "I").totalMatches).toBe(2);
+  });
+
+  it("stores compact section spans for high-frequency searches", () => {
+    const prepared = prepareEvents(
+      [event(1, "status", JSON.stringify({ message: "x ".repeat(5_000) }))],
+      new Map(),
+    );
+    const result = searchPreparedEvents(prepared, " ");
+
+    expect(result.totalMatches).toBeGreaterThan(5_000);
+    expect(result.matchSpans.length).toBeLessThanOrEqual(2);
+    expect(result.matchAt(result.totalMatches - 1)).toEqual({
+      eventIndex: 0,
+      section: "payload",
+      localIndex: expect.any(Number),
+    });
   });
 
   it("provides a production-like 5,000-event fixture", () => {

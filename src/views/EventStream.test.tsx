@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEventRow } from "../bindings";
 import { createEventStressFixture } from "../preview/eventStressFixture";
@@ -147,5 +147,26 @@ describe("EventStream virtualization", () => {
     fireEvent.change(screen.getByLabelText("Search run log"), { target: { value: "only-once" } });
     expect(await screen.findByLabelText("1 search matches")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Next match"));
+  });
+
+  it("reopens a collapsed payload before navigating its only match", async () => {
+    const payload = JSON.stringify({ message: "ordinary", detail: "payload-only-match" });
+    const { container } = render(
+      <EventStream events={[{ ...event(1), payload }]} live={false} />,
+    );
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    fireEvent.change(screen.getByLabelText("Search run log"), {
+      target: { value: "payload-only-match" },
+    });
+
+    expect(await screen.findByLabelText("1 search matches")).toBeTruthy();
+    const details = container.querySelector("details")!;
+    await waitFor(() => expect(details.open).toBe(true));
+    details.open = false;
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() => expect(details.open).toBe(false));
+
+    fireEvent.click(screen.getByLabelText("Next match"));
+    await waitFor(() => expect(details.open).toBe(true));
   });
 });
