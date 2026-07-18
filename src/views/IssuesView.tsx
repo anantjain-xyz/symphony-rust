@@ -1,21 +1,17 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Suspense, useState } from "react";
+import { Suspense, useState, useTransition } from "react";
 import type { IssueRow } from "../bindings";
-import {
-  ChunkErrorBoundary,
-  ViewLoading,
-  createLazyAttempts,
-} from "../ChunkBoundary";
+import { ChunkErrorBoundary, createLazyAttempts } from "../ChunkBoundary";
 import { priorityLabel, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import "./IssuesView.css";
 
 type IssueViewMode = "list" | "dependencies";
 
-let dependencyGraphPromise: Promise<typeof import("./DependencyGraphView")> | null = null;
-export function loadDependencyGraphView() {
+let dependencyGraphPromise: Promise<typeof import("./DependencyGraphPanel")> | null = null;
+export function loadDependencyGraphPanel() {
   if (!dependencyGraphPromise) {
-    dependencyGraphPromise = import("./DependencyGraphView").catch((error) => {
+    dependencyGraphPromise = import("./DependencyGraphPanel").catch((error) => {
       dependencyGraphPromise = null;
       throw error;
     });
@@ -23,10 +19,10 @@ export function loadDependencyGraphView() {
   return dependencyGraphPromise;
 }
 
-const DependencyGraphAttempts = createLazyAttempts(loadDependencyGraphView);
+const DependencyGraphAttempts = createLazyAttempts(loadDependencyGraphPanel);
 
 function preloadDependencyGraph() {
-  void loadDependencyGraphView().catch(() => undefined);
+  void loadDependencyGraphPanel().catch(() => undefined);
 }
 
 function IssuesView({
@@ -38,11 +34,23 @@ function IssuesView({
   linearWorkspace: string | null;
   onOpenSettings: () => void;
 }) {
-  const [mode, setMode] = useState<IssueViewMode>("list");
+  const [selectedMode, setSelectedMode] = useState<IssueViewMode>("list");
+  const [activeMode, setActiveMode] = useState<IssueViewMode>("list");
+  const [isModePending, startModeTransition] = useTransition();
   const [dependencyAttempt, setDependencyAttempt] = useState(() =>
     DependencyGraphAttempts.latest(),
   );
-  const DependencyGraph = DependencyGraphAttempts.get(dependencyAttempt);
+  const DependencyGraphPanel = DependencyGraphAttempts.get(dependencyAttempt);
+
+  const selectMode = (nextMode: IssueViewMode) => {
+    if (nextMode === selectedMode) return;
+    setSelectedMode(nextMode);
+    if (nextMode === "dependencies") {
+      startModeTransition(() => setActiveMode(nextMode));
+    } else {
+      setActiveMode(nextMode);
+    }
+  };
 
   return (
     <>
@@ -57,20 +65,24 @@ function IssuesView({
               key={item}
               type="button"
               role="tab"
-              aria-selected={mode === item}
+              aria-selected={selectedMode === item}
               aria-controls="issues-panel"
-              className={mode === item ? "active" : undefined}
+              className={selectedMode === item ? "active" : undefined}
               onPointerEnter={item === "dependencies" ? preloadDependencyGraph : undefined}
               onFocus={item === "dependencies" ? preloadDependencyGraph : undefined}
-              onClick={() => setMode(item)}
+              onClick={() => selectMode(item)}
             >
               {item === "list" ? "List" : "Dependencies"}
             </button>
           ))}
         </div>
       </header>
-      <section id="issues-panel" role="tabpanel">
-        <Panel title={mode === "list" ? "Watched issues" : "Dependency graph"}>
+      <section
+        id="issues-panel"
+        role="tabpanel"
+        aria-busy={selectedMode === "dependencies" && isModePending}
+      >
+        <Panel title={selectedMode === "list" ? "Watched issues" : "Dependency graph"}>
           {issues.length === 0 ? (
             <Empty
               title="No issues yet"
@@ -78,14 +90,16 @@ function IssuesView({
               actionLabel="Open settings"
               onAction={onOpenSettings}
             />
-          ) : mode === "dependencies" ? (
+          ) : selectedMode === "dependencies" && activeMode !== "dependencies" ? (
+            <DependencyGraphLoading />
+          ) : selectedMode === "dependencies" && activeMode === "dependencies" ? (
             <ChunkErrorBoundary
               key={dependencyAttempt}
               view="Dependency graph"
               onRetry={() => setDependencyAttempt(DependencyGraphAttempts.add())}
             >
-              <Suspense fallback={<ViewLoading view="dependency graph" />}>
-                <DependencyGraph issues={issues} />
+              <Suspense fallback={<DependencyGraphLoading />}>
+                <DependencyGraphPanel issues={issues} />
               </Suspense>
             </ChunkErrorBoundary>
           ) : (
@@ -94,6 +108,22 @@ function IssuesView({
         </Panel>
       </section>
     </>
+  );
+}
+
+function DependencyGraphLoading() {
+  return (
+    <div className="view-loading" aria-busy="true" aria-live="polite">
+      <div className="view-loading-header">
+        <span />
+        <span />
+      </div>
+      <div className="view-loading-panels">
+        <span />
+        <span />
+      </div>
+      <span className="screen-reader-only">Preparing dependency graph…</span>
+    </div>
   );
 }
 

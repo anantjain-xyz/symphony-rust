@@ -16,7 +16,7 @@ export const BUDGETS = {
 export const LAZY_ENTRIES = [
   "src/views/RunsView.tsx",
   "src/views/IssuesView.tsx",
-  "src/views/DependencyGraphView.tsx",
+  "src/views/DependencyGraphPanel.tsx",
   "src/views/RetroView.tsx",
   "src/views/SettingsView.tsx",
 ];

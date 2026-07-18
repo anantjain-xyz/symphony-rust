@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { IssueRow } from "../bindings";
 import { statusSlug } from "../format";
-import "./DependencyGraphView.css";
+import "./DependencyGraphPanel.css";
 
 const DEPENDENCY_NODE_WIDTH = 216;
 const DEPENDENCY_NODE_HEIGHT = 86;
@@ -9,19 +9,19 @@ const DEPENDENCY_LAYER_GAP = 92;
 const DEPENDENCY_ROW_GAP = 18;
 const DEPENDENCY_PADDING = 24;
 
-type DependencyGraph = {
-  nodes: DependencyNode[];
-  edges: DependencyEdge[];
+export type GraphModel = Readonly<{
+  nodes: readonly DependencyNode[];
+  edges: readonly DependencyEdge[];
   width: number;
   height: number;
   issueCount: number;
   blockedIssueCount: number;
   externalBlockerCount: number;
-};
+}>;
 
-type DependencyNode = {
+type DependencyNode = Readonly<{
   identifier: string;
-  issue: IssueRow | null;
+  issue: Readonly<IssueRow> | null;
   external: boolean;
   layer: number;
   row: number;
@@ -29,15 +29,18 @@ type DependencyNode = {
   y: number;
   blocksCount: number;
   blockedByCount: number;
-};
+}>;
 
-type DependencyEdge = {
+type DependencyEdge = Readonly<{
   from: string;
   to: string;
   external: boolean;
-};
+}>;
 
-function DependencyGraphView({ graph }: { graph: DependencyGraph }) {
+const graphModels = new WeakMap<readonly IssueRow[], GraphModel>();
+let graphMeasureSequence = 0;
+
+function DependencyGraphView({ graph }: { graph: GraphModel }) {
   if (graph.edges.length === 0) {
     return (
       <Empty
@@ -175,7 +178,7 @@ function DependencyNodeCard({ node }: { node: DependencyNode }) {
   );
 }
 
-function buildDependencyGraph(issues: IssueRow[]): DependencyGraph {
+export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
   const issueByIdentifier = new Map<string, IssueRow>();
   const order = new Map<string, number>();
   const blockersByIssue = new Map<string, string[]>();
@@ -191,7 +194,7 @@ function buildDependencyGraph(issues: IssueRow[]): DependencyGraph {
 
   for (const issue of issues) {
     const blockers = uniqueIdentifiers(parseIssueStringList(issue.blockers)).filter(
-      (identifier) => identifier !== issue.identifier,
+      (identifier) => isIssueIdentifier(identifier) && identifier !== issue.identifier,
     );
     blockersByIssue.set(issue.identifier, blockers);
     for (const blocker of blockers) {
@@ -279,15 +282,23 @@ function buildDependencyGraph(issues: IssueRow[]): DependencyGraph {
     ...Array.from(layers.values(), (nodes) => Math.max(1, nodes.length)),
   );
 
-  return {
-    nodes: positioned.sort((a, b) => {
-      if (a.layer !== b.layer) return a.layer - b.layer;
-      return a.row - b.row;
-    }),
-    edges: edges.sort(
-      (a, b) =>
-        (order.get(a.from) ?? 0) - (order.get(b.from) ?? 0) ||
-        (order.get(a.to) ?? 0) - (order.get(b.to) ?? 0),
+  return Object.freeze({
+    nodes: Object.freeze(
+      positioned
+        .sort((a, b) => {
+          if (a.layer !== b.layer) return a.layer - b.layer;
+          return a.row - b.row;
+        })
+        .map((node) => Object.freeze(node)),
+    ),
+    edges: Object.freeze(
+      edges
+        .sort(
+          (a, b) =>
+            (order.get(a.from) ?? 0) - (order.get(b.from) ?? 0) ||
+            (order.get(a.to) ?? 0) - (order.get(b.to) ?? 0),
+        )
+        .map((edge) => Object.freeze(edge)),
     ),
     width:
       DEPENDENCY_PADDING * 2 +
@@ -301,7 +312,7 @@ function buildDependencyGraph(issues: IssueRow[]): DependencyGraph {
     blockedIssueCount: issues.filter((issue) => (blockedByCount.get(issue.identifier) ?? 0) > 0)
       .length,
     externalBlockerCount: positioned.filter((node) => node.external).length,
-  };
+  });
 }
 
 function parseIssueStringList(raw: string): string[] {
@@ -319,6 +330,49 @@ function parseIssueStringList(raw: string): string[] {
 
 function uniqueIdentifiers(identifiers: string[]): string[] {
   return Array.from(new Set(identifiers));
+}
+
+function isIssueIdentifier(identifier: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(identifier);
+}
+
+export function getDependencyGraphModel(
+  issues: readonly IssueRow[],
+  builder: (snapshot: readonly IssueRow[]) => GraphModel = buildDependencyGraph,
+): GraphModel {
+  const cached = graphModels.get(issues);
+  if (cached) return cached;
+
+  const graph = measureGraphBuild(issues, builder);
+  graphModels.set(issues, graph);
+  return graph;
+}
+
+function measureGraphBuild(
+  issues: readonly IssueRow[],
+  builder: (snapshot: readonly IssueRow[]) => GraphModel,
+): GraphModel {
+  if (!import.meta.env.DEV) return builder(issues);
+
+  const sequence = graphMeasureSequence++;
+  const start = `dependency-graph-build-${sequence}-start`;
+  const end = `dependency-graph-build-${sequence}-end`;
+  const measure = `dependency-graph-build-${sequence}`;
+  performance.mark(start);
+  try {
+    return builder(issues);
+  } finally {
+    performance.mark(end);
+    const entry = performance.measure(measure, start, end);
+    performance.clearMarks(start);
+    performance.clearMarks(end);
+    performance.clearMeasures(measure);
+    if (entry.duration > 50) {
+      console.warn(
+        `Dependency graph build took ${entry.duration.toFixed(1)} ms for ${issues.length} issues.`,
+      );
+    }
+  }
 }
 
 function Empty({
@@ -352,7 +406,11 @@ function Badge({ status }: { status: string }) {
 }
 
 
-export default function DependencyGraphScreen({ issues }: { issues: IssueRow[] }) {
-  const graph = useMemo(() => buildDependencyGraph(issues), [issues]);
+export default function DependencyGraphPanel({
+  issues,
+}: {
+  issues: readonly IssueRow[];
+}) {
+  const graph = useMemo(() => getDependencyGraphModel(issues), [issues]);
   return <DependencyGraphView graph={graph} />;
 }
