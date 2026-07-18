@@ -52,3 +52,37 @@ test("shared table primitives stay in the eager stylesheet", async () => {
     assert.doesNotMatch(retroCss, rule, `${selector} must not wait for Retro`);
   }
 });
+
+test("shared shell and form primitives stay in the eager stylesheet", async () => {
+  const eagerCss = await readFile(new URL("../src/App.css", import.meta.url), "utf8");
+  const updaterCss = await readFile(
+    new URL("../src/AppUpdate.css", import.meta.url),
+    "utf8",
+  );
+  const settingsCss = await readFile(
+    new URL("../src/views/SettingsView.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(eagerCss, /^small \{/m, "small text must load before the updater");
+  assert.doesNotMatch(updaterCss, /^small \{/m, "small text must not wait for updater");
+
+  for (const selector of [
+    "input,\\nselect,\\ntextarea",
+    "input::placeholder,\\ntextarea::placeholder",
+    "input:disabled,\\nselect:disabled,\\ntextarea:disabled",
+  ]) {
+    const rule = new RegExp(`^${selector} \\{`, "m");
+    assert.match(eagerCss, rule, `${selector} must load before Settings`);
+    assert.doesNotMatch(settingsCss, rule, `${selector} must not wait for Settings`);
+  }
+
+  for (const selector of [
+    "\\.worker-toggle\\.confirm,\\n\\.worker-toggle\\.confirm:hover:not\\(:disabled\\)",
+    "\\.worker-toggle\\.confirm \\.status-dot",
+  ]) {
+    const rule = new RegExp(`^${selector} \\{`, "m");
+    assert.match(eagerCss, rule, `${selector} must load with the shell`);
+    assert.doesNotMatch(settingsCss, rule, `${selector} must not wait for Settings`);
+  }
+});

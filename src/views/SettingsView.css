@@ -391,18 +391,6 @@
   font-size: 11px;
 }
 
-.worker-toggle.confirm,
-.worker-toggle.confirm:hover:not(:disabled) {
-  background: var(--destructive);
-  border-color: var(--destructive-foreground);
-  color: var(--destructive-foreground);
-}
-
-.worker-toggle.confirm .status-dot {
-  background: currentColor;
-  box-shadow: none;
-}
-
 label,
 .field-group {
   color: var(--muted-foreground);
@@ -410,30 +398,6 @@ label,
   font-size: 13px;
   font-weight: 500;
   gap: 6px;
-}
-
-input,
-select,
-textarea {
-  background: var(--background);
-  border: 1px solid var(--input);
-  border-radius: 6px;
-  color: var(--foreground);
-  min-height: 36px;
-  padding: 8px 10px;
-  width: 100%;
-}
-
-input::placeholder,
-textarea::placeholder {
-  color: var(--muted-foreground);
-}
-
-input:disabled,
-select:disabled,
-textarea:disabled {
-  background: var(--muted);
-  color: var(--muted-foreground);
 }
 
 .repo-filter-select {
