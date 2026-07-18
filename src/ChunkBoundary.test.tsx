@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { lazy, Suspense, useState } from "react";
+import { Suspense, useState } from "react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ChunkErrorBoundary, ViewLoading } from "./ChunkBoundary";
+import {
+  ChunkErrorBoundary,
+  ViewLoading,
+  createLazyAttempts,
+} from "./ChunkBoundary";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -17,17 +21,15 @@ function deferred<T>() {
 }
 
 type ViewModule = { default: () => ReactNode };
-type ViewLoader = (() => Promise<ViewModule>) & {
-  loaded?: () => ViewModule | null;
-};
+type ViewLoader = () => Promise<ViewModule>;
 
 function createHarness(loader: ViewLoader) {
-  const attempts = [lazy(loader), lazy(loader)];
+  const attempts = createLazyAttempts(loader);
   return function Harness() {
     const [active, setActive] = useState(false);
     const [attempt, setAttempt] = useState(0);
-    const View =
-      loader.loaded?.()?.default ?? attempts[Math.min(attempt, attempts.length - 1)];
+    const [, setShellRefresh] = useState(0);
+    const View = attempts.get(attempt);
     const preload = () => void loader().catch(() => undefined);
     return (
       <main>
@@ -39,12 +41,15 @@ function createHarness(loader: ViewLoader) {
           >
             Runs
           </button>
+          <button onClick={() => setShellRefresh((value) => value + 1)}>
+            Refresh shell
+          </button>
         </nav>
         {active ? (
           <ChunkErrorBoundary
             key={attempt}
             view="Runs"
-            onRetry={() => setAttempt((current) => current + 1)}
+            onRetry={() => setAttempt(attempts.add())}
           >
             <Suspense fallback={<ViewLoading view="Runs" />}>
               <View />
@@ -88,7 +93,6 @@ describe("lazy view boundaries", () => {
     let loaded: ViewModule | null = null;
     const loader: ViewLoader = () =>
       (cached ??= importView().then((module) => (loaded = module)));
-    loader.loaded = () => loaded;
     const Harness = createHarness(loader);
     render(<Harness />);
     const button = screen.getByRole("button", { name: "Runs" });
@@ -103,20 +107,23 @@ describe("lazy view boundaries", () => {
     });
     fireEvent.click(button);
 
-    expect(screen.getByRole("heading", { name: "Runs" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
     expect(screen.queryByText("Loading Runs…")).toBeNull();
     expect(importView).toHaveBeenCalledTimes(1);
+    expect(loaded).not.toBeNull();
   });
 
-  it("contains a rejected chunk and retries without removing the shell", async () => {
+  it("contains repeated chunk failures and retries until a later import succeeds", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const first = deferred<ViewModule>();
-    const second = deferred<ViewModule>();
+    const imports = [
+      deferred<ViewModule>(),
+      deferred<ViewModule>(),
+      deferred<ViewModule>(),
+      deferred<ViewModule>(),
+    ];
     let cached: Promise<ViewModule> | null = null;
-    const importView = vi
-      .fn<() => Promise<ViewModule>>()
-      .mockImplementationOnce(() => first.promise)
-      .mockImplementationOnce(() => second.promise);
+    const importView = vi.fn<() => Promise<ViewModule>>();
+    imports.forEach(({ promise }) => importView.mockImplementationOnce(() => promise));
     const loader = () => {
       if (!cached) {
         cached = importView().catch((error) => {
@@ -130,20 +137,48 @@ describe("lazy view boundaries", () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "Runs" }));
 
+    for (let index = 0; index < 3; index += 1) {
+      await act(async () => {
+        imports[index].reject(new Error(`chunk unavailable ${index + 1}`));
+        await imports[index].promise.catch(() => undefined);
+      });
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "Unable to load Runs",
+      );
+      expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    }
     await act(async () => {
-      first.reject(new Error("chunk unavailable"));
-      await first.promise.catch(() => undefined);
-    });
-    expect((await screen.findByRole("alert")).textContent).toContain("Unable to load Runs");
-    expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await act(async () => {
-      second.resolve({ default: () => <h2>Runs</h2> });
-      await second.promise;
+      imports[3].resolve({ default: () => <h2>Runs</h2> });
+      await imports[3].promise;
     });
     expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
-    expect(importView).toHaveBeenCalledTimes(2);
+    expect(importView).toHaveBeenCalledTimes(4);
     consoleError.mockRestore();
+  });
+
+  it("keeps the loaded lazy component mounted across shell rerenders", async () => {
+    const pending = deferred<ViewModule>();
+    function StatefulRuns() {
+      const [count, setCount] = useState(0);
+      return (
+        <section>
+          <h2>Runs</h2>
+          <button onClick={() => setCount((value) => value + 1)}>Count {count}</button>
+        </section>
+      );
+    }
+    const Harness = createHarness(() => pending.promise);
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+    await act(async () => {
+      pending.resolve({ default: StatefulRuns });
+      await pending.promise;
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Count 0" }));
+    expect(screen.getByRole("button", { name: "Count 1" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh shell" }));
+    expect(screen.getByRole("button", { name: "Count 1" })).toBeTruthy();
   });
 });

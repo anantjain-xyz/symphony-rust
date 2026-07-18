@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { IssueRow } from "../bindings";
 import { statusSlug } from "../format";
 import "./DependencyGraphView.css";
@@ -352,5 +353,6 @@ function Badge({ status }: { status: string }) {
 
 
 export default function DependencyGraphScreen({ issues }: { issues: IssueRow[] }) {
-  return <DependencyGraphView graph={buildDependencyGraph(issues)} />;
+  const graph = useMemo(() => buildDependencyGraph(issues), [issues]);
+  return <DependencyGraphView graph={graph} />;
 }

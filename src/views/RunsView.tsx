@@ -15,6 +15,7 @@ import {
   highlightMatches,
 } from "../MarkdownText";
 import { AbsoluteTime, RelativeTime } from "../RelativeTime";
+import "./IconSelect.css";
 import "./RunsView.css";
 
 function SessionChips({ raw }: { raw: string | null }) {

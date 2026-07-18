@@ -1,7 +1,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { lazy, Suspense, useState } from "react";
+import { Suspense, useState } from "react";
 import type { IssueRow } from "../bindings";
-import { ChunkErrorBoundary, ViewLoading } from "../ChunkBoundary";
+import {
+  ChunkErrorBoundary,
+  ViewLoading,
+  createLazyAttempts,
+} from "../ChunkBoundary";
 import { priorityLabel, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import "./IssuesView.css";
@@ -19,10 +23,7 @@ export function loadDependencyGraphView() {
   return dependencyGraphPromise;
 }
 
-const DependencyGraphAttempts = [
-  lazy(loadDependencyGraphView),
-  lazy(loadDependencyGraphView),
-];
+const DependencyGraphAttempts = createLazyAttempts(loadDependencyGraphView);
 
 function preloadDependencyGraph() {
   void loadDependencyGraphView().catch(() => undefined);
@@ -39,8 +40,7 @@ function IssuesView({
 }) {
   const [mode, setMode] = useState<IssueViewMode>("list");
   const [dependencyAttempt, setDependencyAttempt] = useState(0);
-  const DependencyGraph =
-    DependencyGraphAttempts[Math.min(dependencyAttempt, DependencyGraphAttempts.length - 1)];
+  const DependencyGraph = DependencyGraphAttempts.get(dependencyAttempt);
 
   return (
     <>
@@ -80,7 +80,7 @@ function IssuesView({
             <ChunkErrorBoundary
               key={dependencyAttempt}
               view="Dependency graph"
-              onRetry={() => setDependencyAttempt((attempt) => attempt + 1)}
+              onRetry={() => setDependencyAttempt(DependencyGraphAttempts.add())}
             >
               <Suspense fallback={<ViewLoading view="dependency graph" />}>
                 <DependencyGraph issues={issues} />

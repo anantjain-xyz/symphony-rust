@@ -3,8 +3,25 @@ import test from "node:test";
 import {
   FORBIDDEN_EAGER_ENTRIES,
   LAZY_ENTRIES,
+  collectJavaScriptFiles,
+  collectStaticGraph,
   inspectBundle,
 } from "./check-bundle-budget.mjs";
+
+test("lazy payload accounting includes transitive static chunks but excludes eager files", () => {
+  const manifest = {
+    entry: { file: "assets/entry.js", imports: ["eager-shared"] },
+    "eager-shared": { file: "assets/eager-shared.js" },
+    lazy: { file: "assets/lazy.js", imports: ["eager-shared", "lazy-shared"] },
+    "lazy-shared": { file: "assets/lazy-shared.js" },
+  };
+  const eagerGraph = collectStaticGraph(manifest, "entry");
+  const lazyGraph = collectStaticGraph(manifest, "lazy");
+  assert.deepEqual(
+    [...collectJavaScriptFiles(manifest, lazyGraph, eagerGraph)].sort(),
+    ["assets/lazy-shared.js", "assets/lazy.js"],
+  );
+});
 
 test("Vite manifest isolates hidden views, preview, and updater modules", async () => {
   const { manifest, eagerGraph } = await inspectBundle();

@@ -1,5 +1,15 @@
-import { Component } from "react";
-import type { ReactNode } from "react";
+import { Component, lazy } from "react";
+import type { ComponentType, LazyExoticComponent, ReactNode } from "react";
+
+export function createLazyAttempts<Props extends object>(
+  loader: () => Promise<{ default: ComponentType<Props> }>,
+) {
+  const attempts: LazyExoticComponent<ComponentType<Props>>[] = [lazy(loader)];
+  return {
+    add: () => attempts.push(lazy(loader)) - 1,
+    get: (index: number) => attempts[index]!,
+  };
+}
 
 export function ViewLoading({ view }: { view: string }) {
   return (

@@ -3,22 +3,6 @@
   grid-template-columns: minmax(280px, 0.55fr) minmax(620px, 1.45fr);
 }
 
-.panel {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  min-width: 0;
-  overflow: hidden;
-}
-
-.panel h3 {
-  border-bottom: 1px solid var(--border);
-  font-size: 13px;
-  font-weight: 600;
-  margin: 0;
-  padding: 13px 15px;
-}
-
 .retro-report {
   display: grid;
   gap: 0;

@@ -24,6 +24,7 @@ import { SettingsValidationController } from "../settingsValidationController";
 import type { SettingsValidationState } from "../settingsValidationController";
 import { nullable } from "../format";
 import { reconcileSettingsDraft } from "../viewHelpers";
+import "./IconSelect.css";
 import "./SettingsView.css";
 
 const SETTINGS_FORM_ID = "settings-form";

@@ -39,6 +39,16 @@ export function collectStaticGraph(manifest, entryKey) {
   return visited;
 }
 
+export function collectJavaScriptFiles(manifest, graph, excludedGraph = new Set()) {
+  const files = new Set();
+  for (const key of graph) {
+    if (excludedGraph.has(key)) continue;
+    const file = manifest[key]?.file;
+    if (file?.endsWith(".js")) files.add(file);
+  }
+  return files;
+}
+
 async function compressedSize(relativePath) {
   const bytes = await readFile(resolve(DIST_DIR, relativePath));
   return { raw: bytes.byteLength, gzip: gzipSync(bytes).byteLength };
@@ -53,11 +63,10 @@ export async function inspectBundle() {
   const entryKey = Object.keys(manifest).find((key) => manifest[key].isEntry);
   if (!entryKey) throw new Error("Vite manifest has no eager entry");
   const eagerGraph = collectStaticGraph(manifest, entryKey);
-  const eagerFiles = new Set();
+  const eagerFiles = collectJavaScriptFiles(manifest, eagerGraph);
   const eagerCssFiles = new Set();
   for (const key of eagerGraph) {
     const chunk = manifest[key];
-    if (chunk.file?.endsWith(".js")) eagerFiles.add(chunk.file);
     for (const css of chunk.css ?? []) eagerCssFiles.add(css);
   }
 
@@ -76,7 +85,9 @@ export async function inspectBundle() {
       LAZY_ENTRIES.map(async (key) => {
         const chunk = manifest[key];
         if (!chunk?.isDynamicEntry) throw new Error(`${key} is not a dynamic entry`);
-        return [key, await compressedSize(chunk.file)];
+        const graph = collectStaticGraph(manifest, key);
+        const files = collectJavaScriptFiles(manifest, graph, eagerGraph);
+        return [key, { ...(await sumFiles(files)), files: [...files].sort() }];
       }),
     ),
   );

@@ -2,7 +2,6 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -10,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ComponentType, RefObject, SetStateAction } from "react";
+import type { RefObject, SetStateAction } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -77,7 +76,11 @@ import {
 import {
   SettingsValidationController,
 } from "./settingsValidationController";
-import { ChunkErrorBoundary, ViewLoading } from "./ChunkBoundary";
+import {
+  ChunkErrorBoundary,
+  ViewLoading,
+  createLazyAttempts,
+} from "./ChunkBoundary";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -86,11 +89,9 @@ type PollKey = "worker" | "retro" | "skillsInstall" | "workflowTransfer";
 
 function cachedImport<T>(importer: () => Promise<T>) {
   let promise: Promise<T> | null = null;
-  let loaded: T | null = null;
-  const load = () => {
+  return () => {
     if (!promise) {
       promise = importer()
-        .then((module) => (loaded = module))
         .catch((error) => {
           promise = null;
           throw error;
@@ -98,8 +99,6 @@ function cachedImport<T>(importer: () => Promise<T>) {
     }
     return promise;
   };
-  load.loaded = () => loaded;
-  return load;
 }
 
 const loadRunsView = cachedImport(() => import("./views/RunsView"));
@@ -107,12 +106,6 @@ const loadIssuesView = cachedImport(() => import("./views/IssuesView"));
 const loadRetroView = cachedImport(() => import("./views/RetroView"));
 const loadSettingsView = cachedImport(() => import("./views/SettingsView"));
 const loadPreviewRuntime = cachedImport(() => import("./preview/runtime"));
-
-function createLazyAttempts<Props extends object>(
-  loader: () => Promise<{ default: ComponentType<Props> }>,
-) {
-  return [lazy(loader), lazy(loader)];
-}
 
 const RunsViewAttempts = createLazyAttempts(loadRunsView);
 const IssuesViewAttempts = createLazyAttempts(loadIssuesView);
@@ -546,24 +539,23 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     typeof import("./AppUpdate")["AppUpdateFeature"] | null
   >(null);
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
-  const RunsView =
-    loadRunsView.loaded()?.default ??
-    RunsViewAttempts[Math.min(viewAttempts.runs, RunsViewAttempts.length - 1)];
-  const IssuesView =
-    loadIssuesView.loaded()?.default ??
-    IssuesViewAttempts[Math.min(viewAttempts.issues, IssuesViewAttempts.length - 1)];
-  const RetroView =
-    loadRetroView.loaded()?.default ??
-    RetroViewAttempts[Math.min(viewAttempts.retro, RetroViewAttempts.length - 1)];
-  const SettingsFeature =
-    loadSettingsView.loaded()?.default ??
-    SettingsViewAttempts[Math.min(viewAttempts.settings, SettingsViewAttempts.length - 1)];
-  const SettingsHeaderActions =
-    loadSettingsView.loaded()?.SettingsHeaderActions ??
-    SettingsHeaderAttempts[Math.min(viewAttempts.settings, SettingsHeaderAttempts.length - 1)];
+  const RunsView = RunsViewAttempts.get(viewAttempts.runs);
+  const IssuesView = IssuesViewAttempts.get(viewAttempts.issues);
+  const RetroView = RetroViewAttempts.get(viewAttempts.retro);
+  const SettingsFeature = SettingsViewAttempts.get(viewAttempts.settings);
+  const SettingsHeaderActions = SettingsHeaderAttempts.get(viewAttempts.settings);
 
   const retryView = (target: Exclude<View, "overview">) => {
-    setViewAttempts((current) => ({ ...current, [target]: current[target] + 1 }));
+    const nextAttempt =
+      target === "runs"
+        ? RunsViewAttempts.add()
+        : target === "issues"
+          ? IssuesViewAttempts.add()
+          : target === "retro"
+            ? RetroViewAttempts.add()
+            : SettingsViewAttempts.add();
+    if (target === "settings") SettingsHeaderAttempts.add();
+    setViewAttempts((current) => ({ ...current, [target]: nextAttempt }));
   };
 
   useEffect(() => {
