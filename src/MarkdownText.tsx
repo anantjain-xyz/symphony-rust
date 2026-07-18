@@ -2,7 +2,7 @@ import { Fragment, type CSSProperties, type ReactNode } from "react";
 
 type Alignment = "left" | "center" | "right" | undefined;
 
-type MarkdownBlock =
+export type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
   | { type: "code"; text: string; language: string | null }
   | {
@@ -29,7 +29,12 @@ export function countMatches(text: string, needle: string) {
 
 export function countMarkdownMatches(text: string, needle: string) {
   if (!needle) return 0;
-  return parseMarkdownBlocks(text).reduce((total, block) => {
+  return countPreparedMarkdownMatches(parseMarkdownBlocks(text), needle);
+}
+
+export function countPreparedMarkdownMatches(blocks: MarkdownBlock[], needle: string) {
+  if (!needle) return 0;
+  return blocks.reduce((total, block) => {
     if (block.type === "paragraph") {
       return (
         total +
@@ -86,16 +91,18 @@ export function highlightMatches(
 
 export function MarkdownText({
   text,
+  blocks: preparedBlocks,
   needle = "",
   firstIndex = 0,
   currentIndex = -1,
 }: {
-  text: string;
+  text?: string;
+  blocks?: MarkdownBlock[];
   needle?: string;
   firstIndex?: number;
   currentIndex?: number;
 }) {
-  const blocks = parseMarkdownBlocks(text);
+  const blocks = preparedBlocks ?? parseMarkdownBlocks(text ?? "");
   const matchIndex = { current: firstIndex };
   const renderText = (value: string) => {
     const rendered = highlightMatches(value, needle, matchIndex.current, currentIndex);
@@ -156,7 +163,7 @@ export function MarkdownText({
   );
 }
 
-function parseMarkdownBlocks(input: string): MarkdownBlock[] {
+export function parseMarkdownBlocks(input: string): MarkdownBlock[] {
   const lines = input.replace(/\r\n?/g, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
   let index = 0;

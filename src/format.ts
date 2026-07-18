@@ -138,6 +138,16 @@ export type EventSummary = {
   tone?: "error";
 };
 
+export type ParsedEventPayload = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export function parseEventPayload(payload: string): ParsedEventPayload | undefined {
+  try {
+    return JSON.parse(payload) as ParsedEventPayload;
+  } catch {
+    return undefined;
+  }
+}
+
 function isGenericToolLifecycle(summary: string) {
   return summary === "running" || /^exit (?:-?\d+|\?)$/.test(summary);
 }
@@ -149,16 +159,15 @@ function toolCallDetail(resultSummary: string | null, command: string | null) {
   return resultSummary === "running" ? command : `${command} (${resultSummary})`;
 }
 
-export function describeEvent(kind: string, payload: string): EventSummary {
-  let data: Record<string, unknown> | null = null;
-  try {
-    const parsed: unknown = JSON.parse(payload);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      data = parsed as Record<string, unknown>;
-    }
-  } catch {
-    data = null;
-  }
+export function describeEvent(
+  kind: string,
+  payload: string,
+  parsed: ParsedEventPayload | undefined = parseEventPayload(payload),
+): EventSummary {
+  const data =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   const text = (value: unknown) => (typeof value === "string" ? value : null);
   const count = (value: unknown) => (typeof value === "number" ? value : 0);
 
@@ -204,12 +213,11 @@ export function describeEvent(kind: string, payload: string): EventSummary {
   }
 }
 
-export function prettyPayload(value: string) {
-  try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return value;
-  }
+export function prettyPayload(
+  value: string,
+  parsed: ParsedEventPayload | undefined = parseEventPayload(value),
+) {
+  return parsed === undefined ? value : JSON.stringify(parsed, null, 2);
 }
 
 export function nullable(value: string) {
