@@ -19,7 +19,9 @@ export type RateLimitChanged = { type: "rate_limit_changed"; source: string };
 const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   rate_limit_state: ["overview"],
   token_usage: ["overview"],
-  worker_heartbeat: ["worker"],
+  // The heartbeat row is part of Overview. Refreshing only WorkerStatus here
+  // leaves the shell evaluating an old beat forever after the first load.
+  worker_heartbeat: ["overview"],
   // Runs and run detail join issue title/state, so issue row updates must also
   // invalidate those caches even when the Issues view remains hidden.
   issues: ["issues", "overview", "runs", "selectedRun"],

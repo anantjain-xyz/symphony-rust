@@ -857,6 +857,197 @@ describe("App settings", () => {
     rendered.unmount();
   });
 
+  it("commits mixed refresh results, preserves last-good data, and recovers with a resource-only Retry", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const oldIssue = issueRow({
+      id: "issue-old",
+      identifier: "SYM-OLD",
+      title: "Last good issue",
+      state: "Todo",
+    });
+    const recoveredIssue = issueRow({
+      id: "issue-fresh",
+      identifier: "SYM-FRESH",
+      title: "Recovered issue data",
+      state: "In Progress",
+    });
+    const freshOverview = {
+      active_runs: [runRow({ issue_title: "Fresh overview result" })],
+      retry_queue: [],
+      recent_failures: [],
+      live_sessions: [],
+      worker_heartbeat: null,
+      rate_limits: [],
+      token_usage: [],
+    } satisfies Overview;
+    const overviewRefresh = deferred<Overview>();
+    const issuesFailure = deferred<IssueRow[]>();
+    const retryFailure = deferred<IssueRow[]>();
+    const retryRecovery = deferred<IssueRow[]>();
+    const baseInvoke = dashboardInvoke({ settings, issues: [oldIssue] });
+    let overviewReads = 0;
+    let issueReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_overview" && overviewReads++ === 1) {
+        return overviewRefresh.promise;
+      }
+      if (command === "list_issues") {
+        issueReads += 1;
+        if (issueReads === 2) return issuesFailure.promise;
+        if (issueReads === 3) return retryFailure.promise;
+        if (issueReads === 4) return retryRecovery.promise;
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+
+    render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
+    expect(await screen.findByText("Last good issue")).toBeTruthy();
+
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "issues", op: "update" },
+    });
+    await waitFor(() => expect(issueReads).toBe(2));
+    overviewRefresh.resolve(freshOverview);
+    issuesFailure.reject(
+      new Error("Authorization: Bearer secret-token LINEAR_API_KEY=abc123"),
+    );
+
+    expect(await screen.findByText("Last good issue")).toBeTruthy();
+    expect(await screen.findByText("Stale")).toBeTruthy();
+    const lastSuccess = screen.getByText(/Showing the last successful data/)
+      .querySelector("time");
+    expect(lastSuccess?.getAttribute("datetime")).toBeTruthy();
+    expect(lastSuccess?.getAttribute("aria-label")).toContain(
+      lastSuccess?.getAttribute("title") ?? "missing",
+    );
+    expect(document.body.textContent).not.toContain("secret-token");
+    expect(document.body.textContent).not.toContain("abc123");
+    expect(
+      document.querySelector('.screen-reader-only[role="status"]')?.textContent,
+    ).toBe("Issues could not be refreshed.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    expect(await screen.findByText("Fresh overview result")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Issues" }));
+
+    const overviewReadsBeforeRetry = overviewReads;
+    fireEvent.click(screen.getByRole("button", { name: "Retry Issues" }));
+    await waitFor(() => expect(issueReads).toBe(3));
+    retryFailure.reject(new Error("still offline"));
+    expect(await screen.findByText("still offline")).toBeTruthy();
+    expect(overviewReads).toBe(overviewReadsBeforeRetry);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry Issues" }));
+    await waitFor(() => expect(issueReads).toBe(4));
+    retryRecovery.resolve([recoveredIssue]);
+    expect(await screen.findByText("Recovered issue data")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry Issues" })).toBeNull(),
+    );
+    expect(document.querySelector(".resource-stale-badge")).toBeNull();
+    expect(overviewReads).toBe(overviewReadsBeforeRetry);
+  });
+
+  it("renders a scoped alert and named Retry when a resource has no successful data", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const run = runRow();
+    const detail = { run, events: [] } satisfies RunDetail;
+    const firstDetail = deferred<RunDetail | null>();
+    const retryDetail = deferred<RunDetail | null>();
+    const baseInvoke = dashboardInvoke({ settings });
+    let detailReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") return [run];
+      if (command === "get_run_detail") {
+        detailReads += 1;
+        return detailReads === 1 ? firstDetail.promise : retryDetail.promise;
+      }
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    firstDetail.reject(new Error("detail unavailable"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Run details could not be refreshed.");
+    expect(alert.textContent).toContain("No data is available.");
+    expect(screen.getByText("Build widgets")).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Retry Run details" });
+    const runReadsBeforeRetry = commandCount("list_runs");
+    fireEvent.click(retry);
+    await waitFor(() => expect(detailReads).toBe(2));
+    expect(commandCount("list_runs")).toBe(runReadsBeforeRetry);
+    retryDetail.resolve(detail);
+    expect(await screen.findByRole("heading", { name: "SYM-1 · Run #1" })).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Retry Run details" })).toBeNull(),
+    );
+  });
+
+  it("delays the nonblocking Refreshing affordance by 250ms", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const refresh = deferred<Overview>();
+    const baseInvoke = dashboardInvoke({ settings });
+    let overviewReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_overview" && overviewReads++ === 1) {
+        return refresh.promise;
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+    const rendered = render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        listeners.get("db_changed")!({
+          payload: { type: "db_changed", table: "token_usage", op: "update" },
+        });
+        vi.advanceTimersByTime(300);
+      });
+      await flushPromises();
+      expect(screen.queryByText("Refreshing…")).toBeNull();
+      act(() => vi.advanceTimersByTime(249));
+      expect(screen.queryByText("Refreshing…")).toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(screen.getByText("Refreshing…")).toBeTruthy();
+      refresh.resolve({
+        active_runs: [],
+        retry_queue: [],
+        recent_failures: [],
+        live_sessions: [],
+        worker_heartbeat: null,
+        rate_limits: [],
+        token_usage: [],
+      });
+      await flushPromises();
+      expect(screen.queryByText("Refreshing…")).toBeNull();
+      rendered.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refreshes issue-derived run metadata only while Runs is active", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
@@ -1647,7 +1838,7 @@ describe("App settings", () => {
     }
   });
 
-  it("does not pin an error banner for a transient background refresh failure", async () => {
+  it("scopes a transient background refresh failure without a global error banner", async () => {
     vi.useFakeTimers();
     try {
       tauriMocks.runtimeAvailable = true;
@@ -1689,7 +1880,9 @@ describe("App settings", () => {
       });
 
       expect(overviewRequests).toBe(2);
-      expect(screen.queryByText(/transient refresh failure/)).toBeNull();
+      expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
+      expect(screen.getByText(/transient refresh failure/)).toBeTruthy();
+      expect(document.querySelector(".banner.error")).toBeNull();
       rendered.unmount();
     } finally {
       vi.useRealTimers();
@@ -2781,6 +2974,6 @@ describe("App settings", () => {
 
     const stopButton = await screen.findByRole("button", { name: "Stop run" });
     expect(stopButton.getAttribute("disabled")).toBeNull();
-    expect(await screen.findByText(/post-stop refresh failed/)).toBeTruthy();
+    expect(await screen.findByText("Overview could not be refreshed.")).toBeTruthy();
   });
 });

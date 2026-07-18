@@ -245,6 +245,81 @@ tr:focus-visible {
   min-width: 0;
 }
 
+.shell-health {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: flex;
+  gap: 8px;
+  max-width: 390px;
+  min-height: 34px;
+  padding: 5px 11px;
+}
+
+.shell-health-dot {
+  background: var(--muted-foreground);
+  border-radius: 50%;
+  flex: 0 0 8px;
+  height: 8px;
+  width: 8px;
+}
+
+.shell-health-dot.healthy {
+  background: var(--success-foreground);
+}
+
+.shell-health-dot.refreshing {
+  background: var(--info-foreground);
+}
+
+.shell-health-dot.stale,
+.shell-health-dot.stopped {
+  background: var(--warning-foreground);
+}
+
+.shell-health-dot.error,
+.shell-health-dot.disconnected {
+  background: var(--destructive-foreground);
+}
+
+.shell-health-copy {
+  display: grid;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.shell-health-copy strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.shell-health-copy span {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-health-stale,
+.shell-health-stopped {
+  background: var(--warning);
+  color: var(--warning-foreground);
+}
+
+.shell-health-error,
+.shell-health-disconnected {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.shell-health-error .shell-health-copy span,
+.shell-health-disconnected .shell-health-copy span {
+  color: inherit;
+  opacity: 0.85;
+}
+
 .brand {
   align-items: center;
   display: flex;
@@ -2778,6 +2853,85 @@ textarea.mono-input {
 .banner.ok {
   background: var(--success);
   color: var(--success-foreground);
+}
+
+.resource-notice {
+  align-items: center;
+  background: var(--info);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--info-foreground);
+  display: flex;
+  font-size: 13px;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 11px 12px;
+}
+
+.resource-notice.resource-stale {
+  background: var(--warning);
+  color: var(--warning-foreground);
+}
+
+.resource-notice.resource-error {
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.resource-notice-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.resource-notice-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.resource-stale-badge,
+.resource-refreshing-label {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 3px 6px;
+  text-transform: uppercase;
+}
+
+.resource-refreshing-label {
+  opacity: 0.75;
+}
+
+.resource-notice details {
+  margin-top: 3px;
+}
+
+.resource-notice summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.resource-notice code {
+  display: block;
+  margin-top: 5px;
+  max-width: min(720px, 75vw);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.screen-reader-only {
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  width: 1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .runtime-banner {
