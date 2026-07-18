@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
@@ -154,7 +155,6 @@ type SettingsFeatureProps = {
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
-  appVersion: string | null;
   onDirtyChange: (dirty: boolean) => void;
   savePendingRef: { current: boolean };
   saveControllerRef: { current: SettingsValidationController | null };
@@ -497,7 +497,6 @@ function SettingsView({
   activeRunCount,
   busy,
   runtimeAvailable,
-  appVersion,
   onSave,
   onTestConnection,
   onRemoveKey,
@@ -533,7 +532,6 @@ function SettingsView({
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
-  appVersion: string | null;
   onSave: () => void;
   onTestConnection: () => void;
   onRemoveKey: () => void;
@@ -545,6 +543,20 @@ function SettingsView({
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
   const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!runtimeAvailable) return;
+    let cancelled = false;
+    void getVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [runtimeAvailable]);
 
   useEffect(() => {
     setExpandedRepoIndex((index) => {

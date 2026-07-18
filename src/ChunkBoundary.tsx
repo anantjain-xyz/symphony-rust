@@ -8,6 +8,7 @@ export function createLazyAttempts<Props extends object>(
   return {
     add: () => attempts.push(lazy(loader)) - 1,
     get: (index: number) => attempts[index]!,
+    latest: () => attempts.length - 1,
   };
 }
 

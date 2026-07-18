@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { useDeferredUpdater } from "./App";
 import { reconcileSettingsDraft, retroRepoBatchState } from "./viewHelpers";
 import type {
   AppSettings,
@@ -772,6 +780,61 @@ describe("App settings", () => {
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed deferred updater import", async () => {
+    vi.useFakeTimers();
+    let idleCallback: IdleRequestCallback | null = null;
+    vi.stubGlobal(
+      "requestIdleCallback",
+      vi.fn((callback: IdleRequestCallback) => {
+        idleCallback = callback;
+        return 41;
+      }),
+    );
+    vi.stubGlobal("cancelIdleCallback", vi.fn());
+    const AppUpdateFeature = () => null;
+    const loader = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("updater chunk unavailable"))
+      .mockResolvedValueOnce({ AppUpdateFeature });
+    const hook = renderHook(() => useDeferredUpdater(true, loader));
+
+    try {
+      await act(async () => {
+        idleCallback?.({ didTimeout: false, timeRemaining: () => 50 });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(loader).toHaveBeenCalledTimes(1);
+      expect(hook.result.current).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(loader).toHaveBeenCalledTimes(2);
+      expect(hook.result.current).toBe(AppUpdateFeature);
+    } finally {
+      hook.unmount();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("cancels a queued updater import when its owner unmounts", () => {
+    const cancelIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", vi.fn(() => 73));
+    vi.stubGlobal("cancelIdleCallback", cancelIdleCallback);
+    const loader = vi.fn();
+    const hook = renderHook(() => useDeferredUpdater(true, loader));
+
+    try {
+      hook.unmount();
+      expect(cancelIdleCallback).toHaveBeenCalledWith(73);
+      expect(loader).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("starts settings and dashboard reads together and commits only after both resolve", async () => {

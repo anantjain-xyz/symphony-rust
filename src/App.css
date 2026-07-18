@@ -690,6 +690,44 @@ tr:focus-visible {
   padding: 13px 15px;
 }
 
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  padding: 10px 15px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+thead {
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+tr {
+  border-bottom: 1px solid var(--border);
+}
+
+tr:last-child {
+  border-bottom: 0;
+}
+
+td {
+  font-size: 13px;
+  padding: 12px 15px;
+  vertical-align: top;
+}
+
+tbody tr:hover {
+  background: var(--muted);
+}
+
 .kpis,
 .actions {
   display: flex;

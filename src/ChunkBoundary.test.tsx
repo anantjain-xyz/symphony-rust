@@ -157,6 +157,65 @@ describe("lazy view boundaries", () => {
     consoleError.mockRestore();
   });
 
+  it("restores the latest nested chunk attempt after its owner remounts", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const first = deferred<ViewModule>();
+    const second = deferred<ViewModule>();
+    const loader = vi
+      .fn<() => Promise<ViewModule>>()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const attempts = createLazyAttempts(loader);
+
+    function NestedBoundary() {
+      const [attempt, setAttempt] = useState(() => attempts.latest());
+      const View = attempts.get(attempt);
+      return (
+        <ChunkErrorBoundary
+          key={attempt}
+          view="Dependency graph"
+          onRetry={() => setAttempt(attempts.add())}
+        >
+          <Suspense fallback={<ViewLoading view="Dependency graph" />}>
+            <View />
+          </Suspense>
+        </ChunkErrorBoundary>
+      );
+    }
+
+    function Harness() {
+      const [visible, setVisible] = useState(true);
+      return (
+        <main>
+          <button onClick={() => setVisible((value) => !value)}>
+            {visible ? "Hide graph" : "Show graph"}
+          </button>
+          {visible ? <NestedBoundary /> : null}
+        </main>
+      );
+    }
+
+    render(<Harness />);
+    await act(async () => {
+      first.reject(new Error("dependency chunk unavailable"));
+      await first.promise.catch(() => undefined);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await act(async () => {
+      second.resolve({ default: () => <h2>Dependency graph</h2> });
+      await second.promise;
+    });
+    expect(await screen.findByRole("heading", { name: "Dependency graph" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide graph" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show graph" }));
+
+    expect(await screen.findByRole("heading", { name: "Dependency graph" })).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(loader).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
+  });
+
   it("keeps the loaded lazy component mounted across shell rerenders", async () => {
     const pending = deferred<ViewModule>();
     function StatefulRuns() {

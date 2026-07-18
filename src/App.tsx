@@ -1,4 +1,3 @@
-import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -106,6 +105,8 @@ const loadIssuesView = cachedImport(() => import("./views/IssuesView"));
 const loadRetroView = cachedImport(() => import("./views/RetroView"));
 const loadSettingsView = cachedImport(() => import("./views/SettingsView"));
 const loadPreviewRuntime = cachedImport(() => import("./preview/runtime"));
+type AppUpdateModule = Pick<typeof import("./AppUpdate"), "AppUpdateFeature">;
+const loadAppUpdate = (): Promise<AppUpdateModule> => import("./AppUpdate");
 
 const RunsViewAttempts = createLazyAttempts(loadRunsView);
 const IssuesViewAttempts = createLazyAttempts(loadIssuesView);
@@ -116,6 +117,45 @@ const loadSettingsHeaderActions = () =>
     default: SettingsHeaderActions,
   }));
 const SettingsHeaderAttempts = createLazyAttempts(loadSettingsHeaderActions);
+
+export function useDeferredUpdater(
+  enabled: boolean,
+  loader: () => Promise<AppUpdateModule> = loadAppUpdate,
+) {
+  const [Component, setComponent] = useState<AppUpdateModule["AppUpdateFeature"] | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    let idleId: number | null = null;
+    let timeoutId: number | null = null;
+    const requestUpdater = () => {
+      idleId = null;
+      timeoutId = null;
+      void loader()
+        .then(({ AppUpdateFeature }) => {
+          if (!cancelled) setComponent(() => AppUpdateFeature);
+        })
+        .catch(() => {
+          if (!cancelled) timeoutId = window.setTimeout(requestUpdater, 2_000);
+        });
+    };
+    if ("requestIdleCallback" in window) {
+      idleId = window.requestIdleCallback(requestUpdater, { timeout: 2_000 });
+    } else {
+      timeoutId = globalThis.setTimeout(requestUpdater, 2_000);
+    }
+    return () => {
+      cancelled = true;
+      if (idleId !== null) window.cancelIdleCallback(idleId);
+      if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
+    };
+  }, [enabled, loader]);
+
+  return Component;
+}
 
 function preloadView(view: View) {
   const pending =
@@ -534,10 +574,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [AppUpdateComponent, setAppUpdateComponent] = useState<
-    typeof import("./AppUpdate")["AppUpdateFeature"] | null
-  >(null);
   const retryButtonRef = useRef<HTMLButtonElement | null>(null);
   const RunsView = RunsViewAttempts.get(viewAttempts.runs);
   const IssuesView = IssuesViewAttempts.get(viewAttempts.issues);
@@ -557,11 +593,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     if (target === "settings") SettingsHeaderAttempts.add();
     setViewAttempts((current) => ({ ...current, [target]: nextAttempt }));
   };
-
-  useEffect(() => {
-    if (!runtimeAvailable) return;
-    getVersion().then(setAppVersion).catch(() => undefined);
-  }, [runtimeAvailable]);
 
   const selectedRunIdRef = useRef<string | null>(null);
   const selectedRetroIdRef = useRef<string | null>(null);
@@ -2128,27 +2159,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         : "Start worker";
 
   const bootReady = bootState.status === "ready";
-  useEffect(() => {
-    if (!bootReady || !runtimeAvailable || IS_LOCAL_DEV) return;
-    let cancelled = false;
-    let idleId: number | null = null;
-    let timeoutId: number | null = null;
-    const requestUpdater = () => {
-      void import("./AppUpdate").then(({ AppUpdateFeature }) => {
-        if (!cancelled) setAppUpdateComponent(() => AppUpdateFeature);
-      });
-    };
-    if ("requestIdleCallback" in window) {
-      idleId = window.requestIdleCallback(requestUpdater, { timeout: 2_000 });
-    } else {
-      timeoutId = globalThis.setTimeout(requestUpdater, 2_000);
-    }
-    return () => {
-      cancelled = true;
-      if (idleId !== null) window.cancelIdleCallback(idleId);
-      if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
-    };
-  }, [bootReady, runtimeAvailable]);
+  const AppUpdateComponent = useDeferredUpdater(
+    bootReady && runtimeAvailable && !IS_LOCAL_DEV,
+  );
   const visibleDashboardResourceKeys = visibleResources(
     DASHBOARD_RESOURCE_KEYS,
     view,
@@ -2484,7 +2497,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
                 activeRunCount={overview.active_runs.length}
                 busy={busy}
                 runtimeAvailable={runtimeAvailable}
-                appVersion={appVersion}
                 onDirtyChange={(nextDirty) => {
                   if (settingsDirtyRef.current === nextDirty) return;
                   settingsDirtyRef.current = nextDirty;

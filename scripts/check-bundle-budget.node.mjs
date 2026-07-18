@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   FORBIDDEN_EAGER_ENTRIES,
@@ -37,4 +38,17 @@ test("Vite manifest isolates hidden views, preview, and updater modules", async 
     manifest["src/views/IssuesView.tsx"].dynamicImports,
     ["src/views/DependencyGraphView.tsx"],
   );
+});
+
+test("shared table primitives stay in the eager stylesheet", async () => {
+  const eagerCss = await readFile(new URL("../src/App.css", import.meta.url), "utf8");
+  const retroCss = await readFile(
+    new URL("../src/views/RetroView.css", import.meta.url),
+    "utf8",
+  );
+  for (const selector of ["table", "th", "thead", "tr", "td", "tbody tr:hover"]) {
+    const rule = new RegExp(`^${selector} \\{`, "m");
+    assert.match(eagerCss, rule, `${selector} must load eagerly`);
+    assert.doesNotMatch(retroCss, rule, `${selector} must not wait for Retro`);
+  }
 });

@@ -39,7 +39,9 @@ function IssuesView({
   onOpenSettings: () => void;
 }) {
   const [mode, setMode] = useState<IssueViewMode>("list");
-  const [dependencyAttempt, setDependencyAttempt] = useState(0);
+  const [dependencyAttempt, setDependencyAttempt] = useState(() =>
+    DependencyGraphAttempts.latest(),
+  );
   const DependencyGraph = DependencyGraphAttempts.get(dependencyAttempt);
 
   return (
