@@ -892,6 +892,61 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(detailReads + 1));
   });
 
+  it("supersedes an in-flight get_run_detail when a typed agent event arrives", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const activeRun = runRow();
+    const baseInvoke = dashboardInvoke({ settings });
+    const initialDetail: RunDetail = { run: activeRun, events: [] };
+    let staleResolve: ((value: RunDetail) => void) | null = null;
+    let detailCall = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") return [activeRun];
+      if (command === "get_run_detail") {
+        detailCall += 1;
+        if (detailCall === 1) return initialDetail;
+        return new Promise<RunDetail>((resolve) => {
+          staleResolve = resolve;
+        });
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
+    );
+    await waitFor(() => expect(detailCall).toBe(1));
+
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "update" },
+    });
+    await waitFor(() => expect(staleResolve).not.toBeNull());
+
+    const event: AgentEventRow = {
+      id: 200,
+      run_id: activeRun.id,
+      kind: "status",
+      payload: JSON.stringify({ message: "streamed event" }),
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    listeners.get("agent_event")!({ payload: { type: "agent_event", event } });
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "agent_events", op: "insert" },
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+
+    staleResolve!(initialDetail);
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+    expect(screen.queryByText("streamed event")).not.toBeNull();
+  });
+
   it("uses the conservative fallback without fetching hidden selected detail", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };

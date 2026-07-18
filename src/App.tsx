@@ -1225,6 +1225,7 @@ function App() {
   selectedRunRef.current = selectedRun;
   const workflowReadinessDirtyRef = useRef(false);
   const typedAgentEventAwaitingDbChangeRef = useRef(false);
+  const localAppendVersionRef = useRef(0);
   const resourceCommandCounts = useRef<Record<string, number>>({});
   const skillsCheckSeq = useRef<Record<string, number>>({});
   const skillsCheckContext = useRef<Record<string, string>>({});
@@ -1321,16 +1322,6 @@ function App() {
         const dirtyVersion = dirtyResourceVersionsRef.current[key] ?? 0;
         const selectedRunId = selectedRunIdRef.current;
         const selectedRetroId = selectedRetroIdRef.current;
-        if (
-          visibleResources(
-            [key],
-            viewRef.current,
-            selectedRunId,
-            selectedRetroId,
-          ).length === 0
-        ) {
-          return;
-        }
         switch (key) {
           case "overview": {
             const next = await invokeDashboardResource<Overview>(key, "get_overview");
@@ -1418,6 +1409,7 @@ function App() {
           }
           case "selectedRun": {
             if (!selectedRunId) break;
+            const appendVersion = localAppendVersionRef.current;
             const next = await invokeDashboardResource<RunDetail | null>(
               key,
               "get_run_detail",
@@ -1425,7 +1417,8 @@ function App() {
             );
             if (
               isAuthoritative(key) &&
-              selectedRunId === selectedRunIdRef.current
+              selectedRunId === selectedRunIdRef.current &&
+              localAppendVersionRef.current === appendVersion
             ) {
               dashboardResourceValues.current.set("selectedRun", next);
               setSelectedRun(next);
@@ -1482,16 +1475,6 @@ function App() {
 
   const refreshDashboard = useCallback(
     () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
-    [requestInvalidatedResources],
-  );
-  const refreshRetroInBackground = useCallback(
-    () =>
-      requestInvalidatedResources([
-        "overview",
-        "retroList",
-        "retroBatches",
-        "selectedRetro",
-      ]),
     [requestInvalidatedResources],
   );
   const pollDashboardResources = useCallback(
@@ -1631,6 +1614,10 @@ function App() {
           typedAgentEventAwaitingDbChangeRef.current
         ) {
           typedAgentEventAwaitingDbChangeRef.current = false;
+          // Mark selectedRun dirty to supersede any in-flight get_run_detail
+          // that may have read the pre-append event list, but don't fetch —
+          // the typed event was already appended locally.
+          markResourceDirty("selectedRun");
           keys = keys.filter((key) => key !== "selectedRun");
         }
         scheduleRefresh(keys);
@@ -1647,6 +1634,7 @@ function App() {
           selectedRunRef.current = updated;
           setSelectedRun(updated);
           typedAgentEventAwaitingDbChangeRef.current = true;
+          localAppendVersionRef.current += 1;
         }
         scheduleRefresh(["overview"]);
       }),
@@ -1654,7 +1642,7 @@ function App() {
         scheduleRefresh(["overview"]);
       }),
     ]).catch((err) => {
-      setError(formatError(err));
+      if (!cancelled) setError(formatError(err));
       return [];
     });
     return () => {
