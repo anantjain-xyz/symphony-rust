@@ -1676,7 +1676,7 @@ function App() {
     const viewKeys = resourcesForView(view).filter((key) =>
       dirtyResourcesRef.current.has(key),
     );
-    void requestInvalidatedResources(viewKeys, { reportFailure: false }, false);
+    void requestInvalidatedResources(viewKeys, { reportFailure: true }, false);
     if (view === "settings" && workflowReadinessDirtyRef.current) {
       workflowReadinessDirtyRef.current = false;
       refreshWorkflowStatus();

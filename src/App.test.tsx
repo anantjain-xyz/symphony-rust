@@ -822,6 +822,41 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
   });
 
+  it("reports a deferred resource failure when its view activates", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: false };
+    const baseInvoke = dashboardInvoke({ settings });
+    let runReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs" && runReads++ === 1) {
+        return Promise.reject(new Error("deferred Runs refresh failed"));
+      }
+      return baseInvoke(command, args);
+    });
+    const listeners = new Map<string, (event: { payload: unknown }) => void>();
+    tauriMocks.listen.mockImplementation(async (name, listener) => {
+      listeners.set(name, listener);
+      return vi.fn();
+    });
+
+    const rendered = render(<App />);
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
+        false,
+      ),
+    );
+
+    listeners.get("db_changed")!({
+      payload: { type: "db_changed", table: "runs", op: "update" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Runs" }));
+
+    await waitFor(() => expect(commandCount("list_runs")).toBe(2));
+    expect(await screen.findByText(/deferred Runs refresh failed/)).toBeTruthy();
+    rendered.unmount();
+  });
+
   it("refreshes issue-derived run metadata only while Runs is active", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
