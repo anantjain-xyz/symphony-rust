@@ -1156,9 +1156,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const settingsDraftRef = useRef<AppSettings | null>(
     runtimeAvailable ? null : previewSettings,
   );
+  const settingsRevisionRef = useRef(0);
   const linearKeyDraftRef = useRef("");
   const [settingsDirty, setSettingsDirty] = useState(false);
   const settingsDirtyRef = useRef(false);
+  const [settingsSavePending, setSettingsSavePending] = useState(false);
+  const settingsSavePendingRef = useRef(false);
+  const settingsSaveControllerRef = useRef<SettingsValidationController | null>(null);
   const [linearViewer, setLinearViewer] = useState<LinearViewerProfile | null>(null);
   const [linearViewerLoading, setLinearViewerLoading] = useState(false);
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
@@ -1242,6 +1246,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const skillsCheckContext = useRef<Record<string, string>>({});
   const workflowCheckSeq = useRef<Record<string, number>>({});
   const workflowCheckContext = useRef<Record<string, string>>({});
+  const repoStatusRefreshTimer = useRef<number | null>(null);
+  const queueRepoStatusRefreshRef = useRef<(target: AppSettings) => void>(() => undefined);
   const linearViewerSeq = useRef(0);
   const pollControllers = useRef<Partial<Record<PollKey, PollController>>>({});
   const dashboardResourceValues = useRef(
@@ -1728,9 +1734,11 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       ) {
         refreshLinearViewer(next, nextKey);
       }
-      if (stableSessionEnvKey(next.session_env) !== stableSessionEnvKey(previous.session_env)) {
-        refreshSkillsStatus(next);
-        refreshWorkflowStatus(next);
+      if (
+        stableSessionEnvKey(next.session_env) !== stableSessionEnvKey(previous.session_env) ||
+        configuredRepoUrls(next).join("\n") !== configuredRepoUrls(previous).join("\n")
+      ) {
+        queueRepoStatusRefreshRef.current(next);
       }
     },
     [refreshLinearViewer],
@@ -1782,8 +1790,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       liveWorkerState === "running" &&
         (!result.workflow_ok || refreshedWorker?.last_error !== null),
     );
-    refreshSkillsStatus(saved);
-    refreshWorkflowStatus(saved);
+    const currentDraft = settingsDraftRef.current;
+    const refreshTarget =
+      currentDraft && formSnapshot(currentDraft) !== formSnapshot(exactSettings)
+        ? currentDraft
+        : saved;
+    queueRepoStatusRefreshRef.current(refreshTarget);
     setSavedFlash(true);
     if (savedFlashTimer.current !== null) {
       window.clearTimeout(savedFlashTimer.current);
@@ -1941,59 +1953,54 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     setWorkflowTransfer(status);
   }
 
-  // Check every configured URL once edits settle (covers the initial settings
-  // load, a newly added card, an edited URL, and Session env auth changes).
-  // Debounced so typing doesn't spam gh; URLs that drop out of the config
-  // simply leave unused cache keys.
-  const repoUrlsKey = settings === null ? null : configuredRepoUrls(settings).join("\n");
-  const sessionEnvKey = settings === null ? null : stableSessionEnvKey(settings.session_env);
-  useEffect(() => {
-    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
-    const sessionEnv = settings?.session_env ?? {};
-    const urls = repoUrlsKey.split("\n");
-    for (const url of urls) {
-      skillsCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
+  // Check the latest draft context once URL/auth edits settle. The ref-backed
+  // scheduler lets Settings publish frequent draft changes without subscribing
+  // App state to them, while replacing one pending timer with the newest full
+  // settings snapshot. Updating context refs immediately also prevents an
+  // already-running check from rendering against superseding credentials.
+  queueRepoStatusRefreshRef.current = (target) => {
+    if (repoStatusRefreshTimer.current !== null) {
+      window.clearTimeout(repoStatusRefreshTimer.current);
+      repoStatusRefreshTimer.current = null;
     }
-    setSkillsStatuses((prev) => {
-      const next = { ...prev };
-      for (const url of urls) delete next[url];
-      return next;
-    });
-    setSkillsChecking((prev) => {
-      const next = { ...prev };
-      for (const url of urls) next[url] = true;
-      return next;
-    });
-    const handle = window.setTimeout(() => {
-      for (const url of urls) checkRepoSkills(url, sessionEnv);
+    if (!runtimeAvailable) return;
+    const urls = configuredRepoUrls(target);
+    const sessionEnv = target.session_env;
+    for (const url of urls) {
+      const contextKey = skillsCheckContextKey(url, sessionEnv);
+      skillsCheckContext.current[url] = contextKey;
+      workflowCheckContext.current[url] = contextKey;
+    }
+    if (urls.length === 0) return;
+    repoStatusRefreshTimer.current = window.setTimeout(() => {
+      repoStatusRefreshTimer.current = null;
+      for (const url of urls) {
+        checkRepoSkills(url, sessionEnv);
+        checkRepoWorkflow(url, sessionEnv);
+      }
     }, 600);
-    return () => window.clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
+  };
 
+  const savedRepoStatusKey =
+    settings === null
+      ? null
+      : `${configuredRepoUrls(settings).join("\n")}\n${stableSessionEnvKey(settings.session_env)}`;
   useEffect(() => {
-    if (!runtimeAvailable || repoUrlsKey === null || repoUrlsKey === "") return;
-    const sessionEnv = settings?.session_env ?? {};
-    const urls = repoUrlsKey.split("\n");
-    for (const url of urls) {
-      workflowCheckContext.current[url] = skillsCheckContextKey(url, sessionEnv);
-    }
-    setWorkflowStatuses((prev) => {
-      const next = { ...prev };
-      for (const url of urls) delete next[url];
-      return next;
-    });
-    setWorkflowChecking((prev) => {
-      const next = { ...prev };
-      for (const url of urls) next[url] = true;
-      return next;
-    });
-    const handle = window.setTimeout(() => {
-      for (const url of urls) checkRepoWorkflow(url, sessionEnv);
-    }, 600);
-    return () => window.clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoUrlsKey, sessionEnvKey, runtimeAvailable]);
+    if (!settings || savedRepoStatusKey === null) return;
+    const target = settingsDirtyRef.current
+      ? settingsDraftRef.current ?? settings
+      : settings;
+    queueRepoStatusRefreshRef.current(target);
+  }, [savedRepoStatusKey, settings]);
+
+  useEffect(
+    () => () => {
+      if (repoStatusRefreshTimer.current !== null) {
+        window.clearTimeout(repoStatusRefreshTimer.current);
+      }
+    },
+    [],
+  );
 
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
@@ -2617,7 +2624,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               workerRunning={worker.state === "running"}
               workerConfigError={worker.state === "running" && worker.last_error !== null}
               liveReconfigureSkipped={liveReconfigureSkipped}
-              busy={busy}
+              busy={busy || settingsSavePending}
               runtimeAvailable={runtimeAvailable}
             />
           ) : null}
@@ -2767,6 +2774,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           <SettingsFeature
             savedSettings={settings}
             draftRef={settingsDraftRef}
+            revisionRef={settingsRevisionRef}
             linearKeyRef={linearKeyDraftRef}
             linearViewer={linearViewer}
             linearViewerLoading={linearViewerLoading}
@@ -2791,6 +2799,10 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               settingsDirtyRef.current = nextDirty;
               setSettingsDirty(nextDirty);
             }}
+            savePendingRef={settingsSavePendingRef}
+            saveControllerRef={settingsSaveControllerRef}
+            savePending={settingsSavePending}
+            onSavePendingChange={setSettingsSavePending}
             onValidationResult={setValidation}
             onDraftChange={handleSettingsDraftChange}
             onSave={saveSettings}
@@ -4698,6 +4710,7 @@ function uniqueIdentifiers(identifiers: string[]): string[] {
 type SettingsFeatureProps = {
   savedSettings: AppSettings;
   draftRef: { current: AppSettings | null };
+  revisionRef: { current: number };
   linearKeyRef: { current: string };
   linearViewer: LinearViewerProfile | null;
   linearViewerLoading: boolean;
@@ -4718,6 +4731,10 @@ type SettingsFeatureProps = {
   runtimeAvailable: boolean;
   appVersion: string | null;
   onDirtyChange: (dirty: boolean) => void;
+  savePendingRef: { current: boolean };
+  saveControllerRef: { current: SettingsValidationController | null };
+  savePending: boolean;
+  onSavePendingChange: (pending: boolean) => void;
   onValidationResult: (result: ValidationResult) => void;
   onDraftChange: (
     next: AppSettings,
@@ -4765,8 +4782,13 @@ export function reconcileSettingsDraft(
 function SettingsFeature({
   savedSettings,
   draftRef,
+  revisionRef,
   linearKeyRef,
   onDirtyChange,
+  savePendingRef,
+  saveControllerRef,
+  savePending,
+  onSavePendingChange,
   onValidationResult,
   onDraftChange,
   onSave,
@@ -4785,10 +4807,11 @@ function SettingsFeature({
       ? { status: "idle", result: null, stale: false }
       : { status: "unavailable", result: null, stale: false },
   );
-  const revisionRef = useRef(0);
   const dirtyRef = useRef(viewProps.settingsDirty);
   const summaryRef = useRef<HTMLDivElement>(null);
   const [focusInvalidSummary, setFocusInvalidSummary] = useState(false);
+  const [promptSeedRevision, setPromptSeedRevision] = useState(0);
+  const deferredValidationRef = useRef(false);
   const controller = useMemo(
     () =>
       new SettingsValidationController(
@@ -4802,6 +4825,19 @@ function SettingsFeature({
         },
       ),
     [onValidationResult, viewProps.runtimeAvailable],
+  );
+  const scheduleValidation = useCallback(
+    (revision: { id: number; settings: AppSettings }) => {
+      if (
+        savePendingRef.current &&
+        saveControllerRef.current !== controller
+      ) {
+        deferredValidationRef.current = true;
+        return;
+      }
+      controller.schedule(revision);
+    },
+    [controller, saveControllerRef, savePendingRef],
   );
 
   const updateDirty = useCallback(
@@ -4826,10 +4862,18 @@ function SettingsFeature({
       draftRef.current = normalized;
       onDraftChange(normalized, linearKeyRef.current, previous);
       const revision = { id: ++revisionRef.current, settings: normalized };
-      controller.schedule(revision);
+      scheduleValidation(revision);
       updateDirty(normalized, linearKeyRef.current);
     },
-    [controller, draft, draftRef, linearKeyRef, onDraftChange, updateDirty],
+    [
+      draft,
+      draftRef,
+      linearKeyRef,
+      onDraftChange,
+      revisionRef,
+      scheduleValidation,
+      updateDirty,
+    ],
   );
 
   const setPromptDraft = useCallback(
@@ -4838,10 +4882,18 @@ function SettingsFeature({
       const next = { ...previous, prompt_template: prompt };
       draftRef.current = next;
       onDraftChange(next, linearKeyRef.current, previous);
-      controller.schedule({ id: ++revisionRef.current, settings: next });
+      scheduleValidation({ id: ++revisionRef.current, settings: next });
       updateDirty(next, linearKeyRef.current);
     },
-    [controller, draft, draftRef, linearKeyRef, onDraftChange, updateDirty],
+    [
+      draft,
+      draftRef,
+      linearKeyRef,
+      onDraftChange,
+      revisionRef,
+      scheduleValidation,
+      updateDirty,
+    ],
   );
 
   const setLinearKey = useCallback(
@@ -4853,15 +4905,35 @@ function SettingsFeature({
       onDraftChange(current, next, current);
       updateDirty(current, next);
     },
-    [draft, draftRef, linearKeyRef, onDraftChange, updateDirty],
+    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, updateDirty],
   );
 
   useEffect(() => {
-    const current = draftRef.current ?? savedSettings;
-    draftRef.current = current;
-    controller.schedule({ id: ++revisionRef.current, settings: current });
+    const current = draftRef.current;
+    if (!current) return () => controller.dispose();
+    scheduleValidation({ id: revisionRef.current, settings: current });
     return () => controller.dispose();
-  }, [controller, draftRef, savedSettings]);
+  }, [controller, draftRef, revisionRef, scheduleValidation]);
+
+  useEffect(() => {
+    if (savePending) {
+      if (saveControllerRef.current !== controller) {
+        deferredValidationRef.current = true;
+      }
+      return;
+    }
+    if (!deferredValidationRef.current) return;
+    deferredValidationRef.current = false;
+    const current = draftRef.current ?? savedSettings;
+    controller.schedule({ id: revisionRef.current, settings: current });
+  }, [
+    controller,
+    draftRef,
+    revisionRef,
+    saveControllerRef,
+    savePending,
+    savedSettings,
+  ]);
 
   useEffect(() => {
     const next = reconcileSettingsDraft(savedSettings, draftRef.current ?? draft, dirtyRef.current);
@@ -4877,24 +4949,46 @@ function SettingsFeature({
   }, [focusInvalidSummary, validationState.status]);
 
   const handleSave = useCallback(async () => {
-    const exactSettings = draftRef.current ?? draft;
-    const exactLinearKey = linearKeyRef.current;
-    const exactRevision = { id: revisionRef.current, settings: exactSettings };
-    const result = await controller.validateNow(exactRevision);
-    if (!result || revisionRef.current !== exactRevision.id) return;
-    if (result.workflow_blocking) {
-      setFocusInvalidSummary(true);
-      return;
+    if (savePendingRef.current) return;
+    savePendingRef.current = true;
+    saveControllerRef.current = controller;
+    onSavePendingChange(true);
+    try {
+      const exactSettings = draftRef.current ?? draft;
+      const exactLinearKey = linearKeyRef.current;
+      const exactRevision = { id: revisionRef.current, settings: exactSettings };
+      const result = await controller.validateNow(exactRevision);
+      if (!result || revisionRef.current !== exactRevision.id) return;
+      if (result.workflow_blocking) {
+        setFocusInvalidSummary(true);
+        return;
+      }
+      const saved = await onSave(exactSettings, exactLinearKey, result);
+      if (!saved || revisionRef.current !== exactRevision.id) return;
+      draftRef.current = saved;
+      setDraft(saved);
+      linearKeyRef.current = "";
+      setLinearKeyState("");
+      dirtyRef.current = false;
+      onDirtyChange(false);
+    } finally {
+      savePendingRef.current = false;
+      if (saveControllerRef.current === controller) {
+        saveControllerRef.current = null;
+      }
+      onSavePendingChange(false);
     }
-    const saved = await onSave(exactSettings, exactLinearKey, result);
-    if (!saved || revisionRef.current !== exactRevision.id) return;
-    draftRef.current = saved;
-    setDraft(saved);
-    linearKeyRef.current = "";
-    setLinearKeyState("");
-    dirtyRef.current = false;
-    onDirtyChange(false);
-  }, [controller, draft, draftRef, linearKeyRef, onDirtyChange, onSave]);
+  }, [
+    controller,
+    draft,
+    draftRef,
+    linearKeyRef,
+    onDirtyChange,
+    onSave,
+    onSavePendingChange,
+    saveControllerRef,
+    savePendingRef,
+  ]);
 
   const handleRemoveKey = useCallback(async () => {
     const linearApiKeySet = await onRemoveKey();
@@ -4909,16 +5003,18 @@ function SettingsFeature({
     const next = { ...previous, prompt_template: prompt };
     draftRef.current = next;
     setDraft(next);
+    setPromptSeedRevision((revision) => revision + 1);
     onDraftChange(next, linearKeyRef.current, previous);
-    controller.schedule({ id: ++revisionRef.current, settings: next });
+    scheduleValidation({ id: ++revisionRef.current, settings: next });
     updateDirty(next, linearKeyRef.current);
   }, [
-    controller,
     draft,
     draftRef,
     linearKeyRef,
     onDraftChange,
     onResetPrompt,
+    revisionRef,
+    scheduleValidation,
     updateDirty,
   ]);
 
@@ -4932,6 +5028,7 @@ function SettingsFeature({
       validation={validationState.result}
       validationState={validationState}
       validationSummaryRef={summaryRef}
+      promptSeedRevision={promptSeedRevision}
       onPromptChange={setPromptDraft}
       onSave={handleSave}
       onTestConnection={() => onTestConnection(draftRef.current ?? draft, linearKeyRef.current)}
@@ -4963,6 +5060,7 @@ function SettingsView({
   validation,
   validationState,
   validationSummaryRef,
+  promptSeedRevision,
   onPromptChange,
   trackerTest,
   skillsStatuses,
@@ -4998,6 +5096,7 @@ function SettingsView({
   validation: ValidationResult | null;
   validationState: SettingsValidationState;
   validationSummaryRef: { current: HTMLDivElement | null };
+  promptSeedRevision: number;
   onPromptChange: (prompt: string) => void;
   trackerTest: TrackerTestResult | null;
   skillsStatuses: Record<string, SkillsStatus>;
@@ -6088,6 +6187,7 @@ function SettingsView({
         <PromptEditor
           id="settings-prompt-template"
           value={settings.prompt_template}
+          seedRevision={promptSeedRevision}
           disabled={!runtimeAvailable}
           onChange={onPromptChange}
           aria-invalid={
@@ -6554,6 +6654,7 @@ function BackendSelect({
 function PromptEditor({
   id,
   value,
+  seedRevision,
   disabled,
   onChange,
   "aria-invalid": ariaInvalid,
@@ -6561,6 +6662,7 @@ function PromptEditor({
 }: {
   id?: string;
   value: string;
+  seedRevision: number;
   disabled: boolean;
   onChange: (next: string) => void;
   "aria-invalid"?: boolean;
@@ -6569,13 +6671,15 @@ function PromptEditor({
   const ref = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(value);
   const lastEmitted = useRef(value);
+  const lastSeedRevision = useRef(seedRevision);
 
   useEffect(() => {
-    if (value !== lastEmitted.current) {
+    if (value !== lastEmitted.current || seedRevision !== lastSeedRevision.current) {
       setDraft(value);
       lastEmitted.current = value;
+      lastSeedRevision.current = seedRevision;
     }
-  }, [value]);
+  }, [seedRevision, value]);
 
   function insertVariable(name: string) {
     const token = `{{${name}}}`;

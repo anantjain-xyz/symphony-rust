@@ -531,6 +531,118 @@ describe("App settings", () => {
     ).toBe(false);
   });
 
+  it("finishes an explicit Save after navigating away during validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const validation = deferred<ValidationResult>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "validate_settings" ? validation.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Save across navigation" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("validate_settings")).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(commandCount("validate_settings")).toBe(1);
+    validation.resolve({
+      workflow_ok: true,
+      workflow_blocking: false,
+      workflow_error: null,
+    } as ValidationResult);
+
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    expect(
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings")?.[1]
+        .request.settings.prompt_template,
+    ).toBe("Save across navigation");
+  });
+
+  it("does not let a remounted draft edit be overwritten by an older Save", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const validation = deferred<ValidationResult>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "validate_settings" ? validation.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Older save revision" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("validate_settings")).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    const remountedPrompt = container.querySelector(
+      ".prompt-editor textarea",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(remountedPrompt, { target: { value: "Newer remounted draft" } });
+    expect(commandCount("validate_settings")).toBe(1);
+    validation.resolve({
+      workflow_ok: true,
+      workflow_blocking: false,
+      workflow_error: null,
+    } as ValidationResult);
+
+    await waitFor(() => expect(commandCount("validate_settings")).toBe(2));
+    expect(commandCount("save_settings")).toBe(0);
+    expect(remountedPrompt.value).toBe("Newer remounted draft");
+    expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull();
+  });
+
+  it("disables and deduplicates Save during authoritative validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const validation = deferred<ValidationResult>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "validate_settings" ? validation.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "One save only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    await waitFor(() => expect(saveButton.getAttribute("disabled")).not.toBeNull());
+    fireEvent.submit(container.querySelector("#settings-form")!);
+    validation.resolve({
+      workflow_ok: true,
+      workflow_blocking: false,
+      workflow_error: null,
+    } as ValidationResult);
+
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    expect(commandCount("validate_settings")).toBe(1);
+  });
+
+  it("reseeds the prompt editor when reset returns the current saved default", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "get_default_prompt" ? settings.prompt_template : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Locally edited prompt" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+
+    await waitFor(() => expect(prompt.value).toBe(settings.prompt_template));
+  });
+
   it("preserves a newer prompt edit while save_settings is in flight", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -1976,6 +2088,105 @@ describe("App settings", () => {
         sessionEnv: { GITHUB_TOKEN: "from-session" },
       }),
     );
+  });
+
+  it("debounces draft repository checks and uses only the latest environment", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+    render(<App />);
+
+    const repoUrl = settings.repos[0].url.trim();
+    await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));
+    await openSettings();
+    tauriMocks.invoke.mockClear();
+    const environment = screen.getByLabelText(/^Session environment/, {
+      selector: "textarea",
+    });
+    for (let index = 1; index <= 10; index += 1) {
+      fireEvent.change(environment, {
+        target: { value: `GITHUB_TOKEN=draft-${index}` },
+      });
+    }
+
+    expect(commandCount("get_skills_status")).toBe(0);
+    expect(commandCount("get_repo_workflow_status")).toBe(0);
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl,
+        sessionEnv: { GITHUB_TOKEN: "draft-10" },
+      });
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_repo_workflow_status", {
+        repoUrl,
+        sessionEnv: { GITHUB_TOKEN: "draft-10" },
+      });
+    });
+    expect(commandCount("get_skills_status")).toBe(1);
+    expect(commandCount("get_repo_workflow_status")).toBe(1);
+  });
+
+  it("automatically checks a newly edited draft repository URL", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+    render(<App />);
+
+    await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+    tauriMocks.invoke.mockClear();
+    const nextRepoUrl = "git@github.com:acme/next-widgets.git";
+    fireEvent.change(screen.getByLabelText(/^Repo URL/, { selector: "input" }), {
+      target: { value: nextRepoUrl },
+    });
+
+    await waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
+        repoUrl: nextRepoUrl,
+        sessionEnv: {},
+      });
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("get_repo_workflow_status", {
+        repoUrl: nextRepoUrl,
+        sessionEnv: {},
+      });
+    });
+  });
+
+  it("does not let a post-save refresh supersede a newer draft environment", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const save = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "save_settings" ? save.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Revision being saved" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    tauriMocks.invoke.mockClear();
+
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=newer-draft" } },
+    );
+    save.resolve({ ...settings, prompt_template: "Revision being saved" });
+
+    await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));
+    const repoCalls = tauriMocks.invoke.mock.calls.filter(([command]) =>
+      ["get_skills_status", "get_repo_workflow_status"].includes(command),
+    );
+    expect(repoCalls.length).toBe(2);
+    for (const [, args] of repoCalls) {
+      expect(args).toEqual({
+        repoUrl: settings.repos[0].url,
+        sessionEnv: { GITHUB_TOKEN: "newer-draft" },
+      });
+    }
   });
 
   it("uses the exact draft environment for manual repository checks", async () => {

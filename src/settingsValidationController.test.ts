@@ -80,6 +80,21 @@ describe("SettingsValidationController", () => {
     expect(validate).toHaveBeenCalledTimes(1);
   });
 
+  it("lets an authoritative validation settle after its feature unmounts", async () => {
+    const validation = deferred<ValidationResult>();
+    const controller = new SettingsValidationController(
+      true,
+      vi.fn().mockReturnValue(validation.promise),
+      vi.fn(),
+    );
+    const result = controller.validateNow({ id: 1, settings: settings("save me") });
+
+    controller.dispose();
+    validation.resolve(valid());
+
+    await expect(result).resolves.toEqual(valid());
+  });
+
   it("never invokes validation when the runtime is unavailable", async () => {
     const validate = vi.fn();
     const states: string[] = [];

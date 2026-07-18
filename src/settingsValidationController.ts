@@ -23,6 +23,7 @@ export class SettingsValidationController {
   private active: SettingsRevision | null = null;
   private queued: SettingsRevision | null = null;
   private latestRevision = 0;
+  private disposed = false;
   private state: SettingsValidationState;
   private waiters = new Map<
     number,
@@ -40,6 +41,7 @@ export class SettingsValidationController {
   }
 
   schedule(revision: SettingsRevision) {
+    if (this.disposed) return;
     this.latestRevision = Math.max(this.latestRevision, revision.id);
     if (!this.runtimeAvailable) {
       this.publish({ status: "unavailable", result: null, stale: false });
@@ -53,6 +55,7 @@ export class SettingsValidationController {
   }
 
   validateNow(revision: SettingsRevision): Promise<ValidationResult | null> {
+    if (this.disposed) return Promise.resolve(null);
     this.latestRevision = Math.max(this.latestRevision, revision.id);
     if (!this.runtimeAvailable) {
       this.publish({ status: "unavailable", result: null, stale: false });
@@ -72,13 +75,12 @@ export class SettingsValidationController {
   }
 
   dispose() {
+    this.disposed = true;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
-    this.queued = null;
-    for (const resolvers of this.waiters.values()) {
-      for (const resolve of resolvers) resolve(null);
+    if (this.queued && !this.waiters.has(this.queued.id)) {
+      this.queued = null;
     }
-    this.waiters.clear();
   }
 
   private enqueueOrRun(revision: SettingsRevision) {
@@ -117,11 +119,14 @@ export class SettingsValidationController {
       for (const resolve of resolvers) resolve(result);
       const queued = this.queued;
       this.queued = null;
-      if (queued) void this.run(queued);
+      if (queued && (!this.disposed || this.waiters.has(queued.id))) {
+        void this.run(queued);
+      }
     }
   }
 
   private publish(state: SettingsValidationState) {
+    if (this.disposed) return;
     this.state = state;
     this.onState(state);
   }
