@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::TimeZone;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -419,6 +420,23 @@ async fn map_codex_event(
             }));
         }
         "turn.failed" => {
+            // Codex usage/credit limits arrive as turn.failed with a human
+            // message ("You've hit your usage limit... try again at ..."), not
+            // as rate_limits on turn.completed. Detect them so the dashboard
+            // and dispatch pause see the hit — matching Claude/Cursor/opencode.
+            let message = ev["error"]["message"]
+                .as_str()
+                .unwrap_or("Codex turn failed");
+            if let Some(limit) = detect_codex_rate_limit(message) {
+                send_rate_limit(events, limit).await?;
+                return Ok(Some(AgentRunResult {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                    outcome: AgentOutcome::Failure,
+                    error_class: Some("rate_limited".to_string()),
+                    error_message: Some(truncate(message, 1000)),
+                }));
+            }
             return Ok(Some(AgentRunResult {
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),
@@ -428,11 +446,7 @@ async fn map_codex_event(
                     .unwrap_or("turn_failed")
                     .to_string()
                     .into(),
-                error_message: ev["error"]["message"]
-                    .as_str()
-                    .unwrap_or("Codex turn failed")
-                    .to_string()
-                    .into(),
+                error_message: Some(message.to_string()),
             }));
         }
         "error" => {
@@ -1310,6 +1324,77 @@ fn detect_cursor_rate_limit(text: &str) -> Option<RateLimitPayload> {
         remaining: None,
         reset_at: None,
     })
+}
+
+/// Rate-limit / usage-credit hit from a Codex `turn.failed` error message.
+/// Anchored to the start of the text so a successful turn that merely
+/// discusses usage limits is not reclassified as a hit.
+fn detect_codex_rate_limit(text: &str) -> Option<RateLimitPayload> {
+    let lower = text.trim().to_lowercase();
+    let hit = lower.starts_with("you've hit your usage limit")
+        || lower.starts_with("you have hit your usage limit")
+        || lower.starts_with("you've reached your usage limit")
+        || lower.starts_with("you have reached your usage limit")
+        || lower.starts_with("usage limit reached")
+        || lower.starts_with("rate limit exceeded");
+    hit.then(|| RateLimitPayload {
+        source: "codex".to_string(),
+        remaining: None,
+        reset_at: codex_limit_reset(text),
+    })
+}
+
+/// Reset timestamp from Codex usage-limit copy:
+/// "You've hit your usage limit. ... try again at Jul 25th, 2026 12:03 PM."
+/// The wall time has no timezone; interpret it in the local zone (desktop
+/// app) so the dispatch pause matches what the user was shown.
+fn codex_limit_reset(text: &str) -> Option<String> {
+    let naive = parse_codex_reset_naive(text)?;
+    let local = chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| chrono::Local.from_local_datetime(&naive).earliest())?;
+    Some(
+        local
+            .to_utc()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    )
+}
+
+fn parse_codex_reset_naive(text: &str) -> Option<chrono::NaiveDateTime> {
+    let lower = text.to_lowercase();
+    let marker = "try again at ";
+    let start = lower.find(marker)? + marker.len();
+    let raw = text[start..].trim().trim_end_matches('.').trim();
+    let normalized = strip_day_ordinal(raw);
+    chrono::NaiveDateTime::parse_from_str(&normalized, "%b %d, %Y %I:%M %p").ok()
+}
+
+/// "Jul 25th, 2026" → "Jul 25, 2026" so chrono can parse the day.
+fn strip_day_ordinal(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                out.push(chars[i]);
+                i += 1;
+            }
+            let ordinal: String = chars[i..]
+                .iter()
+                .take(2)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if matches!(ordinal.as_str(), "st" | "nd" | "rd" | "th") {
+                i += 2;
+            }
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 async fn run_opencode(
@@ -2698,6 +2783,93 @@ mod tests {
             detect_cursor_rate_limit("Updated the rate limit docs and tests; all passing.")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn detects_codex_rate_limit_hits() {
+        let hit = detect_codex_rate_limit(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 25th, 2026 12:03 PM.",
+        )
+        .expect("usage-limit message");
+        assert_eq!(hit.source, "codex");
+        assert!(hit.reset_at.is_some(), "parsed try-again timestamp");
+
+        let naive = parse_codex_reset_naive(
+            "You've hit your usage limit. try again at Jul 25th, 2026 12:03 PM.",
+        )
+        .expect("naive reset");
+        assert_eq!(
+            naive,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 25)
+                .unwrap()
+                .and_hms_opt(12, 3, 0)
+                .unwrap()
+        );
+
+        assert!(detect_codex_rate_limit("You've reached your usage limit.").is_some());
+        assert!(detect_codex_rate_limit("Rate limit exceeded for this model").is_some());
+        assert!(detect_codex_rate_limit("All tests passing").is_none());
+        assert!(detect_codex_rate_limit(
+            "I documented how you've hit your usage limit messages are detected"
+        )
+        .is_none());
+        assert_eq!(
+            detect_codex_rate_limit("You've hit your usage limit.")
+                .expect("hit without reset")
+                .reset_at,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn records_codex_rate_limit_hit_from_turn_failed() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = map_codex_event(
+            "th-1",
+            "tn-1",
+            json!({
+                "type": "turn.failed",
+                "error": {
+                    "type": "usage_limit_exceeded",
+                    "message": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 25th, 2026 12:03 PM."
+                }
+            }),
+            &tx,
+        )
+        .await
+        .unwrap()
+        .expect("turn.failed finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
+
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event.kind, AgentEventKind::RateLimit));
+        let limit = event.rate_limit.expect("rate-limit payload");
+        assert_eq!(limit.source, "codex");
+        assert!(limit.reset_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn codex_turn_failed_without_usage_limit_stays_generic() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = map_codex_event(
+            "th-1",
+            "tn-1",
+            json!({
+                "type": "turn.failed",
+                "error": {
+                    "type": "turn_failed",
+                    "message": "model overloaded"
+                }
+            }),
+            &tx,
+        )
+        .await
+        .unwrap()
+        .expect("turn.failed finishes the run");
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert_eq!(result.error_class.as_deref(), Some("turn_failed"));
+        assert!(rx.try_recv().is_err(), "no rate-limit event");
     }
 
     #[cfg(unix)]
