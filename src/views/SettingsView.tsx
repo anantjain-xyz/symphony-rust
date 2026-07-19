@@ -302,6 +302,9 @@ function SettingsFeature({
       const previous = draftRef.current ?? draft;
       const next = { ...previous, prompt_template: prompt };
       draftRef.current = next;
+      // Keep feature draft aligned without urgent shell work so a PromptEditor
+      // remount reseeds from the latest prompt, not a stale parent value.
+      startTransition(() => setDraft(next));
       onDraftChange(next, linearKeyRef.current, previous);
       scheduleValidation({ id: ++revisionRef.current, settings: next });
       updateDirty(next, linearKeyRef.current);
@@ -658,48 +661,47 @@ function SettingsView({
         </div>
       ) : null}
 
-      {validationState.status === "pending" ||
-      validationState.status === "invalid" ||
-      validationState.status === "unavailable" ? (
-        <div
-          ref={validationSummaryRef}
-          className={`banner ${validationState.status === "invalid" ? "error" : "info"}`}
-          id="settings-validation-summary"
-          role={validationState.status === "invalid" ? "alert" : "status"}
-          aria-live="polite"
-          aria-busy={validationState.status === "pending" ? "true" : undefined}
-          tabIndex={-1}
-        >
-          {validationState.status === "pending" ? (
-            <>
-              <strong>Checking latest changes…</strong>
-              {validationState.result ? <span>Previous result is stale.</span> : null}
-            </>
-          ) : validationState.status === "invalid" ? (
-            <>
-              <strong>Settings need attention</strong>
-              <span>{validationState.result.workflow_error}</span>
-              {validationFieldId(validationState.result) ? (
-                <a
-                  href={`#${validationFieldId(validationState.result)}`}
-                  onClick={() =>
-                    document
-                      .getElementById(validationFieldId(validationState.result)!)
-                      ?.focus()
-                  }
-                >
-                  Go to the first affected field
-                </a>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <strong>Validation unavailable</strong>
-              <span>Desktop validation is not available in browser preview.</span>
-            </>
-          )}
-        </div>
-      ) : null}
+      <div
+        ref={validationSummaryRef}
+        className={`banner ${validationState.status === "invalid" ? "error" : "info"}`}
+        id="settings-validation-summary"
+        role={validationState.status === "invalid" ? "alert" : "status"}
+        aria-live="polite"
+        aria-busy={validationState.status === "pending" ? "true" : undefined}
+        tabIndex={-1}
+        hidden={
+          validationState.status === "valid" || validationState.status === "idle"
+        }
+      >
+        {validationState.status === "pending" ? (
+          <>
+            <strong>Checking latest changes…</strong>
+            {validationState.result ? <span>Previous result is stale.</span> : null}
+          </>
+        ) : validationState.status === "invalid" ? (
+          <>
+            <strong>Settings need attention</strong>
+            <span>{validationState.result.workflow_error}</span>
+            {validationFieldId(validationState.result) ? (
+              <a
+                href={`#${validationFieldId(validationState.result)}`}
+                onClick={() =>
+                  document
+                    .getElementById(validationFieldId(validationState.result)!)
+                    ?.focus()
+                }
+              >
+                Go to the first affected field
+              </a>
+            ) : null}
+          </>
+        ) : validationState.status === "unavailable" ? (
+          <>
+            <strong>Validation unavailable</strong>
+            <span>Desktop validation is not available in browser preview.</span>
+          </>
+        ) : null}
+      </div>
 
       <div className="settings-grid">
         <section className="settings-section" id="settings-repositories" tabIndex={-1}>
