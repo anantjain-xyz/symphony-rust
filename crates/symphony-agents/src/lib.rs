@@ -383,6 +383,11 @@ async fn map_codex_event(
             }
         }
         "turn.completed" => {
+            // Codex reports totals already: `cached_input_tokens` is a subset
+            // of `input_tokens`, and `reasoning_output_tokens` (when present)
+            // is a subset of `output_tokens`. Do not add either or we double
+            // count — unlike Claude/Cursor/opencode, where cache buckets are
+            // separate and must be folded into input.
             let usage = &ev["usage"];
             let input = usage["input_tokens"].as_i64().unwrap_or(0);
             let output = usage["output_tokens"].as_i64().unwrap_or(0);
@@ -1211,9 +1216,13 @@ impl CursorStreamState {
             }
             "result" => {
                 self.completed = true;
-                // cursor-agent reports usage with camelCase keys.
+                // cursor-agent reports usage with camelCase keys. Cache read/
+                // write are separate buckets (like Claude/opencode), so fold
+                // them into input for a comparable per-run total.
                 let usage = &ev["usage"];
-                let input = usage["inputTokens"].as_i64().unwrap_or(0);
+                let input = usage["inputTokens"].as_i64().unwrap_or(0)
+                    + usage["cacheReadTokens"].as_i64().unwrap_or(0)
+                    + usage["cacheWriteTokens"].as_i64().unwrap_or(0);
                 let output = usage["outputTokens"].as_i64().unwrap_or(0);
                 if input > 0 || output > 0 {
                     send_token_count(
@@ -2396,6 +2405,36 @@ mod tests {
         assert_eq!(mapped.humanized.as_deref(), Some(expected.as_str()));
     }
 
+    #[tokio::test]
+    async fn codex_turn_completed_uses_total_tokens_without_double_counting_cache() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let done = map_codex_event(
+            "th-1",
+            "tn-1",
+            json!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 24763,
+                    "cached_input_tokens": 24448,
+                    "output_tokens": 122,
+                    "reasoning_output_tokens": 40
+                }
+            }),
+            &tx,
+        )
+        .await
+        .unwrap()
+        .expect("turn.completed finishes run");
+        assert!(matches!(done.outcome, AgentOutcome::Success));
+        let tokens = rx.recv().await.expect("token count event");
+        assert!(matches!(tokens.kind, AgentEventKind::TokenCount));
+        // cached_input_tokens / reasoning_output_tokens are subsets — do not
+        // add them (Claude/Cursor/opencode cache buckets are additive).
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(24763));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.output_tokens), Some(122));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.total_tokens), Some(24885));
+    }
+
     #[test]
     fn detects_claude_rate_limit_hits() {
         let legacy = detect_claude_rate_limit("Claude AI usage limit reached|1750000000")
@@ -2741,7 +2780,12 @@ mod tests {
                     "subtype": "success",
                     "is_error": false,
                     "result": "All done",
-                    "usage": { "inputTokens": 120, "outputTokens": 45 }
+                    "usage": {
+                        "inputTokens": 120,
+                        "outputTokens": 45,
+                        "cacheReadTokens": 800,
+                        "cacheWriteTokens": 40
+                    }
                 }),
                 &tx,
             )
@@ -2751,8 +2795,9 @@ mod tests {
         assert!(matches!(done.outcome, AgentOutcome::Success));
         let tokens = rx.recv().await.expect("token count event");
         assert!(matches!(tokens.kind, AgentEventKind::TokenCount));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(120));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(960));
         assert_eq!(tokens.tokens.as_ref().map(|t| t.output_tokens), Some(45));
+        assert_eq!(tokens.tokens.as_ref().map(|t| t.total_tokens), Some(1005));
     }
 
     #[tokio::test]
