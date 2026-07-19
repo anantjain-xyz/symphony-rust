@@ -478,13 +478,27 @@ describe("App settings", () => {
     await openSettings();
     const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
     fireEvent.change(prompt, { target: { value: "Unsaved navigation draft" } });
+    await waitFor(() => expect(screen.getByText("Unsaved changes")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByRole("heading", { name: "Settings" });
     await waitFor(() =>
       expect(
         (container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value,
       ).toBe("Unsaved navigation draft"),
     );
+  });
+
+  it("hides the Settings validation summary while settings are valid", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
+    render(<App />);
+    await openSettings();
+    await waitFor(() => expect(commandCount("validate_settings")).toBe(1));
+    const summary = document.getElementById("settings-validation-summary");
+    expect(summary).toBeTruthy();
+    expect(summary?.hidden).toBe(true);
+    expect(summary?.textContent).not.toContain("Latest settings are valid");
   });
 
   it("does not rerender the app shell for every prompt keystroke", async () => {
@@ -1050,7 +1064,7 @@ describe("App settings", () => {
     expect(alert.textContent).toContain("Couldn’t load Symphony");
     expect(alert.textContent).toContain("dashboard failed");
     const retry = screen.getByRole("button", { name: "Retry" });
-    expect(document.activeElement).toBe(retry);
+    await waitFor(() => expect(document.activeElement).toBe(retry));
     expect((retry as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByText("Build widgets")).toBeNull();
     expect(overviewReads).toBe(1);

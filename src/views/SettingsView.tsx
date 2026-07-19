@@ -302,6 +302,9 @@ function SettingsFeature({
       const previous = draftRef.current ?? draft;
       const next = { ...previous, prompt_template: prompt };
       draftRef.current = next;
+      // Keep feature draft aligned without urgent shell work so a PromptEditor
+      // remount reseeds from the latest prompt, not a stale parent value.
+      startTransition(() => setDraft(next));
       onDraftChange(next, linearKeyRef.current, previous);
       scheduleValidation({ id: ++revisionRef.current, settings: next });
       updateDirty(next, linearKeyRef.current);
@@ -666,6 +669,9 @@ function SettingsView({
         aria-live="polite"
         aria-busy={validationState.status === "pending" ? "true" : undefined}
         tabIndex={-1}
+        hidden={
+          validationState.status === "valid" || validationState.status === "idle"
+        }
       >
         {validationState.status === "pending" ? (
           <>
@@ -694,11 +700,7 @@ function SettingsView({
             <strong>Validation unavailable</strong>
             <span>Desktop validation is not available in browser preview.</span>
           </>
-        ) : validationState.status === "valid" ? (
-          <span>Latest settings are valid.</span>
-        ) : (
-          <span>Settings validation has not run yet.</span>
-        )}
+        ) : null}
       </div>
 
       <div className="settings-grid">
