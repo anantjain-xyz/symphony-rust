@@ -941,6 +941,11 @@ td strong {
   padding: 10px 12px;
 }
 
+/* Author `display: flex` otherwise overrides the UA `[hidden] { display: none }`. */
+.banner[hidden] {
+  display: none;
+}
+
 .banner.info,
 .runtime-banner {
   background: var(--info);

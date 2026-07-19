@@ -499,6 +499,8 @@ describe("App settings", () => {
     expect(summary).toBeTruthy();
     expect(summary?.hidden).toBe(true);
     expect(summary?.textContent).not.toContain("Latest settings are valid");
+    // `.banner { display: flex }` must not override the hidden attribute.
+    expect(getComputedStyle(summary!).display).toBe("none");
   });
 
   it("does not rerender the app shell for every prompt keystroke", async () => {
