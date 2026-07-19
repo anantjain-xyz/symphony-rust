@@ -1064,7 +1064,7 @@ describe("App settings", () => {
     expect(alert.textContent).toContain("Couldn’t load Symphony");
     expect(alert.textContent).toContain("dashboard failed");
     const retry = screen.getByRole("button", { name: "Retry" });
-    expect(document.activeElement).toBe(retry);
+    await waitFor(() => expect(document.activeElement).toBe(retry));
     expect((retry as HTMLButtonElement).disabled).toBe(false);
     expect(screen.queryByText("Build widgets")).toBeNull();
     expect(overviewReads).toBe(1);
