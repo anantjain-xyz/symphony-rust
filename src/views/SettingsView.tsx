@@ -5,7 +5,6 @@ import {
   startTransition,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -229,22 +228,56 @@ function SettingsFeature({
   const [focusInvalidSummary, setFocusInvalidSummary] = useState(false);
   const [promptSeedRevision, setPromptSeedRevision] = useState(0);
   const deferredValidationRef = useRef(false);
-  const controller = useMemo(
-    () =>
-      new SettingsValidationController(
-        viewProps.runtimeAvailable,
-        (settings) => invoke<ValidationResult>("validate_settings", { settings }),
-        (state) => {
+  const controllerRef = useRef<SettingsValidationController | null>(null);
+  const mountedRef = useRef(false);
+  const onValidationResultRef = useRef(onValidationResult);
+  onValidationResultRef.current = onValidationResult;
+
+  // Lazily create the controller and remint only when runtime availability
+  // changes or the previous one was disposed. Effect teardown must NOT dispose —
+  // React Strict Mode runs cleanup→setup on the same fiber, and disposing there
+  // permanently breaks Save.
+  const ensureController = useCallback(() => {
+    const existing = controllerRef.current;
+    if (
+      existing &&
+      !existing.isDisposed &&
+      existing.runtimeAvailable === viewProps.runtimeAvailable
+    ) {
+      return existing;
+    }
+    // Drop the previous instance only when Save does not own it.
+    if (
+      existing &&
+      !existing.isDisposed &&
+      saveControllerRef.current !== existing
+    ) {
+      existing.dispose();
+    }
+    const created = new SettingsValidationController(
+      viewProps.runtimeAvailable,
+      (settings) => invoke<ValidationResult>("validate_settings", { settings }),
+      (state) => {
+        if (!mountedRef.current) return;
+        // Keep pending updates low-priority, but flush terminal states immediately
+        // so Save can read the real error instead of a stale/generic banner.
+        if (state.status === "pending") {
           startTransition(() => setValidationState(state));
-          if (state.result && state.status !== "pending") {
-            onValidationResult(state.result);
-          }
-        },
-      ),
-    [onValidationResult, viewProps.runtimeAvailable],
-  );
+        } else {
+          setValidationState(state);
+        }
+        if (state.result && state.status !== "pending") {
+          onValidationResultRef.current(state.result);
+        }
+      },
+    );
+    controllerRef.current = created;
+    return created;
+  }, [saveControllerRef, viewProps.runtimeAvailable]);
+
   const scheduleValidation = useCallback(
     (revision: { id: number; settings: AppSettings }) => {
+      const controller = ensureController();
       if (
         savePendingRef.current &&
         saveControllerRef.current !== controller
@@ -254,7 +287,7 @@ function SettingsFeature({
       }
       controller.schedule(revision);
     },
-    [controller, saveControllerRef, savePendingRef],
+    [ensureController, saveControllerRef, savePendingRef],
   );
 
   const updateDirty = useCallback(
@@ -333,15 +366,23 @@ function SettingsFeature({
   );
 
   useEffect(() => {
+    mountedRef.current = true;
+    const controller = ensureController();
     const current = draftRef.current;
-    if (!current) return () => controller.dispose();
-    scheduleValidation({ id: revisionRef.current, settings: current });
-    return () => controller.dispose();
-  }, [controller, draftRef, revisionRef, scheduleValidation]);
+    if (current) {
+      controller.schedule({ id: revisionRef.current, settings: current });
+    }
+    return () => {
+      mountedRef.current = false;
+      // Clear debounce only — never dispose here. Strict Mode's fake teardown
+      // would otherwise leave Save pointed at a dead controller on the same fiber.
+      controller.clearScheduled();
+    };
+  }, [draftRef, ensureController, revisionRef]);
 
   useEffect(() => {
     if (savePending) {
-      if (saveControllerRef.current !== controller) {
+      if (saveControllerRef.current !== controllerRef.current) {
         deferredValidationRef.current = true;
       }
       return;
@@ -349,10 +390,10 @@ function SettingsFeature({
     if (!deferredValidationRef.current) return;
     deferredValidationRef.current = false;
     const current = draftRef.current ?? savedSettings;
-    controller.schedule({ id: revisionRef.current, settings: current });
+    ensureController().schedule({ id: revisionRef.current, settings: current });
   }, [
-    controller,
     draftRef,
+    ensureController,
     revisionRef,
     saveControllerRef,
     savePending,
@@ -367,22 +408,41 @@ function SettingsFeature({
   }, [draft, draftRef, savedSettings]);
 
   useEffect(() => {
-    if (!focusInvalidSummary || validationState.status !== "invalid") return;
+    if (!focusInvalidSummary) return;
+    if (
+      validationState.status !== "invalid" &&
+      validationState.status !== "unavailable"
+    ) {
+      return;
+    }
     summaryRef.current?.focus();
     setFocusInvalidSummary(false);
   }, [focusInvalidSummary, validationState.status]);
 
   const handleSave = useCallback(async () => {
     if (savePendingRef.current) return;
+    const activeController = ensureController();
     savePendingRef.current = true;
-    saveControllerRef.current = controller;
+    saveControllerRef.current = activeController;
     onSavePendingChange(true);
     try {
       const exactSettings = draftRef.current ?? draft;
       const exactLinearKey = linearKeyRef.current;
       const exactRevision = { id: revisionRef.current, settings: exactSettings };
-      const result = await controller.validateNow(exactRevision);
-      if (!result || revisionRef.current !== exactRevision.id) return;
+      const outcome = await activeController.validateNow(exactRevision);
+      if (revisionRef.current !== exactRevision.id) return;
+      if (outcome.status === "unavailable") {
+        if (outcome.cause === "superseded") return;
+        setValidationState({
+          status: "unavailable",
+          result: null,
+          stale: false,
+          reason: outcome.reason,
+        });
+        setFocusInvalidSummary(true);
+        return;
+      }
+      const result = outcome.result;
       if (result.workflow_blocking) {
         setFocusInvalidSummary(true);
         return;
@@ -397,15 +457,15 @@ function SettingsFeature({
       onDirtyChange(false);
     } finally {
       savePendingRef.current = false;
-      if (saveControllerRef.current === controller) {
+      if (saveControllerRef.current === activeController) {
         saveControllerRef.current = null;
       }
       onSavePendingChange(false);
     }
   }, [
-    controller,
     draft,
     draftRef,
+    ensureController,
     linearKeyRef,
     onDirtyChange,
     onSave,
@@ -699,7 +759,12 @@ function SettingsView({
         ) : validationState.status === "unavailable" ? (
           <>
             <strong>Validation unavailable</strong>
-            <span>Desktop validation is not available in browser preview.</span>
+            <span>
+              {validationState.reason ??
+                (runtimeAvailable
+                  ? "Couldn't validate settings. Try saving again."
+                  : "Desktop validation is not available in browser preview.")}
+            </span>
           </>
         ) : null}
       </div>

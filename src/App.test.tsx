@@ -533,6 +533,55 @@ describe("App settings", () => {
     expect(saveCall()?.[1].request.settings.prompt_template).toBe("Exact validated draft");
   });
 
+  it("saves successfully under StrictMode effect remounts", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+    const { container } = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Strict mode save draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings.prompt_template).toBe("Strict mode save draft");
+    expect(screen.queryByText(/Settings view remounted/)).toBeNull();
+  });
+
+  it("surfaces unavailable validation when Save cannot validate", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "validate_settings") {
+        return Promise.reject(new Error("validation backend down"));
+      }
+      return baseInvoke(command, args);
+    });
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Cannot validate this draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(screen.getByText("Validation unavailable")).toBeTruthy(),
+    );
+    expect(screen.getByText("validation backend down")).toBeTruthy();
+    expect(screen.queryByText(/browser preview/)).toBeNull();
+    expect(screen.queryByText(/Try saving again/)).toBeNull();
+    expect(
+      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
+    ).toBe(false);
+    expect(document.getElementById("settings-validation-summary")?.hidden).toBe(false);
+  });
+
   it("does not save when the draft is superseded during authoritative validation", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -3417,7 +3466,7 @@ describe("App settings", () => {
     await waitFor(() => expect(saveButton.getAttribute("disabled")).toBeNull());
     fireEvent.click(saveButton);
 
-    await waitFor(() => expect(screen.getByText(validationError)).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText(validationError).length).toBeGreaterThan(0));
     await waitFor(() =>
       expect(document.activeElement?.id).toBe("settings-validation-summary"),
     );
