@@ -566,6 +566,26 @@ describe("App settings", () => {
     ).toBe(false);
   });
 
+  it("submits Settings through app validation instead of native form validation", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+    await openSettings();
+    fireEvent.change(
+      screen.getByLabelText(/^Turn timeout/, { selector: "input" }),
+      { target: { value: "" } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
+      { target: { value: "GITHUB_TOKEN=from-session" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+  });
+
   it("finishes an explicit Save after navigating away during validation", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
