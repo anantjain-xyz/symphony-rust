@@ -63,7 +63,10 @@ describe("SettingsValidationController", () => {
     controller.schedule({ id: 3, settings: settings("newer edit") });
     await vi.advanceTimersByTimeAsync(SETTINGS_VALIDATION_DEBOUNCE_MS);
 
-    await expect(saveResult).resolves.toBeNull();
+    await expect(saveResult).resolves.toMatchObject({
+      status: "unavailable",
+      cause: "superseded",
+    });
     first.resolve(valid());
     await Promise.resolve();
     await Promise.resolve();
@@ -93,8 +96,8 @@ describe("SettingsValidationController", () => {
     const controller = new SettingsValidationController(true, validate, vi.fn());
     const revision = { id: 4, settings: settings("save me") };
     controller.schedule(revision);
-    const result = await controller.validateNow(revision);
-    expect(result).toEqual(valid());
+    const outcome = await controller.validateNow(revision);
+    expect(outcome).toEqual({ status: "ok", result: valid() });
     expect(validate).toHaveBeenCalledTimes(1);
     await vi.runAllTimersAsync();
     expect(validate).toHaveBeenCalledTimes(1);
@@ -112,7 +115,29 @@ describe("SettingsValidationController", () => {
     controller.dispose();
     validation.resolve(valid());
 
-    await expect(result).resolves.toEqual(valid());
+    await expect(result).resolves.toEqual({ status: "ok", result: valid() });
+  });
+
+  it("clearScheduled cancels debounce without blocking a later Save", async () => {
+    vi.useFakeTimers();
+    const validate = vi.fn().mockResolvedValue(valid());
+    const controller = new SettingsValidationController(true, validate, vi.fn());
+    controller.schedule({ id: 1, settings: settings("draft") });
+    controller.clearScheduled();
+    await vi.advanceTimersByTimeAsync(SETTINGS_VALIDATION_DEBOUNCE_MS);
+    expect(validate).not.toHaveBeenCalled();
+    await expect(
+      controller.validateNow({ id: 2, settings: settings("save") }),
+    ).resolves.toEqual({ status: "ok", result: valid() });
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports disposed when validateNow runs after dispose", async () => {
+    const controller = new SettingsValidationController(true, vi.fn(), vi.fn());
+    controller.dispose();
+    await expect(
+      controller.validateNow({ id: 1, settings: settings("too late") }),
+    ).resolves.toMatchObject({ status: "unavailable", cause: "disposed" });
   });
 
   it("never invokes validation when the runtime is unavailable", async () => {
@@ -122,9 +147,36 @@ describe("SettingsValidationController", () => {
       states.push(state.status),
     );
     controller.schedule({ id: 1, settings: settings("preview") });
-    expect(await controller.validateNow({ id: 1, settings: settings("preview") })).toBeNull();
+    expect(await controller.validateNow({ id: 1, settings: settings("preview") })).toMatchObject({
+      status: "unavailable",
+      cause: "preview",
+    });
     expect(validate).not.toHaveBeenCalled();
     expect(states).toEqual(["unavailable", "unavailable"]);
+  });
+
+  it("surfaces validate_settings invoke failures with the backend message", async () => {
+    const states: Array<{ status: string; reason?: string }> = [];
+    const controller = new SettingsValidationController(
+      true,
+      vi.fn().mockRejectedValue(new Error("command validate_settings not found")),
+      (state) =>
+        states.push({
+          status: state.status,
+          reason: state.status === "unavailable" ? state.reason : undefined,
+        }),
+    );
+    await expect(
+      controller.validateNow({ id: 1, settings: settings("draft") }),
+    ).resolves.toEqual({
+      status: "unavailable",
+      cause: "error",
+      reason: "command validate_settings not found",
+    });
+    expect(states).toEqual([
+      { status: "pending" },
+      { status: "unavailable", reason: "command validate_settings not found" },
+    ]);
   });
 
   it("renders non-blocking incomplete validation as invalid rather than valid", async () => {
