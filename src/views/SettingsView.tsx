@@ -621,6 +621,7 @@ function SettingsView({
       className="settings-form"
       id={SETTINGS_FORM_ID}
       autoComplete="off"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         onSave();
