@@ -22,6 +22,8 @@ pub enum StorageError {
     Serde(#[from] serde_json::Error),
     #[error("run {0} lost the one-running-run race")]
     AlreadyRunning(String),
+    #[error("run {run_id} cannot finish with non-terminal status {status}")]
+    InvalidRunTransition { run_id: String, status: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

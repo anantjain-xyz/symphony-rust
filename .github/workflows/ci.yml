@@ -33,6 +33,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Architecture
+      - run: pnpm check:boundaries
+      - run: pnpm test:boundaries
+      - run: pnpm test:runtime-contracts
+
       # Rust: pure crates only. Excluding symphony-desktop (the Tauri shell) avoids
       # webkit2gtk system deps and keeps the job fast and apt-free.
       - run: cargo fmt --all --check

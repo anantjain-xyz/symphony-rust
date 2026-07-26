@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "test:boundaries": "node --test scripts/check-boundaries.node.mjs",
     "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
+    "test:runtime-contracts": "cargo test -p symphony-agents native_backend_fixture_contracts && cargo test -p symphony-storage runtime_lifecycle_transition_matrix && cargo test -p symphony-worker runtime_boundary_contracts && cargo test -p symphony-worker runtime_lifecycle_transition_matrix",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
