@@ -1,9 +1,26 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
+export const CANONICAL_RUNNER_SOURCE = `import { runValidationProfile } from "./check-validation-contract.mjs";
+
+process.exitCode = runValidationProfile({ profileName: process.argv[2] });
+`;
+const REQUIRED_FAST_COMMANDS = new Set([
+  "validation-contract",
+  "agent-assets",
+  "validation-tests",
+  "frontend-contracts",
+  "frontend-contract-tests",
+  "rust-format",
+  "rust-clippy",
+  "rust-tests",
+  "frontend-typecheck",
+  "frontend-tests",
+]);
 const REQUIRED_FULL_COMMANDS = new Map([
   [
     "validation-contract",
@@ -538,14 +555,105 @@ function validateCiRunStep(content, command, workflowPath, errors) {
     for (let index = job.index + 1; index < jobEnd; index += 1) {
       if (
         yamlIndent(lines[index]) === steps.indent &&
-        /^if\s*:/.test(lines[index].trim())
+        /^(?:if|continue-on-error)\s*:/.test(lines[index].trim())
       ) {
+        const field = lines[index].trim().split(":")[0];
         errors.push(
-          `CI workflow ${workflowPath} canonical entrypoint job must be unconditional; remove if`,
+          `CI workflow ${workflowPath} canonical entrypoint job must be unconditional and failure-gating; remove ${field}`,
         );
       }
     }
   }
+}
+
+export function runValidationProfile({
+  root = DEFAULT_ROOT,
+  profileName,
+  spawn = spawnSync,
+  platform = process.platform,
+  environment = process.env,
+  stdout = (message) => console.log(message),
+  stderr = (message) => console.error(message),
+} = {}) {
+  let contract;
+  try {
+    contract = JSON.parse(
+      readFileSync(resolve(root, "validation/contract.json"), "utf8"),
+    );
+  } catch (error) {
+    stderr(
+      `Validation runner: cannot read validation/contract.json: ${error.message}`,
+    );
+    return 2;
+  }
+
+  const contractErrors = validateValidationContract(root);
+  if (contractErrors.length > 0) {
+    stderr("Validation runner refused an invalid contract:");
+    for (const error of contractErrors) stderr(`- ${error}`);
+    return 2;
+  }
+
+  const commandIds = contract.profiles?.[profileName];
+  if (!Array.isArray(commandIds)) {
+    stderr(
+      `Validation runner: unknown profile ${JSON.stringify(
+        profileName,
+      )}; choose one of ${Object.keys(contract.profiles ?? {}).join(", ")}`,
+    );
+    return 2;
+  }
+
+  for (const [index, commandId] of commandIds.entries()) {
+    const command = contract.commands?.[commandId];
+    if (!command || !Array.isArray(command.argv) || command.argv.length === 0) {
+      stderr(
+        `Validation runner: profile ${profileName} references invalid command ${commandId}`,
+      );
+      return 2;
+    }
+
+    const [executable, ...args] = command.argv;
+    const platformExecutable =
+      platform === "win32" && executable === "pnpm"
+        ? "pnpm.cmd"
+        : executable;
+    stdout(
+      `\n==> [${index + 1}/${commandIds.length}] ${
+        command.label ?? commandId
+      }`,
+    );
+    stdout(`$ ${command.argv.join(" ")}`);
+
+    const result = spawn(platformExecutable, args, {
+      cwd: root,
+      env: environment,
+      stdio: "inherit",
+    });
+    if (result.error) {
+      stderr(
+        `Validation command ${commandId} could not start: ${result.error.message}`,
+      );
+      return 1;
+    }
+    if (result.signal) {
+      stderr(
+        `Validation command ${commandId} terminated by signal ${result.signal}`,
+      );
+      return 1;
+    }
+    if (result.status !== 0) {
+      stderr(
+        `Validation command ${commandId} failed with exit ${result.status}`,
+      );
+      return result.status ?? 1;
+    }
+  }
+
+  stdout(
+    `\nValidation profile ${profileName} passed (${commandIds.length} commands).`,
+  );
+  return 0;
 }
 
 export function validateValidationContract(
@@ -680,6 +788,13 @@ export function validateValidationContract(
 
   const fast = new Set(Array.isArray(profiles.fast) ? profiles.fast : []);
   const full = new Set(Array.isArray(profiles.full) ? profiles.full : []);
+  for (const commandId of REQUIRED_FAST_COMMANDS) {
+    if (!fast.has(commandId)) {
+      errors.push(
+        `fast validation profile must include required command ${commandId}`,
+      );
+    }
+  }
   for (const [commandId, expected] of REQUIRED_FULL_COMMANDS) {
     const command = commands[commandId];
     if (!command) {
@@ -790,6 +905,16 @@ export function validateValidationContract(
   );
   if (runnerAbsolute && !existsSync(runnerAbsolute)) {
     errors.push(`validation runner is missing at ${RUNNER_SCRIPT}`);
+  } else if (runnerAbsolute) {
+    const runnerSource = readFileSync(runnerAbsolute, "utf8").replace(
+      /\r\n?/g,
+      "\n",
+    );
+    if (runnerSource !== CANONICAL_RUNNER_SOURCE) {
+      errors.push(
+        `validation runner ${RUNNER_SCRIPT} must delegate to the tested canonical profile executor`,
+      );
+    }
   }
 
   for (const [entrypointName, entrypoint] of Object.entries(

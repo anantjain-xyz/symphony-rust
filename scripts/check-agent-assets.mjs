@@ -10,6 +10,7 @@ import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
 
 function resolveInside(root, path, errors, label) {
   if (typeof path !== "string" || path.trim() === "") {
@@ -1191,6 +1192,18 @@ export function validateAgentAssets(
   const promptConfig = contract.defaultPrompt;
   let promptFile = null;
   if (promptConfig) {
+    if (
+      promptConfig.forbiddenNamespacePattern !==
+      FORBIDDEN_MCP_NAMESPACE_PATTERN
+    ) {
+      errors.push(
+        `defaultPrompt forbiddenNamespacePattern must be ${JSON.stringify(
+          FORBIDDEN_MCP_NAMESPACE_PATTERN,
+        )}, received ${JSON.stringify(
+          promptConfig.forbiddenNamespacePattern,
+        )}`,
+      );
+    }
     promptFile = resolveInside(
       root,
       promptConfig.path,
@@ -1231,19 +1244,15 @@ export function validateAgentAssets(
         promptSkills,
         errors,
       );
-      if (promptConfig.forbiddenNamespacePattern) {
-        const namespacePattern = new RegExp(
-          promptConfig.forbiddenNamespacePattern,
+      const namespacePattern = new RegExp(FORBIDDEN_MCP_NAMESPACE_PATTERN);
+      const match = namespacePattern.exec(prompt);
+      if (match) {
+        errors.push(
+          `${promptConfig.path}:${lineNumber(
+            prompt,
+            match.index,
+          )} hard-codes MCP namespace ${match[0]}; describe the capability without assuming a server name`,
         );
-        const match = namespacePattern.exec(prompt);
-        if (match) {
-          errors.push(
-            `${promptConfig.path}:${lineNumber(
-              prompt,
-              match.index,
-            )} hard-codes MCP namespace ${match[0]}; describe the capability without assuming a server name`,
-          );
-        }
       }
     }
   } else {

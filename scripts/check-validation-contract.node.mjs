@@ -9,7 +9,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { validateValidationContract } from "./check-validation-contract.mjs";
+import {
+  CANONICAL_RUNNER_SOURCE,
+  runValidationProfile,
+  validateValidationContract,
+} from "./check-validation-contract.mjs";
 
 function write(root, path, content) {
   const target = join(root, path);
@@ -67,10 +71,10 @@ function validationFixture(t) {
     "scripts/check-preview-coverage.mjs",
     "scripts/check-preview-coverage.node.mjs",
     "scripts/fixture.node.mjs",
-    "scripts/run-validation.mjs",
   ]) {
     write(root, path, "\n");
   }
+  write(root, "scripts/run-validation.mjs", CANONICAL_RUNNER_SOURCE);
   write(
     root,
     ".github/workflows/ci.yml",
@@ -102,6 +106,11 @@ function validationFixture(t) {
         "validation-tests",
         "frontend-contracts",
         "frontend-contract-tests",
+        "rust-format",
+        "rust-clippy",
+        "rust-tests",
+        "frontend-typecheck",
+        "frontend-tests",
       ],
       full: [
         "validation-contract",
@@ -245,6 +254,83 @@ test("accepts a complete canonical validation contract", (t) => {
   assert.deepEqual(validateValidationContract(root), []);
 });
 
+test("pins every command required by the advertised fast profile", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.profiles.fast = ["validation-contract"];
+  writeJson(root, "validation/contract.json", contract);
+
+  const errors = validateValidationContract(root).join("\n");
+  for (const commandId of [
+    "agent-assets",
+    "validation-tests",
+    "frontend-contracts",
+    "frontend-contract-tests",
+    "rust-format",
+    "rust-clippy",
+    "rust-tests",
+    "frontend-typecheck",
+    "frontend-tests",
+  ]) {
+    assert.match(
+      errors,
+      new RegExp(
+        `fast validation profile must include required command ${commandId}`,
+      ),
+    );
+  }
+});
+
+test("requires the tested canonical validation runner entrypoint", (t) => {
+  const root = validationFixture(t);
+  write(root, "scripts/run-validation.mjs", "// no-op\n");
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /validation runner scripts\/run-validation\.mjs must delegate to the tested canonical profile executor/,
+  );
+});
+
+test("validation runner traverses profiles and propagates failures", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  const invocations = [];
+  const successStatus = runValidationProfile({
+    root,
+    profileName: "fast",
+    spawn(executable, args) {
+      invocations.push([executable, ...args]);
+      return { status: 0 };
+    },
+    stdout() {},
+    stderr() {},
+  });
+
+  assert.equal(successStatus, 0);
+  assert.deepEqual(
+    invocations,
+    contract.profiles.fast.map((commandId) => contract.commands[commandId].argv),
+  );
+
+  let attempts = 0;
+  const failureStatus = runValidationProfile({
+    root,
+    profileName: "fast",
+    spawn() {
+      attempts += 1;
+      return { status: attempts === 4 ? 23 : 0 };
+    },
+    stdout() {},
+    stderr() {},
+  });
+  assert.equal(failureStatus, 23);
+  assert.equal(attempts, 4);
+});
+
 test("pins the bodies of package scripts owned by required gates", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -317,6 +403,7 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
     `jobs:
   validate:
     if: \${{ false }}
+    continue-on-error: true
     steps:
       - run: pnpm verify:full
         if: \${{ false }}
@@ -335,7 +422,11 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
   );
   assert.match(
     errors,
-    /canonical entrypoint job must be unconditional; remove if/,
+    /canonical entrypoint job must be unconditional and failure-gating; remove if/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint job must be unconditional and failure-gating; remove continue-on-error/,
   );
 });
 

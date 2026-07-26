@@ -486,6 +486,29 @@ test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
   );
 });
 
+test("requires the portable MCP namespace policy", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  delete contract.defaultPrompt.forbiddenNamespacePattern;
+  writeJson(root, "validation/agent-assets.json", contract);
+  const prompt = join(root, "src-tauri/assets/default-prompt.md");
+  writeFileSync(
+    prompt,
+    `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /defaultPrompt forbiddenNamespacePattern must be "mcp__\[A-Za-z0-9_-\]\+__", received undefined/,
+  );
+  assert.match(
+    errors,
+    /hard-codes MCP namespace mcp__linear-server__; describe the capability without assuming a server name/,
+  );
+});
+
 test("validates the script named after pnpm run in agent Markdown", (t) => {
   const root = harnessFixture(t);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
