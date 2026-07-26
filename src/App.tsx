@@ -1,5 +1,3 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   Suspense,
   useCallback,
@@ -16,11 +14,9 @@ import type {
   LinearViewerProfile,
   Overview,
   RepoWorkflowStatus,
-  RetroBatchRow,
   RetroDetail,
   RetroRow,
   RetroStatus,
-  RetroSuggestionRow,
   RunDetail,
   RunWithIssueRow,
   SkillsInstallStatus,
@@ -47,11 +43,11 @@ import {
   resourcesForDbChange,
   resourcesForView,
   visibleResources,
-  type AgentEvent,
   type DashboardResourceKey,
-  type DbChanged,
-  type RateLimitChanged,
 } from "./dashboardResources";
+import * as desktopCommands from "./desktop/commands";
+import { subscribeDesktopEvents } from "./desktop/events";
+import { isDesktopRuntime } from "./desktop/runtime";
 import {
   beginResourceRefresh,
   completeResourceRefresh,
@@ -317,19 +313,19 @@ export async function loadDashboardSnapshot({
     requestedRetro,
     hasInProgressRetroBatches,
   ] = await Promise.all([
-    invoke<Overview>("get_overview"),
-    invoke<RunWithIssueRow[]>("list_runs"),
-    invoke<IssueRow[]>("list_issues"),
-    invoke<WorkerStatus>("get_worker_status"),
+    desktopCommands.getOverview(),
+    desktopCommands.listRuns(),
+    desktopCommands.listIssues(),
+    desktopCommands.getWorkerStatus(),
     selectedRunId
-      ? invoke<RunDetail | null>("get_run_detail", { id: selectedRunId })
+      ? desktopCommands.getRunDetail(selectedRunId)
       : Promise.resolve(null),
-    invoke<RetroStatus>("get_retro_status"),
-    invoke<RetroRow[]>("list_retros"),
+    desktopCommands.getRetroStatus(),
+    desktopCommands.listRetros(),
     selectedRetroId
-      ? invoke<RetroDetail | null>("get_retro_detail", { id: selectedRetroId })
+      ? desktopCommands.getRetroDetail(selectedRetroId)
       : Promise.resolve(null),
-    invoke<boolean>("has_in_progress_retro_batches"),
+    desktopCommands.hasInProgressRetroBatches(),
   ]);
 
   const nextSelectedRetroId = selectedRetroId ?? retros[0]?.id ?? null;
@@ -376,7 +372,7 @@ function loadBootstrap(): Promise<BootstrapResult> {
 
   const pending = (async () => {
     const [settings, dashboard] = await Promise.all([
-      invoke<AppSettings>("load_settings"),
+      desktopCommands.loadSettings(),
       loadDashboardSnapshot(),
     ]);
     const autoStart =
@@ -385,7 +381,7 @@ function loadBootstrap(): Promise<BootstrapResult> {
       dashboard.worker.state !== "stopped" ||
       dashboard.worker.last_error
         ? null
-        : invoke<WorkerStatus>("start_worker");
+        : desktopCommands.startWorker();
     return { settings, dashboard, autoStart };
   })();
   bootstrapPromise = pending;
@@ -493,7 +489,7 @@ function formSnapshot(settings: AppSettings) {
 
 function App({ onRender }: { onRender?: () => void } = {}) {
   onRender?.();
-  const runtimeAvailable = isTauri();
+  const runtimeAvailable = isDesktopRuntime();
   const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
   const [viewAttempts, setViewAttempts] = useState<Record<Exclude<View, "overview">, number>>({
@@ -803,17 +799,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     );
   }
 
-  async function invokeDashboardResource<T>(
+  async function loadDashboardResource<T>(
     key: DashboardResourceKey,
-    command: string,
-    args?: Record<string, unknown>,
+    load: () => Promise<T>,
   ): Promise<T> {
     if (DASHBOARD_COMMAND_TRACE_ENABLED) {
       const count = (resourceCommandCounts.current[key] ?? 0) + 1;
       resourceCommandCounts.current[key] = count;
-      console.debug("[dashboard-resource] command", { key, command, count });
+      console.debug("[dashboard-resource] command", { key, count });
     }
-    return invoke<T>(command, args);
+    return load();
   }
 
   const dashboardRefreshExecutor = useRef<
@@ -841,16 +836,19 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         try {
           switch (key) {
           case "overview": {
-            const next = await invokeDashboardResource<Overview>(key, "get_overview");
+            const next = await loadDashboardResource(
+              key,
+              desktopCommands.getOverview,
+            );
             if (isAuthoritative(key)) {
               commitResourceSuccess("overview", next);
             }
             break;
           }
           case "runs": {
-            const next = await invokeDashboardResource<RunWithIssueRow[]>(
+            const next = await loadDashboardResource(
               key,
-              "list_runs",
+              desktopCommands.listRuns,
             );
             if (isAuthoritative(key)) {
               commitResourceSuccess("runs", next);
@@ -858,7 +856,10 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             break;
           }
           case "issues": {
-            const next = await invokeDashboardResource<IssueRow[]>(key, "list_issues");
+            const next = await loadDashboardResource(
+              key,
+              desktopCommands.listIssues,
+            );
             if (isAuthoritative(key)) {
               commitResourceSuccess("issues", next);
               const byId = new Map(next.map((issue) => [issue.id, issue]));
@@ -876,9 +877,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             break;
           }
           case "worker": {
-            const next = await invokeDashboardResource<WorkerStatus>(
+            const next = await loadDashboardResource(
               key,
-              "get_worker_status",
+              desktopCommands.getWorkerStatus,
             );
             if (isAuthoritative(key)) {
               commitResourceSuccess("worker", next);
@@ -887,8 +888,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           }
           case "retroList": {
             const [nextStatus, nextRetros] = await Promise.all([
-              invokeDashboardResource<RetroStatus>(key, "get_retro_status"),
-              invokeDashboardResource<RetroRow[]>(key, "list_retros"),
+              loadDashboardResource(key, desktopCommands.getRetroStatus),
+              loadDashboardResource(key, desktopCommands.listRetros),
             ]);
             if (isAuthoritative(key)) {
               commitResourceSuccess("retroList", {
@@ -908,9 +909,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             break;
           }
           case "retroBatches": {
-            const next = await invokeDashboardResource<boolean>(
+            const next = await loadDashboardResource(
               key,
-              "has_in_progress_retro_batches",
+              desktopCommands.hasInProgressRetroBatches,
             );
             if (isAuthoritative(key)) {
               commitResourceSuccess("retroBatches", next);
@@ -920,10 +921,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           case "selectedRun": {
             if (!selectedRunId) break;
             const appendVersion = localAppendVersionRef.current;
-            const next = await invokeDashboardResource<RunDetail | null>(
+            const next = await loadDashboardResource(
               key,
-              "get_run_detail",
-              { id: selectedRunId },
+              () => desktopCommands.getRunDetail(selectedRunId),
             );
             if (
               isAuthoritative(key) &&
@@ -956,10 +956,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           }
           case "selectedRetro": {
             if (!selectedRetroId) break;
-            const next = await invokeDashboardResource<RetroDetail | null>(
+            const next = await loadDashboardResource(
               key,
-              "get_retro_detail",
-              { id: selectedRetroId },
+              () => desktopCommands.getRetroDetail(selectedRetroId),
             );
             if (
               isAuthoritative(key) &&
@@ -1223,8 +1222,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         }
       });
 
-    const unsubs = Promise.all([
-      listen<DbChanged>("db_changed", ({ payload }) => {
+    const unsubscribe = subscribeDesktopEvents({
+      onDbChanged: (payload) => {
         if (payload.table === "workflows") {
           workflowReadinessDirtyRef.current = true;
           setWorkflowReadinessEpoch((epoch) => epoch + 1);
@@ -1242,8 +1241,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           keys = keys.filter((key) => key !== "selectedRun");
         }
         scheduleRefresh(keys);
-      }),
-      listen<AgentEvent>("agent_event", ({ payload }) => {
+      },
+      onAgentEvent: (payload) => {
         const nextEvent = payload.event;
         const current = selectedRunRef.current;
         if (
@@ -1258,18 +1257,18 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           localAppendVersionRef.current += 1;
         }
         scheduleRefresh(["overview"]);
-      }),
-      listen<RateLimitChanged>("rate_limit_changed", () => {
+      },
+      onRateLimitChanged: () => {
         scheduleRefresh(["overview"]);
-      }),
-    ]).catch((err) => {
-      if (!cancelled) setError(formatError(err));
-      return [];
+      },
+      onError: (err) => {
+        if (!cancelled) setError(formatError(err));
+      },
     });
     return () => {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
-      unsubs.then((items) => items.forEach((unlisten) => unlisten()));
+      unsubscribe();
     };
   }, [bootstrapAttempt, requestInvalidatedResources, runtimeAvailable]);
 
@@ -1383,12 +1382,11 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     linearViewerSeq.current = seq;
     setLinearViewerLoading(true);
     setLinearViewerError(null);
-    invoke<LinearViewerProfile>("get_linear_viewer", {
-      request: {
+    desktopCommands
+      .getLinearViewer({
         settings: exactSettings,
         linear_api_key: typedKey ? typedKey : null,
-      },
-    })
+      })
       .then((viewer) => {
         if (linearViewerSeq.current !== seq) return;
         setLinearViewer(viewer);
@@ -1452,17 +1450,15 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     setValidation(result);
     if (result.workflow_blocking) return;
     const saved = await call(() =>
-      invoke<AppSettings>("save_settings", {
-        request: {
-          settings: exactSettings,
-          linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
-        },
+      desktopCommands.saveSettings({
+        settings: exactSettings,
+        linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
       }),
     );
     setSettings(saved);
     let refreshedWorker: WorkerStatus | null = null;
     try {
-      refreshedWorker = await invoke<WorkerStatus>("get_worker_status");
+      refreshedWorker = await desktopCommands.getWorkerStatus();
       setWorker(refreshedWorker);
     } catch {
       // Settings are saved even if this status refresh fails; the next dashboard
@@ -1492,11 +1488,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   async function testConnection(exactSettings: AppSettings, exactLinearKey: string) {
     const result = await call(() =>
-      invoke<TrackerTestResult>("test_tracker_connection", {
-        request: {
-          settings: exactSettings,
-          linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
-        },
+      desktopCommands.testTrackerConnection({
+        settings: exactSettings,
+        linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
       }),
     );
     setTrackerTest(result);
@@ -1520,7 +1514,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     skillsCheckSeq.current[repoUrl] = seq;
     skillsCheckContext.current[repoUrl] = contextKey;
     setSkillsChecking((prev) => ({ ...prev, [repoUrl]: true }));
-    invoke<SkillsStatus>("get_skills_status", { repoUrl, sessionEnv })
+    desktopCommands
+      .getSkillsStatus(repoUrl, sessionEnv)
       .then((status) => {
         if (
           skillsCheckSeq.current[repoUrl] !== seq ||
@@ -1568,10 +1563,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   async function startSkillsInstall(exactSettings: AppSettings, url: string) {
     skillsInstallSettingsRef.current = exactSettings;
     const status = await call(() =>
-      invoke<SkillsInstallStatus>("install_skills", {
-        settings: exactSettings,
-        repoUrl: url.trim(),
-      }),
+      desktopCommands.installSkills(exactSettings, url.trim()),
     );
     setSkillsInstall(status);
   }
@@ -1584,7 +1576,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     workflowCheckSeq.current[repoUrl] = seq;
     workflowCheckContext.current[repoUrl] = contextKey;
     setWorkflowChecking((prev) => ({ ...prev, [repoUrl]: true }));
-    invoke<RepoWorkflowStatus>("get_repo_workflow_status", { repoUrl, sessionEnv })
+    desktopCommands
+      .getRepoWorkflowStatus(repoUrl, sessionEnv)
       .then((status) => {
         if (
           workflowCheckSeq.current[repoUrl] !== seq ||
@@ -1630,9 +1623,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   async function startWorkflowTransfer(url: string) {
     const status = await call(() =>
-      invoke<WorkflowTransferStatus>("transfer_workflow_to_repo", {
-        repoUrl: url.trim(),
-      }),
+      desktopCommands.transferWorkflowToRepo(url.trim()),
     );
     setWorkflowTransfer(status);
   }
@@ -1691,7 +1682,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   useEffect(() => {
     if (!runtimeAvailable || skillsInstall?.state !== "running") return;
     const controller = createPollController({
-      poll: () => invoke<SkillsInstallStatus>("get_skills_install_status"),
+      poll: desktopCommands.getSkillsInstallStatus,
       fingerprint: (status) =>
         JSON.stringify({
           state: status.state,
@@ -1736,8 +1727,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   useEffect(() => {
     if (!runtimeAvailable || workflowTransfer?.state !== "running") return;
     const controller = createPollController({
-      poll: () =>
-        invoke<WorkflowTransferStatus>("get_workflow_transfer_status"),
+      poll: desktopCommands.getWorkflowTransferStatus,
       fingerprint: (status) =>
         JSON.stringify({
           state: status.state,
@@ -1776,9 +1766,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   ]);
 
   async function removeLinearKey() {
-    const fromDisk = await call(() =>
-      invoke<AppSettings>("remove_linear_api_key"),
-    );
+    const fromDisk = await call(desktopCommands.removeLinearApiKey);
     setSettings((current) =>
       current ? { ...current, linear_api_key_set: fromDisk.linear_api_key_set } : current,
     );
@@ -1788,18 +1776,18 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }
 
   async function resetPrompt() {
-    return call(() => invoke<string>("get_default_prompt"));
+    return call(desktopCommands.getDefaultPrompt);
   }
 
   async function startWorker() {
     if (!bootstrapSettled) return;
-    const status = await call(() => invoke<WorkerStatus>("start_worker"));
+    const status = await call(desktopCommands.startWorker);
     setWorker(status);
   }
 
   async function stopWorker() {
     if (!bootstrapSettled) return;
-    const status = await call(() => invoke<WorkerStatus>("stop_worker"));
+    const status = await call(desktopCommands.stopWorker);
     setWorker(status);
   }
 
@@ -1862,9 +1850,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       return;
     }
     try {
-      const detail = await call(() =>
-        invoke<RunDetail | null>("stop_run", { id }),
-      );
+      const detail = await call(() => desktopCommands.stopRun(id));
       if (selectedRunIdRef.current === id) setSelectedRun(detail);
       await refreshDashboard();
     } catch {
@@ -1881,7 +1867,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   async function triggerRetryNow(issueId: string) {
     setTriggeringRetryIds((prev) => new Set(prev).add(issueId));
     try {
-      await call(() => invoke<boolean>("trigger_retry_now", { issueId }));
+      await call(() => desktopCommands.triggerRetryNow(issueId));
       await refreshDashboard();
     } catch {
       // call() has already surfaced the error banner.
@@ -1906,7 +1892,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       setView("retro");
       return;
     }
-    const status = await call(() => invoke<RetroStatus>("start_retro"));
+    const status = await call(desktopCommands.startRetro);
     setRetroStatus(status);
     selectedRetroIdRef.current = status.retro_id;
     setSelectedRetro(null);
@@ -1946,7 +1932,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       return;
     }
     try {
-      await call(() => invoke<void>("delete_retro", { id }));
+      await call(() => desktopCommands.deleteRetro(id));
     } catch {
       return;
     }
@@ -1976,7 +1962,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       return;
     }
     const updated = await call(() =>
-      invoke<RetroSuggestionRow>("set_retro_suggestion_decision", { id, decision }),
+      desktopCommands.setRetroSuggestionDecision(id, decision),
     );
     setSelectedRetro((current) =>
       current
@@ -1992,7 +1978,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   async function applyRetroWorkflow(retroId: string) {
     const batch = await call(() =>
-      invoke<RetroBatchRow>("apply_retro_workflow", { retroId }),
+      desktopCommands.applyRetroWorkflow(retroId),
     );
     if (["queued", "running"].includes(batch.state)) {
       setHasInProgressRetroBatches(true);
@@ -2002,7 +1988,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         ? { ...current, batches: [...current.batches, batch] }
         : current,
     );
-    const saved = await invoke<AppSettings>("load_settings");
+    const saved = await desktopCommands.loadSettings();
     setSettings(saved);
     if (!settingsDirtyRef.current) settingsDraftRef.current = saved;
     await refreshDashboard();
@@ -2011,7 +1997,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   async function startRetroPrs(retroId: string) {
     if (!settings) return;
     const batches = await call(() =>
-      invoke<RetroBatchRow[]>("start_retro_prs", { retroId }),
+      desktopCommands.startRetroPrs(retroId),
     );
     if (batches.some((batch) => ["queued", "running"].includes(batch.state))) {
       setHasInProgressRetroBatches(true);
