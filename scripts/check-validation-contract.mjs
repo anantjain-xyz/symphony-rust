@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
 const SUPPORTED_SCRIPT_EXECUTABLES = new Map([
+  ["biome", ["@biomejs/biome"]],
+  ["cargo", null],
   ["node", null],
   ["playwright", ["@playwright/test", "playwright"]],
   ["tsc", ["typescript"]],
@@ -50,70 +52,203 @@ function duplicates(items) {
   return [...repeated].sort();
 }
 
-function shellSegments(script) {
-  return script
-    .split(/\s*(?:&&|\|\||;)\s*/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+function parseSimpleShellScript(script, scriptName, errors) {
+  const commands = [];
+  let tokens = [];
+  let token = "";
+  let quote = null;
+  let escaped = false;
+
+  const finishToken = () => {
+    if (token !== "") tokens.push(token);
+    token = "";
+  };
+  const finishCommand = () => {
+    finishToken();
+    if (tokens.length === 0) {
+      errors.push(`package script ${scriptName} contains an empty command`);
+    } else {
+      commands.push(tokens);
+    }
+    tokens = [];
+  };
+
+  for (let index = 0; index < script.length; index += 1) {
+    const character = script[index];
+    const next = script[index + 1];
+    if (escaped) {
+      token += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) {
+        quote = null;
+      } else {
+        token += character;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "&" && next === "&") {
+      finishCommand();
+      index += 1;
+      continue;
+    }
+    if (
+      character === ";" ||
+      character === "|" ||
+      character === ">" ||
+      character === "<" ||
+      character === "`" ||
+      (character === "$" && next === "(")
+    ) {
+      errors.push(
+        `package script ${scriptName} uses unsupported shell syntax near ${JSON.stringify(
+          script.slice(index, index + 2).trim(),
+        )}; validation scripts may use argv commands joined only with &&`,
+      );
+      return [];
+    }
+    if (/\s/.test(character)) {
+      finishToken();
+      continue;
+    }
+    token += character;
+  }
+
+  if (quote) {
+    errors.push(`package script ${scriptName} has an unterminated ${quote} quote`);
+    return [];
+  }
+  if (escaped) {
+    errors.push(`package script ${scriptName} ends with an incomplete escape`);
+    return [];
+  }
+  finishCommand();
+  return commands;
 }
 
-function shellTokens(segment) {
-  return segment.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((token) =>
-    token.replace(/^(["'])|(["'])$/g, ""),
-  ) ?? [];
+function validatePackageExecutable(
+  root,
+  scriptName,
+  tokens,
+  packageJson,
+  errors,
+) {
+  const executable = tokens[0];
+  if (!SUPPORTED_SCRIPT_EXECUTABLES.has(executable)) {
+    errors.push(
+      `package script ${scriptName} uses unsupported executable ${JSON.stringify(
+        executable,
+      )}; teach check-validation-contract.mjs how to validate it`,
+    );
+    return;
+  }
+
+  const packages = SUPPORTED_SCRIPT_EXECUTABLES.get(executable);
+  if (packages) {
+    const dependencies = {
+      ...packageJson.dependencies,
+      ...packageJson.devDependencies,
+    };
+    if (!packages.some((name) => dependencies?.[name])) {
+      errors.push(
+        `package script ${scriptName} invokes ${executable}, but none of ${packages.join(
+          ", ",
+        )} is declared in package.json`,
+      );
+    }
+  }
+
+  if (executable === "node") {
+    for (const token of tokens.slice(1)) {
+      if (token.startsWith("-") || !/\.(?:c?js|mjs)$/.test(token)) continue;
+      const target = resolveInside(
+        root,
+        token,
+        errors,
+        `file referenced by package script ${scriptName}`,
+      );
+      if (target && !existsSync(target)) {
+        errors.push(`package script ${scriptName} references missing file ${token}`);
+      }
+    }
+  }
 }
 
 function validatePackageScript(
   root,
   scriptName,
-  body,
   packageJson,
   errors,
+  validated = new Set(),
+  stack = [],
 ) {
-  for (const segment of shellSegments(body)) {
-    const tokens = shellTokens(segment);
-    const executable = tokens[0];
-    if (!SUPPORTED_SCRIPT_EXECUTABLES.has(executable)) {
-      errors.push(
-        `package script ${scriptName} uses unsupported executable ${JSON.stringify(
-          executable,
-        )}; teach check-validation-contract.mjs how to validate it`,
-      );
+  if (validated.has(scriptName)) return;
+  if (stack.includes(scriptName)) {
+    errors.push(
+      `package scripts contain a cycle: ${[...stack, scriptName].join(" -> ")}`,
+    );
+    return;
+  }
+  const body = packageJson.scripts?.[scriptName];
+  if (typeof body !== "string" || body.trim() === "") {
+    errors.push(`package script ${scriptName} is missing or empty`);
+    return;
+  }
+
+  const nextStack = [...stack, scriptName];
+  for (const tokens of parseSimpleShellScript(body, scriptName, errors)) {
+    if (tokens[0] !== "pnpm") {
+      validatePackageExecutable(root, scriptName, tokens, packageJson, errors);
       continue;
     }
 
-    const packages = SUPPORTED_SCRIPT_EXECUTABLES.get(executable);
-    if (packages) {
-      const dependencies = {
-        ...packageJson.dependencies,
-        ...packageJson.devDependencies,
-      };
-      if (!packages.some((name) => dependencies?.[name])) {
-        errors.push(
-          `package script ${scriptName} invokes ${executable}, but none of ${packages.join(
-            ", ",
-          )} is declared in package.json`,
-        );
-      }
+    const referenced =
+      tokens[1] === "run" && tokens.length === 3
+        ? tokens[2]
+        : tokens.length === 2
+          ? tokens[1]
+          : null;
+    if (!referenced) {
+      errors.push(
+        `package script ${scriptName} must invoke another package script as "pnpm <name>" or "pnpm run <name>"`,
+      );
+      continue;
     }
-
-    if (executable === "node") {
-      for (const token of tokens.slice(1)) {
-        if (token.startsWith("-") || !/\.(?:c?js|mjs)$/.test(token)) continue;
-        const target = resolveInside(
-          root,
-          token,
-          errors,
-          `file referenced by package script ${scriptName}`,
-        );
-        if (target && !existsSync(target)) {
-          errors.push(
-            `package script ${scriptName} references missing file ${token}`,
-          );
-        }
-      }
+    if (!packageJson.scripts?.[referenced]) {
+      errors.push(
+        `package script ${scriptName} references missing package script ${referenced}`,
+      );
+      continue;
     }
+    validatePackageScript(
+      root,
+      referenced,
+      packageJson,
+      errors,
+      validated,
+      nextStack,
+    );
   }
+  validated.add(scriptName);
+}
+
+function isValidationPackageScript(scriptName) {
+  return (
+    scriptName === "check" ||
+    scriptName.startsWith("check:") ||
+    scriptName === "test" ||
+    scriptName.startsWith("test:")
+  );
 }
 
 function exactRunLine(command) {
@@ -152,6 +287,8 @@ export function validateValidationContract(
     errors.push("validation contract must define at least one command");
   }
   const executableSet = new Set(contract.executables ?? []);
+  const validatedPackageScripts = new Set();
+  const packageScriptOwners = new Map();
 
   for (const [commandId, command] of Object.entries(commands)) {
     if (!command || !Array.isArray(command.argv) || command.argv.length === 0) {
@@ -173,6 +310,9 @@ export function validateValidationContract(
 
     if (command.packageScript !== undefined) {
       const scriptName = command.packageScript;
+      const owners = packageScriptOwners.get(scriptName) ?? [];
+      owners.push(commandId);
+      packageScriptOwners.set(scriptName, owners);
       const expectedArgv = ["pnpm", scriptName];
       if (JSON.stringify(command.argv) !== JSON.stringify(expectedArgv)) {
         errors.push(
@@ -187,8 +327,23 @@ export function validateValidationContract(
           `validation command ${commandId} references missing package script ${scriptName}`,
         );
       } else {
-        validatePackageScript(root, scriptName, body, packageJson, errors);
+        validatePackageScript(
+          root,
+          scriptName,
+          packageJson,
+          errors,
+          validatedPackageScripts,
+        );
       }
+    }
+  }
+  for (const [scriptName, owners] of packageScriptOwners) {
+    if (owners.length > 1) {
+      errors.push(
+        `package script ${scriptName} is owned by multiple validation commands: ${owners.join(
+          ", ",
+        )}`,
+      );
     }
   }
 
@@ -240,6 +395,24 @@ export function validateValidationContract(
       errors.push(
         `full validation profile omits declared command ${commandId}`,
       );
+    }
+  }
+  for (const scriptName of Object.keys(packageJson.scripts ?? {})
+    .filter(isValidationPackageScript)
+    .sort()) {
+    const owners = packageScriptOwners.get(scriptName) ?? [];
+    if (owners.length === 0) {
+      errors.push(
+        `validation package script ${scriptName} is not owned by a command in validation/contract.json and included in the full profile`,
+      );
+      continue;
+    }
+    for (const commandId of owners) {
+      if (!full.has(commandId)) {
+        errors.push(
+          `validation package script ${scriptName} is owned by ${commandId}, which the full profile omits`,
+        );
+      }
     }
   }
   if (![...full].some((id) => commands[id]?.requiresBrowser)) {

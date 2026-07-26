@@ -108,7 +108,6 @@ fn bundled() {
     },
     defaultPrompt: {
       path: "src-tauri/assets/default-prompt.md",
-      includeOwner: "src-tauri/src/settings.rs",
       forbiddenNamespacePattern: "mcp__[A-Za-z0-9_-]+__",
     },
     pnpmBuiltins: ["install", "exec"],
@@ -160,8 +159,48 @@ test("reports missing include_str targets with the owning Rust file", (t) => {
   );
   assert.match(
     errors,
-    /src-tauri\/src\/settings\.rs must include default prompt/,
+    /default prompt src-tauri\/assets\/default-prompt\.md must have exactly one Rust include_str! owner; found 0/,
   );
+});
+
+test("ignores commented skill macros and accepts multiline inventory entries", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/src/lib.rs",
+    `macro_rules! skill {
+  ($name:literal) => {
+    include_str!(concat!("../assets/skills/", $name, "/SKILL.md"))
+  };
+}
+fn bundled() {
+  // skill!("removed")
+  let text = r#"skill!("also-removed")"#;
+  let _ = [
+    skill!(
+      "commit",
+    ),
+    skill!(
+      "pull"
+    ),
+  ];
+}
+`,
+  );
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test("discovers the default prompt owner instead of pinning its Rust path", (t) => {
+  const root = harnessFixture(t);
+  write(root, "src-tauri/src/settings.rs", "const SETTINGS: &str = \"settings\";\n");
+  write(
+    root,
+    "src-tauri/src/prompt.rs",
+    'const PROMPT: &str = include_str!("../assets/default-prompt.md");\n',
+  );
+
+  assert.deepEqual(validateAgentAssets(root), []);
 });
 
 test("rejects hard-coded MCP namespaces in the default prompt", (t) => {

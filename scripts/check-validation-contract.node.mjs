@@ -169,3 +169,72 @@ test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
     /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
   );
 });
+
+test("rejects validation scripts omitted from the canonical full profile", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["check:omitted"] = "node scripts/omitted.mjs";
+  writeJson(root, "package.json", packageJson);
+  write(root, "scripts/omitted.mjs", "\n");
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /validation package script check:omitted is not owned by a command in validation\/contract\.json and included in the full profile/,
+  );
+});
+
+test("validates nested pnpm and Cargo validation scripts without executing them", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["check:static"] =
+    "pnpm check:harness && pnpm run test:runtime-contracts";
+  packageJson.scripts["test:runtime-contracts"] =
+    "cargo test -p symphony-worker runtime_contracts && cargo test -p symphony-storage transition_contracts";
+  writeJson(root, "package.json", packageJson);
+
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.commands.static = {
+    label: "static contracts",
+    argv: ["pnpm", "check:static"],
+    packageScript: "check:static",
+  };
+  contract.commands.runtime = {
+    label: "runtime contracts",
+    argv: ["pnpm", "test:runtime-contracts"],
+    packageScript: "test:runtime-contracts",
+  };
+  contract.profiles.full.push("static", "runtime");
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.deepEqual(validateValidationContract(root), []);
+});
+
+test("rejects recursive scripts and unsupported shell syntax descriptively", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["check:cycle"] = "pnpm check:cycle";
+  packageJson.scripts["test:unsafe"] = "node scripts/fixture.node.mjs | tee result.txt";
+  writeJson(root, "package.json", packageJson);
+
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.commands.cycle = {
+    label: "cycle",
+    argv: ["pnpm", "check:cycle"],
+    packageScript: "check:cycle",
+  };
+  contract.commands.unsafe = {
+    label: "unsafe",
+    argv: ["pnpm", "test:unsafe"],
+    packageScript: "test:unsafe",
+  };
+  contract.profiles.full.push("cycle", "unsafe");
+  writeJson(root, "validation/contract.json", contract);
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(errors, /package scripts contain a cycle: check:cycle -> check:cycle/);
+  assert.match(errors, /package script test:unsafe uses unsupported shell syntax/);
+});

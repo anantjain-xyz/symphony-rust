@@ -33,7 +33,6 @@
   },
   "defaultPrompt": {
     "path": "src-tauri/assets/default-prompt.md",
-    "includeOwner": "src-tauri/src/settings.rs",
     "forbiddenNamespacePattern": "mcp__[A-Za-z0-9_-]+__"
   },
   "pnpmBuiltins": [

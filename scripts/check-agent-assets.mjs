@@ -185,6 +185,161 @@ function applyAdaptations(content, skillId, adaptations, errors) {
   return expected;
 }
 
+function rustStringToken(content, start) {
+  const raw = content.slice(start).match(/^(?:br|rb|r)(#*)"/);
+  if (raw) {
+    const hashes = raw[1];
+    const valueStart = start + raw[0].length;
+    const terminator = `"${hashes}`;
+    const end = content.indexOf(terminator, valueStart);
+    if (end === -1) return { end: content.length, value: null };
+    return {
+      end: end + terminator.length,
+      value: content.slice(valueStart, end),
+    };
+  }
+
+  const prefixLength = content[start] === "b" && content[start + 1] === '"' ? 1 : 0;
+  if (content[start + prefixLength] !== '"') return null;
+  let value = "";
+  let escaped = false;
+  for (let index = start + prefixLength + 1; index < content.length; index += 1) {
+    const character = content[index];
+    if (escaped) {
+      const replacements = {
+        "0": "\0",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      };
+      value += replacements[character] ?? character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') return { end: index + 1, value };
+    value += character;
+  }
+  return { end: content.length, value: null };
+}
+
+function rustTokens(content) {
+  const tokens = [];
+  for (let index = 0; index < content.length; ) {
+    const character = content[index];
+    const next = content[index + 1];
+    if (/\s/.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      const end = content.indexOf("\n", index + 2);
+      index = end === -1 ? content.length : end + 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      let depth = 1;
+      index += 2;
+      while (index < content.length && depth > 0) {
+        if (content[index] === "/" && content[index + 1] === "*") {
+          depth += 1;
+          index += 2;
+        } else if (content[index] === "*" && content[index + 1] === "/") {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      continue;
+    }
+
+    const string = rustStringToken(content, index);
+    if (string) {
+      if (string.value !== null) {
+        tokens.push({ type: "string", value: string.value, index });
+      }
+      index = string.end;
+      continue;
+    }
+
+    if (
+      character === "'" &&
+      (next === "\\" || content[index + 2] === "'")
+    ) {
+      let end = index + 1;
+      let escaped = false;
+      while (end < content.length) {
+        const candidate = content[end];
+        if (!escaped && candidate === "'") {
+          end += 1;
+          break;
+        }
+        escaped = !escaped && candidate === "\\";
+        if (candidate !== "\\") escaped = false;
+        end += 1;
+      }
+      index = end;
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+      while (end < content.length && /[A-Za-z0-9_]/.test(content[end])) {
+        end += 1;
+      }
+      tokens.push({
+        type: "ident",
+        value: content.slice(index, end),
+        index,
+      });
+      index = end;
+      continue;
+    }
+
+    tokens.push({ type: "punct", value: character, index });
+    index += 1;
+  }
+  return tokens;
+}
+
+function macroInvocation(tokens, index, name) {
+  if (
+    tokens[index]?.type !== "ident" ||
+    tokens[index].value !== name ||
+    tokens[index + 1]?.value !== "!" ||
+    tokens[index + 2]?.value !== "("
+  ) {
+    return null;
+  }
+  let depth = 0;
+  for (let cursor = index + 2; cursor < tokens.length; cursor += 1) {
+    if (tokens[cursor].value === "(") depth += 1;
+    if (tokens[cursor].value === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          arguments: tokens.slice(index + 3, cursor),
+          end: cursor + 1,
+        };
+      }
+    }
+  }
+  return { arguments: null, end: tokens.length };
+}
+
+function singleStringArgument(tokens) {
+  const withoutTrailingComma =
+    tokens.at(-1)?.value === "," ? tokens.slice(0, -1) : tokens;
+  return withoutTrailingComma.length === 1 &&
+    withoutTrailingComma[0].type === "string"
+    ? withoutTrailingComma[0].value
+    : null;
+}
+
 function inventoryFromRust(root, inventoryFile, errors) {
   const absolute = resolveInside(
     root,
@@ -199,9 +354,15 @@ function inventoryFromRust(root, inventoryFile, errors) {
     return new Set();
   }
   const content = readFileSync(absolute, "utf8");
-  const ids = [...content.matchAll(/skill!\(\s*"([^"]+)"\s*\)/g)].map(
-    (match) => match[1],
-  );
+  const tokens = rustTokens(content);
+  const ids = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const invocation = macroInvocation(tokens, index, "skill");
+    if (!invocation?.arguments) continue;
+    const skillId = singleStringArgument(invocation.arguments);
+    if (skillId !== null) ids.push(skillId);
+    index = invocation.end - 1;
+  }
   const unique = new Set(ids);
   if (ids.length === 0) {
     errors.push(`${inventoryFile} does not contain any skill!(...) inventory entries`);
@@ -229,52 +390,78 @@ function checkRustIncludes(root, sourceRoots, inventory, errors) {
       (candidate) => extname(candidate) === ".rs",
     )) {
       const content = readFileSync(file, "utf8");
-      const allCount = [...content.matchAll(/include_str!\s*\(/g)].length;
-      let handledCount = 0;
-
-      for (const match of content.matchAll(
-        /include_str!\s*\(\s*"([^"]+)"\s*\)/g,
-      )) {
-        handledCount += 1;
-        const target = resolve(dirname(file), match[1]);
-        references.push({ source: file, target });
-        if (!existsSync(target)) {
+      const tokens = rustTokens(content);
+      for (let index = 0; index < tokens.length; index += 1) {
+        const include = macroInvocation(tokens, index, "include_str");
+        if (!include) continue;
+        if (!include.arguments) {
           errors.push(
-            `${relativePath(root, file)} include_str! target is missing: ${relativePath(
-              root,
-              target,
-            )}`,
+            `${relativePath(root, file)} has an unterminated include_str! expression`,
           );
+          break;
         }
-      }
 
-      for (const match of content.matchAll(
-        /include_str!\s*\(\s*concat!\(\s*"([^"]*)"\s*,\s*\$name\s*,\s*"([^"]*)"\s*\)\s*\)/g,
-      )) {
-        handledCount += 1;
-        for (const skillId of inventory) {
-          const target = resolve(dirname(file), `${match[1]}${skillId}${match[2]}`);
+        const literal = singleStringArgument(include.arguments);
+        if (literal !== null) {
+          const target = resolve(dirname(file), literal);
           references.push({ source: file, target });
           if (!existsSync(target)) {
             errors.push(
-              `${relativePath(
-                root,
-                file,
-              )} dynamic include_str! target for ${skillId} is missing: ${relativePath(
+              `${relativePath(root, file)} include_str! target is missing: ${relativePath(
                 root,
                 target,
               )}`,
             );
           }
+          index = include.end - 1;
+          continue;
         }
-      }
 
-      if (handledCount !== allCount) {
-        errors.push(
-          `${relativePath(root, file)} has ${
-            allCount - handledCount
-          } unsupported include_str! expression(s); extend the harness checker before adding them`,
-        );
+        const concat = macroInvocation(include.arguments, 0, "concat");
+        const args = concat?.arguments;
+        const dynamic =
+          args &&
+          args.length === 7 &&
+          args[0].type === "string" &&
+          args[1].value === "," &&
+          args[2].value === "$" &&
+          args[3].value === "name" &&
+          args[4].value === "," &&
+          args[5].type === "string" &&
+          args[6].value === ","
+            ? [args[0].value, args[5].value]
+            : args &&
+                args.length === 6 &&
+                args[0].type === "string" &&
+                args[1].value === "," &&
+                args[2].value === "$" &&
+                args[3].value === "name" &&
+                args[4].value === "," &&
+                args[5].type === "string"
+              ? [args[0].value, args[5].value]
+              : null;
+        if (dynamic && concat.end === include.arguments.length) {
+          for (const skillId of inventory) {
+            const target = resolve(dirname(file), `${dynamic[0]}${skillId}${dynamic[1]}`);
+            references.push({ source: file, target });
+            if (!existsSync(target)) {
+              errors.push(
+                `${relativePath(
+                  root,
+                  file,
+                )} dynamic include_str! target for ${skillId} is missing: ${relativePath(
+                  root,
+                  target,
+                )}`,
+              );
+            }
+          }
+        } else {
+          errors.push(
+            `${relativePath(root, file)} has an unsupported include_str! expression; extend the harness checker before adding it`,
+          );
+        }
+        index = include.end - 1;
       }
     }
   }
@@ -485,26 +672,23 @@ export function validateAgentAssets(
       errors,
       "default prompt",
     );
-    const includeOwner = resolveInside(
-      root,
-      promptConfig.includeOwner,
-      errors,
-      "default prompt include owner",
-    );
     if (promptFile && !existsSync(promptFile)) {
       errors.push(`default prompt is missing at ${promptConfig.path}`);
     }
-    if (
-      promptFile &&
-      includeOwner &&
-      !includeReferences.some(
-        (reference) =>
-          reference.source === includeOwner && reference.target === promptFile,
-      )
-    ) {
-      errors.push(
-        `${promptConfig.includeOwner} must include default prompt ${promptConfig.path} with include_str!`,
+    if (promptFile) {
+      const promptIncludes = includeReferences.filter(
+        (reference) => reference.target === promptFile,
       );
+      if (promptIncludes.length !== 1) {
+        const owners = promptIncludes
+          .map((reference) => relativePath(root, reference.source))
+          .sort();
+        errors.push(
+          `default prompt ${promptConfig.path} must have exactly one Rust include_str! owner; found ${promptIncludes.length}${
+            owners.length > 0 ? ` (${owners.join(", ")})` : ""
+          }`,
+        );
+      }
     }
     if (promptFile && existsSync(promptFile)) {
       const prompt = readFileSync(promptFile, "utf8");
