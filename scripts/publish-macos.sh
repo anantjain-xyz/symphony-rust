@@ -85,8 +85,13 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$DMG" "$STAGE/Symphony.dmg"
+RELEASE_REPOSITORY="$(node -p "require('./scripts/contracts/release.json').repository")"
 REPO_URL="$(gh repo view --json url -q .url)"
 REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then
+  echo "error: current repository $REPO_SLUG does not match release contract $RELEASE_REPOSITORY" >&2
+  exit 1
+fi
 UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/Symphony.app.tar.gz"
 SIGNATURE="$(<"$UPDATER_SIGNATURE")"
 # Single quotes preserve JavaScript's template literal for Node.

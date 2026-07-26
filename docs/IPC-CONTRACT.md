@@ -6,24 +6,25 @@ that contract and what must change together.
 
 ## Status
 
-**Current behavior** below describes the repository today. **Proposed
-invariants** are review requirements. The repository does not currently have a
-single static verifier that proves command registration, frontend invocations,
-generated types, and event mappings are all synchronized.
+**Current behavior** below describes the repository today. The static contract
+suite makes generated types, command ownership, command argument names, storage
+invalidation, command/event wire types, and release projections fail closed in
+CI.
 
 ## Contract layers and ownership
 
 | Layer | Current source of truth | Consumer |
 | --- | --- | --- |
-| Command implementation and command-local DTOs | `#[tauri::command]` functions and local request/response types in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs), with settings and retro DTOs in [`src-tauri/src/settings.rs`](../src-tauri/src/settings.rs) and [`src-tauri/src/retro.rs`](../src-tauri/src/retro.rs) | Tauri runtime |
+| Command implementation | `#[tauri::command]` functions in [`src-tauri/src/`](../src-tauri/src/) | Tauri runtime |
+| Shared desktop DTOs | [`crates/symphony-contracts`](../crates/symphony-contracts) | Tauri commands and the headless binding exporter |
 | Core and configuration DTOs | [`crates/symphony-core/src/types.rs`](../crates/symphony-core/src/types.rs) | Tauri commands, worker, and binding exporter |
 | Persistence and event DTOs | [`crates/symphony-storage/src/repo.rs`](../crates/symphony-storage/src/repo.rs) and [`crates/symphony-storage/src/lib.rs`](../crates/symphony-storage/src/lib.rs) | Tauri commands, event forwarder, and React |
 | Worker and workflow DTOs | [`crates/symphony-worker/src/manager.rs`](../crates/symphony-worker/src/manager.rs), [`crates/symphony-worker/src/skills.rs`](../crates/symphony-worker/src/skills.rs), and [`crates/symphony-worker/src/repo_workflow.rs`](../crates/symphony-worker/src/repo_workflow.rs) | Tauri commands and React |
 | Command reachability | `tauri::generate_handler![...]` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | Tauri runtime |
-| Shared data type declarations | Rust types deriving `specta::Type`, explicitly listed by `export_bindings()` | [`src/bindings.ts`](../src/bindings.ts) |
-| Frontend command call | String literal and argument object passed to `invoke<T>()` | React code |
+| Shared data type declarations | Rust types deriving `specta::Type`, explicitly listed by `symphony_contracts::export_bindings()` | [`src/bindings.ts`](../src/bindings.ts) |
+| Frontend command call | Typed wrappers in [`src/desktop/commands.ts`](../src/desktop/commands.ts) | React code |
 | Event wire shape | [`StorageEvent`](../crates/symphony-storage/src/lib.rs) and serde attributes | Tauri event forwarder and React listeners |
-| Event name | `forward_events` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | listener names in [`src/App.tsx`](../src/App.tsx) |
+| Event name | `forward_events` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | listener names in [`src/desktop/events.ts`](../src/desktop/events.ts) |
 
 Rust owns the runtime contract. A TypeScript generic on `invoke<T>()` is only a
 compile-time assertion by the caller; it does not validate a response at
@@ -35,9 +36,8 @@ runtime.
 
 Desktop commands are ordinary `#[tauri::command]` functions. A function is
 callable only when it also appears in the `tauri::generate_handler!` list.
-Frontend code invokes commands by literal name in
-[`App.tsx`](../src/App.tsx), [`AppUpdate.tsx`](../src/AppUpdate.tsx), and
-[`SettingsView.tsx`](../src/views/SettingsView.tsx).
+Frontend code invokes commands through literal-name wrappers in
+[`src/desktop/commands.ts`](../src/desktop/commands.ts).
 
 The checked-in handler definitions and registration list currently agree. Most
 registered commands are invoked by the frontend. `get_issue_detail` is a
@@ -50,14 +50,14 @@ parameter names, serde renames, optionality, integer ranges, and enum tags are
 therefore API behavior. Frontend argument objects use Tauri's JavaScript-facing
 camel-case names where Rust parameters are snake case.
 
-### Proposed invariant
+### Enforced workflow
 
 Treat a command change as one atomic contract change:
 
 1. Define or change the Rust DTO and command signature.
 2. Register the command in `tauri::generate_handler!`.
-3. Add every shared DTO to `export_bindings()`.
-4. Regenerate and review [`src/bindings.ts`](../src/bindings.ts).
+3. Add every shared DTO to `symphony_contracts::export_bindings()`.
+4. Run `pnpm generate:bindings` and review [`src/bindings.ts`](../src/bindings.ts).
 5. Update every `invoke` name, argument object, and return type.
 6. Add Rust tests for handler behavior and frontend tests for caller behavior.
 
@@ -66,64 +66,56 @@ wire change unless the old serialized name is deliberately preserved. Do not
 make the TypeScript side compile by hand-editing a generated type while leaving
 the Rust wire shape unchanged.
 
-A future command verifier should distinguish:
+`pnpm check:ipc` distinguishes:
 
 - implemented and registered commands;
 - registered commands intentionally not called by this frontend;
-- frontend command literals with no registered handler;
-- shared types returned by handlers but absent from the export catalog.
+- frontend command literals with no registered handler.
 
-No such complete verifier is present today.
+It scans all desktop Rust modules and frontend TypeScript modules, follows
+imported invoke wrappers, and compares JavaScript-facing argument-object keys
+and serialized value types with Rust command parameters. It also compares each
+Rust command's direct or `Result` success type with the explicit frontend
+`invoke<T>` result type. The comparison normalizes aliases, nullable options,
+arrays, maps, tuples, and named generated DTOs. `pnpm test:static` exercises
+positive and negative fixtures for these rules.
 
 ## Specta bindings
 
 ### Current behavior
 
-`export_bindings()` is called during Tauri setup and its body is compiled only
-in debug builds. The current path calculation walks up two directories from
-the `src-tauri` manifest directory before appending `src/bindings.ts`. In a
-normal checkout, debug startup therefore attempts to write
-`<checkout-parent>/src/bindings.ts`, not the checked-in
-[`src/bindings.ts`](../src/bindings.ts). It:
+`symphony-contracts` is a Tauri-free workspace crate with an explicit
+`export-bindings` binary. `pnpm generate:bindings` runs that binary and writes
+the checked-in [`src/bindings.ts`](../src/bindings.ts). The exporter:
 
 - uses Specta's TypeScript exporter;
 - exports big integers as TypeScript `number`;
 - exports an explicit, manually maintained list of Rust types;
 - concatenates successful exports;
-- attempts to write the result to that checkout-parent path.
+- returns every export and file-write error.
 
-Export errors are filtered out and the file-write result is ignored. A missing
-checkout-parent `src` directory therefore makes generation fail silently; if
-that directory exists, debug startup may modify a file outside the checkout.
-The checked-in bindings are not updated by this path and are maintained
-manually today.
-Current CI type-checks the checked-in TypeScript but excludes the
-`symphony-desktop` Rust crate, so CI does not regenerate the file or prove it is
-fresh.
+`pnpm check:bindings` invokes the same exporter with `cargo --locked`, writes to
+a temporary directory, and byte-compares the result with `src/bindings.ts`.
+Linux CI runs that check without Tauri/WebKit dependencies. The generated
+`StorageEvent` union is consumed directly by
+[`src/desktop/events.ts`](../src/desktop/events.ts).
 
-The export catalog currently includes `StorageEvent`, while the checked-in
-bindings do not. Frontend event payloads are declared separately in
-[`dashboardResources.ts`](../src/dashboardResources.ts). This is a concrete
-example of the current split ownership; it is not evidence of runtime
-validation.
-
-### Proposed invariant
+### Enforced invariant
 
 Checked-in bindings should be reproducible output, not a second schema. A
 binding-only edit should be rejected unless it is accompanied by the Rust
 source change that produces it.
 
-The desired generation check is:
+The generation check:
 
 1. run the canonical exporter in a deterministic environment;
 2. fail on any individual Specta export or file-write error;
 3. compare the generated bytes with the checked-in file;
 4. fail when the diff is non-empty.
 
-That check is proposed, not implemented. Until it exists, reviewers must inspect
-the Rust export catalog and `src/bindings.ts` together. Because `u64` values are
-currently exported as `number`, values that can exceed JavaScript's safe integer
-range require an explicit design decision before crossing IPC.
+`pnpm check:bindings` implements all four steps. Because `u64` values are
+exported as `number`, values that can exceed JavaScript's safe integer range
+still require an explicit design decision before crossing IPC.
 
 ## Events
 
@@ -167,9 +159,10 @@ Typed events may provide immediate UI updates, but durable `db_changed`
 invalidation remains the recovery path if a typed event is missed or received
 for a hidden resource.
 
-A future verifier should compare backend-emitted table literals against the
-frontend's explicit table map and report unknown or orphaned names. That
-verifier does not exist today.
+`pnpm check:projections` compares backend `emit` event literals with frontend
+`listen` literals, compares backend-emitted table literals with the frontend
+map, rejects unknown or orphaned names, and requires durable repository writes
+to emit their matching invalidation.
 
 ## Error and compatibility rules
 
@@ -214,6 +207,8 @@ Run:
 cargo fmt --all --check
 cargo clippy --workspace --exclude symphony-desktop --all-targets -- -D warnings
 cargo test --workspace --exclude symphony-desktop
+pnpm check:static
+pnpm test:static
 pnpm typecheck
 pnpm test
 ```
