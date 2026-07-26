@@ -318,11 +318,15 @@ test("resolves simple and chained Rust type aliases", async (t) => {
       "mod errors { pub enum StorageError { Sqlx } }",
       "type E = symphony_storage::StorageError;",
       "type Chained = E;",
+      "type Parenthesized = ((symphony_storage::StorageError));",
       "fn direct() { let _ = E::Sqlx(problem); }",
       "fn chained() { let _ = Chained::Sqlx(problem); }",
+      "fn parenthesized() { let _ = Parenthesized::Sqlx(problem); }",
       "mod unrelated {",
       "    type E = crate::errors::StorageError;",
+      "    type Parenthesized = ((crate::errors::StorageError));",
       "    fn allowed() { let _ = E::Sqlx; }",
+      "    fn allowed_parenthesized() { let _ = Parenthesized::Sqlx; }",
       "}",
       "",
     ].join("\n"),
@@ -332,8 +336,9 @@ test("resolves simple and chained Rust type aliases", async (t) => {
   const errors = await scanRestrictedSources(metadata(root), policy());
 
   assert.deepEqual(errors, [
-    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:7: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -345,7 +350,9 @@ test("detects qualified StorageError variant paths", async (t) => {
       "fn direct() { let _ = <symphony_storage::StorageError>::Sqlx(problem); }",
       "fn absolute() { let _ = <::symphony_storage::StorageError>::Sqlx(problem); }",
       "fn aliased() { let _ = <E>::Sqlx(problem); }",
+      "fn parenthesized() { let _ = <((symphony_storage::StorageError))>::Sqlx(problem); }",
       "fn allowed() { let _ = <crate::errors::StorageError>::Sqlx; }",
+      "fn allowed_parenthesized() { let _ = <((crate::errors::StorageError))>::Sqlx; }",
       "",
     ].join("\n"),
   });
@@ -357,6 +364,7 @@ test("detects qualified StorageError variant paths", async (t) => {
     "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -435,6 +443,77 @@ test("recursively scans literal include! sources belonging to Cargo targets", as
 
   assert.deepEqual(errors, [
     "worker/generated/nested/deeper.inc:2: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("preserves bindings across recursively included Rust fragments", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "nested"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    [
+      "use symphony_storage::StorageError as Outer;",
+      "use symphony_storage::StorageError::*;",
+      'include!("nested/bridge.inc");',
+      "fn after_include() { let _ = Inner::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "nested", "bridge.inc"),
+    'include!("shared.inc");\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "nested", "shared.inc"),
+    [
+      "use symphony_storage::StorageError as Inner;",
+      "fn from_outer() { let _ = Outer::Sqlx(problem); }",
+      "fn from_glob() { let _ = Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  );
+
+  const errors = await scanRestrictedSources(
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+    policy(),
+  );
+
+  assert.deepEqual(errors, [
+    "worker/generated/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/generated/nested/shared.inc:2: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/generated/nested/shared.inc:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("resolves modules from the included fragment's directory", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "nested"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    'include!("nested/items.inc");\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "nested", "items.inc"),
+    "mod child;\n",
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "nested", "child.rs"),
+    'fn wrong() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+    policy(),
+  );
+
+  assert.deepEqual(errors, [
+    "worker/generated/nested/child.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
 });
 

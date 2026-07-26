@@ -322,6 +322,49 @@ function macroDefinitionTokens(tokens) {
   return ignored;
 }
 
+function literalInclude(tokens, index, sourceFile) {
+  if (
+    tokens[index].value !== "include" ||
+    tokens[index].raw ||
+    tokens[index + 1]?.value !== "!" ||
+    !closingDelimiter.has(tokens[index + 2]?.value)
+  ) {
+    return null;
+  }
+
+  const closing = matchingDelimiter(tokens, index + 2);
+  const argumentTokens = tokens.slice(index + 3, closing);
+  if (
+    argumentTokens[0]?.value !== "LITERAL" ||
+    !(
+      argumentTokens.length === 1 ||
+      (argumentTokens.length === 2 && argumentTokens[1].value === ",")
+    )
+  ) {
+    throw new Error(
+      `cannot resolve non-literal include! declared at ${sourceFile}:${tokens[index].line}`,
+    );
+  }
+
+  return {
+    closing,
+    includedPath: literalPath(argumentTokens[0], "include!"),
+    line: tokens[index].line,
+  };
+}
+
+async function resolveIncludedFile(sourceFile, includedPath, line) {
+  const includedFile = await existingModuleFile([
+    path.join(path.dirname(sourceFile), includedPath),
+  ]);
+  if (includedFile === null) {
+    throw new Error(
+      `cannot resolve include! ${includedPath} declared at ${sourceFile}:${line}`,
+    );
+  }
+  return includedFile;
+}
+
 async function collectTargetModules(files, entryFile) {
   const visited = new Set();
 
@@ -344,36 +387,15 @@ async function collectTargetModules(files, entryFile) {
     async function scan(start, end, directory) {
       for (let index = start; index < end; index += 1) {
         if (macroTokens.has(index)) continue;
-        if (
-          tokens[index].value === "include" &&
-          !tokens[index].raw &&
-          tokens[index + 1]?.value === "!" &&
-          closingDelimiter.has(tokens[index + 2]?.value)
-        ) {
-          const closing = matchingDelimiter(tokens, index + 2);
-          const argumentTokens = tokens.slice(index + 3, closing);
-          if (
-            argumentTokens[0]?.value !== "LITERAL" ||
-            !(
-              argumentTokens.length === 1 ||
-              (argumentTokens.length === 2 && argumentTokens[1].value === ",")
-            )
-          ) {
-            throw new Error(
-              `cannot resolve non-literal include! declared at ${absolute}:${tokens[index].line}`,
-            );
-          }
-          const includedPath = literalPath(argumentTokens[0], "include!");
-          const includedFile = await existingModuleFile([
-            path.join(path.dirname(absolute), includedPath),
-          ]);
-          if (includedFile === null) {
-            throw new Error(
-              `cannot resolve include! ${includedPath} declared at ${absolute}:${tokens[index].line}`,
-            );
-          }
-          await visit(includedFile, directory);
-          index = closing;
+        const included = literalInclude(tokens, index, absolute);
+        if (included !== null) {
+          const includedFile = await resolveIncludedFile(
+            absolute,
+            included.includedPath,
+            included.line,
+          );
+          await visit(includedFile, path.dirname(includedFile));
+          index = included.closing;
           continue;
         }
         if (
@@ -419,6 +441,50 @@ async function collectTargetModules(files, entryFile) {
 
   const absoluteEntry = path.resolve(entryFile);
   await visit(absoluteEntry, path.dirname(absoluteEntry));
+}
+
+async function expandedRustTokens(file, cache, trail = []) {
+  const absolute = path.resolve(file);
+  if (trail.includes(absolute)) {
+    throw new Error(
+      `literal include! cycle: ${[...trail, absolute].join(" -> ")}`,
+    );
+  }
+  const cached = cache.get(absolute);
+  if (cached !== undefined) return cached;
+
+  let source;
+  try {
+    source = await fs.readFile(absolute, "utf8");
+  } catch (error) {
+    throw new Error(`cannot read ${absolute}: ${error.message}`);
+  }
+  const tokens = lexRust(source).map((token) => ({ ...token, file: absolute }));
+  const macroTokens = macroDefinitionTokens(tokens);
+  const expanded = [];
+  const nextTrail = [...trail, absolute];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (macroTokens.has(index)) {
+      expanded.push(tokens[index]);
+      continue;
+    }
+    const included = literalInclude(tokens, index, absolute);
+    if (included === null) {
+      expanded.push(tokens[index]);
+      continue;
+    }
+    const includedFile = await resolveIncludedFile(
+      absolute,
+      included.includedPath,
+      included.line,
+    );
+    expanded.push(...(await expandedRustTokens(includedFile, cache, nextTrail)));
+    index = included.closing;
+  }
+
+  cache.set(absolute, expanded);
+  return expanded;
 }
 
 async function packageRustFiles(pkg) {
@@ -789,6 +855,14 @@ function declareBinding(scope, name, binding) {
 }
 
 function simplePath(tokens, start, end) {
+  while (
+    tokens[start]?.value === "(" &&
+    matchingDelimiter(tokens, start) === end - 1
+  ) {
+    start += 1;
+    end -= 1;
+  }
+
   let index = start;
   let absolute = false;
   if (tokens[index]?.value === "::") {
@@ -955,6 +1029,28 @@ function hasStorageErrorGlob(scope, name) {
   return false;
 }
 
+function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant) {
+  let start = leadingAbsolute ? index - 1 : index;
+  let end = cursor;
+  while (
+    tokens[start - 1]?.value === "(" &&
+    tokens[end + 1]?.value === ")" &&
+    matchingDelimiter(tokens, start - 1) === end + 1
+  ) {
+    start -= 1;
+    end += 1;
+  }
+  if (
+    tokens[start - 1]?.value === "<" &&
+    tokens[end + 1]?.value === ">" &&
+    tokens[end + 2]?.value === "::" &&
+    tokens[end + 3]?.value === variant
+  ) {
+    return end + 1;
+  }
+  return null;
+}
+
 function normalizedTokenStream(tokens) {
   const ignoredTokens = macroDefinitionTokens(tokens);
   const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
@@ -1013,17 +1109,20 @@ function normalizedTokenStream(tokens) {
       if (importedPath !== null && isStorageErrorPath(importedPath)) {
         values[index] = "StorageError";
       }
-      const startsQualifiedType =
-        tokens[index - 1]?.value === "<" ||
-        (leadingAbsolute && tokens[index - 2]?.value === "<");
-      if (
-        startsQualifiedType &&
-        tokens[cursor + 1]?.value === ">" &&
-        tokens[cursor + 2]?.value === "::" &&
-        tokens[cursor + 3]?.value === "Sqlx"
-      ) {
+      const qualifiedClosing = qualifiedVariantClosing(
+        tokens,
+        index,
+        cursor,
+        leadingAbsolute,
+        "Sqlx",
+      );
+      if (qualifiedClosing !== null) {
         values[index] = "StorageError";
-        for (let tokenIndex = index + 1; tokenIndex <= cursor + 1; tokenIndex += 1) {
+        for (
+          let tokenIndex = index + 1;
+          tokenIndex <= qualifiedClosing;
+          tokenIndex += 1
+        ) {
           values[tokenIndex] = "";
         }
       }
@@ -1045,13 +1144,18 @@ function normalizedTokenStream(tokens) {
     const start = source.length;
     const value = values[index];
     source += value;
-    locations.push({ start, end: source.length, line: token.line });
+    locations.push({
+      start,
+      end: source.length,
+      file: token.file,
+      line: token.line,
+    });
   }
 
   return { source, locations };
 }
 
-function lineForMatch(locations, index) {
+function locationForMatch(locations, index) {
   let low = 0;
   let high = locations.length - 1;
   while (low <= high) {
@@ -1061,10 +1165,13 @@ function lineForMatch(locations, index) {
     } else if (locations[middle].start > index) {
       high = middle - 1;
     } else {
-      return locations[middle].line;
+      return locations[middle];
     }
   }
-  return locations[Math.min(low, locations.length - 1)]?.line ?? 1;
+  return locations[Math.min(low, locations.length - 1)] ?? {
+    file: undefined,
+    line: 1,
+  };
 }
 
 export async function scanRestrictedSources(metadata, policy) {
@@ -1078,17 +1185,14 @@ export async function scanRestrictedSources(metadata, policy) {
       .map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, "g") }));
     if (rules.length === 0) continue;
 
+    const expandedTokenCache = new Map();
     for (const file of await packageRustFiles(pkg)) {
-      let source;
-      try {
-        source = await fs.readFile(file, "utf8");
-      } catch (error) {
-        throw new Error(`cannot read ${file}: ${error.message}`);
-      }
       const relative = path.relative(metadata.workspace_root, file);
       let tokenStream;
       try {
-        tokenStream = normalizedTokenStream(lexRust(source));
+        tokenStream = normalizedTokenStream(
+          await expandedRustTokens(file, expandedTokenCache),
+        );
       } catch (error) {
         throw new Error(`cannot lex ${relative}: ${error.message}`);
       }
@@ -1096,10 +1200,17 @@ export async function scanRestrictedSources(metadata, policy) {
         rule.regex.lastIndex = 0;
         let match;
         while ((match = rule.regex.exec(tokenStream.source)) !== null) {
+          const location = locationForMatch(
+            tokenStream.locations,
+            match.index,
+          );
           errors.add(
             diagnostic(
-              relative,
-              lineForMatch(tokenStream.locations, match.index),
+              path.relative(
+                metadata.workspace_root,
+                location.file ?? file,
+              ),
+              location.line,
               `[${rule.id}] ${rule.message} (package ${pkg.name})`,
             ),
           );
