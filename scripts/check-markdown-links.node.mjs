@@ -38,6 +38,33 @@ test("reference-style heading links slug their rendered labels", async (context)
   assert.deepEqual(problems, []);
 });
 
+test("multi-line Setext headings slug the complete paragraph", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-setext-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await fs.writeFile(
+    path.join(root, "root.md"),
+    ["First line", "second line", "---", "", "[Jump](#first-line-second-line)"].join("\n"),
+  );
+
+  const problems = await checkMarkdownFiles(root, ["root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("reference definitions may wrap before their destination", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-wrapped-ref-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["Read the [guide][docs].", "", "[docs]:", "  <guide.md>"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
 test("accepts local files, headings, images, references, and external URLs", async () => {
   const problems = await checkMarkdownFiles(path.join(fixtureRoot, "positive"), [
     "guide.md.fixture",

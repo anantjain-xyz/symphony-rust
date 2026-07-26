@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Baseline verifiers compare exceptions with the pull request's base.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 

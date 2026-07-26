@@ -1,8 +1,8 @@
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import https from "node:https";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -173,13 +173,32 @@ export async function resolveTool(name) {
   );
 }
 
-function download(url, redirects = 0) {
+export function download(url, { get = https.get, redirects = 0, timeoutMs = 30_000 } = {}) {
   if (redirects > 5) return Promise.reject(new Error(`too many redirects downloading ${url}`));
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.reject(new Error("download timeout must be a positive number"));
+  }
   return new Promise((resolve, reject) => {
-    const request = https.get(
+    let settled = false;
+    let timer;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const fail = (error) => finish(reject, error);
+    const succeed = (value) => finish(resolve, value);
+    const request = get(
       url,
       { headers: { "user-agent": "symphony-hygiene-installer" } },
       (response) => {
+        response.on("error", (error) => {
+          fail(new Error(`download stream failed for ${url}: ${error.message}`, { cause: error }));
+        });
+        response.once("aborted", () => {
+          fail(new Error(`download stream was aborted for ${url}`));
+        });
         if (
           response.statusCode &&
           response.statusCode >= 300 &&
@@ -187,20 +206,41 @@ function download(url, redirects = 0) {
           response.headers.location
         ) {
           response.resume();
-          resolve(download(new URL(response.headers.location, url).toString(), redirects + 1));
+          succeed(
+            download(new URL(response.headers.location, url).toString(), {
+              get,
+              redirects: redirects + 1,
+              timeoutMs,
+            }),
+          );
           return;
         }
         if (response.statusCode !== 200) {
           response.resume();
-          reject(new Error(`download failed with HTTP ${response.statusCode}: ${url}`));
+          fail(new Error(`download failed with HTTP ${response.statusCode}: ${url}`));
           return;
         }
         const chunks = [];
+        let ended = false;
         response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () => resolve(Buffer.concat(chunks)));
+        response.once("end", () => {
+          ended = true;
+          succeed(Buffer.concat(chunks));
+        });
+        response.once("close", () => {
+          if (!ended && response.complete === false) {
+            fail(new Error(`download stream closed before completion for ${url}`));
+          }
+        });
       },
     );
-    request.on("error", reject);
+    request.on("error", fail);
+    timer = setTimeout(() => {
+      const error = new Error(`download timed out after ${timeoutMs}ms: ${url}`);
+      request.destroy(error);
+      fail(error);
+    }, timeoutMs);
+    if (settled) clearTimeout(timer);
   });
 }
 

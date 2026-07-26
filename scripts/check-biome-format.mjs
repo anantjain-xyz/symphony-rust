@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  biomeBaselinePolicyProblems,
+  loadTrustedBiomeBaseline,
+} from "./check-biome-format-lib.mjs";
 
 const BIOME_VERSION = "2.5.5";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,6 +31,18 @@ try {
     );
   }
   const baseline = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+  const trusted = loadTrustedBiomeBaseline(projectRoot);
+  if (!trusted) {
+    throw new Error(
+      "could not locate the trusted format baseline in git history; fetch the base branch and full history",
+    );
+  }
+  const policyProblems = biomeBaselinePolicyProblems(
+    baseline,
+    trusted.baseline,
+    trusted.revision.slice(0, 12),
+  );
+  if (policyProblems.length > 0) throw new Error(policyProblems.sort().join("\n"));
   const result = spawnSync(
     executable,
     ["format", "--reporter=json", "--max-diagnostics=none", "."],

@@ -7,7 +7,11 @@ const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
 const HTML_ATTRIBUTE = /(?<!\S)(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const REFERENCE_DEFINITION =
   /^\s{0,3}\[(?!\^)([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
+const REFERENCE_DEFINITION_START = /^\s{0,3}\[(?!\^)([^\]]+)\]:[ \t]*$/;
+const REFERENCE_DEFINITION_CONTINUATION =
+  /^\s{0,3}(?:<([^>]+)>|(\S+))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 const REFERENCE_USE = /(!?)\[([^\]]*)\]\s*\[([^\]]*)\]/g;
+const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-+)\s*$/;
 
 function maskRange(value, start, end) {
   return `${value.slice(0, start)}${" ".repeat(end - start)}${value.slice(end)}`;
@@ -78,6 +82,16 @@ function headingText(value) {
     .replace(/[`*_~]/g, "");
 }
 
+function startsMarkdownBlock(line) {
+  return (
+    /^\s{0,3}(?:#{1,6}(?:\s|$)|>|(?:[*+-]|\d{1,9}[.)])\s+)/.test(line) ||
+    /^\s{4}/.test(line) ||
+    REFERENCE_DEFINITION.test(line) ||
+    REFERENCE_DEFINITION_START.test(line) ||
+    SETEXT_UNDERLINE.test(line)
+  );
+}
+
 export function githubHeadingSlug(value) {
   return unescapeMarkdown(headingText(value))
     .trim()
@@ -111,9 +125,17 @@ function markdownAnchors(source) {
     } else if (
       index + 1 < maskedLines.length &&
       /\S/.test(line) &&
-      /^\s{0,3}(?:=+|-+)\s*$/.test(maskedLines[index + 1])
+      SETEXT_UNDERLINE.test(maskedLines[index + 1])
     ) {
-      addHeading(originalLines[index]);
+      let firstLine = index;
+      while (
+        firstLine > 0 &&
+        /\S/.test(maskedLines[firstLine - 1]) &&
+        !startsMarkdownBlock(maskedLines[firstLine - 1])
+      ) {
+        firstLine -= 1;
+      }
+      addHeading(originalLines.slice(firstLine, index + 1).join("\n"));
     }
 
     for (const match of line.matchAll(
@@ -202,6 +224,20 @@ function extractTargets(source) {
       const label = normalizeReference(definition[1]);
       definitions.set(label, { line: index + 1, target: definition[2] ?? definition[3] });
       targets.push({ column: 1, line: index + 1, target: definition[2] ?? definition[3] });
+      continue;
+    }
+    const definitionStart = line.match(REFERENCE_DEFINITION_START);
+    const continuation = maskedLines[index + 1]?.match(REFERENCE_DEFINITION_CONTINUATION);
+    if (definitionStart && continuation) {
+      const target = continuation[1] ?? continuation[2];
+      const label = normalizeReference(definitionStart[1]);
+      definitions.set(label, { line: index + 1, target });
+      targets.push({
+        column: (maskedLines[index + 1].indexOf(target) ?? 0) + 1,
+        line: index + 2,
+        target,
+      });
+      index += 1;
       continue;
     }
 
