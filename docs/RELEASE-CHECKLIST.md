@@ -147,6 +147,8 @@ verified. Publishing is the operation that makes the release eligible for the
 - [ ] The intended version is consistent across all version surfaces.
 - [ ] The worktree is clean on `main`.
 - [ ] `HEAD` equals `origin/main` after fetching `main` and tags.
+- [ ] The current GitHub repository equals the repository in
+      `scripts/contracts/release.json`.
 - [ ] No conflicting `v<version>` tag or GitHub release exists.
 - [ ] The host is Apple Silicon macOS.
 - [ ] Node, pnpm, stable Rust, Xcode command-line tools, and authenticated `gh`
@@ -235,8 +237,9 @@ publishing secrets.
 
 ### Current behavior
 
-`publish-macos.sh` verifies the branch, clean state, fetched commit, tag, and
-release before building. It requires exactly one versioned aarch64 DMG.
+`publish-macos.sh` verifies the configured GitHub repository, branch, clean
+state, fetched commit, tag, and release before building. It requires exactly
+one versioned aarch64 DMG.
 
 It then prepares:
 

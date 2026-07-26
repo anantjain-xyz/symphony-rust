@@ -77,24 +77,18 @@ pub fn render_prompt(template: &str, issue: &Issue, repo: Option<&RepoConfig>) -
         .map(|blocker| format!("- {blocker}"))
         .collect::<Vec<_>>()
         .join("\n");
-    // Same order as PROMPT_VARIABLES, so the two cannot drift apart.
-    let values: [&str; 10] = [
-        &issue.id,
-        &issue.identifier,
-        &issue.title,
-        issue.description.as_deref().unwrap_or(""),
-        &issue.state,
-        issue.branch.as_deref().unwrap_or(""),
-        &labels,
-        &blockers,
-        repo.map(|repo| repo.name.as_str()).unwrap_or(""),
-        repo.map(|repo| repo.url.as_str()).unwrap_or(""),
-    ];
-    let value_for = |name: &str| {
-        PROMPT_VARIABLES
-            .iter()
-            .position(|variable| *variable == name)
-            .map(|index| values[index])
+    let value_for = |name: &str| match name {
+        "issue.id" => Some(issue.id.as_str()),
+        "issue.identifier" => Some(issue.identifier.as_str()),
+        "issue.title" => Some(issue.title.as_str()),
+        "issue.description" => Some(issue.description.as_deref().unwrap_or("")),
+        "issue.state" => Some(issue.state.as_str()),
+        "issue.branch" => Some(issue.branch.as_deref().unwrap_or("")),
+        "issue.labels" => Some(labels.as_str()),
+        "issue.blockers" => Some(blockers.as_str()),
+        "repo.name" => Some(repo.map(|repo| repo.name.as_str()).unwrap_or("")),
+        "repo.url" => Some(repo.map(|repo| repo.url.as_str()).unwrap_or("")),
+        _ => None,
     };
 
     let mut out = String::with_capacity(template.len());
@@ -178,6 +172,51 @@ mod tests {
             ),
             "Work on SYM-1: Port it"
         );
+    }
+
+    #[test]
+    fn renders_every_supported_variable_from_its_named_field() {
+        let issue = Issue {
+            id: "id-value".to_string(),
+            identifier: "identifier-value".to_string(),
+            title: "title-value".to_string(),
+            description: Some("description-value".to_string()),
+            state: "state-value".to_string(),
+            branch: Some("branch-value".to_string()),
+            labels: vec!["label-one".to_string(), "label-two".to_string()],
+            blockers: vec!["blocker-one".to_string(), "blocker-two".to_string()],
+            ..issue()
+        };
+        let repo = RepoConfig {
+            name: "repo-name-value".to_string(),
+            url: "repo-url-value".to_string(),
+            ..RepoConfig::default()
+        };
+        let cases = [
+            ("issue.id", "id-value"),
+            ("issue.identifier", "identifier-value"),
+            ("issue.title", "title-value"),
+            ("issue.description", "description-value"),
+            ("issue.state", "state-value"),
+            ("issue.branch", "branch-value"),
+            ("issue.labels", "label-one, label-two"),
+            ("issue.blockers", "- blocker-one\n- blocker-two"),
+            ("repo.name", "repo-name-value"),
+            ("repo.url", "repo-url-value"),
+        ];
+
+        assert_eq!(
+            cases.map(|(name, _)| name),
+            PROMPT_VARIABLES,
+            "the rendering regression table must cover every supported variable"
+        );
+        for (name, expected) in cases {
+            assert_eq!(
+                render_prompt(&format!("{{{{{name}}}}}"), &issue, Some(&repo)),
+                expected,
+                "wrong field rendered for {name}"
+            );
+        }
     }
 
     #[test]

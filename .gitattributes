@@ -1,0 +1,2 @@
+/src/bindings.ts text eol=lf
+/crates/symphony-storage/src/migrations/*.sql text eol=lf

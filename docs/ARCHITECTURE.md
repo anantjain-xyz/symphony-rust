@@ -114,9 +114,10 @@ Feature rendering belongs in `src/views/`. Browser-only preview data belongs in
 `src/preview/`; it is a deterministic substitute when Tauri is unavailable, not
 a second backend.
 
-`src/bindings.ts` is a checked-in IPC type mirror. In debug desktop startup,
-`export_bindings` in `src-tauri/src/lib.rs` rewrites it from Rust Specta types.
-The Rust types and export list are the source of truth.
+`src/bindings.ts` is reproducible generated IPC output. The Tauri-free
+`symphony-contracts` crate owns the shared DTOs and explicit export catalog;
+`pnpm generate:bindings` rewrites the file, while `pnpm check:bindings`
+regenerates it in a temporary directory and rejects drift.
 
 ## Runtime flows
 
@@ -125,8 +126,9 @@ The Rust types and export list are the source of truth.
 1. Tauri repairs the GUI process `PATH`, creates the app-data directory, opens
    and migrates SQLite, and constructs `Repository`, `WorkerManager`, and the
    long-running install/retro managers.
-2. Debug startup regenerates `src/bindings.ts`. The desktop registers commands
-   and forwards storage-bus messages as Tauri events.
+2. The desktop registers commands and forwards storage-bus messages as Tauri
+   events. Binding generation is an explicit development/CI step, not a
+   startup side effect.
 3. React loads settings and an initial dashboard snapshot through commands.
    Later storage events mark the affected resource keys dirty and schedule
    selective refreshes.
