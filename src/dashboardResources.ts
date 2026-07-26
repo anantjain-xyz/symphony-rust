@@ -1,5 +1,3 @@
-import type { AgentEventRow } from "./bindings";
-
 export type DashboardResourceKey =
   | "overview"
   | "runs"
@@ -11,10 +9,6 @@ export type DashboardResourceKey =
   | "selectedRetro";
 
 export type DashboardView = "overview" | "runs" | "issues" | "retro" | "settings";
-
-export type DbChanged = { type: "db_changed"; table: string; op: string };
-export type AgentEvent = { type: "agent_event"; event: AgentEventRow };
-export type RateLimitChanged = { type: "rate_limit_changed"; source: string };
 
 const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   rate_limit_state: ["overview"],

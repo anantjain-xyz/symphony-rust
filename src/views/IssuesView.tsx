@@ -1,7 +1,7 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Suspense, useState, useTransition } from "react";
+import { Suspense, useEffect, useState, useTransition } from "react";
 import type { IssueRow } from "../bindings";
 import { ChunkErrorBoundary, createLazyAttempts } from "../ChunkBoundary";
+import { openExternalUrl } from "../desktop/shell";
 import { priorityLabel, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import "./IssuesView.css";
@@ -9,12 +9,19 @@ import "./IssuesView.css";
 type IssueViewMode = "list" | "dependencies";
 
 let dependencyGraphPromise: Promise<typeof import("./DependencyGraphPanel")> | null = null;
+let dependencyGraphReady = false;
 export function loadDependencyGraphPanel() {
   if (!dependencyGraphPromise) {
-    dependencyGraphPromise = import("./DependencyGraphPanel").catch((error) => {
-      dependencyGraphPromise = null;
-      throw error;
-    });
+    dependencyGraphPromise = import("./DependencyGraphPanel")
+      .then((module) => {
+        dependencyGraphReady = true;
+        return module;
+      })
+      .catch((error) => {
+        dependencyGraphPromise = null;
+        dependencyGraphReady = false;
+        throw error;
+      });
   }
   return dependencyGraphPromise;
 }
@@ -37,10 +44,30 @@ function IssuesView({
   const [selectedMode, setSelectedMode] = useState<IssueViewMode>("list");
   const [activeMode, setActiveMode] = useState<IssueViewMode>("list");
   const [isModePending, startModeTransition] = useTransition();
+  const [isDependencyGraphReady, setDependencyGraphReady] = useState(
+    () => dependencyGraphReady,
+  );
   const [dependencyAttempt, setDependencyAttempt] = useState(() =>
     DependencyGraphAttempts.latest(),
   );
   const DependencyGraphPanel = DependencyGraphAttempts.get(dependencyAttempt);
+
+  useEffect(() => {
+    if (selectedMode !== "dependencies" || isDependencyGraphReady) return;
+
+    let cancelled = false;
+    void loadDependencyGraphPanel().then(
+      () => {
+        if (!cancelled) setDependencyGraphReady(true);
+      },
+      () => {
+        if (!cancelled) setDependencyGraphReady(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [dependencyAttempt, isDependencyGraphReady, selectedMode]);
 
   const selectMode = (nextMode: IssueViewMode) => {
     if (nextMode === selectedMode) return;
@@ -80,7 +107,12 @@ function IssuesView({
       <section
         id="issues-panel"
         role="tabpanel"
-        aria-busy={selectedMode === "dependencies" && isModePending}
+        aria-busy={
+          selectedMode === "dependencies" &&
+          (isModePending ||
+            activeMode !== "dependencies" ||
+            !isDependencyGraphReady)
+        }
       >
         <Panel title={selectedMode === "list" ? "Watched issues" : "Dependency graph"}>
           {issues.length === 0 ? (
@@ -166,7 +198,7 @@ function IssuesTable({
                   className="link-button"
                   aria-label={`Open ${issue.identifier} in Linear`}
                   onClick={() =>
-                    openUrl(
+                    openExternalUrl(
                       `https://linear.app/${linearWorkspace}/issue/${issue.identifier}`,
                     ).catch(() => undefined)
                   }

@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "sourceRoot": "src",
+  "appSource": "src/App.tsx",
+  "previewEntry": "src/main.tsx",
+  "previewFixture": "src/preview/runtime.ts",
+  "bundleOwner": "scripts/check-bundle-budget.mjs",
+  "routeE2eOwner": "e2e/lazy-chunks.e2e.ts",
+  "dynamicImportOwners": [
+    "src/App.tsx",
+    "src/main.tsx",
+    "src/views/IssuesView.tsx"
+  ],
+  "routes": [
+    {
+      "id": "dependencies",
+      "label": "Dependencies",
+      "module": "src/views/DependencyGraphPanel.tsx",
+      "parent": "issues",
+      "fixture": "dashboard.issues"
+    },
+    {
+      "id": "issues",
+      "label": "Issues",
+      "module": "src/views/IssuesView.tsx",
+      "fixture": "dashboard.issues"
+    },
+    {
+      "id": "overview",
+      "label": "Overview",
+      "module": null,
+      "fixture": "dashboard.overview"
+    },
+    {
+      "id": "retro",
+      "label": "Retro",
+      "module": "src/views/RetroView.tsx",
+      "fixture": "dashboard.retroStatus"
+    },
+    {
+      "id": "runs",
+      "label": "Runs",
+      "module": "src/views/RunsView.tsx",
+      "fixture": "dashboard.runs"
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "module": "src/views/SettingsView.tsx",
+      "fixture": "settings"
+    }
+  ],
+  "infrastructureEntries": [
+    "src/AppUpdate.tsx",
+    "src/preview/runtime.ts"
+  ],
+  "updaterGeometry": {
+    "component": "AppUpdateGeometryPreview",
+    "module": "src/AppUpdate.tsx",
+    "query": "?preview=updater",
+    "fixtureSelector": "updater-geometry",
+    "e2eOwner": "e2e/updater-geometry.e2e.ts"
+  }
+}
