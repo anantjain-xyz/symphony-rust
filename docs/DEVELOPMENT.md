@@ -7,7 +7,8 @@ The authoritative setup and validation sources are `Cargo.toml`, `package.json`,
 ## Prerequisites and install
 
 - Rust stable. Install the `rustfmt` and `clippy` components for the full gate.
-- Node.js 20 or newer. CI currently uses Node.js 22.
+- Node.js `^20.19.0 || >=22.12.0`, matching Vite's supported engine range.
+  CI currently uses Node.js 22.
 - pnpm 11.5.2, pinned by the `packageManager` field in `package.json`.
 - On macOS, Xcode Command Line Tools for the Tauri desktop build.
 - Chromium from Playwright for browser end-to-end tests.

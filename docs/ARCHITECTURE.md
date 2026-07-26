@@ -146,10 +146,16 @@ The Rust types and export list are the source of truth.
 
 Application settings are stored as JSON under the app-data directory. The Linear
 API key is stored separately in the OS keychain. The Tauri layer builds runtime
-configuration and environment maps. Repository install flows inherit only the
-repaired `PATH` from the host process, may receive explicitly configured session
-variables, and do not receive the keychain-derived Linear key. Issue agents
-receive their configured session and runtime variables.
+configuration and environment maps. Repository install and workflow-transfer
+agents start with the repaired `PATH`. For `github.com` and
+`ghe.com`/`*.ghe.com` repositories, they also allowlist the host process
+credentials `GH_TOKEN` and `GITHUB_TOKEN`; `GH_ENTERPRISE_TOKEN` and
+`GITHUB_ENTERPRISE_TOKEN` are not forwarded. Explicit session variables are
+applied last and therefore override `PATH` and host credentials. If the session
+environment provides either nonblank allowlisted token, both host/base token
+candidates are suppressed before the session values are applied. These agents
+do not receive the keychain-derived Linear key. Issue agents receive their
+configured session and runtime variables.
 
 ## Change-impact map
 
