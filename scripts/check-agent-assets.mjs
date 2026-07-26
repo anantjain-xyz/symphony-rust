@@ -11,6 +11,30 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
+const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
+  [
+    "pull",
+    [
+      {
+        match:
+          "7. Re-run the target repository's documented validation gate before pushing.",
+        replacement:
+          "7. Re-run validation (`pnpm verify:full`) before pushing.",
+      },
+    ],
+  ],
+  [
+    "push",
+    [
+      {
+        match:
+          "- The target repository's documented validation gate has been run for the latest commit.",
+        replacement:
+          "- Validation gate has been run for the latest commit (`pnpm verify:full`).",
+      },
+    ],
+  ],
+]);
 
 function resolveInside(root, path, errors, label) {
   if (typeof path !== "string" || path.trim() === "") {
@@ -953,6 +977,20 @@ function lineNumber(content, index) {
   return content.slice(0, index).split("\n").length;
 }
 
+function stripMarkdownHtmlComments(content) {
+  let visible = "";
+  let cursor = 0;
+  while (cursor < content.length) {
+    const start = content.indexOf("<!--", cursor);
+    if (start === -1) return visible + content.slice(cursor);
+    visible += content.slice(cursor, start);
+    const end = content.indexOf("-->", start + 4);
+    if (end === -1) return visible;
+    cursor = end + 3;
+  }
+  return visible;
+}
+
 function checkPnpmReferences(root, files, packageJson, builtins, errors) {
   const builtinSet = new Set(builtins ?? []);
   for (const file of files) {
@@ -1073,8 +1111,36 @@ export function validateAgentAssets(
     errors,
   );
 
+  const allowedAdaptations = skillConfig.allowedAdaptations;
+  if (
+    !allowedAdaptations ||
+    typeof allowedAdaptations !== "object" ||
+    Array.isArray(allowedAdaptations)
+  ) {
+    errors.push("allowed adaptations must be an object");
+  } else {
+    for (const skillId of Object.keys(allowedAdaptations)) {
+      if (!REQUIRED_ALLOWED_ADAPTATIONS.has(skillId)) {
+        errors.push(
+          `allowed adaptation skill ids has undeclared extra ${skillId}`,
+        );
+      }
+    }
+    for (const [skillId, expected] of REQUIRED_ALLOWED_ADAPTATIONS) {
+      if (
+        Object.hasOwn(allowedAdaptations, skillId) &&
+        JSON.stringify(allowedAdaptations[skillId]) !==
+        JSON.stringify(expected)
+      ) {
+        errors.push(
+          `allowed adaptations for ${skillId} must be the exact validation-gate substitution`,
+        );
+      }
+    }
+  }
+
   for (const [skillId, adaptationList] of Object.entries(
-    skillConfig.allowedAdaptations ?? {},
+    allowedAdaptations ?? {},
   )) {
     if (!owners.has(skillId)) {
       errors.push(
@@ -1230,8 +1296,9 @@ export function validateAgentAssets(
     }
     if (promptFile && existsSync(promptFile)) {
       const prompt = readFileSync(promptFile, "utf8");
+      const visiblePrompt = stripMarkdownHtmlComments(prompt);
       const promptSkills = new Set(
-        [...prompt.matchAll(/\|\s*`(symphony-[^`]+)`\s*\|/g)].map(
+        [...visiblePrompt.matchAll(/\|\s*`(symphony-[^`]+)`\s*\|/g)].map(
           (match) => match[1],
         ),
       );

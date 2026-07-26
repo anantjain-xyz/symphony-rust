@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
+const DEVELOPMENT_GUIDE = "docs/DEVELOPMENT.md";
 export const CANONICAL_RUNNER_SOURCE = `import { runValidationProfile } from "./check-validation-contract.mjs";
 
 process.exitCode = runValidationProfile({ profileName: process.argv[2] });
@@ -566,6 +567,104 @@ function validateCiRunStep(content, command, workflowPath, errors) {
   }
 }
 
+function validateCiTriggers(content, workflowPath, errors) {
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const triggerBlocks = lines
+    .map((line, index) => ({ index, line }))
+    .filter(
+      ({ line }) => yamlIndent(line) === 0 && line.trim() === "on:",
+    );
+  if (triggerBlocks.length !== 1) {
+    errors.push(
+      `CI workflow ${workflowPath} must define exactly one top-level on trigger block; found ${triggerBlocks.length}`,
+    );
+    return;
+  }
+
+  const triggerStart = triggerBlocks[0].index;
+  let triggerEnd = lines.length;
+  for (let index = triggerStart + 1; index < lines.length; index += 1) {
+    if (lines[index].trim() === "" || lines[index].trimStart().startsWith("#")) {
+      continue;
+    }
+    if (yamlIndent(lines[index]) === 0) {
+      triggerEnd = index;
+      break;
+    }
+  }
+
+  const directTriggers = new Map();
+  for (let index = triggerStart + 1; index < triggerEnd; index += 1) {
+    const line = lines[index];
+    if (
+      line.trim() === "" ||
+      line.trimStart().startsWith("#") ||
+      yamlIndent(line) !== 2
+    ) {
+      continue;
+    }
+    const match = /^([A-Za-z_][A-Za-z0-9_-]*):\s*$/.exec(line.trim());
+    if (!match) continue;
+    const indexes = directTriggers.get(match[1]) ?? [];
+    indexes.push(index);
+    directTriggers.set(match[1], indexes);
+  }
+
+  const pullRequestIndexes = directTriggers.get("pull_request") ?? [];
+  if (pullRequestIndexes.length !== 1) {
+    errors.push(
+      `CI workflow ${workflowPath} must trigger every pull_request without filters`,
+    );
+  } else {
+    const pullRequestIndex = pullRequestIndexes[0];
+    const nextTriggerIndex = [...directTriggers.values()]
+      .flat()
+      .filter((index) => index > pullRequestIndex)
+      .sort((left, right) => left - right)[0];
+    const pullRequestEnd = nextTriggerIndex ?? triggerEnd;
+    const filters = lines
+      .slice(pullRequestIndex + 1, pullRequestEnd)
+      .filter(
+        (line) =>
+          line.trim() !== "" && !line.trimStart().startsWith("#"),
+      );
+    if (filters.length > 0) {
+      errors.push(
+        `CI workflow ${workflowPath} must trigger every pull_request without filters`,
+      );
+    }
+  }
+
+  const pushIndexes = directTriggers.get("push") ?? [];
+  if (pushIndexes.length !== 1) {
+    errors.push(
+      `CI workflow ${workflowPath} must trigger pushes to main with branches: [main] and no filters`,
+    );
+  } else {
+    const pushIndex = pushIndexes[0];
+    const nextTriggerIndex = [...directTriggers.values()]
+      .flat()
+      .filter((index) => index > pushIndex)
+      .sort((left, right) => left - right)[0];
+    const pushEnd = nextTriggerIndex ?? triggerEnd;
+    const pushConfiguration = lines
+      .slice(pushIndex + 1, pushEnd)
+      .filter(
+        (line) =>
+          line.trim() !== "" && !line.trimStart().startsWith("#"),
+      );
+    if (
+      pushConfiguration.length !== 1 ||
+      yamlIndent(pushConfiguration[0]) !== 4 ||
+      pushConfiguration[0].trim() !== "branches: [main]"
+    ) {
+      errors.push(
+        `CI workflow ${workflowPath} must trigger pushes to main with branches: [main] and no filters`,
+      );
+    }
+  }
+}
+
 export function runValidationProfile({
   root = DEFAULT_ROOT,
   profileName,
@@ -614,10 +713,11 @@ export function runValidationProfile({
     }
 
     const [executable, ...args] = command.argv;
-    const platformExecutable =
-      platform === "win32" && executable === "pnpm"
-        ? "pnpm.cmd"
-        : executable;
+    const usesWindowsPnpm = platform === "win32" && executable === "pnpm";
+    const platformExecutable = usesWindowsPnpm ? "cmd.exe" : executable;
+    const platformArgs = usesWindowsPnpm
+      ? ["/d", "/s", "/c", "pnpm.cmd", ...args]
+      : args;
     stdout(
       `\n==> [${index + 1}/${commandIds.length}] ${
         command.label ?? commandId
@@ -625,7 +725,7 @@ export function runValidationProfile({
     );
     stdout(`$ ${command.argv.join(" ")}`);
 
-    const result = spawn(platformExecutable, args, {
+    const result = spawn(platformExecutable, platformArgs, {
       cwd: root,
       env: environment,
       stdio: "inherit",
@@ -896,6 +996,17 @@ export function validateValidationContract(
       );
     }
   }
+  const frontendBuildIndex = fullIds.indexOf("frontend-build");
+  const bundleBudgetIndex = fullIds.indexOf("bundle-budget");
+  if (
+    frontendBuildIndex !== -1 &&
+    bundleBudgetIndex !== -1 &&
+    frontendBuildIndex > bundleBudgetIndex
+  ) {
+    errors.push(
+      "full validation profile must run frontend-build before bundle-budget so bundle inspection uses current artifacts",
+    );
+  }
 
   const runnerAbsolute = resolveInside(
     root,
@@ -980,6 +1091,7 @@ export function validateValidationContract(
       errors.push(`CI workflow is missing at ${ci.path}`);
     } else if (ciAbsolute) {
       const content = readFileSync(ciAbsolute, "utf8");
+      validateCiTriggers(content, ci.path, errors);
       const matches = ciCommand
         ? [...content.matchAll(exactRunLine(ciCommand))]
         : [];
@@ -1046,6 +1158,28 @@ export function validateValidationContract(
     }
   } else {
     errors.push("validation contract is missing contributor-guide integration");
+  }
+
+  if (canonicalFullCommand) {
+    const path = resolveInside(
+      root,
+      DEVELOPMENT_GUIDE,
+      errors,
+      "development guide",
+    );
+    if (path && !existsSync(path)) {
+      errors.push(`development guide is missing at ${DEVELOPMENT_GUIDE}`);
+    } else if (
+      path &&
+      !hasMarkdownCommandLine(
+        readFileSync(path, "utf8"),
+        canonicalFullCommand,
+      )
+    ) {
+      errors.push(
+        `development guide ${DEVELOPMENT_GUIDE} must show canonical full entrypoint ${canonicalFullCommand} on a visible command line`,
+      );
+    }
   }
 
   const skills = contract.integrations?.skills;

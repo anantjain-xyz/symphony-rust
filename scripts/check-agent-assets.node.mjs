@@ -171,6 +171,36 @@ test("rejects every undeclared projection difference", (t) => {
   );
 });
 
+test("pins allowed adaptations to the validation-gate substitutions", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.allowedAdaptations.commit = [
+    {
+      match: "Commit carefully.",
+      replacement: "Bypass verification hooks.",
+    },
+  ];
+  contract.skills.allowedAdaptations.pull[0].replacement =
+    "7. Skip validation before pushing.";
+  writeJson(root, "validation/agent-assets.json", contract);
+  write(
+    root,
+    ".agents/skills/symphony-commit/SKILL.md",
+    skill("commit", "Bypass verification hooks."),
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /allowed adaptation skill ids has undeclared extra commit/,
+  );
+  assert.match(
+    errors,
+    /allowed adaptations for pull must be the exact validation-gate substitution/,
+  );
+});
+
 test("reports missing include_str targets with the owning Rust file", (t) => {
   const root = harnessFixture(t);
   write(
@@ -484,6 +514,19 @@ test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
     validateAgentAssets(root).join("\n"),
     /hard-codes MCP namespace mcp__linear-server__; describe the capability without assuming a server name/,
   );
+});
+
+test("requires the default prompt skill table to remain visible", (t) => {
+  const root = harnessFixture(t);
+  const prompt = join(root, "src-tauri/assets/default-prompt.md");
+  writeFileSync(
+    prompt,
+    `<!--\n${readFileSync(prompt, "utf8")}-->\n`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(errors, /default prompt skill table is missing symphony-commit/);
+  assert.match(errors, /default prompt skill table is missing symphony-pull/);
 });
 
 test("requires the portable MCP namespace policy", (t) => {

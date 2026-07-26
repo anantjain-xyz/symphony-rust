@@ -183,20 +183,16 @@ git worktree remove ../symphony-rust-<topic>
 
 The `validate` job in `.github/workflows/ci.yml` runs on Ubuntu with Node.js 22
 and Rust stable plus `rustfmt` and `clippy`. After
-`pnpm install --frozen-lockfile`, it runs these commands in this order:
+`pnpm install --frozen-lockfile`, it runs the canonical full validation profile:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --exclude symphony-desktop --all-targets -- -D warnings
-cargo test --workspace --exclude symphony-desktop
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm check:bundle
-pnpm test:bundle
-pnpm exec playwright install --with-deps chromium
-pnpm test:e2e
+pnpm verify:full
 ```
+
+`validation/contract.json` owns the ordered commands behind that entrypoint,
+including the contract checks that keep CI, documentation, bundled agent
+assets, frontend boundaries, build output, bundle inspection, and browser
+validation synchronized.
 
 `pnpm check:bundle` reads the Vite manifest and enforces eager JavaScript/CSS,
 lazy-view size, and import-boundary budgets.
@@ -204,6 +200,5 @@ lazy-view size, and import-boundary budgets.
 also verifies lazy-chunk and theme behavior and uploads its screenshots in CI.
 
 During development, start with the smallest package, test file, or E2E file
-that owns the behavior. Before submitting a pull request, run the complete gate
-above (using the local Chromium install command when system dependencies are
-already present).
+that owns the behavior. Before submitting a pull request, run the canonical
+full gate above.

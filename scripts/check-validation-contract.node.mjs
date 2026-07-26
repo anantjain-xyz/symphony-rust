@@ -78,12 +78,17 @@ function validationFixture(t) {
   write(
     root,
     ".github/workflows/ci.yml",
-    "jobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
+    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
   );
   write(
     root,
     "CONTRIBUTING.md",
     "```sh\npnpm verify:fast\n\npnpm verify:full\n```\n",
+  );
+  write(
+    root,
+    "docs/DEVELOPMENT.md",
+    "The canonical CI gate is:\n\n```sh\npnpm verify:full\n```\n",
   );
   for (const name of ["pull", "push"]) {
     write(
@@ -329,6 +334,32 @@ test("validation runner traverses profiles and propagates failures", (t) => {
   });
   assert.equal(failureStatus, 23);
   assert.equal(attempts, 4);
+
+  const windowsInvocations = [];
+  const windowsStatus = runValidationProfile({
+    root,
+    profileName: "fast",
+    platform: "win32",
+    spawn(executable, args) {
+      windowsInvocations.push([executable, ...args]);
+      return { status: 0 };
+    },
+    stdout() {},
+    stderr() {},
+  });
+  assert.equal(windowsStatus, 0);
+  assert.deepEqual(windowsInvocations[0], [
+    "cmd.exe",
+    "/d",
+    "/s",
+    "/c",
+    "pnpm.cmd",
+    "check:validation-contract",
+  ]);
+  assert.deepEqual(
+    windowsInvocations.find((argv) => argv[0] === "cargo"),
+    ["cargo", "fmt", "--all", "--check"],
+  );
 });
 
 test("pins the bodies of package scripts owned by required gates", (t) => {
@@ -430,6 +461,31 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
   );
 });
 
+test("requires pull request and main push CI triggers", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  workflow_dispatch:
+jobs:
+  validate:
+    steps:
+      - run: pnpm verify:full
+`,
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /must trigger every pull_request without filters/,
+  );
+  assert.match(
+    errors,
+    /must trigger pushes to main with branches: \[main\] and no filters/,
+  );
+});
+
 test("requires visible contributor and adapted-skill gate references", (t) => {
   const root = validationFixture(t);
   write(
@@ -441,6 +497,11 @@ test("requires visible contributor and adapted-skill gate references", (t) => {
     root,
     ".agents/skills/symphony-pull/SKILL.md",
     "<!-- Run pnpm verify:full. -->\n",
+  );
+  write(
+    root,
+    "docs/DEVELOPMENT.md",
+    "<!--\npnpm verify:full\n-->\n",
   );
 
   const errors = validateValidationContract(root).join("\n");
@@ -455,6 +516,10 @@ test("requires visible contributor and adapted-skill gate references", (t) => {
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
+  );
+  assert.match(
+    errors,
+    /development guide docs\/DEVELOPMENT\.md must show canonical full entrypoint pnpm verify:full on a visible command line/,
   );
 });
 
@@ -733,5 +798,26 @@ test("requires browser installation before browser validation", (t) => {
   assert.match(
     validateValidationContract(root).join("\n"),
     /browser command browser-e2e must follow required command browser-install in the full profile/,
+  );
+});
+
+test("requires production build before bundle inspection", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.profiles.full = contract.profiles.full.filter(
+    (command) => command !== "frontend-build",
+  );
+  contract.profiles.full.splice(
+    contract.profiles.full.indexOf("bundle-budget") + 1,
+    0,
+    "frontend-build",
+  );
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /full validation profile must run frontend-build before bundle-budget so bundle inspection uses current artifacts/,
   );
 });
