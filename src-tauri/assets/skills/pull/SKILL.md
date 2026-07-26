@@ -29,7 +29,7 @@ description: Sync the current branch with origin/main via merge (not rebase) and
    git -c merge.conflictstyle=zdiff3 merge origin/main
    ```
 6. Resolve conflicts (see below), then `git add <files>` and `git merge --continue` (or `git commit` if the merge auto-paused).
-7. Re-run validation (`pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`) before pushing.
+7. Re-run the target repository's documented validation gate before pushing.
 8. Record the result in the workpad's `### Notes` (e.g. `merge origin/main: clean` or `conflicts resolved: <files>`) and the new short SHA.
 
 ## Resolving conflicts

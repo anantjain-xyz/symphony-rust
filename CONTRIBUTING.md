@@ -16,14 +16,23 @@ pnpm install
 pnpm tauri dev        # run the desktop app with hot reload
 ```
 
-Useful checks (CI runs all of these):
+Run the browser-free validation profile during development:
 
 ```sh
-cargo check --workspace   # Rust workspace
-cargo test --workspace    # Rust tests
-pnpm typecheck            # TypeScript
-pnpm test                 # frontend unit tests (vitest)
+pnpm verify:fast
 ```
+
+Before opening a pull request, install Chromium once and run the same canonical
+full gate as CI:
+
+```sh
+pnpm exec playwright install chromium
+pnpm verify:full
+```
+
+The ordered command lists live in `validation/contract.json`; CI, this guide,
+and the repository-adapted pull/push skills point to the entrypoints instead of
+copying the commands.
 
 ### TypeScript bindings
 
@@ -45,6 +54,6 @@ For signed, notarized release builds (`pnpm release:mac`), see [Building](README
 
 ## Pull requests
 
-- Keep PRs focused; run the checks above before submitting.
+- Keep PRs focused; run `pnpm verify:full` before submitting.
 - For UI changes, include before/after screenshots (light and dark).
 - Significant behavior changes should update the README.

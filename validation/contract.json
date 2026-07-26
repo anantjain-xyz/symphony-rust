@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "executables": [
+    "cargo",
+    "pnpm"
+  ],
+  "entrypoints": {
+    "fast": {
+      "packageScript": "verify:fast",
+      "profile": "fast"
+    },
+    "full": {
+      "packageScript": "verify:full",
+      "profile": "full"
+    }
+  },
+  "profiles": {
+    "fast": [
+      "validation-contract",
+      "agent-assets",
+      "validation-tests",
+      "rust-format",
+      "rust-clippy",
+      "rust-tests",
+      "frontend-typecheck",
+      "frontend-tests"
+    ],
+    "full": [
+      "validation-contract",
+      "agent-assets",
+      "validation-tests",
+      "rust-format",
+      "rust-clippy",
+      "rust-tests",
+      "frontend-typecheck",
+      "frontend-tests",
+      "frontend-build",
+      "bundle-budget",
+      "bundle-tests",
+      "browser-e2e"
+    ]
+  },
+  "commands": {
+    "validation-contract": {
+      "label": "validation contract",
+      "argv": [
+        "pnpm",
+        "check:validation-contract"
+      ],
+      "packageScript": "check:validation-contract"
+    },
+    "agent-assets": {
+      "label": "agent asset contract",
+      "argv": [
+        "pnpm",
+        "check:harness"
+      ],
+      "packageScript": "check:harness"
+    },
+    "validation-tests": {
+      "label": "validation checker tests",
+      "argv": [
+        "pnpm",
+        "test:validation"
+      ],
+      "packageScript": "test:validation"
+    },
+    "rust-format": {
+      "label": "Rust formatting",
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ]
+    },
+    "rust-clippy": {
+      "label": "Rust Clippy",
+      "argv": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--exclude",
+        "symphony-desktop",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ]
+    },
+    "rust-tests": {
+      "label": "Rust tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--exclude",
+        "symphony-desktop"
+      ]
+    },
+    "frontend-typecheck": {
+      "label": "TypeScript typecheck",
+      "argv": [
+        "pnpm",
+        "typecheck"
+      ],
+      "packageScript": "typecheck"
+    },
+    "frontend-tests": {
+      "label": "frontend unit tests",
+      "argv": [
+        "pnpm",
+        "test"
+      ],
+      "packageScript": "test"
+    },
+    "frontend-build": {
+      "label": "frontend production build",
+      "argv": [
+        "pnpm",
+        "build"
+      ],
+      "packageScript": "build"
+    },
+    "bundle-budget": {
+      "label": "bundle budgets",
+      "argv": [
+        "pnpm",
+        "check:bundle"
+      ],
+      "packageScript": "check:bundle"
+    },
+    "bundle-tests": {
+      "label": "bundle contract tests",
+      "argv": [
+        "pnpm",
+        "test:bundle"
+      ],
+      "packageScript": "test:bundle"
+    },
+    "browser-e2e": {
+      "label": "Playwright end-to-end tests",
+      "argv": [
+        "pnpm",
+        "test:e2e"
+      ],
+      "packageScript": "test:e2e",
+      "requiresBrowser": true
+    }
+  },
+  "integrations": {
+    "ci": {
+      "path": ".github/workflows/ci.yml",
+      "command": "pnpm verify:full"
+    },
+    "contributing": {
+      "path": "CONTRIBUTING.md",
+      "commands": [
+        "pnpm verify:fast",
+        "pnpm verify:full"
+      ]
+    },
+    "skills": {
+      "paths": [
+        ".agents/skills/symphony-pull/SKILL.md",
+        ".agents/skills/symphony-push/SKILL.md"
+      ],
+      "command": "pnpm verify:full"
+    }
+  }
+}
