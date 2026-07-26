@@ -49,6 +49,21 @@ test("reference-style heading links slug their rendered labels", async (context)
   assert.deepEqual(problems, []);
 });
 
+test("inline links with balanced destinations slug headings from their rendered labels", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-heading-inline-link-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ['# [Guide](guide(one).md "details")', "", "[Jump](#guide)"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide(one).md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide(one).md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
 test("multi-line Setext headings slug the complete paragraph", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-setext-"));
   context.after(() => fs.rm(root, { force: true, recursive: true }));
@@ -108,6 +123,16 @@ test("headings inside list items contribute GitHub anchors", async (context) => 
     context,
     "symphony-markdown-list-heading-",
     ["- # Setup", "", "[Jump](#setup)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("headings in wide list continuations contribute GitHub anchors", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-list-continuation-heading-",
+    ["10. item", "", "    # Setup", "", "[Jump](#setup)"].join("\n"),
   );
 
   assert.deepEqual(problems, []);
@@ -184,6 +209,29 @@ test("reference-definition titles may contain escaped delimiters", async (contex
     fs.writeFile(
       path.join(root, "root.md"),
       ["[Guide][docs]", "", '[docs]: guide.md "the \\"guide\\""'].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("continued reference-definition titles do not contribute Markdown targets", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-title-line-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      [
+        "[Guide][docs] and [More][more]",
+        "",
+        "[docs]: guide.md",
+        '  "title [example](missing.md)"',
+        "[more]:",
+        "  guide.md",
+        "  'title [example](also-missing.md)'",
+      ].join("\n"),
     ),
     fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
   ]);
@@ -495,6 +543,25 @@ test("links to the current directory resolve to the repository root", async (con
   );
 
   assert.deepEqual(problems, []);
+});
+
+test("directory fragments resolve against the directory README", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-directory-readme-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([fs.mkdir(path.join(root, "docs")), fs.mkdir(path.join(root, "empty"))]);
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[Missing](docs/#missing)", "[Setup](docs/#setup)", "[No README](empty/#setup)"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "docs", "README.md"), "# Setup\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["docs/README.md", "root.md"]);
+  assert.deepEqual(problems, [
+    'root.md:1:1: missing heading "#missing" in docs/README.md',
+    'root.md:3:1: missing Markdown README for fragment "#setup" in empty/',
+  ]);
 });
 
 test("standard .markdown files are discovered and checked", async (context) => {

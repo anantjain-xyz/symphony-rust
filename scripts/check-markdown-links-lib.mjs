@@ -81,11 +81,12 @@ function maskCodeSpans(source) {
 
 function maskRawHtmlBlocks(source) {
   const lines = source.split("\n");
+  const containers = markdownContainerLines(lines);
   let block = null;
   let paragraphOpen = false;
   let paragraphDepth = 0;
   for (let index = 0; index < lines.length; index += 1) {
-    const quote = blockQuoteLine(lines[index]);
+    const quote = containers[index];
     if (block && block.depth !== quote.depth) block = null;
     if (block) {
       if (block.untilBlank && !/\S/.test(quote.content)) {
@@ -148,13 +149,14 @@ function maskRawHtmlBlocks(source) {
 
 function maskIgnoredMarkdown(source) {
   const lines = source.split("\n");
+  const containers = markdownContainerLines(lines);
   let fence = null;
   let indentedCode = false;
   let paragraphOpen = false;
   let paragraphQuoteDepth = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const blockQuote = blockQuoteLine(line);
+    const blockQuote = containers[index];
     const content = blockQuote.content;
     const marker = content.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
@@ -181,7 +183,8 @@ function maskIgnoredMarkdown(source) {
       paragraphOpen = false;
       continue;
     }
-    const continuesParagraph = paragraphOpen && paragraphQuoteDepth === blockQuote.depth;
+    const continuesParagraph =
+      paragraphOpen && paragraphQuoteDepth === blockQuote.depth && !blockQuote.startsListItem;
     if (/^(?: {4}| {0,3}\t)/.test(content) && (indentedCode || !continuesParagraph)) {
       lines[index] = " ".repeat(line.length);
       indentedCode = true;
@@ -327,14 +330,27 @@ function inlineHeadingText(value) {
   return result;
 }
 
+function inlineLinkLabels(value) {
+  const links = inlineLinks(value).sort(
+    (left, right) => left.start - right.start || right.end - left.end,
+  );
+  let cursor = 0;
+  let rendered = "";
+  for (const link of links) {
+    if (link.start < cursor) continue;
+    rendered += value.slice(cursor, link.start);
+    rendered += inlineLinkLabels(link.label);
+    cursor = link.end;
+  }
+  return `${rendered}${value.slice(cursor)}`;
+}
+
 function headingText(value) {
+  const renderedLinks = inlineLinkLabels(referenceLabels(value));
   return inlineHeadingText(
-    referenceLabels(value)
-      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/<([^<>]*)>/g, (_match, content) =>
-        AUTOLINK_URI.test(content) || AUTOLINK_EMAIL.test(content) ? content : "",
-      ),
+    renderedLinks.replace(/<([^<>]*)>/g, (_match, content) =>
+      AUTOLINK_URI.test(content) || AUTOLINK_EMAIL.test(content) ? content : "",
+    ),
   );
 }
 
@@ -360,8 +376,56 @@ function listStrippedLine(line) {
   }
 }
 
-function stripListPrefixes(line) {
-  return listStrippedLine(line).content;
+function markdownContainerLines(lines) {
+  let list = null;
+  return lines.map((line) => {
+    const quoted = blockQuoteLine(line);
+    if (list?.depth !== quoted.depth) list = null;
+
+    let content = quoted.content;
+    let offset = quoted.offset;
+    if (!/\S/.test(content)) {
+      return {
+        content,
+        depth: quoted.depth,
+        offset,
+        startsListItem: false,
+      };
+    }
+
+    let continuationIndent = 0;
+    if (list) {
+      const leadingSpaces = content.match(/^ */)?.[0].length ?? 0;
+      const indentIndex = list.indents.findLastIndex((indent) => indent <= leadingSpaces);
+      if (indentIndex === -1) {
+        list = null;
+      } else {
+        continuationIndent = list.indents[indentIndex];
+        list.indents.length = indentIndex + 1;
+        content = content.slice(continuationIndent);
+        offset += continuationIndent;
+      }
+    }
+
+    const listed = listStrippedLine(content);
+    content = listed.content;
+    offset += listed.offset;
+    if (listed.startsListItem) {
+      const contentIndent = offset - quoted.offset;
+      if (!list || continuationIndent === 0) {
+        list = { depth: quoted.depth, indents: [contentIndent] };
+      } else if (list.indents.at(-1) !== contentIndent) {
+        list.indents.push(contentIndent);
+      }
+    }
+
+    return {
+      content,
+      depth: quoted.depth,
+      offset,
+      startsListItem: listed.startsListItem,
+    };
+  });
 }
 
 export function isMarkdownFile(file) {
@@ -381,8 +445,8 @@ function markdownAnchors(source) {
   const masked = maskedSources.markdown;
   const originalLines = source.split("\n");
   const maskedLines = masked.split("\n");
-  const headingLines = maskedLines.map(blockQuoteLine);
-  const originalHeadingLines = originalLines.map(blockQuoteLine);
+  const headingLines = markdownContainerLines(maskedLines);
+  const originalHeadingLines = markdownContainerLines(originalLines);
   const anchors = new Set();
 
   const addHeading = (value) => {
@@ -397,9 +461,9 @@ function markdownAnchors(source) {
 
   for (let index = 0; index < maskedLines.length; index += 1) {
     const line = headingLines[index].content;
-    const atx = stripListPrefixes(line).match(/^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/);
+    const atx = line.match(/^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/);
     if (atx) {
-      const originalAtx = stripListPrefixes(originalHeadingLines[index].content).match(
+      const originalAtx = originalHeadingLines[index].content.match(
         /^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/,
       );
       addHeading(originalAtx?.[1] ?? atx[1]);
@@ -449,28 +513,31 @@ function findClosingBracket(line, start) {
   return -1;
 }
 
-function validDefinitionRemainder(line, start) {
-  let cursor = start;
-  while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
-  if (cursor === line.length) return true;
-  if (cursor === start) return false;
-
-  const opener = line[cursor];
+function definitionTitleEnd(line, start) {
+  const opener = line[start];
   const closer = opener === "(" ? ")" : opener;
-  if (!['"', "'", "("].includes(opener)) return false;
-  cursor += 1;
+  if (!['"', "'", "("].includes(opener)) return -1;
+  let cursor = start + 1;
   while (cursor < line.length) {
     if (line[cursor] === "\\" && cursor + 1 < line.length) {
       cursor += 2;
     } else if (line[cursor] === closer) {
       cursor += 1;
       while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
-      return cursor === line.length;
+      return cursor === line.length ? cursor : -1;
     } else {
       cursor += 1;
     }
   }
-  return false;
+  return -1;
+}
+
+function definitionRemainder(line, start) {
+  let cursor = start;
+  while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
+  if (cursor === line.length) return { hasTitle: false };
+  if (cursor === start || definitionTitleEnd(line, cursor) === -1) return null;
+  return { hasTitle: true };
 }
 
 function definitionDestination(line, start) {
@@ -508,8 +575,10 @@ function definitionDestination(line, start) {
     if (cursor === start || depth !== 0) return null;
     targetEnd = cursor;
   }
-  if (!validDefinitionRemainder(line, cursor)) return null;
+  const remainder = definitionRemainder(line, cursor);
+  if (!remainder) return null;
   return {
+    ...remainder,
     target: line.slice(targetStart, targetEnd),
     targetStart,
   };
@@ -533,15 +602,9 @@ function parseReferenceContinuation(line) {
   return definitionDestination(line, indent);
 }
 
-function referenceContainerLine(line) {
-  const quoted = blockQuoteLine(line);
-  const listed = listStrippedLine(quoted.content);
-  return {
-    content: listed.content,
-    depth: quoted.depth,
-    offset: quoted.offset + listed.offset,
-    startsListItem: listed.startsListItem,
-  };
+function isContinuedDefinitionTitle(line) {
+  const indent = line.match(/^[ \t]{0,3}/)?.[0].length ?? 0;
+  return definitionTitleEnd(line, indent) !== -1;
 }
 
 function skipInlineWhitespace(value, cursor) {
@@ -696,6 +759,7 @@ function inlineLinks(line) {
     links.push({
       end: destination.closing + 1,
       image,
+      label: line.slice(labelStart + 1, labelEnd),
       start: cursor,
       target: destination.target,
     });
@@ -720,12 +784,21 @@ function extractTargets(source) {
   const maskedSources = maskIgnoredMarkdown(source);
   const masked = maskedSources.markdown;
   const maskedLines = masked.split("\n");
-  const containerLines = maskedLines.map(referenceContainerLine);
+  const containerLines = markdownContainerLines(maskedLines);
   const targets = [];
   const definitions = new Map();
   const definitionLines = new Set();
   let paragraphDepth = 0;
   let paragraphOpen = false;
+  const continuedTitleAt = (index, depth) => {
+    const title = containerLines[index];
+    return Boolean(
+      title &&
+        title.depth === depth &&
+        !title.startsListItem &&
+        isContinuedDefinitionTitle(title.content),
+    );
+  };
 
   for (let index = 0; index < maskedLines.length; index += 1) {
     const line = containerLines[index];
@@ -747,6 +820,10 @@ function extractTargets(source) {
         });
       }
       definitionLines.add(index);
+      if (!definition.hasTitle && continuedTitleAt(index + 1, line.depth)) {
+        definitionLines.add(index + 1);
+        index += 1;
+      }
       paragraphOpen = false;
       paragraphDepth = line.depth;
       continue;
@@ -768,9 +845,12 @@ function extractTargets(source) {
       }
       definitionLines.add(index);
       definitionLines.add(index + 1);
+      const lastDefinitionLine =
+        !continuation.hasTitle && continuedTitleAt(index + 2, line.depth) ? index + 2 : index + 1;
+      definitionLines.add(lastDefinitionLine);
       paragraphOpen = false;
       paragraphDepth = line.depth;
-      index += 1;
+      index = lastDefinitionLine;
       continue;
     }
     paragraphOpen = definition?.startOnly
@@ -912,10 +992,47 @@ export async function checkMarkdownFiles(root, files) {
         problems.push(`${location}: missing local target "${target.target}"`);
         continue;
       }
-      if (decoded.fragment && (markdownFiles.has(relative) || isMarkdownFile(relative))) {
-        const targetAnchors = await anchorsFor(relative, absolute);
+      let fragmentAbsolute = absolute;
+      let fragmentRelative = relative;
+      if (decoded.fragment && (await fs.lstat(absolute)).isDirectory()) {
+        const entries = await fs.readdir(absolute);
+        const readme =
+          ["README.md", "README.markdown"].find((candidate) => entries.includes(candidate)) ??
+          entries.find((entry) => /^readme\.(?:md|markdown)$/i.test(entry));
+        if (!readme) {
+          problems.push(
+            `${location}: missing Markdown README for fragment "#${decoded.fragment}" in ${
+              relative || "."
+            }`,
+          );
+          continue;
+        }
+        fragmentRelative = path.posix.join(relative, readme);
+        try {
+          fragmentAbsolute = await exactPath(normalizedRoot, fragmentRelative);
+        } catch (error) {
+          problems.push(`${location}: invalid local link "${target.target}": ${error.message}`);
+          continue;
+        }
+        if (!fragmentAbsolute || !(await fs.lstat(fragmentAbsolute)).isFile()) {
+          problems.push(
+            `${location}: missing Markdown README for fragment "#${decoded.fragment}" in ${
+              relative || "."
+            }`,
+          );
+          continue;
+        }
+      }
+      if (
+        decoded.fragment &&
+        fragmentAbsolute &&
+        (markdownFiles.has(fragmentRelative) || isMarkdownFile(fragmentRelative))
+      ) {
+        const targetAnchors = await anchorsFor(fragmentRelative, fragmentAbsolute);
         if (!targetAnchors.has(decoded.fragment)) {
-          problems.push(`${location}: missing heading "#${decoded.fragment}" in ${relative}`);
+          problems.push(
+            `${location}: missing heading "#${decoded.fragment}" in ${fragmentRelative}`,
+          );
         }
       }
     }
