@@ -1,0 +1,1 @@
+{"type":"error","sessionID":"fixture-opencode-session","error":{"name":"FixtureProviderError","data":{"message":"sanitized fixture backend failure","statusCode":500}}}

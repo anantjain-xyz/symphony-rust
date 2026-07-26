@@ -46,6 +46,10 @@ pub enum WorkerError {
     RunNotManaged(String),
     #[error("tracker error: {0}")]
     Tracker(#[from] TrackerError),
+    #[error("workspace error: {0}")]
+    Workspace(#[from] crate::workspace::WorkspaceError),
+    #[error("workspace skill injection failed: {0}")]
+    WorkspaceSkills(#[source] std::io::Error),
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 }
@@ -447,46 +451,52 @@ async fn recover<T: TrackerClient>(
     for run in repo.list_running().await? {
         warn!(run_id = %run.id, issue_id = %run.issue_id, "orphan run marked crashed");
         repo.delete_live_session(&run.id).await.ok();
-        repo.finish_run(
-            &run.id,
-            RunStatus::Failure,
-            Some("process_crashed"),
-            Some("worker restarted while run was in-flight"),
-        )
-        .await?;
-        let due = due_after(backoff_ms(
-            run.run_number,
-            config.workflow.front_matter.agent.max_retry_backoff_ms,
-        ));
-        repo.schedule_retry(
-            &run.issue_id,
-            run.run_number + 1,
-            &due,
-            Some("process_crashed"),
-            Some("worker restart"),
-        )
-        .await?;
+        if repo
+            .finish_run(
+                &run.id,
+                RunStatus::Failure,
+                Some("process_crashed"),
+                Some("worker restarted while run was in-flight"),
+            )
+            .await?
+        {
+            let due = due_after(backoff_ms(
+                run.run_number,
+                config.workflow.front_matter.agent.max_retry_backoff_ms,
+            ));
+            repo.schedule_retry(
+                &run.issue_id,
+                run.run_number + 1,
+                &due,
+                Some("process_crashed"),
+                Some("worker restart"),
+            )
+            .await?;
+        }
     }
     for run in repo.list_pending().await? {
-        repo.finish_run(
-            &run.id,
-            RunStatus::Failure,
-            Some("process_crashed"),
-            Some("worker restarted before run was claimed"),
-        )
-        .await?;
-        let due = due_after(backoff_ms(
-            run.run_number,
-            config.workflow.front_matter.agent.max_retry_backoff_ms,
-        ));
-        repo.schedule_retry(
-            &run.issue_id,
-            run.run_number + 1,
-            &due,
-            Some("process_crashed"),
-            Some("worker restart"),
-        )
-        .await?;
+        if repo
+            .finish_run(
+                &run.id,
+                RunStatus::Failure,
+                Some("process_crashed"),
+                Some("worker restarted before run was claimed"),
+            )
+            .await?
+        {
+            let due = due_after(backoff_ms(
+                run.run_number,
+                config.workflow.front_matter.agent.max_retry_backoff_ms,
+            ));
+            repo.schedule_retry(
+                &run.issue_id,
+                run.run_number + 1,
+                &due,
+                Some("process_crashed"),
+                Some("worker restart"),
+            )
+            .await?;
+        }
     }
     repo.delete_orphaned_pending_sessions().await.ok();
     let Some(terminal) = cancellable(stop, tracker.fetch_terminal()).await else {
@@ -748,9 +758,7 @@ async fn reserve_and_dispatch(
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
     let workspaces = workspace_manager(&config, &repo_config);
-    let workspace_path = workspaces
-        .path_for(&issue.identifier)
-        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    let workspace_path = workspaces.path_for(&issue.identifier)?;
     let number = match run_number {
         Some(number) => number,
         None => repo.last_run_number(&issue.id).await? + 1,
@@ -876,15 +884,21 @@ async fn recover_stranded_run(
             return;
         }
     }
-    if let Err(finish_err) = repo
+    let transitioned = match repo
         .finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
         .await
     {
-        error!(
-            error = %finish_err,
-            run_id = %run.id,
-            "could not finish stranded run; leaving it for worker-restart recovery"
-        );
+        Ok(transitioned) => transitioned,
+        Err(finish_err) => {
+            error!(
+                error = %finish_err,
+                run_id = %run.id,
+                "could not finish stranded run; leaving it for worker-restart recovery"
+            );
+            return;
+        }
+    };
+    if !transitioned {
         return;
     }
     let due = due_after(backoff_ms(run.run_number, retry_backoff_cap));
@@ -943,10 +957,7 @@ where
         return Ok(());
     }
     adopt_legacy_workspace(&repo, &config, &issue, &run, &workspaces).await;
-    let workspace = workspaces
-        .create_or_reuse(&issue)
-        .await
-        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+    let workspace = workspaces.create_or_reuse(&issue).await?;
     let env = run_env(&config.env, &repo_config);
 
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
@@ -999,16 +1010,13 @@ where
 
     ensure_workspace_skills(&workspace.path, &config.skills)
         .await
-        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+        .map_err(WorkerError::WorkspaceSkills)?;
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
 
     if workspace.needs_init {
-        workspaces
-            .mark_ready(&issue)
-            .await
-            .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+        workspaces.mark_ready(&issue).await?;
     }
 
     match repo.mark_running(&run.id).await {
@@ -1056,7 +1064,7 @@ where
     }
     ensure_workspace_skills(&workspace.path, &config.skills)
         .await
-        .map_err(|err| StorageError::Sqlx(sqlx::Error::Protocol(err.to_string())))?;
+        .map_err(WorkerError::WorkspaceSkills)?;
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
     }
@@ -1242,19 +1250,25 @@ where
             }
             match result.outcome {
                 AgentOutcome::Success => {
-                    repo.finish_run(&run.id, RunStatus::Success, None, None)
-                        .await?;
-                    repo.clear_retry(&issue.id).await?;
+                    if repo
+                        .finish_run(&run.id, RunStatus::Success, None, None)
+                        .await?
+                    {
+                        repo.clear_retry(&issue.id).await?;
+                    }
                 }
                 AgentOutcome::Cancelled => {
-                    repo.finish_run(
-                        &run.id,
-                        RunStatus::Cancelled,
-                        result.error_class.as_deref(),
-                        result.error_message.as_deref(),
-                    )
-                    .await?;
-                    repo.clear_retry(&issue.id).await?;
+                    if repo
+                        .finish_run(
+                            &run.id,
+                            RunStatus::Cancelled,
+                            result.error_class.as_deref(),
+                            result.error_message.as_deref(),
+                        )
+                        .await?
+                    {
+                        repo.clear_retry(&issue.id).await?;
+                    }
                 }
                 AgentOutcome::Failure => {
                     fail(
@@ -1312,23 +1326,26 @@ async fn finish_if_cancelled(
     if !stop.is_cancelled() {
         return Ok(false);
     }
-    repo.finish_run(
-        &run.id,
-        RunStatus::Cancelled,
-        Some("cancelled"),
-        Some("run cancelled"),
-    )
-    .await?;
-    if suppress_dispatch {
-        repo.suppress_issue_dispatch(
-            &issue.id,
-            USER_CANCELLED_SUPPRESSION,
-            &issue_fingerprint(issue),
+    let transitioned = repo
+        .finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
         )
         .await?;
+    if transitioned {
+        if suppress_dispatch {
+            repo.suppress_issue_dispatch(
+                &issue.id,
+                USER_CANCELLED_SUPPRESSION,
+                &issue_fingerprint(issue),
+            )
+            .await?;
+        }
+        repo.clear_retry(&issue.id).await?;
+        repo.delete_live_session(&run.id).await.ok();
     }
-    repo.clear_retry(&issue.id).await?;
-    repo.delete_live_session(&run.id).await.ok();
     Ok(true)
 }
 
@@ -1380,8 +1397,12 @@ async fn fail(
     class: &str,
     message: &str,
 ) -> Result<(), WorkerError> {
-    repo.finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
-        .await?;
+    if !repo
+        .finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
+        .await?
+    {
+        return Ok(());
+    }
     let due = due_after(backoff_ms(
         run.run_number,
         config.workflow.front_matter.agent.max_retry_backoff_ms,
@@ -1723,6 +1744,48 @@ mod tests {
             .contains(&"lin-1".to_string()));
         // The live session is cleaned up so the failed run stops showing as live.
         assert!(repo.overview().await.unwrap().live_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_boundary_contracts_rescue_workspace_and_skill_failures() {
+        let failures = [
+            WorkerError::from(crate::workspace::WorkspaceError::EscapedRoot(
+                "fixture-workspace".to_string(),
+            )),
+            WorkerError::WorkspaceSkills(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "fixture skill write denied",
+            )),
+        ];
+
+        for failure in failures {
+            let expected_message = failure.to_string();
+            assert!(!expected_message.contains("storage error"));
+            assert!(!expected_message.contains("database error"));
+
+            let temp = tempfile::tempdir().unwrap();
+            let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+                .await
+                .unwrap();
+            let repo = Repository::new(pool, symphony_storage::EventBus::default());
+            repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+            let run = repo
+                .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+                .await
+                .unwrap()
+                .unwrap();
+
+            handle_dispatch_result(Ok(Err(failure)), &repo, "lin-1", &run, 60_000).await;
+
+            let row = repo.get_run(&run.id).await.unwrap().unwrap();
+            assert_eq!(row.status, "failure");
+            assert_eq!(row.error_class.as_deref(), Some("dispatch_error"));
+            assert_eq!(
+                row.error_message.as_deref(),
+                Some(expected_message.as_str())
+            );
+            assert_eq!(repo.all_retry_issue_ids().await.unwrap(), vec!["lin-1"]);
+        }
     }
 
     #[tokio::test]
@@ -2477,6 +2540,31 @@ printf cloned > hook-ran
         assert!(!err.to_string().contains("database error"));
     }
 
+    #[test]
+    fn runtime_boundary_contracts_classify_non_storage_worker_errors() {
+        let workspace = WorkerError::from(crate::workspace::WorkspaceError::EscapedRoot(
+            "fixture".to_string(),
+        ));
+        assert_eq!(
+            workspace.to_string(),
+            "workspace error: workspace path escaped root: fixture"
+        );
+
+        let skills = WorkerError::WorkspaceSkills(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fixture denied",
+        ));
+        assert_eq!(
+            skills.to_string(),
+            "workspace skill injection failed: fixture denied"
+        );
+
+        for error in [workspace, skills] {
+            assert!(!error.to_string().contains("storage error"));
+            assert!(!error.to_string().contains("database error"));
+        }
+    }
+
     #[tokio::test]
     async fn failed_reconfigure_preflight_keeps_live_config_and_worker_token() {
         let temp = tempfile::tempdir().unwrap();
@@ -2933,6 +3021,97 @@ printf cloned > hook-ran
             .unwrap()
             .is_some());
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_lifecycle_transition_matrix_enforces_worker_and_cancellation_invariants() {
+        let worker_cases = [
+            (WorkerState::Stopped, false, WorkerState::Stopped, false),
+            (WorkerState::Running, false, WorkerState::Stopped, false),
+            (WorkerState::Running, true, WorkerState::Stopping, true),
+            (WorkerState::Stopping, true, WorkerState::Stopping, true),
+        ];
+
+        for (initial, has_active_task, expected, token_cancelled) in worker_cases {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = symphony_storage::open_sqlite(temp.path().join("worker.sqlite"))
+                .await
+                .unwrap();
+            let manager =
+                WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+            let token = CancellationToken::new();
+            {
+                let mut inner = manager.inner.lock().await;
+                inner.status = WorkerStatus {
+                    state: initial.clone(),
+                    started_at: (initial != WorkerState::Stopped).then(now_iso),
+                    last_error: None,
+                };
+                inner.stop = has_active_task.then(|| token.clone());
+            }
+
+            let status = manager.stop().await;
+
+            assert_eq!(status.state, expected);
+            assert_eq!(token.is_cancelled(), token_cancelled);
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("cancellation.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let current_issue = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&current_issue))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(&current_issue.id, 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        repo.schedule_retry(
+            &current_issue.id,
+            2,
+            "2000-01-01T00:00:00Z",
+            Some("stale"),
+            None,
+        )
+        .await
+        .unwrap();
+        let stop = CancellationToken::new();
+        stop.cancel();
+
+        assert!(
+            finish_if_cancelled(&repo, &run, &current_issue, &stop, true)
+                .await
+                .unwrap()
+        );
+        fail(
+            &repo,
+            &runtime_config(temp.path()),
+            &run,
+            &current_issue,
+            "late_failure",
+            "a late failure must not outrank cancellation",
+        )
+        .await
+        .unwrap();
+        assert!(!repo
+            .finish_run(&run.id, RunStatus::Success, None, None)
+            .await
+            .unwrap());
+
+        let terminal = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(terminal.status, "cancelled");
+        assert_eq!(terminal.error_class.as_deref(), Some("cancelled"));
+        assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
+        assert!(repo
+            .issue_dispatch_suppression(&current_issue.id, USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

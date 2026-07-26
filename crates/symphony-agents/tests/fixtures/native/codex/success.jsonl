@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"fixture-codex-thread"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"type":"command_execution","id":"fixture-codex-tool","command":"printf fixture","exit_code":0}}
+{"type":"item.completed","item":{"type":"agent_message","text":"Fixture complete"}}
+{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":3,"output_tokens":3,"reasoning_output_tokens":1}}
