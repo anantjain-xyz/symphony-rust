@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/symphony-agents",
+  "crates/symphony-contracts",
   "crates/symphony-core",
   "crates/symphony-storage",
   "crates/symphony-tracker",

@@ -1,11 +1,4 @@
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  readlinkSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,7 +15,8 @@ const REQUIRED_SKILL_TOPOLOGY = {
   projectionPrefix: "symphony-",
 };
 const REQUIRED_DEFAULT_PROMPT_PATH = "src-tauri/assets/default-prompt.md";
-const REQUIRED_SETTINGS_SOURCE = "src-tauri/src/settings.rs";
+const REQUIRED_SETTINGS_CONTRACT_SOURCE = "crates/symphony-contracts/src/settings.rs";
+const REQUIRED_SETTINGS_RUNTIME_SOURCE = "src-tauri/src/settings.rs";
 const REQUIRED_SKILL_RUNTIME_CONSUMERS = [
   {
     functionName: "worker_start_config",
@@ -35,32 +29,8 @@ const REQUIRED_SKILL_RUNTIME_CONSUMERS = [
   {
     functionName: "get_skills_status",
     sequences: [
-      [
-        "let",
-        "names",
-        ":",
-        "Vec",
-        "<",
-        "String",
-        ">",
-        "=",
-        "bundled_skills",
-        "(",
-        ")",
-      ],
-      [
-        "check_skills",
-        "(",
-        "&",
-        "repo_url",
-        ",",
-        "&",
-        "names",
-        ",",
-        "&",
-        "session_env",
-        ")",
-      ],
+      ["let", "names", ":", "Vec", "<", "String", ">", "=", "bundled_skills", "(", ")"],
+      ["check_skills", "(", "&", "repo_url", ",", "&", "names", ",", "&", "session_env", ")"],
     ],
   },
   {
@@ -73,23 +43,14 @@ const REQUIRED_DISCOVERY_PROJECTION = {
   target: "../.agents/skills",
 };
 const REQUIRED_STANDALONE_ROOTS = [".codex/skills"];
-const REQUIRED_PNPM_BUILTINS = [
-  "add",
-  "dlx",
-  "exec",
-  "install",
-  "remove",
-  "run",
-];
+const REQUIRED_PNPM_BUILTINS = ["add", "dlx", "exec", "install", "remove", "run"];
 const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
   [
     "pull",
     [
       {
-        match:
-          "7. Re-run the target repository's documented validation gate before pushing.",
-        replacement:
-          "7. Re-run validation (`pnpm verify:full`) before pushing.",
+        match: "7. Re-run the target repository's documented validation gate before pushing.",
+        replacement: "7. Re-run validation (`pnpm verify:full`) before pushing.",
       },
     ],
   ],
@@ -99,8 +60,7 @@ const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
       {
         match:
           "- The target repository's documented validation gate has been run for the latest commit.",
-        replacement:
-          "- Validation gate has been run for the latest commit (`pnpm verify:full`).",
+        replacement: "- Validation gate has been run for the latest commit (`pnpm verify:full`).",
       },
     ],
   ],
@@ -113,11 +73,7 @@ function resolveInside(root, path, errors, label) {
   }
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (
-    isAbsolute(fromRoot) ||
-    fromRoot === ".." ||
-    fromRoot.startsWith(`..${sep}`)
-  ) {
+  if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
     errors.push(`${label} escapes the repository root: ${path}`);
     return null;
   }
@@ -170,7 +126,9 @@ function parseYamlStringScalar(value, path, line, key, errors) {
       return scalar.slice(1, -1).replaceAll("''", "'");
     }
   } else if (
-    /^[\p{L}_][^\u0000-\u001f[\]{}]*$/u.test(scalar) &&
+    /^[\p{L}_]/u.test(scalar) &&
+    ![...scalar].some((character) => character.codePointAt(0) <= 0x1f) &&
+    !["[", "]", "{", "}"].some((character) => scalar.includes(character)) &&
     !/:(?:\s|$)|(?:^|\s)#/.test(scalar) &&
     !/^(?:true|false|null|yes|no|on|off)$/i.test(scalar)
   ) {
@@ -199,22 +157,14 @@ function parseFrontmatter(content, path, errors) {
     if (line.trim() === "") continue;
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.+)$/);
     if (!match) {
-      errors.push(
-        `${path} frontmatter line ${index + 2} is not a key/value pair`,
-      );
+      errors.push(`${path} frontmatter line ${index + 2} is not a key/value pair`);
       continue;
     }
     const [, key, value] = match;
     if (values[key] !== undefined) {
       errors.push(`${path} frontmatter repeats key ${key}`);
     }
-    const parsed = parseYamlStringScalar(
-      value,
-      path,
-      index + 2,
-      key,
-      errors,
-    );
+    const parsed = parseYamlStringScalar(value, path, index + 2, key, errors);
     if (parsed !== null) values[key] = parsed;
   }
   for (const required of ["name", "description"]) {
@@ -231,14 +181,7 @@ function parseFrontmatter(content, path, errors) {
   return values;
 }
 
-function discoverSkills(
-  root,
-  rootPath,
-  expectedName,
-  errors,
-  label,
-  manifestOnly = false,
-) {
+function discoverSkills(root, rootPath, expectedName, errors, label, manifestOnly = false) {
   const absolute = resolveInside(root, rootPath, errors, label);
   const skills = new Map();
   if (!absolute || !existsSync(absolute)) {
@@ -250,13 +193,11 @@ function discoverSkills(
     return skills;
   }
 
-  for (const entry of readdirSync(absolute, { withFileTypes: true }).sort(
-    (a, b) => a.name.localeCompare(b.name),
+  for (const entry of readdirSync(absolute, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
   )) {
     if (!entry.isDirectory()) {
-      errors.push(
-        `${label} contains unexpected non-directory entry ${rootPath}/${entry.name}`,
-      );
+      errors.push(`${label} contains unexpected non-directory entry ${rootPath}/${entry.name}`);
       continue;
     }
     const manifest = resolve(absolute, entry.name, "SKILL.md");
@@ -363,7 +304,7 @@ function rustStringToken(content, start) {
     const character = content[index];
     if (escaped) {
       const replacements = {
-        "0": "\0",
+        0: "\0",
         n: "\n",
         r: "\r",
         t: "\t",
@@ -422,10 +363,7 @@ function rustTokens(content) {
       continue;
     }
 
-    if (
-      character === "'" &&
-      (next === "\\" || content[index + 2] === "'")
-    ) {
+    if (character === "'" && (next === "\\" || content[index + 2] === "'")) {
       let end = index + 1;
       let escaped = false;
       while (end < content.length) {
@@ -524,10 +462,8 @@ function macroInvocation(tokens, index, name) {
 }
 
 function singleStringArgument(tokens) {
-  const withoutTrailingComma =
-    tokens.at(-1)?.value === "," ? tokens.slice(0, -1) : tokens;
-  return withoutTrailingComma.length === 1 &&
-    withoutTrailingComma[0].type === "string"
+  const withoutTrailingComma = tokens.at(-1)?.value === "," ? tokens.slice(0, -1) : tokens;
+  return withoutTrailingComma.length === 1 && withoutTrailingComma[0].type === "string"
     ? withoutTrailingComma[0].value
     : null;
 }
@@ -552,10 +488,7 @@ function namedFunctionBody(tokens, functionName, inventoryFile, errors) {
       continue;
     }
     let opening = index + 2;
-    while (
-      opening < tokens.length &&
-      !["{", ";"].includes(tokens[opening].value)
-    ) {
+    while (opening < tokens.length && !["{", ";"].includes(tokens[opening].value)) {
       opening += 1;
     }
     if (tokens[opening]?.value !== "{") continue;
@@ -587,10 +520,7 @@ function namedFunctionBodies(tokens, functionName) {
       continue;
     }
     let opening = index + 2;
-    while (
-      opening < tokens.length &&
-      !["{", ";"].includes(tokens[opening].value)
-    ) {
+    while (opening < tokens.length && !["{", ";"].includes(tokens[opening].value)) {
       opening += 1;
     }
     if (tokens[opening]?.value !== "{") continue;
@@ -605,11 +535,7 @@ function namedFunctionBodies(tokens, functionName) {
 function countTokenSequence(tokens, sequence, start = 0, end = tokens.length) {
   let count = 0;
   for (let index = start; index + sequence.length <= end; index += 1) {
-    if (
-      sequence.every(
-        (expected, offset) => tokens[index + offset]?.value === expected,
-      )
-    ) {
+    if (sequence.every((expected, offset) => tokens[index + offset]?.value === expected)) {
       count += 1;
     }
   }
@@ -640,9 +566,7 @@ function rustStructFieldExpressions(struct, fieldName) {
   return struct.fields
     .filter(
       (field) =>
-        field[0]?.type === "ident" &&
-        field[0].value === fieldName &&
-        field[1]?.value === ":",
+        field[0]?.type === "ident" && field[0].value === fieldName && field[1]?.value === ":",
     )
     .map((field) => field.slice(2));
 }
@@ -671,13 +595,7 @@ function requireStructField(
   }
 }
 
-function requireFunctionSequences(
-  tokens,
-  functionName,
-  sequences,
-  sourcePath,
-  errors,
-) {
+function requireFunctionSequences(tokens, functionName, sequences, sourcePath, errors) {
   const bodies = namedFunctionBodies(tokens, functionName);
   if (bodies.length !== 1) {
     errors.push(
@@ -729,23 +647,12 @@ function requireModuleImport(tokens, moduleName, symbol, sourcePath, errors) {
 }
 
 function validateSkillRuntimeConsumers(root, sourcePath, errors) {
-  const absolute = resolveInside(
-    root,
-    sourcePath,
-    errors,
-    "bundled skill runtime source",
-  );
+  const absolute = resolveInside(root, sourcePath, errors, "bundled skill runtime source");
   if (!absolute || !existsSync(absolute)) return;
   const tokens = rustTokens(readFileSync(absolute, "utf8"));
   const bodies = new Map();
   for (const { functionName, sequences } of REQUIRED_SKILL_RUNTIME_CONSUMERS) {
-    const body = requireFunctionSequences(
-      tokens,
-      functionName,
-      sequences,
-      sourcePath,
-      errors,
-    );
+    const body = requireFunctionSequences(tokens, functionName, sequences, sourcePath, errors);
     if (body) bodies.set(functionName, body);
   }
 
@@ -758,9 +665,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       "WorkerStartConfig",
     ).filter((struct) => struct.end === workerBody.end);
     if (returned.length !== 1) {
-      errors.push(
-        `${sourcePath} worker_start_config must directly return one WorkerStartConfig`,
-      );
+      errors.push(`${sourcePath} worker_start_config must directly return one WorkerStartConfig`);
     } else {
       requireStructField(
         returned[0],
@@ -782,11 +687,8 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       "RetroProposalConfig",
     ).filter(
       (struct) =>
-        JSON.stringify(
-          tokens
-            .slice(struct.start - 3, struct.start)
-            .map((token) => token.value),
-        ) === JSON.stringify(["let", "proposal_config", "="]),
+        JSON.stringify(tokens.slice(struct.start - 3, struct.start).map((token) => token.value)) ===
+        JSON.stringify(["let", "proposal_config", "="]),
     );
     if (proposals.length !== 1) {
       errors.push(
@@ -819,10 +721,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       "proposal_config",
       ")",
     ];
-    if (
-      countTokenSequence(tokens, startSequence, retroBody.start, retroBody.end) !==
-      1
-    ) {
+    if (countTokenSequence(tokens, startSequence, retroBody.start, retroBody.end) !== 1) {
       errors.push(
         `${sourcePath} start_retro must pass the validated proposal_config to the retro manager exactly once`,
       );
@@ -831,14 +730,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
 
   const statusBody = bodies.get("get_skills_status");
   if (statusBody) {
-    if (
-      countTokenSequence(
-        tokens,
-        ["let", "names"],
-        statusBody.start,
-        statusBody.end,
-      ) !== 1
-    ) {
+    if (countTokenSequence(tokens, ["let", "names"], statusBody.start, statusBody.end) !== 1) {
       errors.push(
         `${sourcePath} get_skills_status must derive its single names binding from bundled_skills()`,
       );
@@ -847,12 +739,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
 
   const installBody = bodies.get("install_skills");
   if (installBody) {
-    const starts = countTokenSequence(
-      tokens,
-      ["start", "("],
-      installBody.start,
-      installBody.end,
-    );
+    const starts = countTokenSequence(tokens, ["start", "("], installBody.start, installBody.end);
     const installs = rustStructExpressions(
       tokens,
       installBody.start,
@@ -860,8 +747,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       "SkillsInstallConfig",
     ).filter(
       (struct) =>
-        tokens[struct.start - 2]?.value === "start" &&
-        tokens[struct.start - 1]?.value === "(",
+        tokens[struct.start - 2]?.value === "start" && tokens[struct.start - 1]?.value === "(",
     );
     if (starts !== 1 || installs.length !== 1) {
       errors.push(
@@ -881,11 +767,17 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
 }
 
 function validateDefaultPromptRuntimeConsumers(root, errors) {
-  const settingsAbsolute = resolveInside(
+  const contractAbsolute = resolveInside(
     root,
-    REQUIRED_SETTINGS_SOURCE,
+    REQUIRED_SETTINGS_CONTRACT_SOURCE,
     errors,
-    "default prompt settings source",
+    "default prompt settings contract source",
+  );
+  const runtimeAbsolute = resolveInside(
+    root,
+    REQUIRED_SETTINGS_RUNTIME_SOURCE,
+    errors,
+    "default prompt settings runtime source",
   );
   const desktopAbsolute = resolveInside(
     root,
@@ -894,55 +786,57 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
     "default prompt desktop source",
   );
   if (
-    !settingsAbsolute ||
+    !contractAbsolute ||
+    !runtimeAbsolute ||
     !desktopAbsolute ||
-    !existsSync(settingsAbsolute) ||
+    !existsSync(contractAbsolute) ||
+    !existsSync(runtimeAbsolute) ||
     !existsSync(desktopAbsolute)
   ) {
     return;
   }
 
-  const settingsTokens = rustTokens(readFileSync(settingsAbsolute, "utf8"));
+  const contractTokens = rustTokens(readFileSync(contractAbsolute, "utf8"));
   const defaultBody = requireFunctionSequences(
-    settingsTokens,
+    contractTokens,
     "default",
     [["prompt_template", ":", "default_prompt_template", "(", ")"]],
-    REQUIRED_SETTINGS_SOURCE,
+    REQUIRED_SETTINGS_CONTRACT_SOURCE,
     errors,
   );
   if (defaultBody) {
     const returned = rustStructExpressions(
-      settingsTokens,
+      contractTokens,
       defaultBody.start,
       defaultBody.end,
       "Self",
     ).filter((struct) => struct.end === defaultBody.end);
     if (returned.length !== 1) {
       errors.push(
-        `${REQUIRED_SETTINGS_SOURCE} AppSettings::default must directly return one Self value`,
+        `${REQUIRED_SETTINGS_CONTRACT_SOURCE} AppSettings::default must directly return one Self value`,
       );
     } else {
       requireStructField(
         returned[0],
         "prompt_template",
         ["default_prompt_template", "(", ")"],
-        REQUIRED_SETTINGS_SOURCE,
+        REQUIRED_SETTINGS_CONTRACT_SOURCE,
         "default",
         errors,
       );
     }
   }
+  const runtimeTokens = rustTokens(readFileSync(runtimeAbsolute, "utf8"));
   const parseBody = requireFunctionSequences(
-    settingsTokens,
+    runtimeTokens,
     "parse_settings",
     [["unwrap_or_else", "(", "default_prompt_template", ")"]],
-    REQUIRED_SETTINGS_SOURCE,
+    REQUIRED_SETTINGS_RUNTIME_SOURCE,
     errors,
   );
   if (parseBody) {
     const statements =
-      splitTopLevel(settingsTokens.slice(parseBody.start, parseBody.end), ";") ??
-      [];
+      splitTopLevel(runtimeTokens.slice(parseBody.start, parseBody.end), ";") ?? [];
     const promptStatements = statements.filter(
       (statement) =>
         statement[0]?.value === "let" &&
@@ -959,7 +853,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
       ]) !== 1
     ) {
       errors.push(
-        `${REQUIRED_SETTINGS_SOURCE} parse_settings must derive its single prompt_template binding with default_prompt_template`,
+        `${REQUIRED_SETTINGS_RUNTIME_SOURCE} parse_settings must derive its single prompt_template binding with default_prompt_template`,
       );
     }
   }
@@ -978,28 +872,23 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
     ":",
   ];
   const appSettings = rustStructExpressions(
-    settingsTokens,
+    contractTokens,
     0,
-    settingsTokens.length,
+    contractTokens.length,
     "AppSettings",
-  ).filter((struct) => settingsTokens[struct.start - 1]?.value === "struct");
+  ).filter((struct) => contractTokens[struct.start - 1]?.value === "struct");
   const serdeCount =
     appSettings.length === 1
-      ? countTokenSequence(
-          settingsTokens,
-          serdeDefault,
-          appSettings[0].start,
-          appSettings[0].end,
-        )
+      ? countTokenSequence(contractTokens, serdeDefault, appSettings[0].start, appSettings[0].end)
       : 0;
   if (appSettings.length !== 1) {
     errors.push(
-      `${REQUIRED_SETTINGS_SOURCE} must define exactly one AppSettings struct; found ${appSettings.length}`,
+      `${REQUIRED_SETTINGS_CONTRACT_SOURCE} must define exactly one AppSettings struct; found ${appSettings.length}`,
     );
   }
   if (serdeCount !== 1) {
     errors.push(
-      `${REQUIRED_SETTINGS_SOURCE} AppSettings.prompt_template must use serde default_prompt_template exactly once; found ${serdeCount}`,
+      `${REQUIRED_SETTINGS_CONTRACT_SOURCE} AppSettings.prompt_template must use serde default_prompt_template exactly once; found ${serdeCount}`,
     );
   }
 
@@ -1103,17 +992,11 @@ function dynamicSkillInclude(argumentTokens, variableName) {
 function rustStringConstant(tokens, constantName) {
   const values = [];
   for (let index = 0; index + 1 < tokens.length; index += 1) {
-    if (
-      tokens[index].value !== "const" ||
-      tokens[index + 1]?.value !== constantName
-    ) {
+    if (tokens[index].value !== "const" || tokens[index + 1]?.value !== constantName) {
       continue;
     }
     let equals = index + 2;
-    while (
-      equals < tokens.length &&
-      !["=", ";"].includes(tokens[equals].value)
-    ) {
+    while (equals < tokens.length && !["=", ";"].includes(tokens[equals].value)) {
       equals += 1;
     }
     if (tokens[equals]?.value !== "=") continue;
@@ -1123,9 +1006,7 @@ function rustStringConstant(tokens, constantName) {
     }
     const expression = tokens.slice(equals + 1, semicolon);
     values.push(
-      expression.length === 1 && expression[0].type === "string"
-        ? expression[0].value
-        : null,
+      expression.length === 1 && expression[0].type === "string" ? expression[0].value : null,
     );
   }
   return values;
@@ -1150,9 +1031,7 @@ function bundledSkillName(
   }
   const expression = nameFields[0].slice(2);
   const format = macroInvocation(expression, 0, "format");
-  const groups = format?.arguments
-    ? splitTopLevel(format.arguments, ",")
-    : null;
+  const groups = format?.arguments ? splitTopLevel(format.arguments, ",") : null;
   if (groups?.at(-1)?.length === 0) groups.pop();
   if (
     !format?.arguments ||
@@ -1176,10 +1055,7 @@ function bundledSkillName(
 
   const prefixConstant = groups[1][0].value;
   const prefixValues = rustStringConstant(sourceTokens, prefixConstant);
-  if (
-    prefixValues.length !== 1 ||
-    prefixValues[0] !== expectedPrefix
-  ) {
+  if (prefixValues.length !== 1 || prefixValues[0] !== expectedPrefix) {
     errors.push(
       `${inventoryFile} skill! runtime name prefix ${prefixConstant} must be the single string literal ${JSON.stringify(
         expectedPrefix,
@@ -1190,13 +1066,7 @@ function bundledSkillName(
   return true;
 }
 
-function bundledSkillInclude(
-  definition,
-  sourceTokens,
-  expectedPrefix,
-  inventoryFile,
-  errors,
-) {
+function bundledSkillInclude(definition, sourceTokens, expectedPrefix, inventoryFile, errors) {
   const body = definition.body;
   const arrows = [];
   const stack = [];
@@ -1207,11 +1077,7 @@ function bundledSkillInclude(
     } else if ([")", "]", "}"].includes(value)) {
       if (stack.at(-1) !== value) break;
       stack.pop();
-    } else if (
-      value === "=" &&
-      body[index + 1].value === ">" &&
-      stack.length === 0
-    ) {
+    } else if (value === "=" && body[index + 1].value === ">" && stack.length === 0) {
       arrows.push(index);
     }
   }
@@ -1233,9 +1099,7 @@ function bundledSkillInclude(
     pattern[4].value !== "literal" ||
     pattern[5].value !== ")"
   ) {
-    errors.push(
-      `${inventoryFile} skill! macro must match exactly one literal skill id`,
-    );
+    errors.push(`${inventoryFile} skill! macro must match exactly one literal skill id`);
     return null;
   }
   const variableName = pattern[2].value;
@@ -1245,29 +1109,23 @@ function bundledSkillInclude(
     return null;
   }
   const expansionClosing = matchingRustDelimiter(body, expansionOpening);
-  const trailing = expansionClosing === null
-    ? []
-    : body.slice(expansionClosing + 1).filter((token) => token.value !== ";");
+  const trailing =
+    expansionClosing === null
+      ? []
+      : body.slice(expansionClosing + 1).filter((token) => token.value !== ";");
   if (expansionClosing === null || trailing.length !== 0) {
     errors.push(`${inventoryFile} skill! macro has unsupported tokens after its expansion`);
     return null;
   }
 
   const expansion = body.slice(expansionOpening + 1, expansionClosing);
-  if (
-    expansion[0]?.value !== "SkillFile" ||
-    expansion[1]?.value !== "{"
-  ) {
-    errors.push(
-      `${inventoryFile} skill! macro must expand directly to a SkillFile struct`,
-    );
+  if (expansion[0]?.value !== "SkillFile" || expansion[1]?.value !== "{") {
+    errors.push(`${inventoryFile} skill! macro must expand directly to a SkillFile struct`);
     return null;
   }
   const structClosing = matchingRustDelimiter(expansion, 1);
   if (structClosing !== expansion.length - 1) {
-    errors.push(
-      `${inventoryFile} skill! macro must return only the constructed SkillFile`,
-    );
+    errors.push(`${inventoryFile} skill! macro must return only the constructed SkillFile`);
     return null;
   }
   const fields = splitTopLevel(expansion.slice(2, structClosing), ",");
@@ -1276,14 +1134,7 @@ function bundledSkillInclude(
     return null;
   }
   if (
-    !bundledSkillName(
-      fields,
-      variableName,
-      sourceTokens,
-      expectedPrefix,
-      inventoryFile,
-      errors,
-    )
+    !bundledSkillName(fields, variableName, sourceTokens, expectedPrefix, inventoryFile, errors)
   ) {
     return null;
   }
@@ -1304,12 +1155,9 @@ function bundledSkillInclude(
     : [];
   if (
     !include?.arguments ||
-    JSON.stringify(suffix) !==
-      JSON.stringify([".", "to_string", "(", ")"])
+    JSON.stringify(suffix) !== JSON.stringify([".", "to_string", "(", ")"])
   ) {
-    errors.push(
-      `${inventoryFile} skill! content field must be include_str!(...).to_string()`,
-    );
+    errors.push(`${inventoryFile} skill! content field must be include_str!(...).to_string()`);
     return null;
   }
   const dynamic = dynamicSkillInclude(include.arguments, variableName);
@@ -1325,19 +1173,8 @@ function bundledSkillInclude(
   };
 }
 
-function inventoryFromRust(
-  root,
-  inventoryFile,
-  functionName,
-  runtimePrefix,
-  errors,
-) {
-  const absolute = resolveInside(
-    root,
-    inventoryFile,
-    errors,
-    "bundled skill inventory",
-  );
+function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, errors) {
+  const absolute = resolveInside(root, inventoryFile, errors, "bundled skill inventory");
   if (!absolute || !existsSync(absolute)) {
     if (absolute) {
       errors.push(`bundled skill inventory is missing at ${inventoryFile}`);
@@ -1358,13 +1195,7 @@ function inventoryFromRust(
       verifiedDynamicIncludes: new Set(),
     };
   }
-  const vector = tailVectorInvocation(
-    tokens,
-    body,
-    functionName,
-    inventoryFile,
-    errors,
-  );
+  const vector = tailVectorInvocation(tokens, body, functionName, inventoryFile, errors);
   if (vector?.arguments && hasCfgAttribute(vector.arguments)) {
     errors.push(
       `${inventoryFile} ${functionName} returned inventory must not use conditional compilation; bundled inventory must be release-invariant`,
@@ -1411,13 +1242,7 @@ function inventoryFromRust(
     errors,
   );
   const verifiedInclude = definition
-    ? bundledSkillInclude(
-        definition,
-        tokens,
-        runtimePrefix,
-        inventoryFile,
-        errors,
-      )
+    ? bundledSkillInclude(definition, tokens, runtimePrefix, inventoryFile, errors)
     : null;
   const references = [];
   const verifiedDynamicIncludes = new Set();
@@ -1442,20 +1267,10 @@ function inventoryFromRust(
   return { ids: unique, references, verifiedDynamicIncludes };
 }
 
-function checkRustIncludes(
-  root,
-  sourceRoots,
-  verifiedDynamicIncludes,
-  errors,
-) {
+function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
   const references = [];
   for (const sourceRoot of sourceRoots ?? []) {
-    const absoluteRoot = resolveInside(
-      root,
-      sourceRoot,
-      errors,
-      "Rust source root",
-    );
+    const absoluteRoot = resolveInside(root, sourceRoot, errors, "Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) {
       if (absoluteRoot) errors.push(`Rust source root is missing at ${sourceRoot}`);
       continue;
@@ -1469,9 +1284,7 @@ function checkRustIncludes(
         const include = macroInvocation(tokens, index, "include_str");
         if (!include) continue;
         if (!include.arguments) {
-          errors.push(
-            `${relativePath(root, file)} has an unterminated include_str! expression`,
-          );
+          errors.push(`${relativePath(root, file)} has an unterminated include_str! expression`);
           break;
         }
 
@@ -1504,29 +1317,16 @@ function checkRustIncludes(
   return references;
 }
 
-function defaultPromptReturnReference(
-  root,
-  sourceRoots,
-  expectedPrompt,
-  errors,
-) {
+function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, errors) {
   const definitions = [];
   for (const sourceRoot of sourceRoots ?? []) {
-    const absoluteRoot = resolveInside(
-      root,
-      sourceRoot,
-      errors,
-      "default prompt Rust source root",
-    );
+    const absoluteRoot = resolveInside(root, sourceRoot, errors, "default prompt Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) continue;
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
       const tokens = rustTokens(readFileSync(file, "utf8"));
-      for (const body of namedFunctionBodies(
-        tokens,
-        DEFAULT_PROMPT_RETURN_FUNCTION,
-      )) {
+      for (const body of namedFunctionBodies(tokens, DEFAULT_PROMPT_RETURN_FUNCTION)) {
         definitions.push({ body, file, tokens });
       }
     }
@@ -1547,14 +1347,8 @@ function defaultPromptReturnReference(
   const suffix = include?.arguments
     ? expression.slice(include.end).map((token) => token.value)
     : [];
-  const literal = include?.arguments
-    ? singleStringArgument(include.arguments)
-    : null;
-  if (
-    literal === null ||
-    JSON.stringify(suffix) !==
-      JSON.stringify([".", "to_string", "(", ")"])
-  ) {
+  const literal = include?.arguments ? singleStringArgument(include.arguments) : null;
+  if (literal === null || JSON.stringify(suffix) !== JSON.stringify([".", "to_string", "(", ")"])) {
     errors.push(
       `${relativePath(root, file)} ${DEFAULT_PROMPT_RETURN_FUNCTION} must directly return include_str!("...").to_string()`,
     );
@@ -1629,12 +1423,7 @@ export function validateAgentAssets(
 ) {
   const errors = [];
   const contract = (() => {
-    const absolute = resolveInside(
-      root,
-      contractRelativePath,
-      errors,
-      "agent asset contract",
-    );
+    const absolute = resolveInside(root, contractRelativePath, errors, "agent asset contract");
     if (!absolute || !existsSync(absolute)) {
       if (absolute) {
         errors.push(`agent asset contract is missing at ${contractRelativePath}`);
@@ -1654,15 +1443,13 @@ export function validateAgentAssets(
   if (!contract || !packageJson) return errors;
   if (contract.version !== 1) {
     errors.push(
-      `agent asset contract version must be 1, received ${JSON.stringify(
-        contract.version,
-      )}`,
+      `agent asset contract version must be 1, received ${JSON.stringify(contract.version)}`,
     );
   }
   if (
     !Array.isArray(contract.pnpmBuiltins) ||
     JSON.stringify([...contract.pnpmBuiltins].sort()) !==
-    JSON.stringify([...REQUIRED_PNPM_BUILTINS].sort())
+      JSON.stringify([...REQUIRED_PNPM_BUILTINS].sort())
   ) {
     errors.push(
       `pnpmBuiltins must be ${JSON.stringify(
@@ -1671,10 +1458,7 @@ export function validateAgentAssets(
     );
   }
 
-  if (
-    JSON.stringify(contract.rustSourceRoots) !==
-    JSON.stringify(REQUIRED_RUST_SOURCE_ROOTS)
-  ) {
+  if (JSON.stringify(contract.rustSourceRoots) !== JSON.stringify(REQUIRED_RUST_SOURCE_ROOTS)) {
     errors.push(
       `rustSourceRoots must be ${JSON.stringify(
         REQUIRED_RUST_SOURCE_ROOTS,
@@ -1686,9 +1470,7 @@ export function validateAgentAssets(
   for (const [field, expected] of Object.entries(REQUIRED_SKILL_TOPOLOGY)) {
     if (skillConfig[field] !== expected) {
       errors.push(
-        `skill ${field} must be ${expected}, received ${JSON.stringify(
-          skillConfig[field],
-        )}`,
+        `skill ${field} must be ${expected}, received ${JSON.stringify(skillConfig[field])}`,
       );
     }
   }
@@ -1701,16 +1483,11 @@ export function validateAgentAssets(
     "skill owner root",
     true,
   );
-  if (
-    skillConfig.portableOwnerForbiddenPattern !==
-    FORBIDDEN_PORTABLE_OWNER_PATTERN
-  ) {
+  if (skillConfig.portableOwnerForbiddenPattern !== FORBIDDEN_PORTABLE_OWNER_PATTERN) {
     errors.push(
       `portableOwnerForbiddenPattern must be ${JSON.stringify(
         FORBIDDEN_PORTABLE_OWNER_PATTERN,
-      )}, received ${JSON.stringify(
-        skillConfig.portableOwnerForbiddenPattern,
-      )}`,
+      )}, received ${JSON.stringify(skillConfig.portableOwnerForbiddenPattern)}`,
     );
   }
   const portableOwnerPattern = new RegExp(FORBIDDEN_PORTABLE_OWNER_PATTERN);
@@ -1732,11 +1509,7 @@ export function validateAgentAssets(
     prefix,
     errors,
   );
-  validateSkillRuntimeConsumers(
-    root,
-    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
-    errors,
-  );
+  validateSkillRuntimeConsumers(root, REQUIRED_SKILL_TOPOLOGY.inventoryFile, errors);
   const inventory = bundled.ids;
   const projectionsByDirectory = discoverSkills(
     root,
@@ -1751,12 +1524,7 @@ export function validateAgentAssets(
       .map(([directory, value]) => [directory.slice(prefix.length), value]),
   );
 
-  compareSets(
-    "Rust bundled skill inventory",
-    new Set(owners.keys()),
-    inventory,
-    errors,
-  );
+  compareSets("Rust bundled skill inventory", new Set(owners.keys()), inventory, errors);
   compareSets(
     "repository skill projection",
     new Set(owners.keys()),
@@ -1774,16 +1542,13 @@ export function validateAgentAssets(
   } else {
     for (const skillId of Object.keys(allowedAdaptations)) {
       if (!REQUIRED_ALLOWED_ADAPTATIONS.has(skillId)) {
-        errors.push(
-          `allowed adaptation skill ids has undeclared extra ${skillId}`,
-        );
+        errors.push(`allowed adaptation skill ids has undeclared extra ${skillId}`);
       }
     }
     for (const [skillId, expected] of REQUIRED_ALLOWED_ADAPTATIONS) {
       if (
         !Object.hasOwn(allowedAdaptations, skillId) ||
-        JSON.stringify(allowedAdaptations[skillId]) !==
-        JSON.stringify(expected)
+        JSON.stringify(allowedAdaptations[skillId]) !== JSON.stringify(expected)
       ) {
         errors.push(
           `allowed adaptations for ${skillId} must be the exact validation-gate substitution`,
@@ -1792,13 +1557,9 @@ export function validateAgentAssets(
     }
   }
 
-  for (const [skillId, adaptationList] of Object.entries(
-    allowedAdaptations ?? {},
-  )) {
+  for (const [skillId, adaptationList] of Object.entries(allowedAdaptations ?? {})) {
     if (!owners.has(skillId)) {
-      errors.push(
-        `allowed adaptations declare unknown owner skill ${skillId}`,
-      );
+      errors.push(`allowed adaptations declare unknown owner skill ${skillId}`);
     }
     if (!Array.isArray(adaptationList)) {
       errors.push(`allowed adaptations for ${skillId} must be an array`);
@@ -1819,9 +1580,7 @@ export function validateAgentAssets(
       errors.push(
         `${projection.manifestPath} differs from owner ${owner.manifestPath} after declared adaptations at line ${
           difference?.line ?? "unknown"
-        } (expected ${JSON.stringify(
-          difference?.expected,
-        )}, received ${JSON.stringify(
+        } (expected ${JSON.stringify(difference?.expected)}, received ${JSON.stringify(
           difference?.actual,
         )}); declare every intentional projection change in ${contractRelativePath}`,
       );
@@ -1847,9 +1606,7 @@ export function validateAgentAssets(
       "skill discovery projection",
     );
     if (path && !existsSync(path)) {
-      errors.push(
-        `skill discovery projection is missing at ${REQUIRED_DISCOVERY_PROJECTION.path}`,
-      );
+      errors.push(`skill discovery projection is missing at ${REQUIRED_DISCOVERY_PROJECTION.path}`);
     } else if (path) {
       const metadata = lstatSync(path);
       if (metadata.isSymbolicLink()) {
@@ -1878,10 +1635,7 @@ export function validateAgentAssets(
     }
   }
 
-  if (
-    JSON.stringify(skillConfig.standaloneRoots) !==
-    JSON.stringify(REQUIRED_STANDALONE_ROOTS)
-  ) {
+  if (JSON.stringify(skillConfig.standaloneRoots) !== JSON.stringify(REQUIRED_STANDALONE_ROOTS)) {
     errors.push(
       `standaloneRoots must be ${JSON.stringify(
         REQUIRED_STANDALONE_ROOTS,
@@ -1898,26 +1652,17 @@ export function validateAgentAssets(
       "standalone skill root",
     );
     standaloneFiles.push(
-      ...[...standalone.values()].map((value) =>
-        resolve(root, value.manifestPath),
-      ),
+      ...[...standalone.values()].map((value) => resolve(root, value.manifestPath)),
     );
   }
 
   const includeReferences = [
     ...bundled.references,
-    ...checkRustIncludes(
-      root,
-      REQUIRED_RUST_SOURCE_ROOTS,
-      bundled.verifiedDynamicIncludes,
-      errors,
-    ),
+    ...checkRustIncludes(root, REQUIRED_RUST_SOURCE_ROOTS, bundled.verifiedDynamicIncludes, errors),
   ];
   for (const owner of owners.values()) {
     const ownerFile = resolve(root, owner.manifestPath);
-    const ownerIncludes = includeReferences.filter(
-      (reference) => reference.target === ownerFile,
-    );
+    const ownerIncludes = includeReferences.filter((reference) => reference.target === ownerFile);
     if (ownerIncludes.length !== 1) {
       const includeOwners = ownerIncludes
         .map((reference) => relativePath(root, reference.source))
@@ -1948,34 +1693,19 @@ export function validateAgentAssets(
         )}`,
       );
     }
-    if (
-      promptConfig.forbiddenNamespacePattern !==
-      FORBIDDEN_MCP_NAMESPACE_PATTERN
-    ) {
+    if (promptConfig.forbiddenNamespacePattern !== FORBIDDEN_MCP_NAMESPACE_PATTERN) {
       errors.push(
         `defaultPrompt forbiddenNamespacePattern must be ${JSON.stringify(
           FORBIDDEN_MCP_NAMESPACE_PATTERN,
-        )}, received ${JSON.stringify(
-          promptConfig.forbiddenNamespacePattern,
-        )}`,
+        )}, received ${JSON.stringify(promptConfig.forbiddenNamespacePattern)}`,
       );
     }
-    promptFile = resolveInside(
-      root,
-      REQUIRED_DEFAULT_PROMPT_PATH,
-      errors,
-      "default prompt",
-    );
+    promptFile = resolveInside(root, REQUIRED_DEFAULT_PROMPT_PATH, errors, "default prompt");
     if (promptFile && !existsSync(promptFile)) {
       errors.push(`default prompt is missing at ${REQUIRED_DEFAULT_PROMPT_PATH}`);
     }
     if (promptFile) {
-      defaultPromptReturnReference(
-        root,
-        REQUIRED_RUST_SOURCE_ROOTS,
-        promptFile,
-        errors,
-      );
+      defaultPromptReturnReference(root, REQUIRED_RUST_SOURCE_ROOTS, promptFile, errors);
       const promptIncludes = includeReferences.filter(
         (reference) => reference.target === promptFile,
       );
@@ -1994,19 +1724,12 @@ export function validateAgentAssets(
       const prompt = readFileSync(promptFile, "utf8");
       const visiblePrompt = stripMarkdownHtmlComments(prompt);
       const promptSkills = new Set(
-        [...visiblePrompt.matchAll(/\|\s*`(symphony-[^`]+)`\s*\|/g)].map(
-          (match) => match[1],
-        ),
+        [...visiblePrompt.matchAll(/\|\s*`(symphony-[^`]+)`\s*\|/g)].map((match) => match[1]),
       );
       const expectedPromptSkills = new Set(
         [...owners.keys()].map((skillId) => `${prefix}${skillId}`),
       );
-      compareSets(
-        "default prompt skill table",
-        expectedPromptSkills,
-        promptSkills,
-        errors,
-      );
+      compareSets("default prompt skill table", expectedPromptSkills, promptSkills, errors);
       const namespacePattern = new RegExp(FORBIDDEN_MCP_NAMESPACE_PATTERN);
       const match = namespacePattern.exec(prompt);
       if (match) {
@@ -2024,19 +1747,11 @@ export function validateAgentAssets(
 
   const markdownFiles = new Set([
     ...[...owners.values()].map((value) => resolve(root, value.manifestPath)),
-    ...[...projections.values()].map((value) =>
-      resolve(root, value.manifestPath),
-    ),
+    ...[...projections.values()].map((value) => resolve(root, value.manifestPath)),
     ...standaloneFiles,
   ]);
   if (promptFile && existsSync(promptFile)) markdownFiles.add(promptFile);
-  checkPnpmReferences(
-    root,
-    markdownFiles,
-    packageJson,
-    REQUIRED_PNPM_BUILTINS,
-    errors,
-  );
+  checkPnpmReferences(root, markdownFiles, packageJson, REQUIRED_PNPM_BUILTINS, errors);
 
   for (const forbidden of contract.forbiddenText ?? []) {
     let pattern;
@@ -2044,9 +1759,7 @@ export function validateAgentAssets(
       pattern = new RegExp(forbidden.pattern, "g");
     } catch (error) {
       errors.push(
-        `forbidden text pattern ${JSON.stringify(
-          forbidden.pattern,
-        )} is invalid: ${error.message}`,
+        `forbidden text pattern ${JSON.stringify(forbidden.pattern)} is invalid: ${error.message}`,
       );
       continue;
     }
@@ -2080,9 +1793,6 @@ function runCli() {
   console.log("Agent asset contract passed.");
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli();
 }

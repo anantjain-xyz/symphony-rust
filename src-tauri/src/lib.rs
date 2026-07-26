@@ -1,13 +1,15 @@
-use serde::{Deserialize, Serialize};
-use specta::Type;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
+pub use symphony_contracts::AppSettings;
+use symphony_contracts::{
+    IssueDetail, LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult,
+    ValidationResult,
+};
 use symphony_storage::{
-    now_iso, open_sqlite, AgentEventRow, EventBus, IssueRow, Overview, Repository,
-    RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
-    StorageEvent,
+    now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
+    RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow, StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -27,12 +29,6 @@ use retro::{
     uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
     INTERRUPTED_RETRO_MESSAGE,
 };
-#[cfg(debug_assertions)]
-use retro::{
-    RetroConfidence, RetroEvidence, RetroFinding, RetroRepoReport, RetroReport, RetroRunState,
-    RetroSeverity, RetroSuggestion, RetroSuggestionTarget,
-};
-pub use settings::AppSettings;
 use settings::{default_prompt_template, parse_settings, workflow_from_settings};
 use uuid::Uuid;
 
@@ -44,58 +40,6 @@ const RETRO_ACCEPTED_SET_CHANGED_MESSAGE: &str =
     "Accepted suggestions changed while the batch was starting. Review the latest decisions and retry.";
 const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
     "Symphony restarted before this change batch completed. Retry the batch.";
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct SaveSettingsRequest {
-    pub settings: AppSettings,
-    pub linear_api_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct ValidationResult {
-    pub workflow_ok: bool,
-    /// Whether `workflow_error` should stop a save. Genuine configuration
-    /// mistakes block; an unfinished setup (see `workflow_setup_incomplete`)
-    /// does not, so partial progress stays saveable.
-    pub workflow_blocking: bool,
-    pub workflow_error: Option<String>,
-    pub codex_found: bool,
-    pub claude_found: bool,
-    pub cursor_found: bool,
-    pub opencode_found: bool,
-    pub codex_command: String,
-    pub claude_command: String,
-    pub cursor_command: String,
-    pub opencode_command: String,
-    pub app_data_dir: String,
-    pub database_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct TrackerTestResult {
-    pub ok: bool,
-    pub message: String,
-    pub active_issue_count: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct LinearViewerProfile {
-    pub id: String,
-    pub username: String,
-    pub display_name: Option<String>,
-    pub email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RunDetail {
-    pub run: RunWithIssueRow,
-    pub events: Vec<AgentEventRow>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct IssueDetail {
-    pub issue: IssueRow,
-}
 
 #[derive(Clone)]
 struct AppState {
@@ -1251,7 +1195,6 @@ pub fn run() {
                 settings_path: app_dir.join("settings.json"),
                 database_path: db_path,
             };
-            export_bindings();
             forward_events(handle, bus);
             app.manage(state);
             Ok(())
@@ -1393,69 +1336,6 @@ fn init_tracing(app_dir: &std::path::Path) {
         )
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
-}
-
-fn export_bindings() {
-    #[cfg(debug_assertions)]
-    {
-        let conf = specta::ts::ExportConfiguration::default()
-            .bigint(specta::ts::BigIntExportBehavior::Number);
-        let exports = [
-            specta::ts::export::<symphony_core::AgentBackend>(&conf),
-            specta::ts::export::<symphony_core::ApprovalPolicy>(&conf),
-            specta::ts::export::<symphony_core::ThreadSandbox>(&conf),
-            specta::ts::export::<symphony_core::TurnSandboxPolicy>(&conf),
-            specta::ts::export::<symphony_core::ClaudePermissionMode>(&conf),
-            specta::ts::export::<symphony_core::CursorAgentMode>(&conf),
-            specta::ts::export::<symphony_core::CursorSandboxMode>(&conf),
-            specta::ts::export::<symphony_core::RepoConfig>(&conf),
-            specta::ts::export::<AppSettings>(&conf),
-            specta::ts::export::<SaveSettingsRequest>(&conf),
-            specta::ts::export::<ValidationResult>(&conf),
-            specta::ts::export::<TrackerTestResult>(&conf),
-            specta::ts::export::<LinearViewerProfile>(&conf),
-            specta::ts::export::<Overview>(&conf),
-            specta::ts::export::<RunWithIssueRow>(&conf),
-            specta::ts::export::<RunDetail>(&conf),
-            specta::ts::export::<IssueRow>(&conf),
-            specta::ts::export::<IssueDetail>(&conf),
-            specta::ts::export::<AgentEventRow>(&conf),
-            specta::ts::export::<WorkerStatus>(&conf),
-            specta::ts::export::<StorageEvent>(&conf),
-            specta::ts::export::<SkillsStatus>(&conf),
-            specta::ts::export::<SkillsInstallStatus>(&conf),
-            specta::ts::export::<symphony_worker::RepoWorkflowSource>(&conf),
-            specta::ts::export::<RepoWorkflowStatus>(&conf),
-            specta::ts::export::<WorkflowTransferStatus>(&conf),
-            specta::ts::export::<RetroRow>(&conf),
-            specta::ts::export::<RetroSuggestionRow>(&conf),
-            specta::ts::export::<RetroBatchRow>(&conf),
-            specta::ts::export::<RetroRunState>(&conf),
-            specta::ts::export::<RetroStatus>(&conf),
-            specta::ts::export::<RetroDetail>(&conf),
-            specta::ts::export::<RetroReport>(&conf),
-            specta::ts::export::<RetroRepoReport>(&conf),
-            specta::ts::export::<RetroFinding>(&conf),
-            specta::ts::export::<RetroSeverity>(&conf),
-            specta::ts::export::<RetroEvidence>(&conf),
-            specta::ts::export::<RetroSuggestion>(&conf),
-            specta::ts::export::<RetroSuggestionTarget>(&conf),
-            specta::ts::export::<RetroConfidence>(&conf),
-        ]
-        .into_iter()
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("src/bindings.ts");
-        let _ = std::fs::write(
-            path,
-            format!("// Generated by src-tauri at dev startup.\n{exports}\n"),
-        );
-    }
 }
 
 #[cfg(test)]

@@ -21,24 +21,17 @@ import type {
   WorkerStatus,
 } from "../bindings";
 
-function invokeCommand<Result>(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<Result> {
-  return args === undefined
-    ? invoke<Result>(command)
-    : invoke<Result>(command, args);
+function invokeCommand<Result>(command: string, args?: Record<string, unknown>): Promise<Result> {
+  return args === undefined ? invoke<Result>(command) : invoke<Result>(command, args);
 }
 
 export const getOverview = () => invokeCommand<Overview>("get_overview");
 export const listRuns = () => invokeCommand<RunWithIssueRow[]>("list_runs");
 export const listIssues = () => invokeCommand<IssueRow[]>("list_issues");
-export const getWorkerStatus = () =>
-  invokeCommand<WorkerStatus>("get_worker_status");
+export const getWorkerStatus = () => invokeCommand<WorkerStatus>("get_worker_status");
 export const getRunDetail = (id: string) =>
   invokeCommand<RunDetail | null>("get_run_detail", { id });
-export const getRetroStatus = () =>
-  invokeCommand<RetroStatus>("get_retro_status");
+export const getRetroStatus = () => invokeCommand<RetroStatus>("get_retro_status");
 export const listRetros = () => invokeCommand<RetroRow[]>("list_retros");
 export const getRetroDetail = (id: string) =>
   invokeCommand<RetroDetail | null>("get_retro_detail", { id });
@@ -53,28 +46,20 @@ export const getLinearViewer = (request: SaveSettingsRequest) =>
   invokeCommand<LinearViewerProfile>("get_linear_viewer", { request });
 export const testTrackerConnection = (request: SaveSettingsRequest) =>
   invokeCommand<TrackerTestResult>("test_tracker_connection", { request });
-export const removeLinearApiKey = () =>
-  invokeCommand<AppSettings>("remove_linear_api_key");
-export const getDefaultPrompt = () =>
-  invokeCommand<string>("get_default_prompt");
+export const removeLinearApiKey = () => invokeCommand<AppSettings>("remove_linear_api_key");
+export const getDefaultPrompt = () => invokeCommand<string>("get_default_prompt");
 export const startWorker = () => invokeCommand<WorkerStatus>("start_worker");
 export const stopWorker = () => invokeCommand<WorkerStatus>("stop_worker");
-export const stopRun = (id: string) =>
-  invokeCommand<RunDetail | null>("stop_run", { id });
+export const stopRun = (id: string) => invokeCommand<RunDetail | null>("stop_run", { id });
 export const triggerRetryNow = (issueId: string) =>
   invokeCommand<boolean>("trigger_retry_now", { issueId });
-export const getSkillsStatus = (
-  repoUrl: string,
-  sessionEnv: AppSettings["session_env"],
-) => invokeCommand<SkillsStatus>("get_skills_status", { repoUrl, sessionEnv });
+export const getSkillsStatus = (repoUrl: string, sessionEnv: AppSettings["session_env"]) =>
+  invokeCommand<SkillsStatus>("get_skills_status", { repoUrl, sessionEnv });
 export const installSkills = (settings: AppSettings, repoUrl: string) =>
   invokeCommand<SkillsInstallStatus>("install_skills", { settings, repoUrl });
 export const getSkillsInstallStatus = () =>
   invokeCommand<SkillsInstallStatus>("get_skills_install_status");
-export const getRepoWorkflowStatus = (
-  repoUrl: string,
-  sessionEnv: AppSettings["session_env"],
-) =>
+export const getRepoWorkflowStatus = (repoUrl: string, sessionEnv: AppSettings["session_env"]) =>
   invokeCommand<RepoWorkflowStatus>("get_repo_workflow_status", {
     repoUrl,
     sessionEnv,
@@ -86,8 +71,7 @@ export const transferWorkflowToRepo = (repoUrl: string) =>
 export const getWorkflowTransferStatus = () =>
   invokeCommand<WorkflowTransferStatus>("get_workflow_transfer_status");
 export const startRetro = () => invokeCommand<RetroStatus>("start_retro");
-export const deleteRetro = (id: string) =>
-  invokeCommand<void>("delete_retro", { id });
+export const deleteRetro = (id: string) => invokeCommand<void>("delete_retro", { id });
 export const setRetroSuggestionDecision = (id: string, decision: string) =>
   invokeCommand<RetroSuggestionRow>("set_retro_suggestion_decision", {
     id,

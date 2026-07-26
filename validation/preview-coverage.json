@@ -6,11 +6,7 @@
   "previewFixture": "src/preview/runtime.ts",
   "bundleOwner": "scripts/check-bundle-budget.mjs",
   "routeE2eOwner": "e2e/lazy-chunks.e2e.ts",
-  "dynamicImportOwners": [
-    "src/App.tsx",
-    "src/main.tsx",
-    "src/views/IssuesView.tsx"
-  ],
+  "dynamicImportOwners": ["src/App.tsx", "src/main.tsx", "src/views/IssuesView.tsx"],
   "routes": [
     {
       "id": "dependencies",
@@ -114,10 +110,7 @@
       }
     }
   ],
-  "infrastructureEntries": [
-    "src/AppUpdate.tsx",
-    "src/preview/runtime.ts"
-  ],
+  "infrastructureEntries": ["src/AppUpdate.tsx", "src/preview/runtime.ts"],
   "updaterGeometry": {
     "component": "AppUpdateGeometryPreview",
     "module": "src/AppUpdate.tsx",

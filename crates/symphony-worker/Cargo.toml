@@ -13,7 +13,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
-sqlx.workspace = true
 symphony-agents = { path = "../symphony-agents" }
 symphony-core = { path = "../symphony-core" }
 symphony-storage = { path = "../symphony-storage" }

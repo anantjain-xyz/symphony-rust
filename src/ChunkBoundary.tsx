@@ -7,7 +7,11 @@ export function createLazyAttempts<Props extends object>(
   const attempts: LazyExoticComponent<ComponentType<Props>>[] = [lazy(loader)];
   return {
     add: () => attempts.push(lazy(loader)) - 1,
-    get: (index: number) => attempts[index]!,
+    get: (index: number) => {
+      const attempt = attempts[index];
+      if (!attempt) throw new Error(`lazy view attempt ${index} does not exist`);
+      return attempt;
+    },
     latest: () => attempts.length - 1,
   };
 }

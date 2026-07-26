@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"fixture-claude-session","model":"fixture-claude-model","permissionMode":"acceptEdits","claude_code_version":"fixture-version","output_style":"default","fast_mode_state":"off"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Inspecting fixture"},{"type":"tool_use","id":"fixture-claude-tool","name":"Read","input":{"file_path":"/fixture/workspace/fixture.txt"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fixture-claude-tool","is_error":false,"content":"fixture contents"}]}}
+{"type":"result","subtype":"success","result":"Fixture complete","usage":{"input_tokens":3,"cache_creation_input_tokens":1,"cache_read_input_tokens":3,"output_tokens":3}}

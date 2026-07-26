@@ -7,7 +7,7 @@ mod workspace;
 
 pub use backoff::backoff_ms;
 pub use hooks::{run_hook, HookInvocation, HookResult};
-pub use manager::{WorkerManager, WorkerStartConfig, WorkerState, WorkerStatus};
+pub use manager::{WorkerError, WorkerManager, WorkerStartConfig, WorkerState, WorkerStatus};
 pub use repo_workflow::{
     check_repo_workflow, resolve_repo_workflow, resolve_repo_workflow_at_ref, RepoWorkflowSource,
     RepoWorkflowStatus, ResolvedRepoWorkflow, WorkflowTransferConfig, WorkflowTransferManager,
@@ -19,5 +19,6 @@ pub use skills::{
     SkillsInstallStatus, SkillsInstaller, SkillsState, SkillsStatus,
 };
 pub use workspace::{
-    resolve_workspace_root_dir, sanitize_key, Workspace, WorkspaceManager, WORKSPACE_READY_SENTINEL,
+    resolve_workspace_root_dir, sanitize_key, Workspace, WorkspaceError, WorkspaceManager,
+    WORKSPACE_READY_SENTINEL,
 };

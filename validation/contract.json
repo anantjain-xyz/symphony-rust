@@ -1,9 +1,6 @@
 {
   "version": 1,
-  "executables": [
-    "cargo",
-    "pnpm"
-  ],
+  "executables": ["cargo", "pnpm"],
   "entrypoints": {
     "fast": {
       "packageScript": "verify:fast",
@@ -19,11 +16,19 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
+      "hygiene-tools-install",
+      "hygiene-checks",
+      "hygiene-tests",
+      "boundary-checks",
+      "boundary-tests",
+      "runtime-contract-tests",
       "frontend-contracts",
       "frontend-contract-tests",
       "rust-format",
       "rust-clippy",
       "rust-tests",
+      "static-checks",
+      "static-tests",
       "frontend-typecheck",
       "frontend-tests"
     ],
@@ -31,11 +36,19 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
+      "hygiene-tools-install",
+      "hygiene-checks",
+      "hygiene-tests",
+      "boundary-checks",
+      "boundary-tests",
+      "runtime-contract-tests",
       "frontend-contracts",
       "frontend-contract-tests",
       "rust-format",
       "rust-clippy",
       "rust-tests",
+      "static-checks",
+      "static-tests",
       "frontend-typecheck",
       "frontend-tests",
       "frontend-build",
@@ -48,52 +61,62 @@
   "commands": {
     "validation-contract": {
       "label": "validation contract",
-      "argv": [
-        "pnpm",
-        "check:validation-contract"
-      ],
+      "argv": ["pnpm", "check:validation-contract"],
       "packageScript": "check:validation-contract"
     },
     "agent-assets": {
       "label": "agent asset contract",
-      "argv": [
-        "pnpm",
-        "check:harness"
-      ],
+      "argv": ["pnpm", "check:harness"],
       "packageScript": "check:harness"
     },
     "validation-tests": {
       "label": "validation checker tests",
-      "argv": [
-        "pnpm",
-        "test:validation"
-      ],
+      "argv": ["pnpm", "test:validation"],
       "packageScript": "test:validation"
+    },
+    "hygiene-tools-install": {
+      "label": "pinned hygiene tool installation",
+      "argv": ["pnpm", "install:hygiene-tools"],
+      "packageScript": "install:hygiene-tools"
+    },
+    "hygiene-checks": {
+      "label": "repository hygiene contracts",
+      "argv": ["pnpm", "check:hygiene"],
+      "packageScript": "check:hygiene"
+    },
+    "hygiene-tests": {
+      "label": "repository hygiene contract tests",
+      "argv": ["pnpm", "test:hygiene"],
+      "packageScript": "test:hygiene"
+    },
+    "boundary-checks": {
+      "label": "architecture boundary contracts",
+      "argv": ["pnpm", "check:boundaries"],
+      "packageScript": "check:boundaries"
+    },
+    "boundary-tests": {
+      "label": "architecture boundary contract tests",
+      "argv": ["pnpm", "test:boundaries"],
+      "packageScript": "test:boundaries"
+    },
+    "runtime-contract-tests": {
+      "label": "runtime boundary contract tests",
+      "argv": ["pnpm", "test:runtime-contracts"],
+      "packageScript": "test:runtime-contracts"
     },
     "frontend-contracts": {
       "label": "frontend static contracts",
-      "argv": [
-        "pnpm",
-        "check:frontend-contracts"
-      ],
+      "argv": ["pnpm", "check:frontend-contracts"],
       "packageScript": "check:frontend-contracts"
     },
     "frontend-contract-tests": {
       "label": "frontend contract tests",
-      "argv": [
-        "pnpm",
-        "test:frontend-contracts"
-      ],
+      "argv": ["pnpm", "test:frontend-contracts"],
       "packageScript": "test:frontend-contracts"
     },
     "rust-format": {
       "label": "Rust formatting",
-      "argv": [
-        "cargo",
-        "fmt",
-        "--all",
-        "--check"
-      ]
+      "argv": ["cargo", "fmt", "--all", "--check"]
     },
     "rust-clippy": {
       "label": "Rust Clippy",
@@ -111,72 +134,51 @@
     },
     "rust-tests": {
       "label": "Rust tests",
-      "argv": [
-        "cargo",
-        "test",
-        "--workspace",
-        "--exclude",
-        "symphony-desktop"
-      ]
+      "argv": ["cargo", "test", "--workspace", "--exclude", "symphony-desktop"]
+    },
+    "static-checks": {
+      "label": "generated and cross-language contracts",
+      "argv": ["pnpm", "check:static"],
+      "packageScript": "check:static"
+    },
+    "static-tests": {
+      "label": "generated and cross-language contract tests",
+      "argv": ["pnpm", "test:static"],
+      "packageScript": "test:static"
     },
     "frontend-typecheck": {
       "label": "TypeScript typecheck",
-      "argv": [
-        "pnpm",
-        "typecheck"
-      ],
+      "argv": ["pnpm", "typecheck"],
       "packageScript": "typecheck"
     },
     "frontend-tests": {
       "label": "frontend unit tests",
-      "argv": [
-        "pnpm",
-        "test"
-      ],
+      "argv": ["pnpm", "test"],
       "packageScript": "test"
     },
     "frontend-build": {
       "label": "frontend production build",
-      "argv": [
-        "pnpm",
-        "build"
-      ],
+      "argv": ["pnpm", "build"],
       "packageScript": "build"
     },
     "bundle-budget": {
       "label": "bundle budgets",
-      "argv": [
-        "pnpm",
-        "check:bundle"
-      ],
+      "argv": ["pnpm", "check:bundle"],
       "packageScript": "check:bundle"
     },
     "bundle-tests": {
       "label": "bundle contract tests",
-      "argv": [
-        "pnpm",
-        "test:bundle"
-      ],
+      "argv": ["pnpm", "test:bundle"],
       "packageScript": "test:bundle"
     },
     "browser-install": {
       "label": "Playwright Chromium installation",
-      "argv": [
-        "pnpm",
-        "exec",
-        "playwright",
-        "install",
-        "--with-deps",
-        "chromium"
-      ],
+      "argv": ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
       "installsBrowser": true
     },
     "browser-e2e": {
       "label": "Playwright end-to-end tests",
-      "argv": [
-        "pnpm",
-        "test:e2e"
-      ],
+      "argv": ["pnpm", "test:e2e"],
       "packageScript": "test:e2e",
       "requiresBrowser": true
     }
@@ -188,16 +190,10 @@
     },
     "contributing": {
       "path": "CONTRIBUTING.md",
-      "commands": [
-        "pnpm verify:fast",
-        "pnpm verify:full"
-      ]
+      "commands": ["pnpm verify:fast", "pnpm verify:full"]
     },
     "skills": {
-      "paths": [
-        ".agents/skills/symphony-pull/SKILL.md",
-        ".agents/skills/symphony-push/SKILL.md"
-      ],
+      "paths": [".agents/skills/symphony-pull/SKILL.md", ".agents/skills/symphony-push/SKILL.md"],
       "command": "pnpm verify:full"
     }
   }

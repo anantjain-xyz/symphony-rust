@@ -1,0 +1,17 @@
+[package]
+name = "symphony-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+specta.workspace = true
+symphony-core = { path = "../symphony-core" }
+symphony-storage = { path = "../symphony-storage" }
+symphony-worker = { path = "../symphony-worker" }
+
+[dev-dependencies]
+tempfile.workspace = true

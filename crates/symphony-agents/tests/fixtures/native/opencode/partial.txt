@@ -1,0 +1,1 @@
+warning: sanitized fixture stream ended before a terminal event

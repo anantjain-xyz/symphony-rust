@@ -1,17 +1,5 @@
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
-import {
-  dirname,
-  extname,
-  isAbsolute,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
@@ -24,11 +12,7 @@ function resolveInside(root, path, errors, label) {
   }
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (
-    isAbsolute(fromRoot) ||
-    fromRoot === ".." ||
-    fromRoot.startsWith(`..${sep}`)
-  ) {
+  if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
     errors.push(`${label} escapes the repository root: ${path}`);
     return null;
   }
@@ -99,9 +83,7 @@ function parseExportedStringArray(content, exportName, path, errors) {
     errors.push(`${path} must export ${exportName} as a literal string array`);
     return [];
   }
-  return [...match[1].matchAll(/["']([^"']+)["']/g)].map(
-    (item) => item[1],
-  );
+  return [...match[1].matchAll(/["']([^"']+)["']/g)].map((item) => item[1]);
 }
 
 function sourceModule(root, importer, specifier, errors) {
@@ -189,9 +171,7 @@ function previewRuntimeObject(content, path, errors) {
   for (const statement of source.statements) {
     if (
       !ts.isVariableStatement(statement) ||
-      !statement.modifiers?.some(
-        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-      )
+      !statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
     ) {
       continue;
     }
@@ -205,9 +185,7 @@ function previewRuntimeObject(content, path, errors) {
       }
       const initializer = unwrapExpression(declaration.initializer);
       if (ts.isObjectLiteralExpression(initializer)) return initializer;
-      errors.push(
-        `${path} must export previewRuntime as an object literal`,
-      );
+      errors.push(`${path} must export previewRuntime as an object literal`);
       return null;
     }
   }
@@ -252,9 +230,7 @@ function walkStepSyntax(node, visit) {
 }
 
 function literalText(node) {
-  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
-    ? node.text
-    : null;
+  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) ? node.text : null;
 }
 
 function namedObjectProperty(object, name) {
@@ -279,10 +255,7 @@ function roleQuery(call, expected) {
   if (typeof expected.name === "string") {
     return literalText(name) === expected.name;
   }
-  if (
-    typeof expected.namePattern === "string" &&
-    ts.isRegularExpressionLiteral(name)
-  ) {
+  if (typeof expected.namePattern === "string" && ts.isRegularExpressionLiteral(name)) {
     return name.text.includes(expected.namePattern);
   }
   return false;
@@ -306,19 +279,13 @@ function interactionPosition(stepBody, interaction) {
       position = node.getStart();
       return;
     }
-    if (
-      interaction.kind !== "click" ||
-      !ts.isPropertyAccessExpression(node.expression)
-    ) {
+    if (interaction.kind !== "click" || !ts.isPropertyAccessExpression(node.expression)) {
       return;
     }
     const action = node.expression.name.text;
     if (
       action !== "click" &&
-      !(
-        action === "dispatchEvent" &&
-        literalText(node.arguments[0]) === "click"
-      )
+      !(action === "dispatchEvent" && literalText(node.arguments[0]) === "click")
     ) {
       return;
     }
@@ -370,10 +337,7 @@ function routeStepBodies(content, path, errors) {
     }
     const label = literalText(node.arguments[0]);
     const callback = node.arguments[1];
-    if (
-      !label ||
-      (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))
-    ) {
+    if (!label || (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))) {
       return;
     }
     if (!steps.has(label)) steps.set(label, []);
@@ -387,18 +351,11 @@ export function validatePreviewCoverage(
   contractRelativePath = "validation/preview-coverage.json",
 ) {
   const errors = [];
-  const contract = readJson(
-    root,
-    contractRelativePath,
-    errors,
-    "preview coverage contract",
-  );
+  const contract = readJson(root, contractRelativePath, errors, "preview coverage contract");
   if (!contract) return errors;
   if (contract.version !== 1) {
     errors.push(
-      `preview coverage contract version must be 1, received ${JSON.stringify(
-        contract.version,
-      )}`,
+      `preview coverage contract version must be 1, received ${JSON.stringify(contract.version)}`,
     );
   }
 
@@ -417,74 +374,43 @@ export function validatePreviewCoverage(
   const routeIdSet = new Set(routeIds);
   for (const route of routes) {
     if (route.parent && !routeIdSet.has(route.parent)) {
-      errors.push(
-        `preview route ${route.id} references missing parent ${route.parent}`,
-      );
+      errors.push(`preview route ${route.id} references missing parent ${route.parent}`);
     }
     if (route.module) {
-      const module = resolveInside(
-        root,
-        route.module,
-        errors,
-        `preview route ${route.id} module`,
-      );
+      const module = resolveInside(root, route.module, errors, `preview route ${route.id} module`);
       if (module && !existsSync(module)) {
         errors.push(`preview route ${route.id} module is missing at ${route.module}`);
       }
     }
   }
 
-  const appContent = readFile(
-    root,
-    contract.appSource,
-    errors,
-    "preview app source",
-  );
+  const appContent = readFile(root, contract.appSource, errors, "preview app source");
   if (appContent !== null) {
     const viewType = appContent.match(/\btype\s+View\s*=\s*([\s\S]*?);/);
     if (!viewType) {
       errors.push(`${contract.appSource} must define the primary View union`);
     } else {
       const sourceViews = new Set(
-        [...viewType[1].matchAll(/["']([^"']+)["']/g)].map(
-          (match) => match[1],
-        ),
+        [...viewType[1].matchAll(/["']([^"']+)["']/g)].map((match) => match[1]),
       );
       const projectedViews = new Set(
         routes.filter((route) => !route.parent).map((route) => route.id),
       );
-      compareSets(
-        "primary preview route projections",
-        sourceViews,
-        projectedViews,
-        errors,
-      );
+      compareSets("primary preview route projections", sourceViews, projectedViews, errors);
     }
   }
 
   const expectedLazyEntries = new Set(
-    routes
-      .map((route) => route.module)
-      .filter((module) => typeof module === "string"),
+    routes.map((route) => route.module).filter((module) => typeof module === "string"),
   );
   const infrastructureEntries = new Set(contract.infrastructureEntries ?? []);
-  const expectedDynamicEntries = new Set([
-    ...expectedLazyEntries,
-    ...infrastructureEntries,
-  ]);
+  const expectedDynamicEntries = new Set([...expectedLazyEntries, ...infrastructureEntries]);
   const actualDynamicEntries = new Set();
   const actualDynamicOwners = new Set();
-  const sourceRoot = resolveInside(
-    root,
-    contract.sourceRoot,
-    errors,
-    "preview source root",
-  );
+  const sourceRoot = resolveInside(root, contract.sourceRoot, errors, "preview source root");
   const sourceFiles =
     sourceRoot && existsSync(sourceRoot)
-      ? walkSource(sourceRoot).filter(
-          (path) => !relative(root, path).includes(".test."),
-        )
+      ? walkSource(sourceRoot).filter((path) => !relative(root, path).includes(".test."))
       : [];
   if (sourceRoot && !existsSync(sourceRoot)) {
     errors.push(`preview source root is missing at ${contract.sourceRoot}`);
@@ -511,12 +437,7 @@ export function validatePreviewCoverage(
     errors,
   );
 
-  const bundleContent = readFile(
-    root,
-    contract.bundleOwner,
-    errors,
-    "bundle budget owner",
-  );
+  const bundleContent = readFile(root, contract.bundleOwner, errors, "bundle budget owner");
   if (bundleContent !== null) {
     const lazyEntries = parseExportedStringArray(
       bundleContent,
@@ -524,12 +445,7 @@ export function validatePreviewCoverage(
       contract.bundleOwner,
       errors,
     );
-    compareSets(
-      "bundle lazy view entries",
-      expectedLazyEntries,
-      new Set(lazyEntries),
-      errors,
-    );
+    compareSets("bundle lazy view entries", expectedLazyEntries, new Set(lazyEntries), errors);
     const forbiddenEager = parseExportedStringArray(
       bundleContent,
       "FORBIDDEN_EAGER_ENTRIES",
@@ -544,24 +460,12 @@ export function validatePreviewCoverage(
     );
   }
 
-  const fixtureContent = readFile(
-    root,
-    contract.previewFixture,
-    errors,
-    "preview runtime fixture",
-  );
+  const fixtureContent = readFile(root, contract.previewFixture, errors, "preview runtime fixture");
   if (fixtureContent !== null) {
-    const runtimeObject = previewRuntimeObject(
-      fixtureContent,
-      contract.previewFixture,
-      errors,
-    );
+    const runtimeObject = previewRuntimeObject(fixtureContent, contract.previewFixture, errors);
     if (runtimeObject) {
       for (const route of routes) {
-        if (
-          typeof route.fixture !== "string" ||
-          !fixtureHasPath(runtimeObject, route.fixture)
-        ) {
+        if (typeof route.fixture !== "string" || !fixtureHasPath(runtimeObject, route.fixture)) {
           errors.push(
             `${contract.previewFixture} is missing fixture projection ${route.fixture} for route ${route.id}`,
           );
@@ -570,51 +474,29 @@ export function validatePreviewCoverage(
     }
   }
 
-  const routeE2e = readFile(
-    root,
-    contract.routeE2eOwner,
-    errors,
-    "preview route E2E owner",
-  );
+  const routeE2e = readFile(root, contract.routeE2eOwner, errors, "preview route E2E owner");
   if (routeE2e !== null) {
-    const steps = routeStepBodies(
-      routeE2e,
-      contract.routeE2eOwner,
-      errors,
-    );
+    const steps = routeStepBodies(routeE2e, contract.routeE2eOwner, errors);
     for (const route of routes) {
       const stepLabel = `preview-route:${route.id}`;
       const bodies = steps.get(stepLabel) ?? [];
       if (bodies.length !== 1) {
-        errors.push(
-          `${contract.routeE2eOwner} must define exactly one ${stepLabel} step`,
-        );
+        errors.push(`${contract.routeE2eOwner} must define exactly one ${stepLabel} step`);
         continue;
       }
-      if (!route.e2e || !route.e2e.interaction || !route.e2e.loaded) {
-        errors.push(
-          `preview route ${route.id} must declare e2e interaction and loaded selectors`,
-        );
+      if (!route.e2e?.interaction || !route.e2e.loaded) {
+        errors.push(`preview route ${route.id} must declare e2e interaction and loaded selectors`);
         continue;
       }
-      const interaction = interactionPosition(
-        bodies[0],
-        route.e2e.interaction,
-      );
+      const interaction = interactionPosition(bodies[0], route.e2e.interaction);
       const loaded = loadedAssertionPosition(bodies[0], route.e2e.loaded);
       if (interaction === null) {
-        errors.push(
-          `${stepLabel} is missing its declared preview interaction`,
-        );
+        errors.push(`${stepLabel} is missing its declared preview interaction`);
       }
       if (loaded === null) {
-        errors.push(
-          `${stepLabel} is missing its declared loaded assertion`,
-        );
+        errors.push(`${stepLabel} is missing its declared loaded assertion`);
       } else if (interaction !== null && loaded <= interaction) {
-        errors.push(
-          `${stepLabel} loaded assertion must follow its preview interaction`,
-        );
+        errors.push(`${stepLabel} loaded assertion must follow its preview interaction`);
       }
     }
   }
@@ -623,48 +505,24 @@ export function validatePreviewCoverage(
   if (!updater) {
     errors.push("preview coverage contract is missing updaterGeometry");
   } else {
-    const moduleContent = readFile(
-      root,
-      updater.module,
-      errors,
-      "updater preview module",
-    );
-    if (
-      moduleContent !== null &&
-      !moduleContent.includes(`export function ${updater.component}`)
-    ) {
-      errors.push(
-        `${updater.module} must export updater preview component ${updater.component}`,
-      );
+    const moduleContent = readFile(root, updater.module, errors, "updater preview module");
+    if (moduleContent !== null && !moduleContent.includes(`export function ${updater.component}`)) {
+      errors.push(`${updater.module} must export updater preview component ${updater.component}`);
     }
-    const previewEntry = readFile(
-      root,
-      contract.previewEntry,
-      errors,
-      "preview entry",
-    );
+    const previewEntry = readFile(root, contract.previewEntry, errors, "preview entry");
     const query = String(updater.query ?? "");
     if (
       previewEntry !== null &&
       (!previewEntry.includes(`location.search === "${query}"`) ||
         !previewEntry.includes(`module.${updater.component}`))
     ) {
-      errors.push(
-        `${contract.previewEntry} must route ${updater.query} to ${updater.component}`,
-      );
+      errors.push(`${contract.previewEntry} must route ${updater.query} to ${updater.component}`);
     }
-    const updaterE2e = readFile(
-      root,
-      updater.e2eOwner,
-      errors,
-      "updater geometry E2E owner",
-    );
+    const updaterE2e = readFile(root, updater.e2eOwner, errors, "updater geometry E2E owner");
     if (updaterE2e !== null) {
       for (const marker of [updater.query, updater.fixtureSelector]) {
         if (!updaterE2e.includes(marker)) {
-          errors.push(
-            `${updater.e2eOwner} must reference updater geometry marker ${marker}`,
-          );
+          errors.push(`${updater.e2eOwner} must reference updater geometry marker ${marker}`);
         }
       }
     }
@@ -683,9 +541,6 @@ function runCli() {
   console.log("Preview coverage contract passed.");
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli();
 }

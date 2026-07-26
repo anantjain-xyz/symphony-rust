@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "packages": {
+    "symphony-core": {
+      "allowedInternalDependencies": []
+    },
+    "symphony-agents": {
+      "allowedInternalDependencies": ["symphony-core"]
+    },
+    "symphony-storage": {
+      "allowedInternalDependencies": ["symphony-core"]
+    },
+    "symphony-tracker": {
+      "allowedInternalDependencies": ["symphony-core"]
+    },
+    "symphony-worker": {
+      "allowedInternalDependencies": [
+        "symphony-agents",
+        "symphony-core",
+        "symphony-storage",
+        "symphony-tracker"
+      ]
+    },
+    "symphony-contracts": {
+      "allowedInternalDependencies": ["symphony-core", "symphony-storage", "symphony-worker"]
+    },
+    "symphony-desktop": {
+      "allowedInternalDependencies": [
+        "symphony-agents",
+        "symphony-contracts",
+        "symphony-core",
+        "symphony-storage",
+        "symphony-tracker",
+        "symphony-worker"
+      ]
+    }
+  },
+  "restrictedDependencies": {
+    "sqlx": ["symphony-storage"]
+  },
+  "sourceRules": [
+    {
+      "id": "direct-sqlx",
+      "pattern": "\\bsqlx\\s*::",
+      "allowedPackages": ["symphony-storage"],
+      "message": "direct sqlx use belongs in symphony-storage"
+    },
+    {
+      "id": "storage-sqlx-construction",
+      "pattern": "\\bStorageError\\s*::\\s*Sqlx\\b",
+      "allowedPackages": ["symphony-storage"],
+      "message": "constructing StorageError::Sqlx outside symphony-storage disguises a non-storage failure"
+    }
+  ]
+}

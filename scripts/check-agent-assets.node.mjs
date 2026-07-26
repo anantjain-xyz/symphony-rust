@@ -1,12 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -58,7 +51,7 @@ fn get_default_prompt() -> String {
 `;
 }
 
-function defaultPromptSettingsConsumers() {
+function defaultPromptContractConsumers() {
   return `struct AppSettings {
   #[serde(default = "default_prompt_template")]
   pub prompt_template: String,
@@ -71,7 +64,11 @@ impl Default for AppSettings {
     }
   }
 }
+`;
+}
 
+function defaultPromptRuntimeConsumers() {
+  return `
 pub fn parse_settings() {
   let prompt_template = None::<String>.unwrap_or_else(default_prompt_template);
 }
@@ -83,8 +80,7 @@ function harnessFixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const portableGate =
     "7. Re-run the target repository's documented validation gate before pushing.";
-  const adaptedGate =
-    "7. Re-run validation (`pnpm verify:full`) before pushing.";
+  const adaptedGate = "7. Re-run validation (`pnpm verify:full`) before pushing.";
   const portablePushGate =
     "- The target repository's documented validation gate has been run for the latest commit.";
   const adaptedPushGate =
@@ -95,36 +91,12 @@ function harnessFixture(t) {
       "verify:full": "node scripts/run-validation.mjs full",
     },
   });
-  write(
-    root,
-    "src-tauri/assets/skills/commit/SKILL.md",
-    skill("commit", "Commit carefully."),
-  );
-  write(
-    root,
-    "src-tauri/assets/skills/pull/SKILL.md",
-    skill("pull", portableGate),
-  );
-  write(
-    root,
-    "src-tauri/assets/skills/push/SKILL.md",
-    skill("push", portablePushGate),
-  );
-  write(
-    root,
-    ".agents/skills/symphony-commit/SKILL.md",
-    skill("commit", "Commit carefully."),
-  );
-  write(
-    root,
-    ".agents/skills/symphony-pull/SKILL.md",
-    skill("pull", adaptedGate),
-  );
-  write(
-    root,
-    ".agents/skills/symphony-push/SKILL.md",
-    skill("push", adaptedPushGate),
-  );
+  write(root, "src-tauri/assets/skills/commit/SKILL.md", skill("commit", "Commit carefully."));
+  write(root, "src-tauri/assets/skills/pull/SKILL.md", skill("pull", portableGate));
+  write(root, "src-tauri/assets/skills/push/SKILL.md", skill("push", portablePushGate));
+  write(root, ".agents/skills/symphony-commit/SKILL.md", skill("commit", "Commit carefully."));
+  write(root, ".agents/skills/symphony-pull/SKILL.md", skill("pull", adaptedGate));
+  write(root, ".agents/skills/symphony-push/SKILL.md", skill("push", adaptedPushGate));
   write(root, ".claude/skills", "../.agents/skills");
   write(
     root,
@@ -154,17 +126,18 @@ fn bundled_skills() {
 ${runtimeConsumerSource()}
 `,
   );
+  write(root, "src-tauri/src/settings.rs", defaultPromptRuntimeConsumers());
   write(
     root,
-    "src-tauri/src/settings.rs",
-    `${defaultPromptSettingsConsumers()}
+    "crates/symphony-contracts/src/settings.rs",
+    `${defaultPromptContractConsumers()}
 
 pub fn default_prompt_template() -> String {
-  include_str!("../assets/default-prompt.md").to_string()
+  include_str!("../../../src-tauri/assets/default-prompt.md").to_string()
 }
 `,
   );
-  write(root, "crates/fixture.rs", "const FIXTURE: &str = \"fixture\";\n");
+  write(root, "crates/fixture.rs", 'const FIXTURE: &str = "fixture";\n');
   write(
     root,
     "src-tauri/assets/default-prompt.md",
@@ -211,17 +184,13 @@ test("accepts discovered owners, inventory, includes, and declared projections",
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
-test(
-  "accepts a symlink discovery projection",
-  { skip: process.platform === "win32" },
-  (t) => {
-    const root = harnessFixture(t);
-    rmSync(join(root, ".claude/skills"));
-    symlinkSync("../.agents/skills", join(root, ".claude/skills"), "dir");
+test("accepts a symlink discovery projection", { skip: process.platform === "win32" }, (t) => {
+  const root = harnessFixture(t);
+  rmSync(join(root, ".claude/skills"));
+  symlinkSync("../.agents/skills", join(root, ".claude/skills"), "dir");
 
-    assert.deepEqual(validateAgentAssets(root), []);
-  },
-);
+  assert.deepEqual(validateAgentAssets(root), []);
+});
 
 test("rejects an invalid Git-flattened discovery projection", (t) => {
   const root = harnessFixture(t);
@@ -246,10 +215,7 @@ test("requires the canonical Claude discovery projection", (t) => {
     errors,
     /skill discovery projection must be \{"path":"\.claude\/skills","target":"\.\.\/\.agents\/skills"\}, received undefined/,
   );
-  assert.match(
-    errors,
-    /skill discovery projection is missing at \.claude\/skills/,
-  );
+  assert.match(errors, /skill discovery projection is missing at \.claude\/skills/);
 });
 
 test("pins the canonical agent asset source topology", (t) => {
@@ -286,10 +252,7 @@ test("pins the canonical agent asset source topology", (t) => {
     errors,
     /skill projectionRoot must be \.agents\/skills, received "fixtures\/projections"/,
   );
-  assert.match(
-    errors,
-    /skill projectionPrefix must be symphony-, received "fixture-"/,
-  );
+  assert.match(errors, /skill projectionPrefix must be symphony-, received "fixture-"/);
   assert.match(
     errors,
     /defaultPrompt path must be src-tauri\/assets\/default-prompt\.md, received "fixtures\/default-prompt\.md"/,
@@ -298,14 +261,8 @@ test("pins the canonical agent asset source topology", (t) => {
 
 test("rejects every undeclared projection difference", (t) => {
   const root = harnessFixture(t);
-  const projection = join(
-    root,
-    ".agents/skills/symphony-pull/SKILL.md",
-  );
-  writeFileSync(
-    projection,
-    `${readFileSync(projection, "utf8")}Undeclared local edit.\n`,
-  );
+  const projection = join(root, ".agents/skills/symphony-pull/SKILL.md");
+  writeFileSync(projection, `${readFileSync(projection, "utf8")}Undeclared local edit.\n`);
 
   assert.match(
     validateAgentAssets(root).join("\n"),
@@ -323,8 +280,7 @@ test("pins allowed adaptations to the validation-gate substitutions", (t) => {
       replacement: "Bypass verification hooks.",
     },
   ];
-  contract.skills.allowedAdaptations.pull[0].replacement =
-    "7. Skip validation before pushing.";
+  contract.skills.allowedAdaptations.pull[0].replacement = "7. Skip validation before pushing.";
   delete contract.skills.allowedAdaptations.push;
   writeJson(root, "validation/agent-assets.json", contract);
   write(
@@ -334,10 +290,7 @@ test("pins allowed adaptations to the validation-gate substitutions", (t) => {
   );
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /allowed adaptation skill ids has undeclared extra commit/,
-  );
+  assert.match(errors, /allowed adaptation skill ids has undeclared extra commit/);
   assert.match(
     errors,
     /allowed adaptations for pull must be the exact validation-gate substitution/,
@@ -352,14 +305,19 @@ test("reports missing include_str targets with the owning Rust file", (t) => {
   const root = harnessFixture(t);
   write(
     root,
-    "src-tauri/src/settings.rs",
-    'const PROMPT: &str = include_str!("../assets/missing-prompt.md");\n',
+    "crates/symphony-contracts/src/settings.rs",
+    `${defaultPromptContractConsumers()}
+
+pub fn default_prompt_template() -> String {
+  include_str!("../../../src-tauri/assets/missing-prompt.md").to_string()
+}
+`,
   );
 
   const errors = validateAgentAssets(root).join("\n");
   assert.match(
     errors,
-    /src-tauri\/src\/settings\.rs include_str! target is missing: src-tauri\/assets\/missing-prompt\.md/,
+    /crates\/symphony-contracts\/src\/settings\.rs include_str! target is missing: src-tauri\/assets\/missing-prompt\.md/,
   );
   assert.match(
     errors,
@@ -554,10 +512,7 @@ test("ties the validated skill inventory to every runtime consumer", (t) => {
     errors,
     /get_skills_status must derive its single names binding from bundled_skills\(\)/,
   );
-  assert.match(
-    errors,
-    /runtime consumer install_skills must set skills from bundled_skills \( \)/,
-  );
+  assert.match(errors, /runtime consumer install_skills must set skills from bundled_skills \( \)/);
 });
 
 test("rejects conditional compilation inside bundled inventory", (t) => {
@@ -604,14 +559,8 @@ fn bundled_skills() {
   );
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /skill! content field must be include_str!\(\.\.\.\)\.to_string\(\)/,
-  );
-  assert.match(
-    errors,
-    /src-tauri\/src\/lib\.rs has an unsupported include_str! expression/,
-  );
+  assert.match(errors, /skill! content field must be include_str!\(\.\.\.\)\.to_string\(\)/);
+  assert.match(errors, /src-tauri\/src\/lib\.rs has an unsupported include_str! expression/);
   assert.match(
     errors,
     /bundled skill owner src-tauri\/assets\/skills\/commit\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
@@ -656,17 +605,17 @@ test("discovers the default prompt owner instead of pinning its Rust path", (t) 
   const root = harnessFixture(t);
   write(
     root,
-    "src-tauri/src/settings.rs",
-    `${defaultPromptSettingsConsumers()}
+    "crates/symphony-contracts/src/settings.rs",
+    `${defaultPromptContractConsumers()}
 
 pub use crate::prompt::default_prompt_template;
 `,
   );
   write(
     root,
-    "src-tauri/src/prompt.rs",
+    "crates/symphony-contracts/src/prompt.rs",
     `pub fn default_prompt_template() -> String {
-  include_str!("../assets/default-prompt.md").to_string()
+  include_str!("../../../src-tauri/assets/default-prompt.md").to_string()
 }
 `,
   );
@@ -678,9 +627,9 @@ test("ties the default prompt include to its runtime return expression", (t) => 
   const root = harnessFixture(t);
   write(
     root,
-    "src-tauri/src/settings.rs",
+    "crates/symphony-contracts/src/settings.rs",
     `pub fn default_prompt_template() -> String {
-  let _decoy = include_str!("../assets/default-prompt.md");
+  let _decoy = include_str!("../../../src-tauri/assets/default-prompt.md");
   String::new()
 }
 `,
@@ -695,10 +644,10 @@ test("ties the default prompt include to its runtime return expression", (t) => 
 
 test("ties the validated default prompt to settings and IPC consumers", (t) => {
   const root = harnessFixture(t);
-  const settings = join(root, "src-tauri/src/settings.rs");
+  const contractSettings = join(root, "crates/symphony-contracts/src/settings.rs");
   writeFileSync(
-    settings,
-    readFileSync(settings, "utf8")
+    contractSettings,
+    readFileSync(contractSettings, "utf8")
       .replace(
         '#[serde(default = "default_prompt_template")]',
         '#[serde(default = "empty_prompt")]',
@@ -717,30 +666,26 @@ test("ties the validated default prompt to settings and IPC consumers", (t) => {
       prompt_template: empty_prompt(),
     }
   }`,
-      )
-      .replace(
-        `pub fn parse_settings() {
+      ),
+  );
+  const runtimeSettings = join(root, "src-tauri/src/settings.rs");
+  writeFileSync(
+    runtimeSettings,
+    readFileSync(runtimeSettings, "utf8").replace(
+      `pub fn parse_settings() {
   let prompt_template = None::<String>.unwrap_or_else(default_prompt_template);
 }`,
-        `pub fn parse_settings() {
+      `pub fn parse_settings() {
   let _decoy = None::<String>.unwrap_or_else(default_prompt_template);
   let prompt_template = None::<String>.unwrap_or_else(empty_prompt);
-}
-
-struct DecoySettings {
-  #[serde(default = "default_prompt_template")]
-  pub prompt_template: String,
 }`,
-      ),
+    ),
   );
   const desktop = join(root, "src-tauri/src/lib.rs");
   writeFileSync(
     desktop,
     readFileSync(desktop, "utf8")
-      .replace(
-        "use settings::{default_prompt_template};",
-        "use settings::{empty_prompt};",
-      )
+      .replace("use settings::{default_prompt_template};", "use settings::{empty_prompt};")
       .replace(
         "fn get_default_prompt() -> String {\n  default_prompt_template()\n}",
         "fn get_default_prompt() -> String {\n  empty_prompt()\n}",
@@ -760,14 +705,8 @@ struct DecoySettings {
     errors,
     /AppSettings\.prompt_template must use serde default_prompt_template exactly once; found 0/,
   );
-  assert.match(
-    errors,
-    /must import default_prompt_template from settings exactly once; found 0/,
-  );
-  assert.match(
-    errors,
-    /get_default_prompt must directly return default_prompt_template\(\)/,
-  );
+  assert.match(errors, /must import default_prompt_template from settings exactly once; found 0/);
+  assert.match(errors, /get_default_prompt must directly return default_prompt_template\(\)/);
 });
 
 test("accepts CRLF skill frontmatter on Windows-style checkouts", (t) => {
@@ -807,18 +746,12 @@ test("rejects malformed YAML string scalars in skill frontmatter", (t) => {
     const absolute = join(root, path);
     writeFileSync(
       absolute,
-      readFileSync(absolute, "utf8").replace(
-        "description: pull fixture",
-        "description: true",
-      ),
+      readFileSync(absolute, "utf8").replace("description: pull fixture", "description: true"),
     );
   }
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /description must be a valid string scalar in the supported YAML subset/,
-  );
+  assert.match(errors, /description must be a valid string scalar in the supported YAML subset/);
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md frontmatter line 3 description must be a valid string scalar/,
@@ -880,10 +813,7 @@ test("requires validation of the canonical standalone Codex skill root", (t) => 
   );
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /standaloneRoots must be \["\.codex\/skills"\], received undefined/,
-  );
+  assert.match(errors, /standaloneRoots must be \["\.codex\/skills"\], received undefined/);
   assert.match(
     errors,
     /\.codex\/skills\/local\/SKILL\.md must contain a non-empty Markdown instructional body/,
@@ -897,10 +827,7 @@ test("forbids every pnpm reference in portable owner manifests only", (t) => {
     ".agents/skills/symphony-commit/SKILL.md",
   ]) {
     const absolute = join(root, path);
-    writeFileSync(
-      absolute,
-      `${readFileSync(absolute, "utf8")}Run \`pnpm install\`.\n`,
-    );
+    writeFileSync(absolute, `${readFileSync(absolute, "utf8")}Run \`pnpm install\`.\n`);
   }
 
   const errors = validateAgentAssets(root).join("\n");
@@ -934,16 +861,10 @@ test("pins pnpm builtins instead of trusting contract additions", (t) => {
   contract.pnpmBuiltins.push("definitely-missing");
   writeJson(root, "validation/agent-assets.json", contract);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(
-    prompt,
-    `${readFileSync(prompt, "utf8")}\nRun \`pnpm definitely-missing\`.\n`,
-  );
+  writeFileSync(prompt, `${readFileSync(prompt, "utf8")}\nRun \`pnpm definitely-missing\`.\n`);
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /pnpmBuiltins must be \["add","dlx","exec","install","remove","run"\]/,
-  );
+  assert.match(errors, /pnpmBuiltins must be \["add","dlx","exec","install","remove","run"\]/);
   assert.match(
     errors,
     /default-prompt\.md:\d+ references missing package script pnpm definitely-missing/,
@@ -952,11 +873,7 @@ test("pins pnpm builtins instead of trusting contract additions", (t) => {
 
 test("rejects companion files that the bundled skill runtime cannot ship", (t) => {
   const root = harnessFixture(t);
-  write(
-    root,
-    "src-tauri/assets/skills/commit/scripts/helper.sh",
-    "#!/bin/sh\n",
-  );
+  write(root, "src-tauri/assets/skills/commit/scripts/helper.sh", "#!/bin/sh\n");
 
   assert.match(
     validateAgentAssets(root).join("\n"),
@@ -967,10 +884,7 @@ test("rejects companion files that the bundled skill runtime cannot ship", (t) =
 test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
   const root = harnessFixture(t);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(
-    prompt,
-    `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`,
-  );
+  writeFileSync(prompt, `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`);
 
   assert.match(
     validateAgentAssets(root).join("\n"),
@@ -981,10 +895,7 @@ test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
 test("requires the default prompt skill table to remain visible", (t) => {
   const root = harnessFixture(t);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(
-    prompt,
-    `<!--\n${readFileSync(prompt, "utf8")}-->\n`,
-  );
+  writeFileSync(prompt, `<!--\n${readFileSync(prompt, "utf8")}-->\n`);
 
   const errors = validateAgentAssets(root).join("\n");
   assert.match(errors, /default prompt skill table is missing symphony-commit/);
@@ -998,10 +909,7 @@ test("requires the portable MCP namespace policy", (t) => {
   delete contract.defaultPrompt.forbiddenNamespacePattern;
   writeJson(root, "validation/agent-assets.json", contract);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(
-    prompt,
-    `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`,
-  );
+  writeFileSync(prompt, `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`);
 
   const errors = validateAgentAssets(root).join("\n");
   assert.match(
@@ -1029,8 +937,5 @@ Run \`pnpm run verify:full\`, not \`pnpm run definitely-missing\`.
     errors,
     /default-prompt\.md:\d+ references missing package script pnpm run definitely-missing/,
   );
-  assert.doesNotMatch(
-    errors,
-    /references missing package script pnpm run verify:full/,
-  );
+  assert.doesNotMatch(errors, /references missing package script pnpm run verify:full/);
 });

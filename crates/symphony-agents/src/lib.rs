@@ -154,6 +154,30 @@ impl AgentDriver for MockAgentDriver {
     }
 }
 
+fn parse_strict_json_line(line: &str) -> Result<Value, AgentError> {
+    Ok(serde_json::from_str(line)?)
+}
+
+#[derive(Debug, PartialEq)]
+enum OpencodeStdoutLine {
+    Event(Value),
+    AgentFallback(String),
+    Ignored,
+}
+
+fn parse_opencode_stdout_line(line: &str) -> OpencodeStdoutLine {
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) => OpencodeStdoutLine::Event(value),
+        Err(_) if is_opencode_agent_fallback(line) => {
+            OpencodeStdoutLine::AgentFallback(line.to_string())
+        }
+        // opencode can print human-readable warnings to stdout even under
+        // `--format json`; these are intentionally tolerated unless they
+        // announce an unsafe fallback to a different configured agent.
+        Err(_) => OpencodeStdoutLine::Ignored,
+    }
+}
+
 async fn run_codex(
     request: AgentRunRequest,
     events: AgentEventSender,
@@ -177,7 +201,7 @@ async fn run_codex(
             if line.trim().is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(&line)?;
+            let value = parse_strict_json_line(&line)?;
             if let Some(done) = map_codex_event(&thread_id, &turn_id, value, &events).await? {
                 result = Some(done);
             }
@@ -526,30 +550,7 @@ async fn run_claude(
         .session_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let mut args = vec![
-        "-p".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--session-id".to_string(),
-        session_id.clone(),
-    ];
-    args.push("--permission-mode".to_string());
-    args.push(permission_mode_arg(&request.claude.permission_mode).to_string());
-    if !request.claude.allowed_tools.is_empty() {
-        args.push("--allowedTools".to_string());
-        args.push(request.claude.allowed_tools.join(","));
-    }
-    if !request.claude.disallowed_tools.is_empty() {
-        args.push("--disallowedTools".to_string());
-        args.push(request.claude.disallowed_tools.join(","));
-    }
-    args.push("--add-dir".to_string());
-    args.push(request.cwd.join(".git").display().to_string());
-    for dir in &request.claude.add_dirs {
-        args.push("--add-dir".to_string());
-        args.push(dir.clone());
-    }
+    let args = claude_args(&request, &session_id);
 
     let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
     let pid = child.id();
@@ -570,7 +571,7 @@ async fn run_claude(
             if line.trim().is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(&line)?;
+            let value = parse_strict_json_line(&line)?;
             if let Some(done) = stream.push(value, &events).await? {
                 if stream.abort {
                     // Unusable session (e.g. dropped permission mode): stop
@@ -615,6 +616,34 @@ async fn run_claude(
         error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
         error_message: (!status.success()).then(|| format!("claude exit {status}")),
     }))
+}
+
+fn claude_args(request: &AgentRunRequest, session_id: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--session-id".to_string(),
+        session_id.to_string(),
+    ];
+    args.push("--permission-mode".to_string());
+    args.push(permission_mode_arg(&request.claude.permission_mode).to_string());
+    if !request.claude.allowed_tools.is_empty() {
+        args.push("--allowedTools".to_string());
+        args.push(request.claude.allowed_tools.join(","));
+    }
+    if !request.claude.disallowed_tools.is_empty() {
+        args.push("--disallowedTools".to_string());
+        args.push(request.claude.disallowed_tools.join(","));
+    }
+    args.push("--add-dir".to_string());
+    args.push(request.cwd.join(".git").display().to_string());
+    for dir in &request.claude.add_dirs {
+        args.push("--add-dir".to_string());
+        args.push(dir.clone());
+    }
+    args
 }
 
 struct ClaudeStreamState {
@@ -999,44 +1028,7 @@ async fn run_cursor(
     cancel: CancellationToken,
 ) -> Result<AgentRunResult, AgentError> {
     let session_id = format!("cs_{}", Uuid::new_v4());
-    let mut args = vec![
-        "-p".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--workspace".to_string(),
-        request.cwd.display().to_string(),
-    ];
-    if request.cursor.force {
-        args.push("--force".to_string());
-    }
-    if request.cursor.trust {
-        args.push("--trust".to_string());
-    }
-    if request.cursor.approve_mcps {
-        args.push("--approve-mcps".to_string());
-    }
-    let mode = match request.cursor.mode {
-        CursorAgentMode::Plan => Some("plan"),
-        CursorAgentMode::Ask => Some("ask"),
-        CursorAgentMode::Agent => None,
-    };
-    if let Some(mode) = mode {
-        args.push("--mode".to_string());
-        args.push(mode.to_string());
-    }
-    let sandbox = match request.cursor.sandbox {
-        CursorSandboxMode::Enabled => "enabled",
-        CursorSandboxMode::Disabled => "disabled",
-    };
-    args.push("--sandbox".to_string());
-    args.push(sandbox.to_string());
-    if let Some(model) = &request.cursor.model {
-        let model = model.trim();
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.to_string());
-        }
-    }
+    let args = cursor_args(&request);
 
     // Stream the prompt over stdin (cursor-agent reads it in print mode) rather
     // than as an argv entry: large issue prompts can exceed the OS command-line
@@ -1056,7 +1048,7 @@ async fn run_cursor(
             if line.trim().is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(&line)?;
+            let value = parse_strict_json_line(&line)?;
             if let Some(done) = stream.push(value, &events).await? {
                 // The `result` record is terminal, but cursor-agent can keep
                 // the process alive afterwards waiting on a command-based MCP
@@ -1110,6 +1102,48 @@ async fn run_cursor(
         error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
         error_message: (!status.success()).then(|| format!("cursor exit {status}")),
     })
+}
+
+fn cursor_args(request: &AgentRunRequest) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--workspace".to_string(),
+        request.cwd.display().to_string(),
+    ];
+    if request.cursor.force {
+        args.push("--force".to_string());
+    }
+    if request.cursor.trust {
+        args.push("--trust".to_string());
+    }
+    if request.cursor.approve_mcps {
+        args.push("--approve-mcps".to_string());
+    }
+    let mode = match request.cursor.mode {
+        CursorAgentMode::Plan => Some("plan"),
+        CursorAgentMode::Ask => Some("ask"),
+        CursorAgentMode::Agent => None,
+    };
+    if let Some(mode) = mode {
+        args.push("--mode".to_string());
+        args.push(mode.to_string());
+    }
+    let sandbox = match request.cursor.sandbox {
+        CursorSandboxMode::Enabled => "enabled",
+        CursorSandboxMode::Disabled => "disabled",
+    };
+    args.push("--sandbox".to_string());
+    args.push(sandbox.to_string());
+    if let Some(model) = &request.cursor.model {
+        let model = model.trim();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    args
 }
 
 struct CursorStreamState {
@@ -1416,32 +1450,7 @@ async fn run_opencode(
     // which would fill the OS pipe buffer and block the child (stalling stdout
     // JSON parsing until the turn timeout) unless we drained stderr in lockstep.
     // Leaving it off keeps stderr quiet; we still drain it below as a safety net.
-    let mut args = vec![
-        "run".to_string(),
-        "--dir".to_string(),
-        request.cwd.display().to_string(),
-        "--format".to_string(),
-        "json".to_string(),
-    ];
-    if request.opencode.skip_permissions {
-        // Non-interactive opencode auto-rejects every permission request
-        // without this; an unattended run could never edit a file.
-        args.push("--dangerously-skip-permissions".to_string());
-    }
-    if let Some(model) = &request.opencode.model {
-        let model = model.trim();
-        if !model.is_empty() {
-            args.push("--model".to_string());
-            args.push(model.to_string());
-        }
-    }
-    if let Some(agent) = &request.opencode.agent {
-        let agent = agent.trim();
-        if !agent.is_empty() {
-            args.push("--agent".to_string());
-            args.push(agent.to_string());
-        }
-    }
+    let args = opencode_args(&request);
 
     // Stream the prompt over stdin: opencode appends piped stdin to the
     // message, and large issue prompts can exceed the OS argv limit (which is
@@ -1471,31 +1480,19 @@ async fn run_opencode(
             if line.is_empty() {
                 continue;
             }
-            // opencode can print human-readable warnings to stdout even under
-            // `--format json` (e.g. a permission auto-reject, or a fallback
-            // when the configured agent is missing). Skip anything that is not
-            // a JSON event instead of failing the whole run on it.
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                // The agent-fallback notice is the one diagnostic we must not
-                // swallow: silently running the writable default agent in place
-                // of a misconfigured restricted one would defeat the user's
-                // intent under skip-permissions. Fail the run instead.
-                if is_opencode_agent_fallback(line) {
-                    send_error(&events, "agent_not_found", line).await?;
-                    result = Some(AgentRunResult {
-                        thread_id: stream.session_id.clone(),
-                        turn_id: stream.session_id.clone(),
-                        outcome: AgentOutcome::Failure,
-                        error_class: Some("agent_not_found".to_string()),
-                        error_message: Some(truncate(line, 1000)),
-                    });
+            match parse_opencode_stdout_line(line) {
+                OpencodeStdoutLine::Event(value) => {
+                    if let Some(done) = stream.push(value, &events).await? {
+                        result = Some(done);
+                    }
+                }
+                OpencodeStdoutLine::AgentFallback(message) => {
+                    send_error(&events, "agent_not_found", &message).await?;
+                    result = Some(opencode_agent_fallback_result(&stream, &message));
                     kill_pid(pid).await;
                     break;
                 }
-                continue;
-            };
-            if let Some(done) = stream.push(value, &events).await? {
-                result = Some(done);
+                OpencodeStdoutLine::Ignored => {}
             }
         }
         let status = child.wait().await?;
@@ -1530,18 +1527,41 @@ async fn run_opencode(
     if let Some(done) = parsed_result {
         return Ok(done);
     }
-    let sid = stream.session_id.clone();
-    Ok(AgentRunResult {
-        thread_id: sid.clone(),
-        turn_id: sid,
-        outcome: if status.success() {
-            AgentOutcome::Success
-        } else {
-            AgentOutcome::Failure
-        },
-        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
-        error_message: (!status.success()).then(|| format!("opencode exit {status}")),
-    })
+    Ok(opencode_process_result(
+        &stream,
+        status.success(),
+        (!status.success()).then(|| format!("opencode exit {status}")),
+    ))
+}
+
+fn opencode_args(request: &AgentRunRequest) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--dir".to_string(),
+        request.cwd.display().to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    if request.opencode.skip_permissions {
+        // Non-interactive opencode auto-rejects every permission request
+        // without this; an unattended run could never edit a file.
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Some(model) = &request.opencode.model {
+        let model = model.trim();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+    if let Some(agent) = &request.opencode.agent {
+        let agent = agent.trim();
+        if !agent.is_empty() {
+            args.push("--agent".to_string());
+            args.push(agent.to_string());
+        }
+    }
+    args
 }
 
 struct OpencodeStreamState {
@@ -1683,6 +1703,39 @@ impl OpencodeStreamState {
         // exits; surface the recorded failure once stdout drains by handing it
         // to the caller as the terminal result.
         Ok(self.failure.clone())
+    }
+}
+
+fn opencode_process_result(
+    stream: &OpencodeStreamState,
+    process_succeeded: bool,
+    exit_error: Option<String>,
+) -> AgentRunResult {
+    if let Some(failure) = &stream.failure {
+        return failure.clone();
+    }
+    let sid = stream.session_id.clone();
+    AgentRunResult {
+        thread_id: sid.clone(),
+        turn_id: sid,
+        outcome: if process_succeeded {
+            AgentOutcome::Success
+        } else {
+            AgentOutcome::Failure
+        },
+        error_class: (!process_succeeded).then(|| "nonzero_exit".to_string()),
+        error_message: (!process_succeeded)
+            .then(|| exit_error.unwrap_or_else(|| "opencode exited unsuccessfully".to_string())),
+    }
+}
+
+fn opencode_agent_fallback_result(stream: &OpencodeStreamState, message: &str) -> AgentRunResult {
+    AgentRunResult {
+        thread_id: stream.session_id.clone(),
+        turn_id: stream.session_id.clone(),
+        outcome: AgentOutcome::Failure,
+        error_class: Some("agent_not_found".to_string()),
+        error_message: Some(truncate(message, 1000)),
     }
 }
 
@@ -2052,6 +2105,399 @@ mod tests {
             opencode: OpencodeRunOptions::default(),
             env: Vec::new(),
         }
+    }
+
+    fn native_fixture_request(backend: AgentBackend) -> AgentRunRequest {
+        AgentRunRequest {
+            command: backend.as_source_str().to_string(),
+            backend,
+            cwd: PathBuf::from("/fixture/workspace"),
+            prompt: "sanitized fixture prompt".to_string(),
+            thread_sandbox: ThreadSandbox::WorkspaceWrite,
+            turn_sandbox_policy: TurnSandboxPolicy::Inherit,
+            network_access: true,
+            turn_timeout_ms: 1_000,
+            claude: ClaudeRunOptions::default(),
+            cursor: CursorRunOptions::default(),
+            opencode: OpencodeRunOptions::default(),
+            env: Vec::new(),
+        }
+    }
+
+    fn strict_fixture_values(raw: &str) -> Result<Vec<Value>, AgentError> {
+        raw.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(parse_strict_json_line)
+            .collect()
+    }
+
+    fn drain_fixture_events(mut rx: mpsc::Receiver<MappedAgentEvent>) -> Vec<MappedAgentEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    struct NativeFixtureObservation {
+        backend: &'static str,
+        result: AgentRunResult,
+        events: Vec<MappedAgentEvent>,
+    }
+
+    #[test]
+    fn native_backend_fixture_contracts_construct_commands_without_clis() {
+        let codex = codex_args_with_git_metadata_dirs(
+            &native_fixture_request(AgentBackend::Codex),
+            vec![PathBuf::from("/fixture/git-metadata")],
+        );
+        assert_eq!(
+            codex,
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-C",
+                "/fixture/workspace",
+                "--full-auto",
+                "--add-dir",
+                "/fixture/git-metadata",
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+            ]
+            .map(str::to_string)
+        );
+
+        let mut claude_request = native_fixture_request(AgentBackend::Claude);
+        claude_request.claude.allowed_tools = vec!["Read".to_string(), "Edit".to_string()];
+        claude_request.claude.disallowed_tools = vec!["WebSearch".to_string()];
+        claude_request.claude.add_dirs = vec!["/fixture/shared".to_string()];
+        assert_eq!(
+            claude_args(&claude_request, "fixture-claude-session"),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--session-id",
+                "fixture-claude-session",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Read,Edit",
+                "--disallowedTools",
+                "WebSearch",
+                "--add-dir",
+                "/fixture/workspace/.git",
+                "--add-dir",
+                "/fixture/shared",
+            ]
+            .map(str::to_string)
+        );
+
+        let mut cursor_request = native_fixture_request(AgentBackend::Cursor);
+        cursor_request.cursor.mode = CursorAgentMode::Plan;
+        cursor_request.cursor.force = true;
+        cursor_request.cursor.trust = true;
+        cursor_request.cursor.approve_mcps = true;
+        cursor_request.cursor.sandbox = CursorSandboxMode::Disabled;
+        cursor_request.cursor.model = Some(" fixture-cursor-model ".to_string());
+        assert_eq!(
+            cursor_args(&cursor_request),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--workspace",
+                "/fixture/workspace",
+                "--force",
+                "--trust",
+                "--approve-mcps",
+                "--mode",
+                "plan",
+                "--sandbox",
+                "disabled",
+                "--model",
+                "fixture-cursor-model",
+            ]
+            .map(str::to_string)
+        );
+
+        let mut opencode_request = native_fixture_request(AgentBackend::Opencode);
+        opencode_request.opencode.skip_permissions = true;
+        opencode_request.opencode.model = Some(" fixture/model ".to_string());
+        opencode_request.opencode.agent = Some(" fixture-reviewer ".to_string());
+        assert_eq!(
+            opencode_args(&opencode_request),
+            [
+                "run",
+                "--dir",
+                "/fixture/workspace",
+                "--format",
+                "json",
+                "--dangerously-skip-permissions",
+                "--model",
+                "fixture/model",
+                "--agent",
+                "fixture-reviewer",
+            ]
+            .map(str::to_string)
+        );
+    }
+
+    #[tokio::test]
+    async fn native_backend_fixture_contracts_normalize_success_equivalently() {
+        const CODEX: &str = include_str!("../tests/fixtures/native/codex/success.jsonl");
+        const CLAUDE: &str = include_str!("../tests/fixtures/native/claude/success.jsonl");
+        const CURSOR: &str = include_str!("../tests/fixtures/native/cursor/success.jsonl");
+        const OPENCODE: &str = include_str!("../tests/fixtures/native/opencode/success.jsonl");
+
+        let mut observations = Vec::new();
+
+        let (tx, rx) = mpsc::channel(64);
+        let mut result = None;
+        for value in strict_fixture_values(CODEX).unwrap() {
+            result = map_codex_event("fixture-codex-thread", "fixture-codex-turn", value, &tx)
+                .await
+                .unwrap()
+                .or(result);
+        }
+        drop(tx);
+        observations.push(NativeFixtureObservation {
+            backend: "codex",
+            result: result.expect("codex fixture terminal result"),
+            events: drain_fixture_events(rx),
+        });
+
+        let (tx, rx) = mpsc::channel(64);
+        let mut stream = ClaudeStreamState::new(
+            "fixture-claude-session".to_string(),
+            &ClaudePermissionMode::AcceptEdits,
+            PathBuf::from("/fixture/workspace"),
+        );
+        let mut result = None;
+        for value in strict_fixture_values(CLAUDE).unwrap() {
+            result = stream.push(value, &tx).await.unwrap().or(result);
+        }
+        drop(tx);
+        observations.push(NativeFixtureObservation {
+            backend: "claude",
+            result: result.expect("claude fixture terminal result"),
+            events: drain_fixture_events(rx),
+        });
+
+        let (tx, rx) = mpsc::channel(64);
+        let mut stream = CursorStreamState::new("fixture-cursor-session".to_string());
+        let mut result = None;
+        for value in strict_fixture_values(CURSOR).unwrap() {
+            result = stream.push(value, &tx).await.unwrap().or(result);
+        }
+        drop(tx);
+        observations.push(NativeFixtureObservation {
+            backend: "cursor",
+            result: result.expect("cursor fixture terminal result"),
+            events: drain_fixture_events(rx),
+        });
+
+        let (tx, rx) = mpsc::channel(64);
+        let mut stream = OpencodeStreamState::new("fixture-opencode-session".to_string());
+        for line in OPENCODE
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let OpencodeStdoutLine::Event(value) = parse_opencode_stdout_line(line) else {
+                panic!("opencode success fixture must contain only JSON events");
+            };
+            stream.push(value, &tx).await.unwrap();
+        }
+        stream.finish(&tx).await.unwrap();
+        let result = opencode_process_result(&stream, true, None);
+        drop(tx);
+        observations.push(NativeFixtureObservation {
+            backend: "opencode",
+            result,
+            events: drain_fixture_events(rx),
+        });
+
+        for observation in &observations {
+            assert_eq!(
+                observation.result.outcome,
+                AgentOutcome::Success,
+                "{} outcome",
+                observation.backend
+            );
+            assert_eq!(observation.result.error_class, None);
+            assert!(
+                observation
+                    .events
+                    .iter()
+                    .any(|event| event.kind == AgentEventKind::Status),
+                "{} status",
+                observation.backend
+            );
+            assert!(
+                observation
+                    .events
+                    .iter()
+                    .any(|event| event.kind == AgentEventKind::ToolCall),
+                "{} tool call",
+                observation.backend
+            );
+            let token_events = observation
+                .events
+                .iter()
+                .filter(|event| event.kind == AgentEventKind::TokenCount)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                token_events.len(),
+                1,
+                "{} token event count",
+                observation.backend
+            );
+            assert_eq!(
+                token_events[0].tokens,
+                Some(TokenCountPayload {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    total_tokens: 10,
+                }),
+                "{} normalized token totals",
+                observation.backend
+            );
+        }
+
+        for observation in &observations {
+            let carries_session_info = observation
+                .events
+                .iter()
+                .any(|event| event.session_info.is_some());
+            assert_eq!(
+                carries_session_info,
+                matches!(observation.backend, "claude" | "cursor"),
+                "{} intentional session metadata difference",
+                observation.backend
+            );
+            let tool_event = observation
+                .events
+                .iter()
+                .find(|event| event.kind == AgentEventKind::ToolCall)
+                .expect("fixture tool event");
+            let tool: ToolCallPayload = serde_json::from_value(tool_event.payload.clone()).unwrap();
+            let expected_tool = match observation.backend {
+                "codex" => "bash",
+                "claude" => "Read",
+                "cursor" => "read",
+                "opencode" => "edit",
+                _ => unreachable!(),
+            };
+            assert_eq!(tool.tool, expected_tool);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_backend_fixture_contracts_classify_sanitized_failures() {
+        const CODEX: &str = include_str!("../tests/fixtures/native/codex/failure.jsonl");
+        const CLAUDE: &str = include_str!("../tests/fixtures/native/claude/failure.jsonl");
+        const CURSOR: &str = include_str!("../tests/fixtures/native/cursor/failure.jsonl");
+        const OPENCODE: &str = include_str!("../tests/fixtures/native/opencode/failure.jsonl");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let codex = map_codex_event(
+            "fixture-codex-thread",
+            "fixture-codex-turn",
+            strict_fixture_values(CODEX).unwrap().remove(0),
+            &tx,
+        )
+        .await
+        .unwrap()
+        .expect("codex failure");
+
+        let mut claude_stream = ClaudeStreamState::new(
+            "fixture-claude-session".to_string(),
+            &ClaudePermissionMode::AcceptEdits,
+            PathBuf::from("/fixture/workspace"),
+        );
+        let claude = claude_stream
+            .push(strict_fixture_values(CLAUDE).unwrap().remove(0), &tx)
+            .await
+            .unwrap()
+            .expect("claude failure");
+
+        let mut cursor_stream = CursorStreamState::new("fixture-cursor-session".to_string());
+        let cursor = cursor_stream
+            .push(strict_fixture_values(CURSOR).unwrap().remove(0), &tx)
+            .await
+            .unwrap()
+            .expect("cursor failure");
+
+        let mut opencode_stream = OpencodeStreamState::new("fixture-opencode-session".to_string());
+        let opencode = opencode_stream
+            .push(strict_fixture_values(OPENCODE).unwrap().remove(0), &tx)
+            .await
+            .unwrap()
+            .expect("opencode failure");
+
+        for (backend, result, expected_class) in [
+            ("codex", codex, "fixture_failure"),
+            ("claude", claude, "error_during_execution"),
+            ("cursor", cursor, "error"),
+            ("opencode", opencode, "FixtureProviderError"),
+        ] {
+            assert_eq!(result.outcome, AgentOutcome::Failure, "{backend} outcome");
+            assert_eq!(
+                result.error_class.as_deref(),
+                Some(expected_class),
+                "{backend} class"
+            );
+            assert_eq!(
+                result.error_message.as_deref(),
+                Some("sanitized fixture backend failure"),
+                "{backend} message"
+            );
+        }
+    }
+
+    #[test]
+    fn native_backend_fixture_contracts_fail_closed_or_tolerate_partial_streams() {
+        for (backend, raw) in [
+            (
+                "codex",
+                include_str!("../tests/fixtures/native/codex/malformed.jsonl"),
+            ),
+            (
+                "claude",
+                include_str!("../tests/fixtures/native/claude/malformed.jsonl"),
+            ),
+            (
+                "cursor",
+                include_str!("../tests/fixtures/native/cursor/malformed.jsonl"),
+            ),
+        ] {
+            let error = parse_strict_json_line(raw.trim()).unwrap_err();
+            assert!(
+                matches!(error, AgentError::Json(_)),
+                "{backend} must reject malformed JSON"
+            );
+        }
+
+        let partial = include_str!("../tests/fixtures/native/opencode/partial.txt").trim();
+        assert_eq!(
+            parse_opencode_stdout_line(partial),
+            OpencodeStdoutLine::Ignored,
+            "opencode intentionally tolerates non-JSON partial output"
+        );
+
+        let fallback = include_str!("../tests/fixtures/native/opencode/fallback.txt").trim();
+        let OpencodeStdoutLine::AgentFallback(message) = parse_opencode_stdout_line(fallback)
+        else {
+            panic!("opencode fallback must not be ignored");
+        };
+        let stream = OpencodeStreamState::new("fixture-opencode-session".to_string());
+        let result = opencode_agent_fallback_result(&stream, &message);
+        assert_eq!(result.outcome, AgentOutcome::Failure);
+        assert_eq!(result.error_class.as_deref(), Some("agent_not_found"));
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

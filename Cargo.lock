@@ -5690,6 +5690,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "symphony-contracts"
+version = "0.1.17"
+dependencies = [
+ "anyhow",
+ "serde",
+ "specta",
+ "symphony-core",
+ "symphony-storage",
+ "symphony-worker",
+ "tempfile",
+]
+
+[[package]]
 name = "symphony-core"
 version = "0.1.17"
 dependencies = [
@@ -5718,6 +5731,7 @@ dependencies = [
  "similar",
  "specta",
  "symphony-agents",
+ "symphony-contracts",
  "symphony-core",
  "symphony-storage",
  "symphony-tracker",
@@ -5745,6 +5759,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "specta",
  "sqlx",
  "symphony-core",
@@ -5778,7 +5793,6 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
- "sqlx",
  "symphony-agents",
  "symphony-core",
  "symphony-storage",

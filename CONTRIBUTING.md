@@ -13,6 +13,7 @@ Thanks for your interest in improving Symphony! This guide covers the developmen
 
 ```sh
 pnpm install
+pnpm install:hygiene-tools  # pinned actionlint + ShellCheck binaries
 pnpm tauri dev        # run the desktop app with hot reload
 ```
 
@@ -32,7 +33,13 @@ pnpm verify:full
 
 The ordered command lists live in `validation/contract.json`; CI, this guide,
 and the repository-adapted pull/push skills point to the entrypoints instead of
-copying the commands.
+copying the commands. Both profiles install the external hygiene tools in
+`.cache/hygiene-tools` from exact, checksum-verified GitHub release assets for
+macOS or Linux on arm64/x64.
+
+Biome formatting is adopted incrementally. Existing unformatted files are
+hash-pinned in `scripts/biome-format-baseline.json`; format any file you change
+with `pnpm biome format --write <file>` and remove its stale baseline entry.
 
 ### TypeScript bindings
 

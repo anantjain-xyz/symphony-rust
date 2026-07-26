@@ -713,6 +713,14 @@ tbody tr:hover {
   padding: 10px 14px;
 }
 
+td strong {
+  align-items: center;
+  display: flex;
+  font-weight: 600;
+  gap: 8px;
+  min-width: 0;
+}
+
 .kpi strong {
   display: block;
   font-size: 22px;
@@ -748,14 +756,6 @@ tbody tr:hover {
 
 .clickable-row:hover td:first-child strong {
   color: var(--foreground);
-}
-
-td strong {
-  align-items: center;
-  display: flex;
-  font-weight: 600;
-  gap: 8px;
-  min-width: 0;
 }
 
 .badge {
@@ -1320,8 +1320,11 @@ td strong {
   *,
   *::before,
   *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: reduced-motion must override authored animations. */
     animation-duration: 0.001ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: reduced-motion must override repeating animations. */
     animation-iteration-count: 1 !important;
+    /* biome-ignore lint/complexity/noImportantStyles: reduced-motion must override authored transitions. */
     transition-duration: 0.001ms !important;
   }
 }

@@ -24,9 +24,7 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
     await capture(page, testInfo, "01-preview-loading");
 
     releasePreview();
-    await expect(
-      page.getByRole("heading", { name: "Overview", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await capture(page, testInfo, "02-overview");
   });
 
@@ -106,17 +104,13 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
 
   await test.step("preview-route:settings", async () => {
     await page.getByRole("button", { name: "Settings" }).click();
-    await expect(
-      page.getByRole("heading", { name: "Settings", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
     await capture(page, testInfo, "09-settings");
   });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Overview" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Overview", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
   await capture(page, testInfo, "10-overview-mobile");
 
   await page.setViewportSize({ width: 1280, height: 720 });
@@ -126,12 +120,8 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
 
 test("keeps the shell visible when a lazy chunk fails", async ({ page }, testInfo) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(
-    page.getByRole("heading", { name: "Overview", exact: true }),
-  ).toBeVisible();
-  await page.route(/\/assets\/RetroView-[^/]+\.js$/, (route) =>
-    route.abort("failed"),
-  );
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await page.route(/\/assets\/RetroView-[^/]+\.js$/, (route) => route.abort("failed"));
 
   await page.getByRole("button", { name: "Retro" }).dispatchEvent("click");
   await expect(page.getByRole("alert")).toContainText("Unable to load Retro");

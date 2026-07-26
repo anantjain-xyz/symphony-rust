@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"fixture-cursor-session","model":"fixture-cursor-model","permissionMode":"default"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Inspecting fixture"}]}}
+{"type":"tool_call","subtype":"completed","call_id":"fixture-cursor-tool","tool_call":{"readToolCall":{"args":{"path":"/fixture/workspace/fixture.txt"},"result":{"success":{"content":"fixture contents"}}}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Fixture complete","usage":{"inputTokens":3,"cacheReadTokens":3,"cacheWriteTokens":1,"outputTokens":3}}

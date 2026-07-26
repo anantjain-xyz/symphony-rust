@@ -1,12 +1,14 @@
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
-use specta::Type;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
+};
+pub use symphony_contracts::{
+    RetroConfidence, RetroDetail, RetroEvidence, RetroFinding, RetroRepoReport, RetroReport,
+    RetroRunState, RetroSeverity, RetroStatus, RetroSuggestion, RetroSuggestionTarget,
 };
 use symphony_storage::{
     now_iso, AgentEventRow, Repository, RetroBatchRow, RetroInputRow, RetroRow, RetroSuggestionRow,
@@ -21,120 +23,6 @@ pub(crate) const INTERRUPTED_RETRO_MESSAGE: &str = "Retro interrupted before com
 const MAX_FINDINGS_PER_REPO: usize = 8;
 const MAX_EVIDENCE_PER_FINDING: usize = 5;
 const RETRO_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RetroRunState {
-    Idle,
-    Running,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroStatus {
-    pub state: RetroRunState,
-    pub retro_id: Option<String>,
-    pub message: Option<String>,
-    pub report: Option<RetroReport>,
-    pub error: Option<String>,
-}
-
-impl RetroStatus {
-    fn idle() -> Self {
-        Self {
-            state: RetroRunState::Idle,
-            retro_id: None,
-            message: None,
-            report: None,
-            error: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroDetail {
-    pub row: RetroRow,
-    pub report: Option<RetroReport>,
-    pub suggestions: Vec<RetroSuggestionRow>,
-    pub batches: Vec<RetroBatchRow>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroReport {
-    pub id: String,
-    pub since_at: String,
-    pub until_at: String,
-    pub generated_at: String,
-    pub run_count: i64,
-    pub issue_count: i64,
-    pub workpad_count: i64,
-    pub repos: Vec<RetroRepoReport>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroRepoReport {
-    pub repo_name: String,
-    pub run_count: i64,
-    pub issue_count: i64,
-    pub workpad_count: i64,
-    pub failure_count: i64,
-    pub retry_count: i64,
-    pub findings: Vec<RetroFinding>,
-    pub suggestions: Vec<RetroSuggestion>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroFinding {
-    pub title: String,
-    pub detail: String,
-    pub severity: RetroSeverity,
-    pub occurrences: i64,
-    pub evidence: Vec<RetroEvidence>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum RetroSeverity {
-    Low,
-    Medium,
-    High,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroEvidence {
-    pub issue_identifier: String,
-    pub run_id: Option<String>,
-    pub run_number: Option<i64>,
-    pub event_id: Option<i64>,
-    pub kind: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct RetroSuggestion {
-    pub target_type: RetroSuggestionTarget,
-    pub target_id: String,
-    pub title: String,
-    pub body: String,
-    pub rationale: String,
-    pub confidence: RetroConfidence,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum RetroSuggestionTarget {
-    Prompt,
-    Skill,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum RetroConfidence {
-    Low,
-    Medium,
-    High,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct RetroManager {

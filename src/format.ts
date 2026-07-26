@@ -50,7 +50,9 @@ export function providerRateLimits(
     const matches = limits.filter(
       (limit) => limit.source === key || limit.source.startsWith(`${key}_`),
     );
-    matches.forEach((limit) => claimed.add(limit.source));
+    matches.forEach((limit) => {
+      claimed.add(limit.source);
+    });
     if (matches.length === 0) return [{ id: key, label, limit: null }];
     return matches.map((limit) => ({
       id: limit.source,

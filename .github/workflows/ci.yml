@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Baseline verifiers compare exceptions with the pull request's base.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -33,7 +36,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       # validation/contract.json owns the ordered gate. The full profile keeps
-      # symphony-desktop excluded from Linux Rust checks to avoid webkit2gtk.
+      # symphony-desktop excluded from Linux Rust checks to avoid webkit2gtk,
+      # and includes hygiene, boundary, runtime, generated/static, frontend,
+      # bundle, and browser verification.
       - run: pnpm verify:full
       - name: Upload theme screenshots
         if: always()
@@ -42,3 +47,17 @@ jobs:
           name: theme-e2e-screenshots
           path: test-results/**/*.png
           if-no-files-found: error
+
+  desktop-check:
+    # The Tauri shell is intentionally excluded from Linux validation because it
+    # requires platform webview libraries. Compile it on its supported host so
+    # desktop-only dependency and API regressions still block the PR.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test -p symphony-desktop --lib

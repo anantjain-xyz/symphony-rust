@@ -429,12 +429,18 @@ impl Repository {
         status: RunStatus,
         error_class: Option<&str>,
         error_message: Option<&str>,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
+    ) -> Result<bool, StorageError> {
+        if !status.is_terminal() {
+            return Err(StorageError::InvalidRunTransition {
+                run_id: run_id.to_string(),
+                status: status.as_db_str().to_string(),
+            });
+        }
+        let result = sqlx::query(
             r#"
             update runs
             set status = ?1, ended_at = ?2, error_class = ?3, error_message = ?4
-            where id = ?5
+            where id = ?5 and status in ('pending', 'running')
             "#,
         )
         .bind(status.as_db_str())
@@ -444,8 +450,11 @@ impl Repository {
         .bind(run_id)
         .execute(&self.pool)
         .await?;
-        self.changed("runs", "update");
-        Ok(())
+        let transitioned = result.rows_affected() > 0;
+        if transitioned {
+            self.changed("runs", "update");
+        }
+        Ok(transitioned)
     }
 
     pub async fn list_running(&self) -> Result<Vec<RunRow>, StorageError> {
@@ -2864,6 +2873,143 @@ mod tests {
         repo.mark_running(&first.id).await.unwrap();
         let result = repo.mark_running(&second.id).await;
         assert!(matches!(result, Err(StorageError::AlreadyRunning(_))));
+    }
+
+    #[tokio::test]
+    async fn runtime_lifecycle_transition_matrix_enforces_issue_run_and_retry_invariants() {
+        let repo = repo().await;
+        let terminal_cases = [
+            (RunStatus::Success, "success"),
+            (RunStatus::Failure, "failure"),
+            (RunStatus::Timeout, "timeout"),
+            (RunStatus::Cancelled, "cancelled"),
+        ];
+
+        for (source_index, starts_running) in [false, true].into_iter().enumerate() {
+            for (target_index, (target, expected)) in terminal_cases.iter().enumerate() {
+                let mut current_issue = issue();
+                current_issue.id = format!("matrix-{source_index}-{target_index}");
+                current_issue.identifier = format!("MATRIX-{source_index}-{target_index}");
+                repo.upsert_issues(std::slice::from_ref(&current_issue))
+                    .await
+                    .unwrap();
+                let run = repo
+                    .try_reserve_run(&current_issue.id, 1, "/tmp/ws", None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if starts_running {
+                    repo.mark_running(&run.id).await.unwrap();
+                }
+
+                assert!(
+                    repo.finish_run(
+                        &run.id,
+                        target.clone(),
+                        Some("first"),
+                        Some("first terminal")
+                    )
+                    .await
+                    .unwrap(),
+                    "{starts_running:?} -> {expected} should be legal"
+                );
+                let terminal = repo.get_run(&run.id).await.unwrap().unwrap();
+                assert_eq!(terminal.status, *expected);
+                assert_eq!(terminal.error_class.as_deref(), Some("first"));
+                let ended_at = terminal.ended_at.clone();
+
+                let replacement = if *expected == "success" {
+                    RunStatus::Failure
+                } else {
+                    RunStatus::Success
+                };
+                assert!(
+                    !repo
+                        .finish_run(&run.id, replacement, Some("late"), Some("late terminal"),)
+                        .await
+                        .unwrap(),
+                    "terminal state {expected} must be immutable"
+                );
+                repo.mark_running(&run.id).await.unwrap();
+                let unchanged = repo.get_run(&run.id).await.unwrap().unwrap();
+                assert_eq!(unchanged.status, *expected);
+                assert_eq!(unchanged.error_class.as_deref(), Some("first"));
+                assert_eq!(unchanged.ended_at, ended_at);
+            }
+        }
+
+        for target in [RunStatus::Pending, RunStatus::Running] {
+            let mut current_issue = issue();
+            current_issue.id = format!("illegal-{}", target.as_db_str());
+            current_issue.identifier = format!("ILLEGAL-{}", target.as_db_str());
+            repo.upsert_issues(std::slice::from_ref(&current_issue))
+                .await
+                .unwrap();
+            let run = repo
+                .try_reserve_run(&current_issue.id, 1, "/tmp/ws", None)
+                .await
+                .unwrap()
+                .unwrap();
+
+            let error = repo
+                .finish_run(&run.id, target.clone(), None, None)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                StorageError::InvalidRunTransition { status, .. }
+                    if status == target.as_db_str()
+            ));
+            assert_eq!(
+                repo.get_run(&run.id).await.unwrap().unwrap().status,
+                "pending"
+            );
+        }
+
+        let mut synced_issue = issue();
+        synced_issue.id = "issue-transition".to_string();
+        synced_issue.identifier = "ISSUE-TRANSITION".to_string();
+        for state in ["Todo", "In Progress", "Done"] {
+            synced_issue.state = state.to_string();
+            repo.upsert_issues(std::slice::from_ref(&synced_issue))
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.get_issue(&synced_issue.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                state
+            );
+        }
+
+        repo.schedule_retry(
+            &synced_issue.id,
+            2,
+            "2000-01-01T00:00:00Z",
+            Some("first"),
+            None,
+        )
+        .await
+        .unwrap();
+        repo.schedule_retry(
+            &synced_issue.id,
+            3,
+            "2000-01-02T00:00:00Z",
+            Some("latest"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.all_retry_issue_ids().await.unwrap(),
+            vec![synced_issue.id]
+        );
+        let retries = repo.due_retries("9999-01-01T00:00:00Z").await.unwrap();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].run_number, 3);
+        assert_eq!(retries[0].error_class.as_deref(), Some("latest"));
     }
 
     #[tokio::test]
