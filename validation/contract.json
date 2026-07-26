@@ -146,6 +146,7 @@
         "exec",
         "playwright",
         "install",
+        "--with-deps",
         "chromium"
       ],
       "installsBrowser": true

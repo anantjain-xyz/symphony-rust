@@ -53,6 +53,19 @@ const REQUIRED_FULL_COMMANDS = new Map([
       packageScript: "build",
     },
   ],
+  [
+    "browser-install",
+    {
+      argv: [
+        "pnpm",
+        "exec",
+        "playwright",
+        "install",
+        "--with-deps",
+        "chromium",
+      ],
+    },
+  ],
 ]);
 const SUPPORTED_SCRIPT_EXECUTABLES = new Map([
   ["biome", ["@biomejs/biome"]],
@@ -106,12 +119,14 @@ function parseSimpleShellScript(script, scriptName, errors) {
   const commands = [];
   let tokens = [];
   let token = "";
+  let tokenStarted = false;
   let quote = null;
   let escaped = false;
 
   const finishToken = () => {
-    if (token !== "") tokens.push(token);
+    if (tokenStarted) tokens.push(token);
     token = "";
+    tokenStarted = false;
   };
   const finishCommand = () => {
     finishToken();
@@ -128,6 +143,7 @@ function parseSimpleShellScript(script, scriptName, errors) {
     const next = script[index + 1];
     if (escaped) {
       token += character;
+      tokenStarted = true;
       escaped = false;
       continue;
     }
@@ -144,8 +160,15 @@ function parseSimpleShellScript(script, scriptName, errors) {
       continue;
     }
     if (character === "'" || character === '"') {
+      tokenStarted = true;
       quote = character;
       continue;
+    }
+    if (character === "#" && !tokenStarted) {
+      errors.push(
+        `package script ${scriptName} uses unsupported shell comment syntax near "#"; validation scripts may not contain unquoted comments`,
+      );
+      return [];
     }
     if (character === "&" && next === "&") {
       finishCommand();
@@ -173,6 +196,7 @@ function parseSimpleShellScript(script, scriptName, errors) {
       continue;
     }
     token += character;
+    tokenStarted = true;
   }
 
   if (quote) {
@@ -506,15 +530,18 @@ export function validateValidationContract(
   if (!fullIds.some((id) => commands[id]?.requiresBrowser)) {
     errors.push("full validation profile must include a browser command");
   }
+  if (commands["browser-install"]?.installsBrowser !== true) {
+    errors.push(
+      "required command browser-install must declare installsBrowser: true",
+    );
+  }
   for (const [index, commandId] of fullIds.entries()) {
     if (
       commands[commandId]?.requiresBrowser &&
-      !fullIds
-        .slice(0, index)
-        .some((candidate) => commands[candidate]?.installsBrowser)
+      !fullIds.slice(0, index).includes("browser-install")
     ) {
       errors.push(
-        `browser command ${commandId} must follow a command with installsBrowser in the full profile`,
+        `browser command ${commandId} must follow required command browser-install in the full profile`,
       );
     }
   }

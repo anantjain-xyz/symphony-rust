@@ -32,7 +32,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
       # validation/contract.json owns the ordered gate. The full profile keeps
       # symphony-desktop excluded from Linux Rust checks to avoid webkit2gtk.
       - run: pnpm verify:full

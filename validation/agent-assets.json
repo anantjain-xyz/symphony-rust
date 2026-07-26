@@ -7,6 +7,7 @@
   "skills": {
     "ownerRoot": "src-tauri/assets/skills",
     "inventoryFile": "src-tauri/src/lib.rs",
+    "inventoryFunction": "bundled_skills",
     "projectionRoot": ".agents/skills",
     "projectionPrefix": "symphony-",
     "discoveryProjection": {

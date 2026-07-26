@@ -59,19 +59,21 @@ function harnessFixture(t) {
     ".agents/skills/symphony-pull/SKILL.md",
     skill("pull", adaptedGate),
   );
-  mkdirSync(join(root, ".claude"), { recursive: true });
-  symlinkSync("../.agents/skills", join(root, ".claude/skills"), "dir");
+  write(root, ".claude/skills", "../.agents/skills");
 
   write(
     root,
     "src-tauri/src/lib.rs",
-    `macro_rules! skill {
-  ($name:literal) => {
-    include_str!(concat!("../assets/skills/", $name, "/SKILL.md"))
-  };
-}
-fn bundled() {
-  let _ = [skill!("commit"), skill!("pull")];
+    `fn bundled_skills() {
+  macro_rules! skill {
+    ($name:literal) => {
+      SkillFile {
+        name: $name,
+        content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
+      }
+    };
+  }
+  vec![skill!("commit"), skill!("pull")]
 }
 `,
   );
@@ -95,6 +97,7 @@ fn bundled() {
     skills: {
       ownerRoot: "src-tauri/assets/skills",
       inventoryFile: "src-tauri/src/lib.rs",
+      inventoryFunction: "bundled_skills",
       projectionRoot: ".agents/skills",
       projectionPrefix: "symphony-",
       discoveryProjection: {
@@ -125,6 +128,28 @@ fn bundled() {
 test("accepts discovered owners, inventory, includes, and declared projections", (t) => {
   const root = harnessFixture(t);
   assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test(
+  "accepts a symlink discovery projection",
+  { skip: process.platform === "win32" },
+  (t) => {
+    const root = harnessFixture(t);
+    rmSync(join(root, ".claude/skills"));
+    symlinkSync("../.agents/skills", join(root, ".claude/skills"), "dir");
+
+    assert.deepEqual(validateAgentAssets(root), []);
+  },
+);
+
+test("rejects an invalid Git-flattened discovery projection", (t) => {
+  const root = harnessFixture(t);
+  write(root, ".claude/skills", "../wrong/skills");
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /expected Git flattened symlink target "\.\.\/\.agents\/skills"/,
+  );
 });
 
 test("rejects every undeclared projection difference", (t) => {
@@ -168,13 +193,16 @@ test("requires every bundled skill owner to have one Rust include", (t) => {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `macro_rules! skill {
-  ($name:literal) => {
-    ""
-  };
-}
-fn bundled() {
-  let _ = [skill!("commit"), skill!("pull")];
+    `fn bundled_skills() {
+  macro_rules! skill {
+    ($name:literal) => {
+      SkillFile {
+        name: $name,
+        content: "".to_string(),
+      }
+    };
+  }
+  vec![skill!("commit"), skill!("pull")]
 }
 `,
   );
@@ -195,27 +223,128 @@ test("ignores commented skill macros and accepts multiline inventory entries", (
   write(
     root,
     "src-tauri/src/lib.rs",
-    `macro_rules! skill {
-  ($name:literal) => {
-    include_str!(concat!("../assets/skills/", $name, "/SKILL.md"))
-  };
-}
-fn bundled() {
+    `fn bundled_skills() {
+  macro_rules! skill {
+    ($name:literal) => {
+      SkillFile {
+        name: $name,
+        content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
+      }
+    };
+  }
   // skill!("removed")
   let text = r#"skill!("also-removed")"#;
-  let _ = [
+  vec![
     skill!(
       "commit",
     ),
     skill!(
       "pull"
     ),
-  ];
+  ]
 }
 `,
   );
 
   assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test("scopes bundled inventory to the returned vector", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/src/lib.rs",
+    `fn bundled_skills() {
+  macro_rules! skill {
+    ($name:literal) => {
+      SkillFile {
+        name: $name,
+        content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
+      }
+    };
+  }
+  #[cfg(test)]
+  let _ = skill!("pull");
+  vec![skill!("commit")]
+}
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(errors, /Rust bundled skill inventory is missing pull/);
+  assert.match(
+    errors,
+    /bundled skill owner src-tauri\/assets\/skills\/pull\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
+  );
+});
+
+test("pins inventory discovery to bundled_skills", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.inventoryFunction = "decoy_inventory";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /skill inventoryFunction must be bundled_skills, received "decoy_inventory"/,
+  );
+});
+
+test("rejects conditional compilation inside bundled inventory", (t) => {
+  const root = harnessFixture(t);
+  const source = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    source,
+    readFileSync(source, "utf8").replace(
+      'vec![skill!("commit"), skill!("pull")]',
+      'vec![skill!("commit"), #[cfg(test)] skill!("pull")]',
+    ),
+  );
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /bundled_skills returned inventory must not use conditional compilation; bundled inventory must be release-invariant/,
+  );
+});
+
+test("ties bundled includes to the skill macro content field", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/src/lib.rs",
+    `fn bundled_skills() {
+  macro_rules! unused_skill_content {
+    ($name:literal) => {
+      include_str!(concat!("../assets/skills/", $name, "/SKILL.md"))
+    };
+  }
+  macro_rules! skill {
+    ($name:literal) => {
+      SkillFile {
+        name: $name,
+        content: "".to_string(),
+      }
+    };
+  }
+  vec![skill!("commit"), skill!("pull")]
+}
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /skill! content field must be include_str!\(\.\.\.\)\.to_string\(\)/,
+  );
+  assert.match(
+    errors,
+    /src-tauri\/src\/lib\.rs has an unsupported include_str! expression/,
+  );
+  assert.match(
+    errors,
+    /bundled skill owner src-tauri\/assets\/skills\/commit\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
+  );
 });
 
 test("discovers the default prompt owner instead of pinning its Rust path", (t) => {

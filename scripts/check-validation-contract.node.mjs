@@ -146,7 +146,14 @@ function validationFixture(t) {
       },
       "browser-install": {
         label: "browser install",
-        argv: ["pnpm", "exec", "playwright", "install", "chromium"],
+        argv: [
+          "pnpm",
+          "exec",
+          "playwright",
+          "install",
+          "--with-deps",
+          "chromium",
+        ],
         installsBrowser: true,
       },
       browser: {
@@ -269,6 +276,27 @@ test("validates nested pnpm and Cargo validation scripts without executing them"
   assert.deepEqual(validateValidationContract(root), []);
 });
 
+test("accepts quoted and escaped hashes in validation script arguments", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["test:hash-args"] =
+    'node scripts/fixture.node.mjs "value # literal" value\\#literal';
+  writeJson(root, "package.json", packageJson);
+
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.commands["hash-args"] = {
+    label: "hash arguments",
+    argv: ["pnpm", "test:hash-args"],
+    packageScript: "test:hash-args",
+  };
+  contract.profiles.full.push("hash-args");
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.deepEqual(validateValidationContract(root), []);
+});
+
 test("rejects recursive scripts and unsupported shell syntax descriptively", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -276,6 +304,8 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
   packageJson.scripts["test:unsafe"] = "node scripts/fixture.node.mjs | tee result.txt";
   packageJson.scripts["test:backgrounded"] =
     "node scripts/fixture.node.mjs & node scripts/fixture.node.mjs";
+  packageJson.scripts["test:commented"] =
+    "node scripts/fixture.node.mjs # && vitest run";
   writeJson(root, "package.json", packageJson);
 
   const contract = JSON.parse(
@@ -296,7 +326,12 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     argv: ["pnpm", "test:backgrounded"],
     packageScript: "test:backgrounded",
   };
-  contract.profiles.full.push("cycle", "unsafe", "backgrounded");
+  contract.commands.commented = {
+    label: "commented",
+    argv: ["pnpm", "test:commented"],
+    packageScript: "test:commented",
+  };
+  contract.profiles.full.push("cycle", "unsafe", "backgrounded", "commented");
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
@@ -305,6 +340,10 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
   assert.match(
     errors,
     /package script test:backgrounded uses unsupported shell syntax near "&"/,
+  );
+  assert.match(
+    errors,
+    /package script test:commented uses unsupported shell comment syntax near "#"/,
   );
 });
 
@@ -319,6 +358,7 @@ test("pins required full-gate commands independently of the command inventory", 
     "rust-tests",
     "frontend-typecheck",
     "frontend-build",
+    "browser-install",
   ]) {
     delete contract.commands[commandId];
     contract.profiles.full = contract.profiles.full.filter(
@@ -334,6 +374,7 @@ test("pins required full-gate commands independently of the command inventory", 
     "rust-tests",
     "frontend-typecheck",
     "frontend-build",
+    "browser-install",
   ]) {
     assert.match(
       errors,
@@ -350,6 +391,14 @@ test("pins the semantics of required full-gate commands", (t) => {
   contract.commands["rust-clippy"].argv = ["cargo", "clippy"];
   contract.commands["frontend-build"].packageScript = "typecheck";
   contract.commands["frontend-build"].argv = ["pnpm", "typecheck"];
+  contract.commands["browser-install"].argv = [
+    "pnpm",
+    "exec",
+    "playwright",
+    "install",
+    "chromium",
+  ];
+  contract.commands["browser-install"].installsBrowser = false;
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
@@ -364,6 +413,14 @@ test("pins the semantics of required full-gate commands", (t) => {
   assert.match(
     errors,
     /required command frontend-build must own package script build, received "typecheck"/,
+  );
+  assert.match(
+    errors,
+    /required command browser-install argv must be pnpm exec playwright install --with-deps chromium/,
+  );
+  assert.match(
+    errors,
+    /required command browser-install must declare installsBrowser: true/,
   );
 });
 
@@ -397,6 +454,6 @@ test("requires browser installation before browser validation", (t) => {
 
   assert.match(
     validateValidationContract(root).join("\n"),
-    /browser command browser must follow a command with installsBrowser in the full profile/,
+    /browser command browser must follow required command browser-install in the full profile/,
   );
 });

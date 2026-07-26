@@ -307,29 +307,65 @@ function rustTokens(content) {
   return tokens;
 }
 
+const rustClosingDelimiter = new Map([
+  ["(", ")"],
+  ["[", "]"],
+  ["{", "}"],
+]);
+
+function matchingRustDelimiter(tokens, opening) {
+  if (!rustClosingDelimiter.has(tokens[opening]?.value)) return null;
+  const stack = [];
+  for (let index = opening; index < tokens.length; index += 1) {
+    const value = tokens[index].value;
+    if (rustClosingDelimiter.has(value)) {
+      stack.push(rustClosingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (stack.at(-1) !== value) return null;
+      stack.pop();
+      if (stack.length === 0) return index;
+    }
+  }
+  return null;
+}
+
+function splitTopLevel(tokens, separator) {
+  const groups = [];
+  let start = 0;
+  const stack = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const value = tokens[index].value;
+    if (rustClosingDelimiter.has(value)) {
+      stack.push(rustClosingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (stack.at(-1) !== value) return null;
+      stack.pop();
+    } else if (value === separator && stack.length === 0) {
+      groups.push(tokens.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (stack.length > 0) return null;
+  groups.push(tokens.slice(start));
+  return groups;
+}
+
 function macroInvocation(tokens, index, name) {
   if (
     tokens[index]?.type !== "ident" ||
     tokens[index].value !== name ||
     tokens[index + 1]?.value !== "!" ||
-    tokens[index + 2]?.value !== "("
+    !rustClosingDelimiter.has(tokens[index + 2]?.value)
   ) {
     return null;
   }
-  let depth = 0;
-  for (let cursor = index + 2; cursor < tokens.length; cursor += 1) {
-    if (tokens[cursor].value === "(") depth += 1;
-    if (tokens[cursor].value === ")") {
-      depth -= 1;
-      if (depth === 0) {
-        return {
-          arguments: tokens.slice(index + 3, cursor),
-          end: cursor + 1,
-        };
-      }
-    }
-  }
-  return { arguments: null, end: tokens.length };
+  const closing = matchingRustDelimiter(tokens, index + 2);
+  return closing === null
+    ? { arguments: null, end: tokens.length }
+    : {
+        arguments: tokens.slice(index + 3, closing),
+        end: closing + 1,
+      };
 }
 
 function singleStringArgument(tokens) {
@@ -341,7 +377,242 @@ function singleStringArgument(tokens) {
     : null;
 }
 
-function inventoryFromRust(root, inventoryFile, errors) {
+function hasCfgAttribute(tokens) {
+  return tokens.some(
+    (token, index) =>
+      token.value === "#" &&
+      tokens[index + 1]?.value === "[" &&
+      ["cfg", "cfg_attr"].includes(tokens[index + 2]?.value),
+  );
+}
+
+function namedFunctionBody(tokens, functionName, inventoryFile, errors) {
+  const matches = [];
+  for (let index = 0; index + 2 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "fn" ||
+      tokens[index + 1]?.type !== "ident" ||
+      tokens[index + 1].value !== functionName
+    ) {
+      continue;
+    }
+    let opening = index + 2;
+    while (
+      opening < tokens.length &&
+      !["{", ";"].includes(tokens[opening].value)
+    ) {
+      opening += 1;
+    }
+    if (tokens[opening]?.value !== "{") continue;
+    const closing = matchingRustDelimiter(tokens, opening);
+    if (closing === null) {
+      errors.push(`${inventoryFile} has an unterminated ${functionName} function`);
+      continue;
+    }
+    matches.push({ functionIndex: index, start: opening + 1, end: closing });
+    index = closing;
+  }
+  if (matches.length !== 1) {
+    errors.push(
+      `${inventoryFile} must define exactly one ${functionName} inventory function; found ${matches.length}`,
+    );
+    return null;
+  }
+  return matches[0];
+}
+
+function tailVectorInvocation(tokens, body, functionName, inventoryFile, errors) {
+  const matches = [];
+  for (let index = body.start; index < body.end; index += 1) {
+    const invocation = macroInvocation(tokens, index, "vec");
+    if (!invocation?.arguments || invocation.end !== body.end) continue;
+    matches.push({ ...invocation, tokenIndex: index });
+  }
+  if (matches.length !== 1) {
+    errors.push(
+      `${inventoryFile} ${functionName} must return exactly one direct vec![...] inventory expression`,
+    );
+    return null;
+  }
+  return matches[0];
+}
+
+function macroRulesDefinition(tokens, start, end, name, inventoryFile, errors) {
+  const matches = [];
+  for (let index = start; index + 3 < end; index += 1) {
+    if (
+      tokens[index].value !== "macro_rules" ||
+      tokens[index + 1]?.value !== "!" ||
+      tokens[index + 2]?.value !== name ||
+      !rustClosingDelimiter.has(tokens[index + 3]?.value)
+    ) {
+      continue;
+    }
+    const closing = matchingRustDelimiter(tokens, index + 3);
+    if (closing === null || closing >= end) {
+      errors.push(`${inventoryFile} has an unterminated macro_rules! ${name} definition`);
+      continue;
+    }
+    matches.push({
+      start: index,
+      end: closing + 1,
+      body: tokens.slice(index + 4, closing),
+    });
+    index = closing;
+  }
+  if (matches.length !== 1) {
+    errors.push(
+      `${inventoryFile} inventory function must define exactly one macro_rules! ${name}; found ${matches.length}`,
+    );
+    return null;
+  }
+  return matches[0];
+}
+
+function dynamicSkillInclude(argumentTokens, variableName) {
+  const concat = macroInvocation(argumentTokens, 0, "concat");
+  if (!concat?.arguments || concat.end !== argumentTokens.length) return null;
+  const groups = splitTopLevel(concat.arguments, ",");
+  if (groups === null) return null;
+  if (groups.at(-1)?.length === 0) groups.pop();
+  if (
+    groups.length !== 3 ||
+    groups[0].length !== 1 ||
+    groups[0][0].type !== "string" ||
+    groups[1].length !== 2 ||
+    groups[1][0].value !== "$" ||
+    groups[1][1].value !== variableName ||
+    groups[2].length !== 1 ||
+    groups[2][0].type !== "string"
+  ) {
+    return null;
+  }
+  return [groups[0][0].value, groups[2][0].value];
+}
+
+function bundledSkillInclude(definition, inventoryFile, errors) {
+  const body = definition.body;
+  const arrows = [];
+  const stack = [];
+  for (let index = 0; index + 1 < body.length; index += 1) {
+    const value = body[index].value;
+    if (rustClosingDelimiter.has(value)) {
+      stack.push(rustClosingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (stack.at(-1) !== value) break;
+      stack.pop();
+    } else if (
+      value === "=" &&
+      body[index + 1].value === ">" &&
+      stack.length === 0
+    ) {
+      arrows.push(index);
+    }
+  }
+  if (arrows.length !== 1) {
+    errors.push(
+      `${inventoryFile} skill! macro must contain exactly one unconditional expansion arm`,
+    );
+    return null;
+  }
+
+  const arrow = arrows[0];
+  const pattern = body.slice(0, arrow);
+  if (
+    pattern.length !== 6 ||
+    pattern[0].value !== "(" ||
+    pattern[1].value !== "$" ||
+    pattern[2].type !== "ident" ||
+    pattern[3].value !== ":" ||
+    pattern[4].value !== "literal" ||
+    pattern[5].value !== ")"
+  ) {
+    errors.push(
+      `${inventoryFile} skill! macro must match exactly one literal skill id`,
+    );
+    return null;
+  }
+  const variableName = pattern[2].value;
+  const expansionOpening = arrow + 2;
+  if (!rustClosingDelimiter.has(body[expansionOpening]?.value)) {
+    errors.push(`${inventoryFile} skill! macro expansion must be a delimited expression`);
+    return null;
+  }
+  const expansionClosing = matchingRustDelimiter(body, expansionOpening);
+  const trailing = expansionClosing === null
+    ? []
+    : body.slice(expansionClosing + 1).filter((token) => token.value !== ";");
+  if (expansionClosing === null || trailing.length !== 0) {
+    errors.push(`${inventoryFile} skill! macro has unsupported tokens after its expansion`);
+    return null;
+  }
+
+  const expansion = body.slice(expansionOpening + 1, expansionClosing);
+  if (
+    expansion[0]?.value !== "SkillFile" ||
+    expansion[1]?.value !== "{"
+  ) {
+    errors.push(
+      `${inventoryFile} skill! macro must expand directly to a SkillFile struct`,
+    );
+    return null;
+  }
+  const structClosing = matchingRustDelimiter(expansion, 1);
+  if (structClosing !== expansion.length - 1) {
+    errors.push(
+      `${inventoryFile} skill! macro must return only the constructed SkillFile`,
+    );
+    return null;
+  }
+  const fields = splitTopLevel(expansion.slice(2, structClosing), ",");
+  if (fields === null) {
+    errors.push(`${inventoryFile} skill! macro has malformed SkillFile fields`);
+    return null;
+  }
+  const contentFields = fields.filter(
+    (field) => field[0]?.value === "content" && field[1]?.value === ":",
+  );
+  if (contentFields.length !== 1) {
+    errors.push(
+      `${inventoryFile} skill! macro must define exactly one content field; found ${contentFields.length}`,
+    );
+    return null;
+  }
+
+  const expression = contentFields[0].slice(2);
+  const include = macroInvocation(expression, 0, "include_str");
+  const suffix = include?.arguments
+    ? expression.slice(include.end).map((token) => token.value)
+    : [];
+  if (
+    !include?.arguments ||
+    JSON.stringify(suffix) !==
+      JSON.stringify([".", "to_string", "(", ")"])
+  ) {
+    errors.push(
+      `${inventoryFile} skill! content field must be include_str!(...).to_string()`,
+    );
+    return null;
+  }
+  const dynamic = dynamicSkillInclude(include.arguments, variableName);
+  if (dynamic === null) {
+    errors.push(
+      `${inventoryFile} skill! content include_str! must derive its path from the literal skill id`,
+    );
+    return null;
+  }
+  return {
+    dynamic,
+    includeIndex: expression[0].index,
+  };
+}
+
+function inventoryFromRust(
+  root,
+  inventoryFile,
+  functionName,
+  errors,
+) {
   const absolute = resolveInside(
     root,
     inventoryFile,
@@ -352,17 +623,58 @@ function inventoryFromRust(root, inventoryFile, errors) {
     if (absolute) {
       errors.push(`bundled skill inventory is missing at ${inventoryFile}`);
     }
-    return new Set();
+    return {
+      ids: new Set(),
+      references: [],
+      verifiedDynamicIncludes: new Set(),
+    };
   }
   const content = readFileSync(absolute, "utf8");
   const tokens = rustTokens(content);
+  const body = namedFunctionBody(tokens, functionName, inventoryFile, errors);
+  if (body === null) {
+    return {
+      ids: new Set(),
+      references: [],
+      verifiedDynamicIncludes: new Set(),
+    };
+  }
+  const vector = tailVectorInvocation(
+    tokens,
+    body,
+    functionName,
+    inventoryFile,
+    errors,
+  );
+  if (vector?.arguments && hasCfgAttribute(vector.arguments)) {
+    errors.push(
+      `${inventoryFile} ${functionName} returned inventory must not use conditional compilation; bundled inventory must be release-invariant`,
+    );
+  }
   const ids = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const invocation = macroInvocation(tokens, index, "skill");
-    if (!invocation?.arguments) continue;
-    const skillId = singleStringArgument(invocation.arguments);
-    if (skillId !== null) ids.push(skillId);
-    index = invocation.end - 1;
+  if (vector?.arguments) {
+    const entries = splitTopLevel(vector.arguments, ",");
+    if (entries === null) {
+      errors.push(`${inventoryFile} ${functionName} has malformed vec! entries`);
+    } else {
+      for (const entry of entries.filter((candidate) => candidate.length > 0)) {
+        const invocation = macroInvocation(entry, 0, "skill");
+        if (!invocation?.arguments || invocation.end !== entry.length) {
+          errors.push(
+            `${inventoryFile} ${functionName} inventory entries must be direct skill!("id") expressions`,
+          );
+          continue;
+        }
+        const skillId = singleStringArgument(invocation.arguments);
+        if (skillId === null) {
+          errors.push(
+            `${inventoryFile} ${functionName} skill! entries must contain one string literal`,
+          );
+        } else {
+          ids.push(skillId);
+        }
+      }
+    }
   }
   const unique = new Set(ids);
   if (ids.length === 0) {
@@ -371,10 +683,46 @@ function inventoryFromRust(root, inventoryFile, errors) {
   if (unique.size !== ids.length) {
     errors.push(`${inventoryFile} contains duplicate bundled skill inventory entries`);
   }
-  return unique;
+  const definition = macroRulesDefinition(
+    tokens,
+    body.start,
+    vector?.tokenIndex ?? body.end,
+    "skill",
+    inventoryFile,
+    errors,
+  );
+  const verifiedInclude = definition
+    ? bundledSkillInclude(definition, inventoryFile, errors)
+    : null;
+  const references = [];
+  const verifiedDynamicIncludes = new Set();
+  if (verifiedInclude) {
+    verifiedDynamicIncludes.add(`${absolute}\0${verifiedInclude.includeIndex}`);
+    for (const skillId of unique) {
+      const target = resolve(
+        dirname(absolute),
+        `${verifiedInclude.dynamic[0]}${skillId}${verifiedInclude.dynamic[1]}`,
+      );
+      references.push({ source: absolute, target });
+      if (!existsSync(target)) {
+        errors.push(
+          `${inventoryFile} skill! content target for ${skillId} is missing: ${relativePath(
+            root,
+            target,
+          )}`,
+        );
+      }
+    }
+  }
+  return { ids: unique, references, verifiedDynamicIncludes };
 }
 
-function checkRustIncludes(root, sourceRoots, inventory, errors) {
+function checkRustIncludes(
+  root,
+  sourceRoots,
+  verifiedDynamicIncludes,
+  errors,
+) {
   const references = [];
   for (const sourceRoot of sourceRoots ?? []) {
     const absoluteRoot = resolveInside(
@@ -418,46 +766,8 @@ function checkRustIncludes(root, sourceRoots, inventory, errors) {
           continue;
         }
 
-        const concat = macroInvocation(include.arguments, 0, "concat");
-        const args = concat?.arguments;
-        const dynamic =
-          args &&
-          args.length === 7 &&
-          args[0].type === "string" &&
-          args[1].value === "," &&
-          args[2].value === "$" &&
-          args[3].value === "name" &&
-          args[4].value === "," &&
-          args[5].type === "string" &&
-          args[6].value === ","
-            ? [args[0].value, args[5].value]
-            : args &&
-                args.length === 6 &&
-                args[0].type === "string" &&
-                args[1].value === "," &&
-                args[2].value === "$" &&
-                args[3].value === "name" &&
-                args[4].value === "," &&
-                args[5].type === "string"
-              ? [args[0].value, args[5].value]
-              : null;
-        if (dynamic && concat.end === include.arguments.length) {
-          for (const skillId of inventory) {
-            const target = resolve(dirname(file), `${dynamic[0]}${skillId}${dynamic[1]}`);
-            references.push({ source: file, target });
-            if (!existsSync(target)) {
-              errors.push(
-                `${relativePath(
-                  root,
-                  file,
-                )} dynamic include_str! target for ${skillId} is missing: ${relativePath(
-                  root,
-                  target,
-                )}`,
-              );
-            }
-          }
-        } else {
+        const includeKey = `${file}\0${tokens[index].index}`;
+        if (!verifiedDynamicIncludes.has(includeKey)) {
           errors.push(
             `${relativePath(root, file)} has an unsupported include_str! expression; extend the harness checker before adding it`,
           );
@@ -544,6 +854,13 @@ export function validateAgentAssets(
 
   const skillConfig = contract.skills ?? {};
   const prefix = skillConfig.projectionPrefix ?? "";
+  if (skillConfig.inventoryFunction !== "bundled_skills") {
+    errors.push(
+      `skill inventoryFunction must be bundled_skills, received ${JSON.stringify(
+        skillConfig.inventoryFunction,
+      )}`,
+    );
+  }
   const owners = discoverSkills(
     root,
     skillConfig.ownerRoot,
@@ -551,11 +868,13 @@ export function validateAgentAssets(
     errors,
     "skill owner root",
   );
-  const inventory = inventoryFromRust(
+  const bundled = inventoryFromRust(
     root,
     skillConfig.inventoryFile,
+    "bundled_skills",
     errors,
   );
+  const inventory = bundled.ids;
   const projectionsByDirectory = discoverSkills(
     root,
     skillConfig.projectionRoot,
@@ -630,17 +949,28 @@ export function validateAgentAssets(
       errors.push(`skill discovery projection is missing at ${discovery.path}`);
     } else if (path) {
       const metadata = lstatSync(path);
-      if (!metadata.isSymbolicLink()) {
-        errors.push(
-          `skill discovery projection ${discovery.path} must be a symlink to ${discovery.target}`,
-        );
-      } else {
+      if (metadata.isSymbolicLink()) {
         const target = readlinkSync(path);
         if (target !== discovery.target) {
           errors.push(
             `skill discovery projection ${discovery.path} points to ${target}; expected ${discovery.target}`,
           );
         }
+      } else if (metadata.isFile()) {
+        const target = readFileSync(path, "utf8");
+        if (target !== discovery.target) {
+          errors.push(
+            `skill discovery projection ${discovery.path} contains ${JSON.stringify(
+              target,
+            )}; expected Git flattened symlink target ${JSON.stringify(
+              discovery.target,
+            )}`,
+          );
+        }
+      } else {
+        errors.push(
+          `skill discovery projection ${discovery.path} must be a symlink or Git flattened symlink file targeting ${discovery.target}`,
+        );
       }
     }
   }
@@ -661,12 +991,15 @@ export function validateAgentAssets(
     );
   }
 
-  const includeReferences = checkRustIncludes(
-    root,
-    contract.rustSourceRoots,
-    inventory,
-    errors,
-  );
+  const includeReferences = [
+    ...bundled.references,
+    ...checkRustIncludes(
+      root,
+      contract.rustSourceRoots,
+      bundled.verifiedDynamicIncludes,
+      errors,
+    ),
+  ];
   for (const owner of owners.values()) {
     const ownerFile = resolve(root, owner.manifestPath);
     const ownerIncludes = includeReferences.filter(
