@@ -70,17 +70,11 @@ describe("desktop event subscription", () => {
     expect(handlers.onRateLimitChanged).toHaveBeenCalledOnce();
     expect(() => unsubscribe()).not.toThrow();
     unsubscribe();
-    expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([
-      1, 1, 1,
-    ]);
+    expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([1, 1, 1]);
   });
 
   it("cleans late and partial registrations after an early Strict Mode teardown", async () => {
-    const registrations = [
-      deferred<() => void>(),
-      deferred<() => void>(),
-      deferred<() => void>(),
-    ];
+    const registrations = [deferred<() => void>(), deferred<() => void>(), deferred<() => void>()];
     const unlisteners = [vi.fn(), vi.fn()];
     eventMocks.listen
       .mockReturnValueOnce(registrations[0].promise)
@@ -100,9 +94,7 @@ describe("desktop event subscription", () => {
     registrations[2].resolve(unlisteners[1]);
     await flushRegistration();
 
-    expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([
-      1, 1,
-    ]);
+    expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([1, 1]);
     expect(handlers.onError).not.toHaveBeenCalled();
 
     registrations[1].reject(new Error("event bridge unavailable"));
@@ -111,11 +103,7 @@ describe("desktop event subscription", () => {
   });
 
   it("reports one active registration failure and cleans late listeners", async () => {
-    const registrations = [
-      deferred<() => void>(),
-      deferred<() => void>(),
-      deferred<() => void>(),
-    ];
+    const registrations = [deferred<() => void>(), deferred<() => void>(), deferred<() => void>()];
     const unlisteners = [vi.fn(), vi.fn()];
     eventMocks.listen
       .mockReturnValueOnce(registrations[0].promise)

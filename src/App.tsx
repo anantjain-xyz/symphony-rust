@@ -1,11 +1,4 @@
-import {
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject, SetStateAction } from "react";
 import type {
   AgentEventRow,
@@ -66,14 +59,8 @@ import {
   type PollController,
   type PollResourceState,
 } from "./pollController";
-import {
-  SettingsValidationController,
-} from "./settingsValidationController";
-import {
-  ChunkErrorBoundary,
-  ViewLoading,
-  createLazyAttempts,
-} from "./ChunkBoundary";
+import type { SettingsValidationController } from "./settingsValidationController";
+import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "./ChunkBoundary";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -84,11 +71,10 @@ function cachedImport<T>(importer: () => Promise<T>) {
   let promise: Promise<T> | null = null;
   return () => {
     if (!promise) {
-      promise = importer()
-        .catch((error) => {
-          promise = null;
-          throw error;
-        });
+      promise = importer().catch((error) => {
+        promise = null;
+        throw error;
+      });
     }
     return promise;
   };
@@ -116,9 +102,7 @@ export function useDeferredUpdater(
   enabled: boolean,
   loader: () => Promise<AppUpdateModule> = loadAppUpdate,
 ) {
-  const [Component, setComponent] = useState<AppUpdateModule["AppUpdateFeature"] | null>(
-    null,
-  );
+  const [Component, setComponent] = useState<AppUpdateModule["AppUpdateFeature"] | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -173,8 +157,7 @@ const POLL_LABELS: Record<PollKey, string> = {
 
 const THEME_STORAGE_KEY = "symphony-theme";
 const IS_LOCAL_DEV = import.meta.env.DEV;
-const DASHBOARD_COMMAND_TRACE_ENABLED =
-  IS_LOCAL_DEV && import.meta.env.MODE !== "test";
+const DASHBOARD_COMMAND_TRACE_ENABLED = IS_LOCAL_DEV && import.meta.env.MODE !== "test";
 const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
   "overview",
   "runs",
@@ -269,9 +252,7 @@ type DashboardResourceData = {
 };
 
 type DashboardResourceEnvelopes = {
-  [Key in DashboardResourceKey]: DashboardResourceEnvelope<
-    DashboardResourceData[Key]
-  >;
+  [Key in DashboardResourceKey]: DashboardResourceEnvelope<DashboardResourceData[Key]>;
 };
 
 const RESOURCE_LABELS: Record<DashboardResourceKey, string> = {
@@ -317,14 +298,10 @@ export async function loadDashboardSnapshot({
     desktopCommands.listRuns(),
     desktopCommands.listIssues(),
     desktopCommands.getWorkerStatus(),
-    selectedRunId
-      ? desktopCommands.getRunDetail(selectedRunId)
-      : Promise.resolve(null),
+    selectedRunId ? desktopCommands.getRunDetail(selectedRunId) : Promise.resolve(null),
     desktopCommands.getRetroStatus(),
     desktopCommands.listRetros(),
-    selectedRetroId
-      ? desktopCommands.getRetroDetail(selectedRetroId)
-      : Promise.resolve(null),
+    selectedRetroId ? desktopCommands.getRetroDetail(selectedRetroId) : Promise.resolve(null),
     desktopCommands.hasInProgressRetroBatches(),
   ]);
 
@@ -469,15 +446,10 @@ function retroDetailRenderedFields(detail: RetroDetail | null | undefined) {
 }
 
 function stableSessionEnvKey(env: AppSettings["session_env"]): string {
-  return JSON.stringify(
-    Object.entries(env).sort(([left], [right]) => left.localeCompare(right)),
-  );
+  return JSON.stringify(Object.entries(env).sort(([left], [right]) => left.localeCompare(right)));
 }
 
-function skillsCheckContextKey(
-  repoUrl: string,
-  sessionEnv: AppSettings["session_env"],
-): string {
+function skillsCheckContextKey(repoUrl: string, sessionEnv: AppSettings["session_env"]): string {
   return `${repoUrl}\n${stableSessionEnvKey(sessionEnv)}`;
 }
 
@@ -510,14 +482,14 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [linearViewer, setLinearViewer] = useState<LinearViewerProfile | null>(null);
   const [linearViewerLoading, setLinearViewerLoading] = useState(false);
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
-  const [dashboardResources, setDashboardResources] =
-    useState<DashboardResourceEnvelopes>(createInitialDashboardResources);
+  const [dashboardResources, setDashboardResources] = useState<DashboardResourceEnvelopes>(
+    createInitialDashboardResources,
+  );
   const overview = dashboardResources.overview.data ?? emptyOverview;
   const runs = dashboardResources.runs.data ?? [];
   const issues = dashboardResources.issues.data ?? [];
   const retros = dashboardResources.retroList.data?.retros ?? [];
-  const retroStatus =
-    dashboardResources.retroList.data?.retroStatus ?? emptyRetroStatus;
+  const retroStatus = dashboardResources.retroList.data?.retroStatus ?? emptyRetroStatus;
   const worker = dashboardResources.worker.data ?? {
     state: "stopped",
     started_at: null,
@@ -529,9 +501,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [error, setError] = useState<string | null>(null);
   const [resourceAnnouncement, setResourceAnnouncement] =
     useState<ResourceFailureAnnouncement | null>(null);
-  const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<
-    Set<DashboardResourceKey>
-  >(() => new Set());
+  const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<Set<DashboardResourceKey>>(
+    () => new Set(),
+  );
   const [busy, setBusy] = useState(false);
   const [bootState, setBootState] = useState<BootState>({ status: "loading" });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
@@ -542,22 +514,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const [skillsStatuses, setSkillsStatuses] = useState<Record<string, SkillsStatus>>({});
   const [skillsChecking, setSkillsChecking] = useState<Record<string, boolean>>({});
   const [skillsInstall, setSkillsInstall] = useState<SkillsInstallStatus | null>(null);
-  const [workflowStatuses, setWorkflowStatuses] = useState<
-    Record<string, RepoWorkflowStatus>
-  >({});
+  const [workflowStatuses, setWorkflowStatuses] = useState<Record<string, RepoWorkflowStatus>>({});
   const [workflowReadinessEpoch, setWorkflowReadinessEpoch] = useState(0);
   const [workflowChecking, setWorkflowChecking] = useState<Record<string, boolean>>({});
-  const [workflowTransfer, setWorkflowTransfer] =
-    useState<WorkflowTransferStatus | null>(null);
-  const [pollingStates, setPollingStates] = useState<
-    Partial<Record<PollKey, PollResourceState>>
-  >({});
-  const hasInProgressRetroBatches =
-    dashboardResources.retroBatches.data ?? false;
-  const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
-  const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(
-    () => new Set(),
+  const [workflowTransfer, setWorkflowTransfer] = useState<WorkflowTransferStatus | null>(null);
+  const [pollingStates, setPollingStates] = useState<Partial<Record<PollKey, PollResourceState>>>(
+    {},
   );
+  const hasInProgressRetroBatches = dashboardResources.retroBatches.data ?? false;
+  const [stoppingRunIds, setStoppingRunIds] = useState<Set<string>>(() => new Set());
+  const [triggeringRetryIds, setTriggeringRetryIds] = useState<Set<string>>(() => new Set());
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmStopTimer = useRef<number | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
@@ -583,15 +549,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   const selectedRunIdRef = useRef<string | null>(null);
   const selectedRetroIdRef = useRef<string | null>(null);
-  const previewRuntimeRef = useRef<
-    typeof import("./preview/runtime")["previewRuntime"] | null
-  >(null);
+  const previewRuntimeRef = useRef<typeof import("./preview/runtime")["previewRuntime"] | null>(
+    null,
+  );
   const viewRef = useRef<View>(view);
   viewRef.current = view;
   const dirtyResourcesRef = useRef<Set<DashboardResourceKey>>(new Set());
-  const dirtyResourceVersionsRef = useRef<Partial<Record<DashboardResourceKey, number>>>(
-    {},
-  );
+  const dirtyResourceVersionsRef = useRef<Partial<Record<DashboardResourceKey, number>>>({});
   const selectedRunRef = useRef<RunDetail | null>(selectedRun);
   selectedRunRef.current = selectedRun;
   const workflowReadinessDirtyRef = useRef(false);
@@ -607,17 +571,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const queueRepoStatusRefreshRef = useRef<(target: AppSettings) => void>(() => undefined);
   const linearViewerSeq = useRef(0);
   const pollControllers = useRef<Partial<Record<PollKey, PollController>>>({});
-  const refreshAffordanceTimers = useRef(
-    new Map<DashboardResourceKey, number>(),
-  );
+  const refreshAffordanceTimers = useRef(new Map<DashboardResourceKey, number>());
   const userRetryKeys = useRef(new Set<DashboardResourceKey>());
   const userFailureAnnouncedKeys = useRef(new Set<DashboardResourceKey>());
   const resourceAnnouncementSequence = useRef(0);
   const dashboardResourcesRef = useRef(dashboardResources);
   dashboardResourcesRef.current = dashboardResources;
-  const dashboardResourceValues = useRef(
-    new Map<DashboardResourceKey, unknown>(),
-  );
+  const dashboardResourceValues = useRef(new Map<DashboardResourceKey, unknown>());
 
   function updateDashboardResource<Key extends DashboardResourceKey>(
     key: Key,
@@ -651,17 +611,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     }));
   }
 
-  const setOverview = (update: SetStateAction<Overview>) =>
-    setResourceData("overview", update);
-  const setRuns = (update: SetStateAction<RunWithIssueRow[]>) =>
-    setResourceData("runs", update);
-  const setWorker = (update: SetStateAction<WorkerStatus>) =>
-    setResourceData("worker", update);
+  const setOverview = (update: SetStateAction<Overview>) => setResourceData("overview", update);
+  const setRuns = (update: SetStateAction<RunWithIssueRow[]>) => setResourceData("runs", update);
+  const setWorker = (update: SetStateAction<WorkerStatus>) => setResourceData("worker", update);
   const setRetroStatus = (update: SetStateAction<RetroStatus>) =>
     setResourceData("retroList", (current) => ({
       ...current,
-      retroStatus:
-        typeof update === "function" ? update(current.retroStatus) : update,
+      retroStatus: typeof update === "function" ? update(current.retroStatus) : update,
     }));
   const setRetros = (update: SetStateAction<RetroRow[]>) =>
     setResourceData("retroList", (current) => ({
@@ -681,20 +637,14 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     now = new Date().toISOString(),
   ) {
     dashboardResourceValues.current.set(key, data);
-    updateDashboardResource(key, (resource) =>
-      completeResourceRefresh(resource, data, now),
-    );
+    updateDashboardResource(key, (resource) => completeResourceRefresh(resource, data, now));
     userFailureAnnouncedKeys.current.delete(key);
-    setResourceAnnouncement((current) =>
-      current?.key === key ? null : current,
-    );
+    setResourceAnnouncement((current) => (current?.key === key ? null : current));
   }
 
   function resetDashboardResource<Key extends DashboardResourceKey>(key: Key) {
     dashboardResourceValues.current.delete(key);
-    updateDashboardResource(key, () =>
-      createResourceEnvelope<DashboardResourceData[Key]>(),
-    );
+    updateDashboardResource(key, () => createResourceEnvelope<DashboardResourceData[Key]>());
   }
 
   function beginDashboardResourceRefresh(key: DashboardResourceKey) {
@@ -737,9 +687,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     );
     const hasData = hasResourceData(current);
     const shouldAnnounce =
-      hasData &&
-      (newlySurfaced ||
-        (userInitiated && !userFailureAnnouncedKeys.current.has(key)));
+      hasData && (newlySurfaced || (userInitiated && !userFailureAnnouncedKeys.current.has(key)));
     if (shouldAnnounce) {
       if (userInitiated) userFailureAnnouncedKeys.current.add(key);
       setResourceAnnouncement({
@@ -757,26 +705,20 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     commitResourceSuccess("runs", snapshot.runs, now);
     commitResourceSuccess("issues", snapshot.issues, now);
     commitResourceSuccess("worker", snapshot.worker, now);
-    commitResourceSuccess("retroList", {
-      retroStatus: snapshot.retroStatus,
-      retros: snapshot.retros,
-    }, now);
     commitResourceSuccess(
-      "retroBatches",
-      snapshot.hasInProgressRetroBatches,
+      "retroList",
+      {
+        retroStatus: snapshot.retroStatus,
+        retros: snapshot.retros,
+      },
       now,
     );
-    if (
-      snapshot.requestedRunId &&
-      snapshot.requestedRunId === selectedRunIdRef.current
-    ) {
+    commitResourceSuccess("retroBatches", snapshot.hasInProgressRetroBatches, now);
+    if (snapshot.requestedRunId && snapshot.requestedRunId === selectedRunIdRef.current) {
       commitResourceSuccess("selectedRun", snapshot.selectedRun, now);
       if (!snapshot.selectedRun) selectedRunIdRef.current = null;
     }
-    if (
-      snapshot.requestedRetroId &&
-      snapshot.requestedRetroId === selectedRetroIdRef.current
-    ) {
+    if (snapshot.requestedRetroId && snapshot.requestedRetroId === selectedRetroIdRef.current) {
       commitResourceSuccess("selectedRetro", snapshot.selectedRetro, now);
       if (!snapshot.selectedRetro) selectedRetroIdRef.current = null;
     } else if (!snapshot.requestedRetroId && selectedRetroIdRef.current === null) {
@@ -792,8 +734,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   function markResourceDirty(key: DashboardResourceKey) {
     dirtyResourcesRef.current.add(key);
-    dirtyResourceVersionsRef.current[key] =
-      (dirtyResourceVersionsRef.current[key] ?? 0) + 1;
+    dirtyResourceVersionsRef.current[key] = (dirtyResourceVersionsRef.current[key] ?? 0) + 1;
     updateDashboardResource(key, (resource) =>
       markEnvelopeDirty(resource, new Date().toISOString()),
     );
@@ -823,6 +764,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       instrumentation: { enabled: DASHBOARD_COMMAND_TRACE_ENABLED },
     });
   }
+  const dashboardCoordinator = dashboardRefreshCoordinator.current;
 
   dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
@@ -835,140 +777,120 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         if (isAuthoritative(key)) beginDashboardResourceRefresh(key);
         try {
           switch (key) {
-          case "overview": {
-            const next = await loadDashboardResource(
-              key,
-              desktopCommands.getOverview,
-            );
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("overview", next);
+            case "overview": {
+              const next = await loadDashboardResource(key, desktopCommands.getOverview);
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("overview", next);
+              }
+              break;
             }
-            break;
-          }
-          case "runs": {
-            const next = await loadDashboardResource(
-              key,
-              desktopCommands.listRuns,
-            );
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("runs", next);
+            case "runs": {
+              const next = await loadDashboardResource(key, desktopCommands.listRuns);
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("runs", next);
+              }
+              break;
             }
-            break;
-          }
-          case "issues": {
-            const next = await loadDashboardResource(
-              key,
-              desktopCommands.listIssues,
-            );
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("issues", next);
-              const byId = new Map(next.map((issue) => [issue.id, issue]));
-              const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
-                const issue = byId.get(run.issue_id);
-                return issue
-                  ? { ...run, issue_title: issue.title, issue_state: issue.state }
-                  : run;
-              };
-              setRuns((current) => current.map(updateRunIssue));
-              setSelectedRun((current) =>
-                current ? { ...current, run: updateRunIssue(current.run) } : current,
+            case "issues": {
+              const next = await loadDashboardResource(key, desktopCommands.listIssues);
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("issues", next);
+                const byId = new Map(next.map((issue) => [issue.id, issue]));
+                const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
+                  const issue = byId.get(run.issue_id);
+                  return issue
+                    ? { ...run, issue_title: issue.title, issue_state: issue.state }
+                    : run;
+                };
+                setRuns((current) => current.map(updateRunIssue));
+                setSelectedRun((current) =>
+                  current ? { ...current, run: updateRunIssue(current.run) } : current,
+                );
+              }
+              break;
+            }
+            case "worker": {
+              const next = await loadDashboardResource(key, desktopCommands.getWorkerStatus);
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("worker", next);
+              }
+              break;
+            }
+            case "retroList": {
+              const [nextStatus, nextRetros] = await Promise.all([
+                loadDashboardResource(key, desktopCommands.getRetroStatus),
+                loadDashboardResource(key, desktopCommands.listRetros),
+              ]);
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("retroList", {
+                  retroStatus: nextStatus,
+                  retros: nextRetros,
+                });
+                if (selectedRetroIdRef.current === null) {
+                  selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
+                  if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
+                    markResourceDirty("selectedRetro");
+                    void dashboardCoordinator.request(["selectedRetro"], {
+                      reportFailure: false,
+                    });
+                  }
+                }
+              }
+              break;
+            }
+            case "retroBatches": {
+              const next = await loadDashboardResource(
+                key,
+                desktopCommands.hasInProgressRetroBatches,
               );
-            }
-            break;
-          }
-          case "worker": {
-            const next = await loadDashboardResource(
-              key,
-              desktopCommands.getWorkerStatus,
-            );
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("worker", next);
-            }
-            break;
-          }
-          case "retroList": {
-            const [nextStatus, nextRetros] = await Promise.all([
-              loadDashboardResource(key, desktopCommands.getRetroStatus),
-              loadDashboardResource(key, desktopCommands.listRetros),
-            ]);
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("retroList", {
-                retroStatus: nextStatus,
-                retros: nextRetros,
-              });
-              if (selectedRetroIdRef.current === null) {
-                selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
-                if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
-                  markResourceDirty("selectedRetro");
-                  void dashboardRefreshCoordinator.current!.request(["selectedRetro"], {
-                    reportFailure: false,
-                  });
-                }
+              if (isAuthoritative(key)) {
+                commitResourceSuccess("retroBatches", next);
               }
+              break;
             }
-            break;
-          }
-          case "retroBatches": {
-            const next = await loadDashboardResource(
-              key,
-              desktopCommands.hasInProgressRetroBatches,
-            );
-            if (isAuthoritative(key)) {
-              commitResourceSuccess("retroBatches", next);
-            }
-            break;
-          }
-          case "selectedRun": {
-            if (!selectedRunId) break;
-            const appendVersion = localAppendVersionRef.current;
-            const next = await loadDashboardResource(
-              key,
-              () => desktopCommands.getRunDetail(selectedRunId),
-            );
-            if (
-              isAuthoritative(key) &&
-              selectedRunId === selectedRunIdRef.current
-            ) {
-              const current = selectedRunRef.current;
-              let committed = next;
-              if (
-                localAppendVersionRef.current !== appendVersion &&
-                current?.run.id === selectedRunId
-              ) {
-                if (!next) {
-                  committed = current;
-                } else {
-                  const eventIds = new Set(next.events.map((event) => event.id));
-                  committed = {
-                    ...next,
-                    events: [
-                      ...next.events,
-                      ...current.events.filter((event) => !eventIds.has(event.id)),
-                    ],
-                  };
+            case "selectedRun": {
+              if (!selectedRunId) break;
+              const appendVersion = localAppendVersionRef.current;
+              const next = await loadDashboardResource(key, () =>
+                desktopCommands.getRunDetail(selectedRunId),
+              );
+              if (isAuthoritative(key) && selectedRunId === selectedRunIdRef.current) {
+                const current = selectedRunRef.current;
+                let committed = next;
+                if (
+                  localAppendVersionRef.current !== appendVersion &&
+                  current?.run.id === selectedRunId
+                ) {
+                  if (!next) {
+                    committed = current;
+                  } else {
+                    const eventIds = new Set(next.events.map((event) => event.id));
+                    committed = {
+                      ...next,
+                      events: [
+                        ...next.events,
+                        ...current.events.filter((event) => !eventIds.has(event.id)),
+                      ],
+                    };
+                  }
                 }
+                selectedRunRef.current = committed;
+                commitResourceSuccess("selectedRun", committed);
+                if (!committed) selectedRunIdRef.current = null;
               }
-              selectedRunRef.current = committed;
-              commitResourceSuccess("selectedRun", committed);
-              if (!committed) selectedRunIdRef.current = null;
+              break;
             }
-            break;
-          }
-          case "selectedRetro": {
-            if (!selectedRetroId) break;
-            const next = await loadDashboardResource(
-              key,
-              () => desktopCommands.getRetroDetail(selectedRetroId),
-            );
-            if (
-              isAuthoritative(key) &&
-              selectedRetroId === selectedRetroIdRef.current
-            ) {
-              commitResourceSuccess("selectedRetro", next);
-              if (!next) selectedRetroIdRef.current = null;
+            case "selectedRetro": {
+              if (!selectedRetroId) break;
+              const next = await loadDashboardResource(key, () =>
+                desktopCommands.getRetroDetail(selectedRetroId),
+              );
+              if (isAuthoritative(key) && selectedRetroId === selectedRetroIdRef.current) {
+                commitResourceSuccess("selectedRetro", next);
+                if (!next) selectedRetroIdRef.current = null;
+              }
+              break;
             }
-            break;
-          }
           }
           if (
             isAuthoritative(key) &&
@@ -998,6 +920,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     }
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dependencies are ref-backed helpers intentionally held stable across renders.
   const requestInvalidatedResources = useCallback(
     (
       keys: Iterable<DashboardResourceKey>,
@@ -1012,7 +935,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         selectedRunIdRef.current,
         selectedRetroIdRef.current,
       );
-      return dashboardRefreshCoordinator.current!.request(fetchable, options);
+      return dashboardCoordinator.request(fetchable, options);
     },
     [],
   );
@@ -1021,11 +944,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
     [requestInvalidatedResources],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the coordinator and dirty tracker are stable ref-backed helpers.
   const retryDashboardResource = useCallback(async (key: DashboardResourceKey) => {
     userRetryKeys.current.add(key);
     markResourceDirty(key);
     try {
-      await dashboardRefreshCoordinator.current!.request([key], {
+      await dashboardCoordinator.request([key], {
         rejectOnFailure: true,
         reportFailure: false,
       });
@@ -1048,20 +972,18 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       userRetryKeys.current.delete(key);
     }
   }, []);
-  const markVisibleResourceStale = useCallback(
-    (key: DashboardResourceKey, nowMs: number) => {
-      const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
-        DashboardResourceData[typeof key]
-      >;
-      const next = staleDirtyResource(current, nowMs, true);
-      if (next === current) return;
-      updateDashboardResource(key, () => next);
-    },
-    [],
-  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the updater writes through refs and must keep stable callback identity.
+  const markVisibleResourceStale = useCallback((key: DashboardResourceKey, nowMs: number) => {
+    const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
+      DashboardResourceData[typeof key]
+    >;
+    const next = staleDirtyResource(current, nowMs, true);
+    if (next === current) return;
+    updateDashboardResource(key, () => next);
+  }, []);
   const pollDashboardResources = useCallback(
     async (keys: readonly DashboardResourceKey[]) => {
-      await dashboardRefreshCoordinator.current!.request(keys, {
+      await dashboardCoordinator.request(keys, {
         rejectOnFailure: true,
         reportFailure: false,
       });
@@ -1069,15 +991,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         keys.map((key) => [key, dashboardResourceValues.current.get(key)]),
       ) as Partial<Record<DashboardResourceKey, unknown>>;
     },
-    [],
+    [dashboardCoordinator],
   );
 
-  const updatePollingState = useCallback(
-    (key: PollKey, status: PollResourceState) => {
-      setPollingStates((current) => ({ ...current, [key]: status }));
-    },
-    [],
-  );
+  const updatePollingState = useCallback((key: PollKey, status: PollResourceState) => {
+    setPollingStates((current) => ({ ...current, [key]: status }));
+  }, []);
   const clearPollingState = useCallback((key: PollKey) => {
     setPollingStates((current) => {
       if (!(key in current)) return current;
@@ -1088,16 +1007,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }, []);
 
   useEffect(() => {
-    const coordinator = dashboardRefreshCoordinator.current!;
+    const coordinator = dashboardCoordinator;
     coordinator.activate();
     return () => {
       coordinator.dispose();
-      refreshAffordanceTimers.current.forEach((timer) =>
-        window.clearTimeout(timer),
-      );
+      refreshAffordanceTimers.current.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
       refreshAffordanceTimers.current.clear();
     };
-  }, []);
+  }, [dashboardCoordinator]);
 
   useEffect(() => {
     setStoppingRunIds((prev) => {
@@ -1118,6 +1037,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     if (bootState.status === "error") retryButtonRef.current?.focus();
   }, [bootState.status, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrapAttempt is an explicit retry trigger; snapshot commit reads current refs.
   useEffect(() => {
     if (runtimeAvailable) return;
     let cancelled = false;
@@ -1150,6 +1070,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     };
   }, [bootstrapAttempt, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrapAttempt intentionally restarts subscriptions; event helpers read current refs.
   useEffect(() => {
     if (!runtimeAvailable) return;
 
@@ -1229,10 +1150,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           setWorkflowReadinessEpoch((epoch) => epoch + 1);
         }
         let keys = resourcesForDbChange(payload.table);
-        if (
-          payload.table === "agent_events" &&
-          typedAgentEventAwaitingDbChangeRef.current
-        ) {
+        if (payload.table === "agent_events" && typedAgentEventAwaitingDbChangeRef.current) {
           typedAgentEventAwaitingDbChangeRef.current = false;
           // Mark selectedRun dirty to supersede any in-flight get_run_detail
           // that may have read the pre-append event list, but don't fetch —
@@ -1272,11 +1190,10 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     };
   }, [bootstrapAttempt, requestInvalidatedResources, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: workflowReadinessEpoch is an explicit invalidation signal, not a captured value.
   useEffect(() => {
     if (!runtimeAvailable || bootState.status !== "ready") return;
-    const viewKeys = resourcesForView(view).filter((key) =>
-      dirtyResourcesRef.current.has(key),
-    );
+    const viewKeys = resourcesForView(view).filter((key) => dirtyResourcesRef.current.has(key));
     void requestInvalidatedResources(viewKeys, { reportFailure: true }, false);
     if (view === "settings" && workflowReadinessDirtyRef.current) {
       workflowReadinessDirtyRef.current = false;
@@ -1284,7 +1201,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     }
     // refreshWorkflowStatus intentionally refreshes readiness only; it never
     // replaces the editable Settings draft.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     bootState.status,
     requestInvalidatedResources,
@@ -1324,8 +1240,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       unchangedBackoffMs: stopping ? [] : [4_000, 8_000, 10_000],
       pauseWhenHidden: !stopping,
       failureMaxMs: stopping ? 10_000 : 30_000,
-      onResult: (resources) =>
-        (resources.worker as WorkerStatus | undefined)?.state !== "stopped",
+      onResult: (resources) => (resources.worker as WorkerStatus | undefined)?.state !== "stopped",
       onStatus: (status) => updatePollingState("worker", status),
     });
     pollControllers.current.worker = controller;
@@ -1360,47 +1275,50 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     [settings, runs],
   );
 
-  const refreshLinearViewer = useCallback((exactSettings: AppSettings, exactKey: string) => {
-    if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
-      linearViewerSeq.current += 1;
-      setLinearViewer(null);
-      setLinearViewerLoading(false);
-      setLinearViewerError(null);
-      return;
-    }
-
-    const typedKey = exactKey.trim();
-    if (!exactSettings.linear_api_key_set && typedKey === "") {
-      linearViewerSeq.current += 1;
-      setLinearViewer(null);
-      setLinearViewerLoading(false);
-      setLinearViewerError("Add a Linear API key to show the current user.");
-      return;
-    }
-
-    const seq = linearViewerSeq.current + 1;
-    linearViewerSeq.current = seq;
-    setLinearViewerLoading(true);
-    setLinearViewerError(null);
-    desktopCommands
-      .getLinearViewer({
-        settings: exactSettings,
-        linear_api_key: typedKey ? typedKey : null,
-      })
-      .then((viewer) => {
-        if (linearViewerSeq.current !== seq) return;
-        setLinearViewer(viewer);
-      })
-      .catch((err) => {
-        if (linearViewerSeq.current !== seq) return;
+  const refreshLinearViewer = useCallback(
+    (exactSettings: AppSettings, exactKey: string) => {
+      if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
+        linearViewerSeq.current += 1;
         setLinearViewer(null);
-        setLinearViewerError(formatError(err));
-      })
-      .finally(() => {
-        if (linearViewerSeq.current !== seq) return;
         setLinearViewerLoading(false);
-      });
-  }, [runtimeAvailable]);
+        setLinearViewerError(null);
+        return;
+      }
+
+      const typedKey = exactKey.trim();
+      if (!exactSettings.linear_api_key_set && typedKey === "") {
+        linearViewerSeq.current += 1;
+        setLinearViewer(null);
+        setLinearViewerLoading(false);
+        setLinearViewerError("Add a Linear API key to show the current user.");
+        return;
+      }
+
+      const seq = linearViewerSeq.current + 1;
+      linearViewerSeq.current = seq;
+      setLinearViewerLoading(true);
+      setLinearViewerError(null);
+      desktopCommands
+        .getLinearViewer({
+          settings: exactSettings,
+          linear_api_key: typedKey ? typedKey : null,
+        })
+        .then((viewer) => {
+          if (linearViewerSeq.current !== seq) return;
+          setLinearViewer(viewer);
+        })
+        .catch((err) => {
+          if (linearViewerSeq.current !== seq) return;
+          setLinearViewer(null);
+          setLinearViewerError(formatError(err));
+        })
+        .finally(() => {
+          if (linearViewerSeq.current !== seq) return;
+          setLinearViewerLoading(false);
+        });
+    },
+    [runtimeAvailable],
+  );
 
   useEffect(() => {
     if (settings) refreshLinearViewer(settings, linearKeyDraftRef.current);
@@ -1562,9 +1480,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   async function startSkillsInstall(exactSettings: AppSettings, url: string) {
     skillsInstallSettingsRef.current = exactSettings;
-    const status = await call(() =>
-      desktopCommands.installSkills(exactSettings, url.trim()),
-    );
+    const status = await call(() => desktopCommands.installSkills(exactSettings, url.trim()));
     setSkillsInstall(status);
   }
 
@@ -1622,9 +1538,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }
 
   async function startWorkflowTransfer(url: string) {
-    const status = await call(() =>
-      desktopCommands.transferWorkflowToRepo(url.trim()),
-    );
+    const status = await call(() => desktopCommands.transferWorkflowToRepo(url.trim()));
     setWorkflowTransfer(status);
   }
 
@@ -1662,9 +1576,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       : `${configuredRepoUrls(settings).join("\n")}\n${stableSessionEnvKey(settings.session_env)}`;
   useEffect(() => {
     if (!settings || savedRepoStatusKey === null) return;
-    const target = settingsDirtyRef.current
-      ? settingsDraftRef.current ?? settings
-      : settings;
+    const target = settingsDirtyRef.current ? (settingsDraftRef.current ?? settings) : settings;
     queueRepoStatusRefreshRef.current(target);
   }, [savedRepoStatusKey, settings]);
 
@@ -1679,6 +1591,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the polling callback intentionally uses the current ref-backed repo checker.
   useEffect(() => {
     if (!runtimeAvailable || skillsInstall?.state !== "running") return;
     const controller = createPollController({
@@ -1697,10 +1610,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       onResult: (status) => {
         setSkillsInstall(status);
         if (status.state === "completed" && status.repo_url) {
-          checkRepoSkills(
-            status.repo_url,
-            skillsInstallSettingsRef.current?.session_env,
-          );
+          checkRepoSkills(status.repo_url, skillsInstallSettingsRef.current?.session_env);
         }
         if (status.state !== "running") skillsInstallSettingsRef.current = null;
         return status.state === "running";
@@ -1716,14 +1626,9 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         delete pollControllers.current.skillsInstall;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    clearPollingState,
-    runtimeAvailable,
-    skillsInstall?.state,
-    updatePollingState,
-  ]);
+  }, [clearPollingState, runtimeAvailable, skillsInstall?.state, updatePollingState]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the polling callback intentionally uses the current ref-backed repo checker.
   useEffect(() => {
     if (!runtimeAvailable || workflowTransfer?.state !== "running") return;
     const controller = createPollController({
@@ -1757,13 +1662,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         delete pollControllers.current.workflowTransfer;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    clearPollingState,
-    runtimeAvailable,
-    updatePollingState,
-    workflowTransfer?.state,
-  ]);
+  }, [clearPollingState, runtimeAvailable, updatePollingState, workflowTransfer?.state]);
 
   async function removeLinearKey() {
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
@@ -1926,9 +1825,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       setRetros(remaining);
       selectedRetroIdRef.current = nextRetro?.id ?? null;
       setSelectedRetro(nextRetro ? preview.retroDetailForId(nextRetro.id) : null);
-      setRetroStatus((current) =>
-        current.retro_id === id ? emptyRetroStatus : current,
-      );
+      setRetroStatus((current) => (current.retro_id === id ? emptyRetroStatus : current));
       return;
     }
     try {
@@ -1961,9 +1858,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       );
       return;
     }
-    const updated = await call(() =>
-      desktopCommands.setRetroSuggestionDecision(id, decision),
-    );
+    const updated = await call(() => desktopCommands.setRetroSuggestionDecision(id, decision));
     setSelectedRetro((current) =>
       current
         ? {
@@ -1977,16 +1872,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }
 
   async function applyRetroWorkflow(retroId: string) {
-    const batch = await call(() =>
-      desktopCommands.applyRetroWorkflow(retroId),
-    );
+    const batch = await call(() => desktopCommands.applyRetroWorkflow(retroId));
     if (["queued", "running"].includes(batch.state)) {
       setHasInProgressRetroBatches(true);
     }
     setSelectedRetro((current) =>
-      current?.row.id === retroId
-        ? { ...current, batches: [...current.batches, batch] }
-        : current,
+      current?.row.id === retroId ? { ...current, batches: [...current.batches, batch] } : current,
     );
     const saved = await desktopCommands.loadSettings();
     setSettings(saved);
@@ -1996,9 +1887,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   async function startRetroPrs(retroId: string) {
     if (!settings) return;
-    const batches = await call(() =>
-      desktopCommands.startRetroPrs(retroId),
-    );
+    const batches = await call(() => desktopCommands.startRetroPrs(retroId));
     if (batches.some((batch) => ["queued", "running"].includes(batch.state))) {
       setHasInProgressRetroBatches(true);
     }
@@ -2009,10 +1898,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }
 
   useEffect(() => {
-    if (
-      !runtimeAvailable ||
-      (retroStatus.state !== "running" && !hasInProgressRetroBatches)
-    ) {
+    if (!runtimeAvailable || (retroStatus.state !== "running" && !hasInProgressRetroBatches)) {
       return;
     }
     const keys: DashboardResourceKey[] = ["retroList", "retroBatches"];
@@ -2050,8 +1936,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         const retroList = resources.retroList as
           | { retroStatus: RetroStatus; retros: RetroRow[] }
           | undefined;
-        return retroList?.retroStatus?.state === "running" ||
-          resources.retroBatches === true;
+        return retroList?.retroStatus?.state === "running" || resources.retroBatches === true;
       },
       onStatus: (status) => updatePollingState("retro", status),
     });
@@ -2079,8 +1964,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   // the boot auto-start condition. Skills are recommended only and live in
   // Settings, so they must not keep the overview onboarding visible.
   const setupBlocked =
-    settings !== null &&
-    (!settings.linear_api_key_set || !anyRepoConfigured(settings));
+    settings !== null && (!settings.linear_api_key_set || !anyRepoConfigured(settings));
   const setup = {
     blocked: setupBlocked,
     linearConnected: settings?.linear_api_key_set ?? false,
@@ -2095,14 +1979,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   // Repo skill detection does not depend on the selected agent or its command,
   // so it only needs refreshing when Settings are entered or first loaded.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: entering Settings or first loading settings are the deliberate refresh triggers.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
-    const target = settingsDirtyRef.current
-      ? settingsDraftRef.current ?? settings
-      : settings;
+    const target = settingsDirtyRef.current ? (settingsDraftRef.current ?? settings) : settings;
     refreshSkillsStatus(target);
     refreshWorkflowStatus(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
   function requestStop() {
@@ -2111,10 +1993,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       if (confirmStopTimer.current !== null) {
         window.clearTimeout(confirmStopTimer.current);
       }
-      confirmStopTimer.current = window.setTimeout(
-        () => setConfirmStop(false),
-        4000,
-      );
+      confirmStopTimer.current = window.setTimeout(() => setConfirmStop(false), 4000);
       return;
     }
     if (confirmStopTimer.current !== null) {
@@ -2136,9 +2015,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         : "Start worker";
 
   const bootReady = bootState.status === "ready";
-  const AppUpdateComponent = useDeferredUpdater(
-    bootReady && runtimeAvailable && !IS_LOCAL_DEV,
-  );
+  const AppUpdateComponent = useDeferredUpdater(bootReady && runtimeAvailable && !IS_LOCAL_DEV);
   const visibleDashboardResourceKeys = visibleResources(
     DASHBOARD_RESOURCE_KEYS,
     view,
@@ -2209,6 +2086,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           <nav className="topnav" aria-label="Primary">
             {(["overview", "runs", "issues", "retro", "settings"] as View[]).map((item) => (
               <button
+                type="button"
                 key={item}
                 className={view === item ? "nav-active" : ""}
                 aria-current={view === item ? "page" : undefined}
@@ -2259,36 +2137,35 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           >
             {theme === "dark" ? <SunIcon /> : <MoonIcon />}
           </button>
-          {bootReady ? <button
-            type="button"
-            className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
-            disabled={
-              !bootstrapSettled ||
-              busy ||
-              !runtimeAvailable ||
-              worker.state === "stopping"
-            }
-            onClick={worker.state === "running" ? requestStop : startWorker}
-            title={workerTitle}
-            aria-label={workerTitle}
-            aria-live="polite"
-          >
-            <span className={`status-dot ${worker.state}`} aria-hidden="true" />
-            {worker.state === "running" && !confirmStop ? (
-              <>
-                <span className="worker-toggle-label rest">Running</span>
-                <span className="worker-toggle-label on-hover">Stop</span>
-              </>
-            ) : (
-              <span className="worker-toggle-label">
-                {worker.state === "running"
-                  ? `Stop ${overview.active_runs.length} ${overview.active_runs.length === 1 ? "run" : "runs"}?`
-                  : worker.state === "stopping"
-                    ? "Stopping…"
-                    : "Start"}
-              </span>
-            )}
-          </button> : null}
+          {bootReady ? (
+            <button
+              type="button"
+              className={`worker-toggle ${worker.state}${confirmStop ? " confirm" : ""}`}
+              disabled={
+                !bootstrapSettled || busy || !runtimeAvailable || worker.state === "stopping"
+              }
+              onClick={worker.state === "running" ? requestStop : startWorker}
+              title={workerTitle}
+              aria-label={workerTitle}
+              aria-live="polite"
+            >
+              <span className={`status-dot ${worker.state}`} aria-hidden="true" />
+              {worker.state === "running" && !confirmStop ? (
+                <>
+                  <span className="worker-toggle-label rest">Running</span>
+                  <span className="worker-toggle-label on-hover">Stop</span>
+                </>
+              ) : (
+                <span className="worker-toggle-label">
+                  {worker.state === "running"
+                    ? `Stop ${overview.active_runs.length} ${overview.active_runs.length === 1 ? "run" : "runs"}?`
+                    : worker.state === "stopping"
+                      ? "Stopping…"
+                      : "Start"}
+                </span>
+              )}
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -2296,9 +2173,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         className={view === "runs" ? "content content-viewport" : "content"}
         aria-busy={bootState.status === "loading" ? "true" : undefined}
       >
-        {bootState.status === "loading" ? (
-          <BootLoading preview={!runtimeAvailable} />
-        ) : null}
+        {bootState.status === "loading" ? <BootLoading preview={!runtimeAvailable} /> : null}
         {bootState.status === "error" ? (
           <BootError
             message={bootState.message}
@@ -2327,10 +2202,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
             <strong>Background updates delayed</strong>
             <span>
               {stalePollingEntries
-                .map(
-                  ([key, status]) =>
-                    `${POLL_LABELS[key]}: ${formatError(status.error)}`,
-                )
+                .map(([key, status]) => `${POLL_LABELS[key]}: ${formatError(status.error)}`)
                 .join(" · ")}
             </span>
           </div>
@@ -2356,10 +2228,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           <OverviewView
             overview={overview}
             canStartWorker={
-              bootstrapSettled &&
-              runtimeAvailable &&
-              !busy &&
-              worker.state === "stopped"
+              bootstrapSettled && runtimeAvailable && !busy && worker.state === "stopped"
             }
             canTriggerRetry={runtimeAvailable && !busy && worker.state === "running"}
             workerRunning={worker.state === "running"}
@@ -2459,9 +2328,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
                 workflowTransfer={workflowTransfer}
                 settingsDirty={dirty}
                 workerRunning={worker.state === "running"}
-                workerConfigError={
-                  worker.state === "running" && worker.last_error !== null
-                }
+                workerConfigError={worker.state === "running" && worker.last_error !== null}
                 liveReconfigureSkipped={liveReconfigureSkipped}
                 activeRunCount={overview.active_runs.length}
                 busy={busy}
@@ -2505,6 +2372,7 @@ function ResourceStalenessMonitor({
 }) {
   const visibleKeySignature = visibleKeys.join("|");
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: visibleKeySignature tracks list contents without retriggering for array identity.
   useEffect(() => {
     const timers: number[] = [];
     const now = Date.now();
@@ -2521,11 +2389,12 @@ function ResourceStalenessMonitor({
       const dirtyAt = Date.parse(resource.dirtySince);
       if (!Number.isFinite(dirtyAt)) return;
       const delay = Math.max(0, dirtyAt + 60_000 - now);
-      timers.push(
-        window.setTimeout(() => onStale(key, Date.now()), delay),
-      );
+      timers.push(window.setTimeout(() => onStale(key, Date.now()), delay));
     });
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
+    return () =>
+      timers.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
   }, [onStale, resources, visibleKeySignature]);
 
   return null;
@@ -2547,8 +2416,7 @@ function ResourceNotices({
     const hasData = hasResourceData(resource);
     const stale = resourceIsStale(resource);
     const noDataFailure = !hasData && resource.error !== null;
-    const refreshing =
-      resource.status === "loading" || resource.status === "refreshing";
+    const refreshing = resource.status === "loading" || resource.status === "refreshing";
     const showRefreshing = slowRefreshingKeys.has(key) && refreshing;
     if (!stale && !noDataFailure && !showRefreshing) return [];
     const error = resource.error as DashboardResourceError | null;
@@ -2564,9 +2432,7 @@ function ResourceNotices({
           <div className="resource-notice-title">
             <strong>{RESOURCE_LABELS[key]}</strong>
             {stale ? <span className="resource-stale-badge">Stale</span> : null}
-            {showRefreshing ? (
-              <span className="resource-refreshing-label">Refreshing…</span>
-            ) : null}
+            {showRefreshing ? <span className="resource-refreshing-label">Refreshing…</span> : null}
           </div>
           {noDataFailure ? (
             <span>{error?.summary} No data is available.</span>
@@ -2575,7 +2441,8 @@ function ResourceNotices({
               Showing the last successful data
               {resource.lastSuccessAt ? (
                 <>
-                  {" "}from <RelativeTime value={resource.lastSuccessAt} />
+                  {" "}
+                  from <RelativeTime value={resource.lastSuccessAt} />
                 </>
               ) : null}
               .
@@ -2605,16 +2472,14 @@ function ResourceNotices({
     ];
   });
 
-  return notices.length > 0 ? <>{notices}</> : null;
+  return notices.length > 0 ? notices : null;
 }
 
 function BootLoading({ preview }: { preview: boolean }) {
   return (
     <div className="boot-surface boot-loading">
       <div className="boot-copy">
-        <h2 role="status">
-          {preview ? "Loading preview…" : "Connecting to local worker…"}
-        </h2>
+        <h2 role="status">{preview ? "Loading preview…" : "Connecting to local worker…"}</h2>
         <p>Please wait.</p>
       </div>
       <div className="boot-skeleton" aria-hidden="true">
@@ -2693,13 +2558,12 @@ function OverviewView({
   // A run gets a live_sessions row only while it is actively streaming tokens.
   // Use that to pulse streaming rows and show their last-activity heartbeat in
   // the Active runs table (the panel this data used to live in on its own).
-  const liveRunIds = new Set(
-    overview.live_sessions.map((session) => session.run_id),
-  );
+  const liveRunIds = new Set(overview.live_sessions.map((session) => session.run_id));
   const lastActivity = new Map<string, string>(
-    overview.live_sessions.map(
-      (session): [string, string] => [session.run_id, session.last_event_at],
-    ),
+    overview.live_sessions.map((session): [string, string] => [
+      session.run_id,
+      session.last_event_at,
+    ]),
   );
   return (
     <>
@@ -2721,9 +2585,7 @@ function OverviewView({
         </div>
       </header>
 
-      {setup.blocked ? (
-        <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} />
-      ) : null}
+      {setup.blocked ? <SetupChecklist setup={setup} onOpenSettings={onOpenSettings} /> : null}
 
       <div className="grid">
         <Panel title="Active runs">
@@ -2742,20 +2604,10 @@ function OverviewView({
                   : "Start the worker when you are ready to dispatch agent work."
             }
             actionLabel={
-              setup.blocked
-                ? "Open settings"
-                : workerRunning
-                  ? "View issues"
-                  : "Start worker"
+              setup.blocked ? "Open settings" : workerRunning ? "View issues" : "Start worker"
             }
             actionDisabled={setup.blocked || workerRunning ? false : !canStartWorker}
-            onAction={
-              setup.blocked
-                ? onOpenSettings
-                : workerRunning
-                  ? onOpenIssues
-                  : onStartWorker
-            }
+            onAction={setup.blocked ? onOpenSettings : workerRunning ? onOpenIssues : onStartWorker}
           />
         </Panel>
       </div>
@@ -2809,9 +2661,7 @@ function OverviewView({
                         }
                         onClick={() => onTriggerRetryNow(retry.issue_id)}
                       >
-                        {triggeringRetryIds.has(retry.issue_id)
-                          ? "Retrying..."
-                          : "Retry now"}
+                        {triggeringRetryIds.has(retry.issue_id) ? "Retrying..." : "Retry now"}
                       </button>
                     </td>
                   </tr>
@@ -2847,15 +2697,17 @@ function OverviewView({
                   </td>
                   <td className="tnum">{row.limit?.remaining ?? "—"}</td>
                   <td className="tnum">
-                    {row.limit
-                      ? row.limit.reset_at
-                        ? (
-                          <>
-                            resets <RelativeTime value={row.limit.reset_at} />
-                          </>
-                        )
-                        : "no reset reported"
-                      : "—"}
+                    {row.limit ? (
+                      row.limit.reset_at ? (
+                        <>
+                          resets <RelativeTime value={row.limit.reset_at} />
+                        </>
+                      ) : (
+                        "no reset reported"
+                      )
+                    ) : (
+                      "—"
+                    )}
                   </td>
                 </tr>
               ))}
@@ -2879,23 +2731,18 @@ function OverviewView({
                     <strong>{row.label}</strong>
                     {row.usage ? (
                       <small>
-                        {row.usage.run_count}{" "}
-                        {row.usage.run_count === 1 ? "run" : "runs"} · last{" "}
+                        {row.usage.run_count} {row.usage.run_count === 1 ? "run" : "runs"} · last{" "}
                         <RelativeTime value={row.usage.updated_at} />
                       </small>
                     ) : (
                       <small>no usage yet</small>
                     )}
                   </td>
-                  <td className="tnum">
-                    {row.usage ? formatTokens(row.usage.input_tokens) : "—"}
-                  </td>
+                  <td className="tnum">{row.usage ? formatTokens(row.usage.input_tokens) : "—"}</td>
                   <td className="tnum">
                     {row.usage ? formatTokens(row.usage.output_tokens) : "—"}
                   </td>
-                  <td className="tnum">
-                    {row.usage ? formatTokens(row.usage.total_tokens) : "—"}
-                  </td>
+                  <td className="tnum">{row.usage ? formatTokens(row.usage.total_tokens) : "—"}</td>
                 </tr>
               ))}
             </tbody>
@@ -2918,9 +2765,9 @@ function SetupChecklist({
       <div className="setup-intro">
         <h3>Welcome to Symphony</h3>
         <p>
-          Symphony watches your Linear project and dispatches Codex, Claude Code, or Cursor
-          agents to work on issues in isolated workspaces. Finish the first two
-          setup steps to start the worker.
+          Symphony watches your Linear project and dispatches Codex, Claude Code, or Cursor agents
+          to work on issues in isolated workspaces. Finish the first two setup steps to start the
+          worker.
         </p>
       </div>
       <ol className="setup-steps">
@@ -3019,11 +2866,10 @@ function SetupStep({
       </thead>
       <tbody>
         {runs.map((run) => (
+          // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
           <tr
             key={run.id}
-            className={
-              run.id === selectedRunId ? "clickable-row selected" : "clickable-row"
-            }
+            className={run.id === selectedRunId ? "clickable-row selected" : "clickable-row"}
             tabIndex={0}
             role="button"
             aria-label={`Open run ${run.issue_identifier} number ${run.run_number}`}
@@ -3053,15 +2899,19 @@ function SetupStep({
               ) : null}
             </td>
             <td>#{run.run_number}</td>
-            <td><Badge status={run.status} /></td>
+            <td>
+              <Badge status={run.status} />
+            </td>
             <td className="tnum">
               <RelativeTime value={run.created_at} />
             </td>
             {lastActivity ? (
               <td className="tnum">
-                {lastActivity.has(run.id)
-                  ? <RelativeTime value={lastActivity.get(run.id)!} />
-                  : "—"}
+                {lastActivity.has(run.id) ? (
+                  <RelativeTime value={lastActivity.get(run.id) ?? ""} />
+                ) : (
+                  "—"
+                )}
               </td>
             ) : null}
           </tr>
@@ -3069,8 +2919,7 @@ function SetupStep({
       </tbody>
     </table>
   );
-}
-
+};
 
 function RunTable({
   runs,
@@ -3121,11 +2970,10 @@ function RunTable({
       </thead>
       <tbody>
         {runs.map((run) => (
+          // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
           <tr
             key={run.id}
-            className={
-              run.id === selectedRunId ? "clickable-row selected" : "clickable-row"
-            }
+            className={run.id === selectedRunId ? "clickable-row selected" : "clickable-row"}
             tabIndex={0}
             role="button"
             aria-label={`Open run ${run.issue_identifier} number ${run.run_number}`}
@@ -3155,15 +3003,19 @@ function RunTable({
               ) : null}
             </td>
             <td>#{run.run_number}</td>
-            <td><Badge status={run.status} /></td>
+            <td>
+              <Badge status={run.status} />
+            </td>
             <td className="tnum">
               <RelativeTime value={run.created_at} />
             </td>
             {lastActivity ? (
               <td className="tnum">
-                {lastActivity.has(run.id)
-                  ? <RelativeTime value={lastActivity.get(run.id)!} />
-                  : "—"}
+                {lastActivity.has(run.id) ? (
+                  <RelativeTime value={lastActivity.get(run.id) ?? ""} />
+                ) : (
+                  "—"
+                )}
               </td>
             ) : null}
           </tr>
@@ -3220,7 +3072,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}
@@ -3234,12 +3086,7 @@ function Badge({ status }: { status: string }) {
 
 function WaveMark() {
   return (
-    <svg
-      className="brand-icon"
-      viewBox="0 0 100 100"
-      fill="currentColor"
-      aria-hidden="true"
-    >
+    <svg className="brand-icon" viewBox="0 0 100 100" fill="currentColor" aria-hidden="true">
       <rect x="4" y="36" width="8" height="28" rx="4" />
       <rect x="18" y="25" width="8" height="50" rx="4" />
       <rect x="32" y="12" width="8" height="76" rx="4" />
@@ -3293,16 +3140,10 @@ function label(view: View) {
 }
 
 function friendlyError(message: string) {
-  if (
-    message.includes("Linear auth failed") ||
-    message.includes("Linear HTTP error 401")
-  ) {
+  if (message.includes("Linear auth failed") || message.includes("Linear HTTP error 401")) {
     return "Linear rejected the request. Update the API key in Settings → Linear.";
   }
-  if (
-    message.includes("front matter") ||
-    message.includes("tracker configuration")
-  ) {
+  if (message.includes("front matter") || message.includes("tracker configuration")) {
     return `Workflow needs attention: ${message}. Edit it in Settings → Workflow.`;
   }
   return message;
@@ -3317,7 +3158,9 @@ function formatError(err: unknown) {
 }
 
 function normalizeBootstrapError(err: unknown) {
-  const message = formatError(err).replace(/^Error:\s*/i, "").trim();
+  const message = formatError(err)
+    .replace(/^Error:\s*/i, "")
+    .trim();
   return message || "The desktop runtime did not return startup data.";
 }
 

@@ -1,9 +1,4 @@
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,11 +19,7 @@ function resolveInside(root, path, errors, label) {
   }
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (
-    isAbsolute(fromRoot) ||
-    fromRoot === ".." ||
-    fromRoot.startsWith(`..${sep}`)
-  ) {
+  if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
     errors.push(`${label} escapes the repository root: ${path}`);
     return null;
   }
@@ -104,10 +95,7 @@ function moduleImports(content) {
 }
 
 function literalCalls(content, functionName) {
-  const pattern = new RegExp(
-    `\\b${functionName}(?:<[^;()]+>)?\\s*\\(\\s*["']([^"']+)["']`,
-    "g",
-  );
+  const pattern = new RegExp(`\\b${functionName}(?:<[^;()]+>)?\\s*\\(\\s*["']([^"']+)["']`, "g");
   return [...content.matchAll(pattern)].map((match) => ({
     value: match[1],
     index: match.index,
@@ -115,10 +103,7 @@ function literalCalls(content, functionName) {
 }
 
 function functionCalls(content, functionName) {
-  const pattern = new RegExp(
-    `\\b${functionName}(?:<[^;()]+>)?\\s*\\(`,
-    "g",
-  );
+  const pattern = new RegExp(`\\b${functionName}(?:<[^;()]+>)?\\s*\\(`, "g");
   return [...content.matchAll(pattern)]
     .filter((match) => {
       const prefix = content.slice(0, match.index);
@@ -127,14 +112,7 @@ function functionCalls(content, functionName) {
     .map((match) => ({ index: match.index }));
 }
 
-function rejectNonLiteralCalls(
-  content,
-  path,
-  functionName,
-  literalCallsFound,
-  kind,
-  errors,
-) {
+function rejectNonLiteralCalls(content, path, functionName, literalCallsFound, kind, errors) {
   const literalIndexes = new Set(literalCallsFound.map(({ index }) => index));
   for (const call of functionCalls(content, functionName)) {
     if (literalIndexes.has(call.index)) continue;
@@ -167,27 +145,15 @@ export function validateFrontendBoundaries(
   contractRelativePath = "validation/frontend-boundaries.json",
 ) {
   const errors = [];
-  const contract = readJson(
-    root,
-    contractRelativePath,
-    errors,
-    "frontend boundary contract",
-  );
+  const contract = readJson(root, contractRelativePath, errors, "frontend boundary contract");
   if (!contract) return errors;
   if (contract.version !== 1) {
     errors.push(
-      `frontend boundary contract version must be 1, received ${JSON.stringify(
-        contract.version,
-      )}`,
+      `frontend boundary contract version must be 1, received ${JSON.stringify(contract.version)}`,
     );
   }
 
-  const sourceRoot = resolveInside(
-    root,
-    contract.sourceRoot,
-    errors,
-    "frontend source root",
-  );
+  const sourceRoot = resolveInside(root, contract.sourceRoot, errors, "frontend source root");
   if (!sourceRoot || !existsSync(sourceRoot)) {
     if (sourceRoot) {
       errors.push(`frontend source root is missing at ${contract.sourceRoot}`);
@@ -198,20 +164,10 @@ export function validateFrontendBoundaries(
   const sourceByPath = new Map(
     sourceFiles.map((path) => [relativePath(root, path), readFileSync(path, "utf8")]),
   );
-  const productionFiles = [...sourceByPath].filter(
-    ([path]) => !path.includes(".test."),
-  );
+  const productionFiles = [...sourceByPath].filter(([path]) => !path.includes(".test."));
 
-  const commands = assertSortedUnique(
-    "frontend command allowlist",
-    contract.commands,
-    errors,
-  );
-  const events = assertSortedUnique(
-    "frontend event allowlist",
-    contract.events,
-    errors,
-  );
+  const commands = assertSortedUnique("frontend command allowlist", contract.commands, errors);
+  const events = assertSortedUnique("frontend event allowlist", contract.events, errors);
   const commandSet = new Set(commands);
   const eventSet = new Set(events);
   const commandOwner = contract.commandOwner;
@@ -417,33 +373,22 @@ export function validateFrontendBoundaries(
   } else {
     for (const marker of ["isDesktopRuntime()", "loadPreviewRuntime"]) {
       if (!selectionContent.includes(marker)) {
-        errors.push(
-          `${selectionOwner} must preserve native/preview selection marker ${marker}`,
-        );
+        errors.push(`${selectionOwner} must preserve native/preview selection marker ${marker}`);
       }
     }
   }
 
   for (const invariant of contract.asyncInvariantTests ?? []) {
-    const path = resolveInside(
-      root,
-      invariant.path,
-      errors,
-      `async invariant ${invariant.id}`,
-    );
+    const path = resolveInside(root, invariant.path, errors, `async invariant ${invariant.id}`);
     if (!path || !existsSync(path)) {
       if (path) {
-        errors.push(
-          `async invariant ${invariant.id} test is missing at ${invariant.path}`,
-        );
+        errors.push(`async invariant ${invariant.id} test is missing at ${invariant.path}`);
       }
       continue;
     }
     const content = readFileSync(path, "utf8");
     const count =
-      typeof invariant.marker === "string"
-        ? content.split(invariant.marker).length - 1
-        : 0;
+      typeof invariant.marker === "string" ? content.split(invariant.marker).length - 1 : 0;
     if (count !== 1) {
       errors.push(
         `${invariant.path} must encode async invariant ${invariant.id} with marker ${JSON.stringify(
@@ -466,9 +411,6 @@ function runCli() {
   console.log("Frontend boundary contract passed.");
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli();
 }

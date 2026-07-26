@@ -13,6 +13,7 @@ Thanks for your interest in improving Symphony! This guide covers the developmen
 
 ```sh
 pnpm install
+pnpm install:hygiene-tools  # pinned actionlint + ShellCheck binaries
 pnpm tauri dev        # run the desktop app with hot reload
 ```
 
@@ -23,7 +24,16 @@ cargo check --workspace   # Rust workspace
 cargo test --workspace    # Rust tests
 pnpm typecheck            # TypeScript
 pnpm test                 # frontend unit tests (vitest)
+pnpm check:hygiene        # formatting, lint, workflows, shell, and Markdown links
+pnpm test:hygiene         # focused tests for the hygiene tooling
 ```
+
+The external hygiene tools are installed in `.cache/hygiene-tools` from exact,
+checksum-verified GitHub release assets for macOS or Linux on arm64/x64.
+
+Biome formatting is adopted incrementally. Existing unformatted files are
+hash-pinned in `scripts/biome-format-baseline.json`; format any file you change
+with `pnpm biome format --write <file>` and remove its stale baseline entry.
 
 ### TypeScript bindings
 

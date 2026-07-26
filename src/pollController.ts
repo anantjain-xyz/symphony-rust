@@ -16,6 +16,7 @@ type PollControllerOptions<T> = {
   unchangedBackoffMs: readonly number[];
   pauseWhenHidden: boolean;
   failureMaxMs?: number;
+  // biome-ignore lint/suspicious/noConfusingVoidType: callbacks may synchronously decline a refresh.
   onResult: (value: T) => boolean | void;
   onError?: (error: unknown) => void;
   onStatus: (status: PollResourceState) => void;

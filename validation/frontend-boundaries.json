@@ -1,34 +1,16 @@
 {
   "version": 1,
   "sourceRoot": "src",
-  "generatedOwners": [
-    "src/bindings.ts"
-  ],
-  "previewOwners": [
-    "src/main.tsx",
-    "src/preview/runtime.ts"
-  ],
+  "generatedOwners": ["src/bindings.ts"],
+  "previewOwners": ["src/main.tsx", "src/preview/runtime.ts"],
   "runtimeSelectionOwner": "src/App.tsx",
   "tauriImportOwners": {
-    "@tauri-apps/api/app": [
-      "src/desktop/shell.ts"
-    ],
-    "@tauri-apps/api/core": [
-      "src/desktop/commands.ts",
-      "src/desktop/runtime.ts"
-    ],
-    "@tauri-apps/api/event": [
-      "src/desktop/events.ts"
-    ],
-    "@tauri-apps/plugin-opener": [
-      "src/desktop/shell.ts"
-    ],
-    "@tauri-apps/plugin-process": [
-      "src/desktop/updater.ts"
-    ],
-    "@tauri-apps/plugin-updater": [
-      "src/desktop/updater.ts"
-    ]
+    "@tauri-apps/api/app": ["src/desktop/shell.ts"],
+    "@tauri-apps/api/core": ["src/desktop/commands.ts", "src/desktop/runtime.ts"],
+    "@tauri-apps/api/event": ["src/desktop/events.ts"],
+    "@tauri-apps/plugin-opener": ["src/desktop/shell.ts"],
+    "@tauri-apps/plugin-process": ["src/desktop/updater.ts"],
+    "@tauri-apps/plugin-updater": ["src/desktop/updater.ts"]
   },
   "commandOwner": "src/desktop/commands.ts",
   "commands": [
@@ -65,11 +47,7 @@
     "validate_settings"
   ],
   "eventOwner": "src/desktop/events.ts",
-  "events": [
-    "agent_event",
-    "db_changed",
-    "rate_limit_changed"
-  ],
+  "events": ["agent_event", "db_changed", "rate_limit_changed"],
   "asyncInvariantTests": [
     {
       "id": "per-caller-settlement",

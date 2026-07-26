@@ -1,11 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -77,10 +71,7 @@ export const app = isDesktopRuntime() ? "native" : loadPreviewRuntime;
     previewOwners: ["src/main.tsx", "src/preview/runtime.ts"],
     runtimeSelectionOwner: "src/App.tsx",
     tauriImportOwners: {
-      "@tauri-apps/api/core": [
-        "src/desktop/commands.ts",
-        "src/desktop/runtime.ts",
-      ],
+      "@tauri-apps/api/core": ["src/desktop/commands.ts", "src/desktop/runtime.ts"],
       "@tauri-apps/api/event": ["src/desktop/events.ts"],
     },
     commandOwner: "src/desktop/commands.ts",
@@ -119,18 +110,9 @@ export const load = () => invoke("missing_command");
   );
 
   const errors = validateFrontendBoundaries(root).join("\n");
-  assert.match(
-    errors,
-    /src\/Feature\.tsx:1 imports @tauri-apps\/api\/core; approved owners:/,
-  );
-  assert.match(
-    errors,
-    /src\/Feature\.tsx:2 calls Tauri invoke directly/,
-  );
-  assert.match(
-    errors,
-    /src\/Feature\.tsx:2 invokes unknown desktop command "missing_command"/,
-  );
+  assert.match(errors, /src\/Feature\.tsx:1 imports @tauri-apps\/api\/core; approved owners:/);
+  assert.match(errors, /src\/Feature\.tsx:2 calls Tauri invoke directly/);
+  assert.match(errors, /src\/Feature\.tsx:2 invokes unknown desktop command "missing_command"/);
 });
 
 test("rejects unknown adapter commands, cleanup drift, and missing invariants", (t) => {
@@ -138,10 +120,10 @@ test("rejects unknown adapter commands, cleanup drift, and missing invariants", 
   const commandOwner = join(root, "src/desktop/commands.ts");
   writeFileSync(
     commandOwner,
-    readFileSync(commandOwner, "utf8").replace(
+    `${readFileSync(commandOwner, "utf8").replace(
       '"save_settings"',
       '"save_setting"',
-    ) + "\nexport const dynamic = (command: string) => invokeCommand(command);\n",
+    )}\nexport const dynamic = (command: string) => invokeCommand(command);\n`,
   );
   write(
     root,

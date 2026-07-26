@@ -49,6 +49,7 @@ const previewSettings: AppSettings = {
   max_concurrent_agents: 3,
   max_retry_backoff_ms: 300000,
   hook_after_create:
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this is literal shell parameter expansion.
     'git clone "$REPO_URL" .\ngit checkout -B "${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"\neval "${SYMPHONY_INSTALL_CMD:-npm ci}"\n',
   hook_before_run: null,
   hook_after_run: null,

@@ -89,6 +89,8 @@ REPO_URL="$(gh repo view --json url -q .url)"
 REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/Symphony.app.tar.gz"
 SIGNATURE="$(<"$UPDATER_SIGNATURE")"
+# Single quotes preserve JavaScript's template literal for Node.
+# shellcheck disable=SC2016
 VERSION="$VERSION" UPDATER_URL="$UPDATER_URL" SIGNATURE="$SIGNATURE" \
   node -e '
     const feed = {

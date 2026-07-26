@@ -224,7 +224,7 @@ function RepoFilterSelect({
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
-  const optionRefs = useRef<(HTMLLIElement | null)[]>([]);
+  const optionRefs = useRef<(HTMLDivElement | null)[]>([]);
   const options = useMemo(
     () => [
       { value: "", label: "All repos" },
@@ -320,12 +320,17 @@ function RepoFilterSelect({
         </svg>
       </button>
       {open ? (
-        <ul className="icon-select-list repo-filter-list" id="repo-filter-listbox" role="listbox">
+        <div
+          className="icon-select-list repo-filter-list"
+          id="repo-filter-listbox"
+          role="listbox"
+        >
           {options.map((option, index) => (
-            <li
+            <div
               key={option.value || "all"}
               id={`repo-filter-option-${index}`}
               role="option"
+              tabIndex={-1}
               aria-selected={option.value === value}
               ref={(node) => {
                 optionRefs.current[index] = node;
@@ -336,10 +341,16 @@ function RepoFilterSelect({
               title={option.label}
               onPointerMove={() => setActiveIndex(index)}
               onClick={() => commit(index)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  commit(index);
+                }
+              }}
             >
               <span className="icon-select-check" aria-hidden="true">
                 {option.value === value ? (
-                  <svg viewBox="0 0 16 16" width="12" height="12">
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
                     <path
                       d="M3 8.5l3.5 3.5L13 4.5"
                       fill="none"
@@ -352,9 +363,9 @@ function RepoFilterSelect({
                 ) : null}
               </span>
               <span className="repo-filter-option-label">{option.label}</span>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       ) : null}
     </div>
   );
@@ -409,6 +420,7 @@ function RunTable({
       </thead>
       <tbody>
         {runs.map((run) => (
+          // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
           <tr
             key={run.id}
             className={
@@ -450,7 +462,7 @@ function RunTable({
             {lastActivity ? (
               <td className="tnum">
                 {lastActivity.has(run.id)
-                  ? <RelativeTime value={lastActivity.get(run.id)!} />
+                  ? <RelativeTime value={lastActivity.get(run.id) ?? ""} />
                   : "—"}
               </td>
             ) : null}
@@ -488,7 +500,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}
