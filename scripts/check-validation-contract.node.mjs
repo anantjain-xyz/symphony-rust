@@ -29,7 +29,10 @@ function validationFixture(t) {
     scripts: {
       "check:validation-contract":
         "node scripts/check-validation-contract.mjs",
+      "check:bundle": "node scripts/check-bundle-budget.mjs",
       "check:harness": "node scripts/check-agent-assets.mjs",
+      test: "vitest run",
+      "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
       "test:validation": "node --test scripts/fixture.node.mjs",
       "test:e2e": "playwright test",
       typecheck: "tsc --noEmit",
@@ -41,11 +44,14 @@ function validationFixture(t) {
       "@playwright/test": "1.0.0",
       typescript: "1.0.0",
       vite: "1.0.0",
+      vitest: "1.0.0",
     },
   });
   for (const path of [
     "scripts/check-validation-contract.mjs",
     "scripts/check-agent-assets.mjs",
+    "scripts/check-bundle-budget.mjs",
+    "scripts/check-bundle-budget.node.mjs",
     "scripts/fixture.node.mjs",
     "scripts/run-validation.mjs",
   ]) {
@@ -54,7 +60,7 @@ function validationFixture(t) {
   write(
     root,
     ".github/workflows/ci.yml",
-    "steps:\n  - run: pnpm verify:full\n",
+    "jobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
   );
   write(
     root,
@@ -76,32 +82,35 @@ function validationFixture(t) {
       full: { packageScript: "verify:full", profile: "full" },
     },
     profiles: {
-      fast: ["contract", "harness", "checker-tests"],
+      fast: ["validation-contract", "agent-assets", "validation-tests"],
       full: [
-        "contract",
-        "harness",
-        "checker-tests",
+        "validation-contract",
+        "agent-assets",
+        "validation-tests",
         "rust-format",
         "rust-clippy",
         "rust-tests",
         "frontend-typecheck",
+        "frontend-tests",
         "frontend-build",
+        "bundle-budget",
+        "bundle-tests",
         "browser-install",
-        "browser",
+        "browser-e2e",
       ],
     },
     commands: {
-      contract: {
+      "validation-contract": {
         label: "contract",
         argv: ["pnpm", "check:validation-contract"],
         packageScript: "check:validation-contract",
       },
-      harness: {
+      "agent-assets": {
         label: "harness",
         argv: ["pnpm", "check:harness"],
         packageScript: "check:harness",
       },
-      "checker-tests": {
+      "validation-tests": {
         label: "checker tests",
         argv: ["pnpm", "test:validation"],
         packageScript: "test:validation",
@@ -139,10 +148,25 @@ function validationFixture(t) {
         argv: ["pnpm", "typecheck"],
         packageScript: "typecheck",
       },
+      "frontend-tests": {
+        label: "frontend tests",
+        argv: ["pnpm", "test"],
+        packageScript: "test",
+      },
       "frontend-build": {
         label: "frontend build",
         argv: ["pnpm", "build"],
         packageScript: "build",
+      },
+      "bundle-budget": {
+        label: "bundle budget",
+        argv: ["pnpm", "check:bundle"],
+        packageScript: "check:bundle",
+      },
+      "bundle-tests": {
+        label: "bundle tests",
+        argv: ["pnpm", "test:bundle"],
+        packageScript: "test:bundle",
       },
       "browser-install": {
         label: "browser install",
@@ -156,7 +180,7 @@ function validationFixture(t) {
         ],
         installsBrowser: true,
       },
-      browser: {
+      "browser-e2e": {
         label: "browser",
         argv: ["pnpm", "test:e2e"],
         packageScript: "test:e2e",
@@ -203,7 +227,7 @@ test("reports missing package scripts and command ids with owners", (t) => {
   const errors = validateValidationContract(root).join("\n");
   assert.match(
     errors,
-    /validation command harness references missing package script check:harness/,
+    /validation command agent-assets references missing package script check:harness/,
   );
   assert.match(
     errors,
@@ -216,7 +240,7 @@ test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
   write(
     root,
     ".github/workflows/ci.yml",
-    "steps:\n  - run: pnpm test:e2e\n",
+    "jobs:\n  validate:\n    steps:\n      - run: pnpm test:e2e\n",
   );
   write(
     root,
@@ -232,6 +256,36 @@ test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
+  );
+});
+
+test("requires the canonical CI step and its job to be failure-gating", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `jobs:
+  validate:
+    if: \${{ false }}
+    steps:
+      - run: pnpm verify:full
+        if: \${{ false }}
+        continue-on-error: true
+`,
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /canonical entrypoint step must be unconditional and failure-gating; remove continue-on-error/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint step must be unconditional and failure-gating; remove if/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint job must be unconditional; remove if/,
   );
 });
 
@@ -306,6 +360,8 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     "node scripts/fixture.node.mjs & node scripts/fixture.node.mjs";
   packageJson.scripts["test:commented"] =
     "node scripts/fixture.node.mjs # && vitest run";
+  packageJson.scripts["test:line-break"] =
+    "vitest run\nnode scripts/fixture.node.mjs";
   writeJson(root, "package.json", packageJson);
 
   const contract = JSON.parse(
@@ -331,7 +387,18 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     argv: ["pnpm", "test:commented"],
     packageScript: "test:commented",
   };
-  contract.profiles.full.push("cycle", "unsafe", "backgrounded", "commented");
+  contract.commands["line-break"] = {
+    label: "line break",
+    argv: ["pnpm", "test:line-break"],
+    packageScript: "test:line-break",
+  };
+  contract.profiles.full.push(
+    "cycle",
+    "unsafe",
+    "backgrounded",
+    "commented",
+    "line-break",
+  );
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
@@ -345,6 +412,10 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     errors,
     /package script test:commented uses unsupported shell comment syntax near "#"/,
   );
+  assert.match(
+    errors,
+    /package script test:line-break uses unsupported shell line break/,
+  );
 });
 
 test("pins required full-gate commands independently of the command inventory", (t) => {
@@ -353,12 +424,19 @@ test("pins required full-gate commands independently of the command inventory", 
     readFileSync(join(root, "validation/contract.json"), "utf8"),
   );
   for (const commandId of [
+    "validation-contract",
+    "agent-assets",
+    "validation-tests",
     "rust-format",
     "rust-clippy",
     "rust-tests",
     "frontend-typecheck",
+    "frontend-tests",
     "frontend-build",
+    "bundle-budget",
+    "bundle-tests",
     "browser-install",
+    "browser-e2e",
   ]) {
     delete contract.commands[commandId];
     contract.profiles.full = contract.profiles.full.filter(
@@ -369,12 +447,19 @@ test("pins required full-gate commands independently of the command inventory", 
 
   const errors = validateValidationContract(root).join("\n");
   for (const commandId of [
+    "validation-contract",
+    "agent-assets",
+    "validation-tests",
     "rust-format",
     "rust-clippy",
     "rust-tests",
     "frontend-typecheck",
+    "frontend-tests",
     "frontend-build",
+    "bundle-budget",
+    "bundle-tests",
     "browser-install",
+    "browser-e2e",
   ]) {
     assert.match(
       errors,
@@ -391,6 +476,9 @@ test("pins the semantics of required full-gate commands", (t) => {
   contract.commands["rust-clippy"].argv = ["cargo", "clippy"];
   contract.commands["frontend-build"].packageScript = "typecheck";
   contract.commands["frontend-build"].argv = ["pnpm", "typecheck"];
+  contract.commands["frontend-tests"].argv = ["pnpm", "typecheck"];
+  contract.commands["bundle-budget"].packageScript = "test:bundle";
+  contract.commands["bundle-tests"].argv = ["pnpm", "check:bundle"];
   contract.commands["browser-install"].argv = [
     "pnpm",
     "exec",
@@ -399,6 +487,7 @@ test("pins the semantics of required full-gate commands", (t) => {
     "chromium",
   ];
   contract.commands["browser-install"].installsBrowser = false;
+  contract.commands["browser-e2e"].requiresBrowser = false;
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
@@ -416,11 +505,27 @@ test("pins the semantics of required full-gate commands", (t) => {
   );
   assert.match(
     errors,
+    /required command frontend-tests argv must be pnpm test, received pnpm typecheck/,
+  );
+  assert.match(
+    errors,
+    /required command bundle-budget must own package script check:bundle, received "test:bundle"/,
+  );
+  assert.match(
+    errors,
+    /required command bundle-tests argv must be pnpm test:bundle, received pnpm check:bundle/,
+  );
+  assert.match(
+    errors,
     /required command browser-install argv must be pnpm exec playwright install --with-deps chromium/,
   );
   assert.match(
     errors,
     /required command browser-install must declare installsBrowser: true/,
+  );
+  assert.match(
+    errors,
+    /required command browser-e2e must declare requiresBrowser: true/,
   );
 });
 
@@ -454,6 +559,6 @@ test("requires browser installation before browser validation", (t) => {
 
   assert.match(
     validateValidationContract(root).join("\n"),
-    /browser command browser must follow required command browser-install in the full profile/,
+    /browser command browser-e2e must follow required command browser-install in the full profile/,
   );
 });

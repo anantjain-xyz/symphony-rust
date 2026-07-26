@@ -6,6 +6,27 @@ const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
 const REQUIRED_FULL_COMMANDS = new Map([
   [
+    "validation-contract",
+    {
+      argv: ["pnpm", "check:validation-contract"],
+      packageScript: "check:validation-contract",
+    },
+  ],
+  [
+    "agent-assets",
+    {
+      argv: ["pnpm", "check:harness"],
+      packageScript: "check:harness",
+    },
+  ],
+  [
+    "validation-tests",
+    {
+      argv: ["pnpm", "test:validation"],
+      packageScript: "test:validation",
+    },
+  ],
+  [
     "rust-format",
     {
       argv: ["cargo", "fmt", "--all", "--check"],
@@ -47,10 +68,31 @@ const REQUIRED_FULL_COMMANDS = new Map([
     },
   ],
   [
+    "frontend-tests",
+    {
+      argv: ["pnpm", "test"],
+      packageScript: "test",
+    },
+  ],
+  [
     "frontend-build",
     {
       argv: ["pnpm", "build"],
       packageScript: "build",
+    },
+  ],
+  [
+    "bundle-budget",
+    {
+      argv: ["pnpm", "check:bundle"],
+      packageScript: "check:bundle",
+    },
+  ],
+  [
+    "bundle-tests",
+    {
+      argv: ["pnpm", "test:bundle"],
+      packageScript: "test:bundle",
     },
   ],
   [
@@ -64,6 +106,14 @@ const REQUIRED_FULL_COMMANDS = new Map([
         "--with-deps",
         "chromium",
       ],
+    },
+  ],
+  [
+    "browser-e2e",
+    {
+      argv: ["pnpm", "test:e2e"],
+      packageScript: "test:e2e",
+      requiresBrowser: true,
     },
   ],
 ]);
@@ -167,6 +217,12 @@ function parseSimpleShellScript(script, scriptName, errors) {
     if (character === "#" && !tokenStarted) {
       errors.push(
         `package script ${scriptName} uses unsupported shell comment syntax near "#"; validation scripts may not contain unquoted comments`,
+      );
+      return [];
+    }
+    if (character === "\n" || character === "\r") {
+      errors.push(
+        `package script ${scriptName} uses unsupported shell line break; validation scripts may use argv commands joined only with &&`,
       );
       return [];
     }
@@ -331,6 +387,99 @@ function exactRunLine(command) {
   return new RegExp(`^\\s*-\\s+run:\\s*${escaped}\\s*$`, "gm");
 }
 
+function yamlIndent(line) {
+  return line.match(/^ */)[0].length;
+}
+
+function previousYamlParent(lines, index, childIndent) {
+  for (let candidate = index - 1; candidate >= 0; candidate -= 1) {
+    const line = lines[candidate];
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    const indent = yamlIndent(line);
+    if (indent < childIndent) {
+      return { index: candidate, indent, text: line.trim() };
+    }
+  }
+  return null;
+}
+
+function validateCiRunStep(content, command, workflowPath, errors) {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const runPattern = new RegExp(`^( *)-\\s+run:\\s*${escaped}\\s*$`);
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+
+  for (const [lineIndex, line] of lines.entries()) {
+    const match = runPattern.exec(line);
+    if (!match) continue;
+    const stepIndent = match[1].length;
+    const steps = previousYamlParent(lines, lineIndex, stepIndent);
+    if (
+      !steps ||
+      steps.indent !== stepIndent - 2 ||
+      steps.text !== "steps:"
+    ) {
+      errors.push(
+        `CI workflow ${workflowPath} canonical entrypoint must be a direct workflow step under steps`,
+      );
+      continue;
+    }
+
+    const job = previousYamlParent(lines, steps.index, steps.indent);
+    if (
+      !job ||
+      job.indent !== steps.indent - 2 ||
+      !/^[A-Za-z_][A-Za-z0-9_-]*:$/.test(job.text)
+    ) {
+      errors.push(
+        `CI workflow ${workflowPath} canonical entrypoint must belong to a job`,
+      );
+      continue;
+    }
+
+    let stepEnd = lines.length;
+    for (let index = lineIndex + 1; index < lines.length; index += 1) {
+      if (lines[index].trim() === "") continue;
+      if (yamlIndent(lines[index]) <= stepIndent) {
+        stepEnd = index;
+        break;
+      }
+    }
+    for (let index = lineIndex + 1; index < stepEnd; index += 1) {
+      if (
+        yamlIndent(lines[index]) === stepIndent + 2 &&
+        /^(?:if|continue-on-error)\s*:/.test(lines[index].trim())
+      ) {
+        errors.push(
+          `CI workflow ${workflowPath} canonical entrypoint step must be unconditional and failure-gating; remove ${lines[
+            index
+          ]
+            .trim()
+            .split(":")[0]}`,
+        );
+      }
+    }
+
+    let jobEnd = lines.length;
+    for (let index = job.index + 1; index < lines.length; index += 1) {
+      if (lines[index].trim() === "") continue;
+      if (yamlIndent(lines[index]) <= job.indent) {
+        jobEnd = index;
+        break;
+      }
+    }
+    for (let index = job.index + 1; index < jobEnd; index += 1) {
+      if (
+        yamlIndent(lines[index]) === steps.indent &&
+        /^if\s*:/.test(lines[index].trim())
+      ) {
+        errors.push(
+          `CI workflow ${workflowPath} canonical entrypoint job must be unconditional; remove if`,
+        );
+      }
+    }
+  }
+}
+
 export function validateValidationContract(
   root = DEFAULT_ROOT,
   contractRelativePath = "validation/contract.json",
@@ -476,6 +625,14 @@ export function validateValidationContract(
         `required command ${commandId} must own package script ${expected.packageScript}, received ${JSON.stringify(
           command.packageScript,
         )}`,
+      );
+    }
+    if (
+      expected.requiresBrowser !== undefined &&
+      command.requiresBrowser !== expected.requiresBrowser
+    ) {
+      errors.push(
+        `required command ${commandId} must declare requiresBrowser: ${expected.requiresBrowser}`,
       );
     }
     if (!full.has(commandId)) {
@@ -628,6 +785,9 @@ export function validateValidationContract(
             ciCommand,
           )} exactly once; found ${matches.length}`,
         );
+      }
+      if (ciCommand && matches.length > 0) {
+        validateCiRunStep(content, ciCommand, ci.path, errors);
       }
       for (const command of Object.values(commands)) {
         const direct = command.argv?.join(" ");

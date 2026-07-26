@@ -64,11 +64,13 @@ function harnessFixture(t) {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `fn bundled_skills() {
+    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
+fn bundled_skills() {
   macro_rules! skill {
     ($name:literal) => {
       SkillFile {
-        name: $name,
+        name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
         content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
       }
     };
@@ -193,11 +195,13 @@ test("requires every bundled skill owner to have one Rust include", (t) => {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `fn bundled_skills() {
+    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
+fn bundled_skills() {
   macro_rules! skill {
     ($name:literal) => {
       SkillFile {
-        name: $name,
+        name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
         content: "".to_string(),
       }
     };
@@ -223,11 +227,13 @@ test("ignores commented skill macros and accepts multiline inventory entries", (
   write(
     root,
     "src-tauri/src/lib.rs",
-    `fn bundled_skills() {
+    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
+fn bundled_skills() {
   macro_rules! skill {
     ($name:literal) => {
       SkillFile {
-        name: $name,
+        name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
         content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
       }
     };
@@ -254,11 +260,13 @@ test("scopes bundled inventory to the returned vector", (t) => {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `fn bundled_skills() {
+    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
+fn bundled_skills() {
   macro_rules! skill {
     ($name:literal) => {
       SkillFile {
-        name: $name,
+        name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
         content: include_str!(concat!("../assets/skills/", $name, "/SKILL.md")).to_string(),
       }
     };
@@ -313,7 +321,9 @@ test("ties bundled includes to the skill macro content field", (t) => {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `fn bundled_skills() {
+    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+
+fn bundled_skills() {
   macro_rules! unused_skill_content {
     ($name:literal) => {
       include_str!(concat!("../assets/skills/", $name, "/SKILL.md"))
@@ -322,7 +332,7 @@ test("ties bundled includes to the skill macro content field", (t) => {
   macro_rules! skill {
     ($name:literal) => {
       SkillFile {
-        name: $name,
+        name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),
         content: "".to_string(),
       }
     };
@@ -344,6 +354,40 @@ test("ties bundled includes to the skill macro content field", (t) => {
   assert.match(
     errors,
     /bundled skill owner src-tauri\/assets\/skills\/commit\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
+  );
+});
+
+test("pins the runtime names produced by the bundled skill macro", (t) => {
+  const root = harnessFixture(t);
+  const source = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    source,
+    readFileSync(source, "utf8").replace(
+      'name: format!("{}{}", SYMPHONY_SKILL_PREFIX, $name),',
+      "name: $name.to_string(),",
+    ),
+  );
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /skill! name field must format a constant prefix followed by the literal skill id/,
+  );
+});
+
+test("pins the runtime skill-name prefix to the projection prefix", (t) => {
+  const root = harnessFixture(t);
+  const source = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    source,
+    readFileSync(source, "utf8").replace(
+      'const SYMPHONY_SKILL_PREFIX: &str = "symphony-";',
+      'const SYMPHONY_SKILL_PREFIX: &str = "wrong-";',
+    ),
+  );
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /skill! runtime name prefix SYMPHONY_SKILL_PREFIX must be the single string literal "symphony-"/,
   );
 });
 

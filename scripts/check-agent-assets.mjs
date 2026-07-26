@@ -490,7 +490,103 @@ function dynamicSkillInclude(argumentTokens, variableName) {
   return [groups[0][0].value, groups[2][0].value];
 }
 
-function bundledSkillInclude(definition, inventoryFile, errors) {
+function rustStringConstant(tokens, constantName) {
+  const values = [];
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "const" ||
+      tokens[index + 1]?.value !== constantName
+    ) {
+      continue;
+    }
+    let equals = index + 2;
+    while (
+      equals < tokens.length &&
+      !["=", ";"].includes(tokens[equals].value)
+    ) {
+      equals += 1;
+    }
+    if (tokens[equals]?.value !== "=") continue;
+    let semicolon = equals + 1;
+    while (semicolon < tokens.length && tokens[semicolon].value !== ";") {
+      semicolon += 1;
+    }
+    const expression = tokens.slice(equals + 1, semicolon);
+    values.push(
+      expression.length === 1 && expression[0].type === "string"
+        ? expression[0].value
+        : null,
+    );
+  }
+  return values;
+}
+
+function bundledSkillName(
+  fields,
+  variableName,
+  sourceTokens,
+  expectedPrefix,
+  inventoryFile,
+  errors,
+) {
+  const nameFields = fields.filter(
+    (field) => field[0]?.value === "name" && field[1]?.value === ":",
+  );
+  if (nameFields.length !== 1) {
+    errors.push(
+      `${inventoryFile} skill! macro must define exactly one name field; found ${nameFields.length}`,
+    );
+    return false;
+  }
+  const expression = nameFields[0].slice(2);
+  const format = macroInvocation(expression, 0, "format");
+  const groups = format?.arguments
+    ? splitTopLevel(format.arguments, ",")
+    : null;
+  if (groups?.at(-1)?.length === 0) groups.pop();
+  if (
+    !format?.arguments ||
+    format.end !== expression.length ||
+    groups === null ||
+    groups.length !== 3 ||
+    groups[0].length !== 1 ||
+    groups[0][0].type !== "string" ||
+    groups[0][0].value !== "{}{}" ||
+    groups[1].length !== 1 ||
+    groups[1][0].type !== "ident" ||
+    groups[2].length !== 2 ||
+    groups[2][0].value !== "$" ||
+    groups[2][1].value !== variableName
+  ) {
+    errors.push(
+      `${inventoryFile} skill! name field must format a constant prefix followed by the literal skill id`,
+    );
+    return false;
+  }
+
+  const prefixConstant = groups[1][0].value;
+  const prefixValues = rustStringConstant(sourceTokens, prefixConstant);
+  if (
+    prefixValues.length !== 1 ||
+    prefixValues[0] !== expectedPrefix
+  ) {
+    errors.push(
+      `${inventoryFile} skill! runtime name prefix ${prefixConstant} must be the single string literal ${JSON.stringify(
+        expectedPrefix,
+      )}`,
+    );
+    return false;
+  }
+  return true;
+}
+
+function bundledSkillInclude(
+  definition,
+  sourceTokens,
+  expectedPrefix,
+  inventoryFile,
+  errors,
+) {
   const body = definition.body;
   const arrows = [];
   const stack = [];
@@ -569,6 +665,18 @@ function bundledSkillInclude(definition, inventoryFile, errors) {
     errors.push(`${inventoryFile} skill! macro has malformed SkillFile fields`);
     return null;
   }
+  if (
+    !bundledSkillName(
+      fields,
+      variableName,
+      sourceTokens,
+      expectedPrefix,
+      inventoryFile,
+      errors,
+    )
+  ) {
+    return null;
+  }
   const contentFields = fields.filter(
     (field) => field[0]?.value === "content" && field[1]?.value === ":",
   );
@@ -611,6 +719,7 @@ function inventoryFromRust(
   root,
   inventoryFile,
   functionName,
+  runtimePrefix,
   errors,
 ) {
   const absolute = resolveInside(
@@ -692,7 +801,13 @@ function inventoryFromRust(
     errors,
   );
   const verifiedInclude = definition
-    ? bundledSkillInclude(definition, inventoryFile, errors)
+    ? bundledSkillInclude(
+        definition,
+        tokens,
+        runtimePrefix,
+        inventoryFile,
+        errors,
+      )
     : null;
   const references = [];
   const verifiedDynamicIncludes = new Set();
@@ -872,6 +987,7 @@ export function validateAgentAssets(
     root,
     skillConfig.inventoryFile,
     "bundled_skills",
+    prefix,
     errors,
   );
   const inventory = bundled.ids;
