@@ -418,6 +418,60 @@ test("accepts CRLF skill frontmatter on Windows-style checkouts", (t) => {
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
+test("rejects malformed YAML string scalars in skill frontmatter", (t) => {
+  const root = harnessFixture(t);
+  for (const path of [
+    "src-tauri/assets/skills/commit/SKILL.md",
+    ".agents/skills/symphony-commit/SKILL.md",
+  ]) {
+    const absolute = join(root, path);
+    writeFileSync(
+      absolute,
+      readFileSync(absolute, "utf8").replace(
+        "description: commit fixture",
+        "description: [unterminated",
+      ),
+    );
+  }
+  for (const path of [
+    "src-tauri/assets/skills/pull/SKILL.md",
+    ".agents/skills/symphony-pull/SKILL.md",
+  ]) {
+    const absolute = join(root, path);
+    writeFileSync(
+      absolute,
+      readFileSync(absolute, "utf8").replace(
+        "description: pull fixture",
+        "description: true",
+      ),
+    );
+  }
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /description must be a valid string scalar in the supported YAML subset/,
+  );
+  assert.match(
+    errors,
+    /symphony-pull\/SKILL\.md frontmatter line 3 description must be a valid string scalar/,
+  );
+});
+
+test("rejects companion files that the bundled skill runtime cannot ship", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/assets/skills/commit/scripts/helper.sh",
+    "#!/bin/sh\n",
+  );
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /skill owner root skill commit contains unbundled companion .*scripts; bundled skills may contain only SKILL\.md/,
+  );
+});
+
 test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
   const root = harnessFixture(t);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");

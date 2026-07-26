@@ -61,6 +61,33 @@ function walkFiles(path) {
   return files;
 }
 
+function parseYamlStringScalar(value, path, line, key, errors) {
+  const scalar = value.trim();
+  if (scalar.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(scalar);
+      if (typeof parsed === "string") return parsed;
+    } catch {
+      // Report the shared scalar error below.
+    }
+  } else if (scalar.startsWith("'")) {
+    if (/^'(?:[^']|'')*'$/.test(scalar)) {
+      return scalar.slice(1, -1).replaceAll("''", "'");
+    }
+  } else if (
+    /^[\p{L}_][^\u0000-\u001f[\]{}]*$/u.test(scalar) &&
+    !/:(?:\s|$)|(?:^|\s)#/.test(scalar) &&
+    !/^(?:true|false|null|yes|no|on|off)$/i.test(scalar)
+  ) {
+    return scalar;
+  }
+
+  errors.push(
+    `${path} frontmatter line ${line} ${key} must be a valid string scalar in the supported YAML subset`,
+  );
+  return null;
+}
+
 function parseFrontmatter(content, path, errors) {
   const normalized = content.replace(/\r\n?/g, "\n");
   if (!normalized.startsWith("---\n")) {
@@ -86,7 +113,14 @@ function parseFrontmatter(content, path, errors) {
     if (values[key] !== undefined) {
       errors.push(`${path} frontmatter repeats key ${key}`);
     }
-    values[key] = value.replace(/^"(.*)"$/, "$1").trim();
+    const parsed = parseYamlStringScalar(
+      value,
+      path,
+      index + 2,
+      key,
+      errors,
+    );
+    if (parsed !== null) values[key] = parsed;
   }
   for (const required of ["name", "description"]) {
     if (!values[required]) {
@@ -96,7 +130,14 @@ function parseFrontmatter(content, path, errors) {
   return values;
 }
 
-function discoverSkills(root, rootPath, expectedName, errors, label) {
+function discoverSkills(
+  root,
+  rootPath,
+  expectedName,
+  errors,
+  label,
+  manifestOnly = false,
+) {
   const absolute = resolveInside(root, rootPath, errors, label);
   const skills = new Map();
   if (!absolute || !existsSync(absolute)) {
@@ -122,6 +163,19 @@ function discoverSkills(root, rootPath, expectedName, errors, label) {
     if (!existsSync(manifest)) {
       errors.push(`${label} skill ${entry.name} is missing ${manifestPath}`);
       continue;
+    }
+    if (manifestOnly) {
+      for (const companion of readdirSync(resolve(absolute, entry.name), {
+        withFileTypes: true,
+      })) {
+        if (companion.name === "SKILL.md") continue;
+        errors.push(
+          `${label} skill ${entry.name} contains unbundled companion ${relativePath(
+            root,
+            resolve(absolute, entry.name, companion.name),
+          )}; bundled skills may contain only SKILL.md`,
+        );
+      }
     }
     const content = readFileSync(manifest, "utf8");
     const frontmatter = parseFrontmatter(content, manifestPath, errors);
@@ -982,6 +1036,7 @@ export function validateAgentAssets(
     (id) => `${prefix}${id}`,
     errors,
     "skill owner root",
+    true,
   );
   const bundled = inventoryFromRust(
     root,

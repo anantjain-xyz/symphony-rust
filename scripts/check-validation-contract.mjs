@@ -117,6 +117,23 @@ const REQUIRED_FULL_COMMANDS = new Map([
     },
   ],
 ]);
+const REQUIRED_PACKAGE_SCRIPTS = new Map([
+  [
+    "check:validation-contract",
+    "node scripts/check-validation-contract.mjs",
+  ],
+  ["check:harness", "node scripts/check-agent-assets.mjs"],
+  [
+    "test:validation",
+    "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
+  ],
+  ["typecheck", "tsc --noEmit"],
+  ["test", "vitest run"],
+  ["build", "tsc && vite build"],
+  ["check:bundle", "node scripts/check-bundle-budget.mjs"],
+  ["test:bundle", "node --test scripts/check-bundle-budget.node.mjs"],
+  ["test:e2e", "playwright test"],
+]);
 const SUPPORTED_SCRIPT_EXECUTABLES = new Map([
   ["biome", ["@biomejs/biome"]],
   ["cargo", null],
@@ -387,6 +404,27 @@ function exactRunLine(command) {
   return new RegExp(`^\\s*-\\s+run:\\s*${escaped}\\s*$`, "gm");
 }
 
+function stripMarkdownHtmlComments(content) {
+  let visible = "";
+  let cursor = 0;
+  while (cursor < content.length) {
+    const start = content.indexOf("<!--", cursor);
+    if (start === -1) return visible + content.slice(cursor);
+    visible += content.slice(cursor, start);
+    const end = content.indexOf("-->", start + 4);
+    if (end === -1) return visible;
+    cursor = end + 3;
+  }
+  return visible;
+}
+
+function hasMarkdownCommandLine(content, command) {
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?:\\$\\s*)?${escaped}\\s*$`, "m").test(
+    stripMarkdownHtmlComments(content),
+  );
+}
+
 function yamlIndent(line) {
   return line.match(/^ */)[0].length;
 }
@@ -509,6 +547,16 @@ export function validateValidationContract(
   const commandIds = Object.keys(commands);
   if (commandIds.length === 0) {
     errors.push("validation contract must define at least one command");
+  }
+  for (const [scriptName, expectedBody] of REQUIRED_PACKAGE_SCRIPTS) {
+    const actualBody = packageJson.scripts?.[scriptName];
+    if (actualBody !== expectedBody) {
+      errors.push(
+        `required package script ${scriptName} must be ${JSON.stringify(
+          expectedBody,
+        )}, received ${JSON.stringify(actualBody)}`,
+      );
+    }
   }
   const executableSet = new Set(contract.executables ?? []);
   const validatedPackageScripts = new Set();
@@ -833,9 +881,9 @@ export function validateValidationContract(
     } else if (path) {
       const content = readFileSync(path, "utf8");
       for (const command of contributingCommands) {
-        if (!content.includes(command)) {
+        if (!hasMarkdownCommandLine(content, command)) {
           errors.push(
-            `contributor guide ${contributing.path} must reference ${command}`,
+            `contributor guide ${contributing.path} must show ${command} on a visible command line`,
           );
         }
       }
@@ -862,7 +910,7 @@ export function validateValidationContract(
       if (path && !existsSync(path)) {
         errors.push(`adapted skill is missing at ${skillPath}`);
       } else if (path) {
-        const content = readFileSync(path, "utf8");
+        const content = stripMarkdownHtmlComments(readFileSync(path, "utf8"));
         const count = content.split(skills.command).length - 1;
         if (count !== 1) {
           errors.push(

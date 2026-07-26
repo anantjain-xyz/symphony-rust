@@ -33,7 +33,8 @@ function validationFixture(t) {
       "check:harness": "node scripts/check-agent-assets.mjs",
       test: "vitest run",
       "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
-      "test:validation": "node --test scripts/fixture.node.mjs",
+      "test:validation":
+        "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
       "test:e2e": "playwright test",
       typecheck: "tsc --noEmit",
       build: "tsc && vite build",
@@ -49,7 +50,9 @@ function validationFixture(t) {
   });
   for (const path of [
     "scripts/check-validation-contract.mjs",
+    "scripts/check-validation-contract.node.mjs",
     "scripts/check-agent-assets.mjs",
+    "scripts/check-agent-assets.node.mjs",
     "scripts/check-bundle-budget.mjs",
     "scripts/check-bundle-budget.node.mjs",
     "scripts/fixture.node.mjs",
@@ -65,7 +68,7 @@ function validationFixture(t) {
   write(
     root,
     "CONTRIBUTING.md",
-    "`pnpm verify:fast`\n\n`pnpm verify:full`\n",
+    "```sh\npnpm verify:fast\n\npnpm verify:full\n```\n",
   );
   for (const name of ["pull", "push"]) {
     write(
@@ -213,6 +216,18 @@ test("accepts a complete canonical validation contract", (t) => {
   assert.deepEqual(validateValidationContract(root), []);
 });
 
+test("pins the bodies of package scripts owned by required gates", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["test:validation"] = "node --help";
+  writeJson(root, "package.json", packageJson);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /required package script test:validation must be "node --test scripts\/check-agent-assets\.node\.mjs scripts\/check-validation-contract\.node\.mjs", received "node --help"/,
+  );
+});
+
 test("reports missing package scripts and command ids with owners", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -286,6 +301,34 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
   assert.match(
     errors,
     /canonical entrypoint job must be unconditional; remove if/,
+  );
+});
+
+test("requires visible contributor and adapted-skill gate references", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    "CONTRIBUTING.md",
+    "<!--\npnpm verify:fast\npnpm verify:full\n-->\n",
+  );
+  write(
+    root,
+    ".agents/skills/symphony-pull/SKILL.md",
+    "<!-- Run pnpm verify:full. -->\n",
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /CONTRIBUTING\.md must show pnpm verify:fast on a visible command line/,
+  );
+  assert.match(
+    errors,
+    /CONTRIBUTING\.md must show pnpm verify:full on a visible command line/,
+  );
+  assert.match(
+    errors,
+    /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
   );
 });
 
