@@ -477,15 +477,19 @@ function checkPnpmReferences(root, files, packageJson, builtins, errors) {
   const builtinSet = new Set(builtins ?? []);
   for (const file of files) {
     const content = readFileSync(file, "utf8");
-    for (const match of content.matchAll(/\bpnpm\s+([A-Za-z0-9][A-Za-z0-9:_-]*)/g)) {
-      const script = match[1];
-      if (builtinSet.has(script)) continue;
+    for (const match of content.matchAll(
+      /\bpnpm[ \t]+(?:(run)[ \t]+)?([A-Za-z0-9][A-Za-z0-9:_-]*)/g,
+    )) {
+      const usesRun = match[1] === "run";
+      const script = match[2];
+      if (!usesRun && builtinSet.has(script)) continue;
       if (!packageJson.scripts?.[script]) {
+        const command = usesRun ? `pnpm run ${script}` : `pnpm ${script}`;
         errors.push(
           `${relativePath(root, file)}:${lineNumber(
             content,
             match.index,
-          )} references missing package script pnpm ${script}`,
+          )} references missing package script ${command}`,
         );
       }
     }
@@ -663,6 +667,22 @@ export function validateAgentAssets(
     inventory,
     errors,
   );
+  for (const owner of owners.values()) {
+    const ownerFile = resolve(root, owner.manifestPath);
+    const ownerIncludes = includeReferences.filter(
+      (reference) => reference.target === ownerFile,
+    );
+    if (ownerIncludes.length !== 1) {
+      const includeOwners = ownerIncludes
+        .map((reference) => relativePath(root, reference.source))
+        .sort();
+      errors.push(
+        `bundled skill owner ${owner.manifestPath} must have exactly one Rust include_str! owner; found ${ownerIncludes.length}${
+          includeOwners.length > 0 ? ` (${includeOwners.join(", ")})` : ""
+        }`,
+      );
+    }
+  }
 
   const promptConfig = contract.defaultPrompt;
   let promptFile = null;

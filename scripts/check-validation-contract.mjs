@@ -4,6 +4,56 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
+const REQUIRED_FULL_COMMANDS = new Map([
+  [
+    "rust-format",
+    {
+      argv: ["cargo", "fmt", "--all", "--check"],
+    },
+  ],
+  [
+    "rust-clippy",
+    {
+      argv: [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--exclude",
+        "symphony-desktop",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+      ],
+    },
+  ],
+  [
+    "rust-tests",
+    {
+      argv: [
+        "cargo",
+        "test",
+        "--workspace",
+        "--exclude",
+        "symphony-desktop",
+      ],
+    },
+  ],
+  [
+    "frontend-typecheck",
+    {
+      argv: ["pnpm", "typecheck"],
+      packageScript: "typecheck",
+    },
+  ],
+  [
+    "frontend-build",
+    {
+      argv: ["pnpm", "build"],
+      packageScript: "build",
+    },
+  ],
+]);
 const SUPPORTED_SCRIPT_EXECUTABLES = new Map([
   ["biome", ["@biomejs/biome"]],
   ["cargo", null],
@@ -103,6 +153,7 @@ function parseSimpleShellScript(script, scriptName, errors) {
       continue;
     }
     if (
+      character === "&" ||
       character === ";" ||
       character === "|" ||
       character === ">" ||
@@ -378,6 +429,37 @@ export function validateValidationContract(
 
   const fast = new Set(Array.isArray(profiles.fast) ? profiles.fast : []);
   const full = new Set(Array.isArray(profiles.full) ? profiles.full : []);
+  for (const [commandId, expected] of REQUIRED_FULL_COMMANDS) {
+    const command = commands[commandId];
+    if (!command) {
+      errors.push(
+        `full validation contract is missing required command ${commandId}`,
+      );
+      continue;
+    }
+    if (JSON.stringify(command.argv) !== JSON.stringify(expected.argv)) {
+      errors.push(
+        `required command ${commandId} argv must be ${expected.argv.join(
+          " ",
+        )}, received ${command.argv?.join(" ") ?? "<missing>"}`,
+      );
+    }
+    if (
+      expected.packageScript !== undefined &&
+      command.packageScript !== expected.packageScript
+    ) {
+      errors.push(
+        `required command ${commandId} must own package script ${expected.packageScript}, received ${JSON.stringify(
+          command.packageScript,
+        )}`,
+      );
+    }
+    if (!full.has(commandId)) {
+      errors.push(
+        `full validation profile must include required command ${commandId}`,
+      );
+    }
+  }
   for (const commandId of fast) {
     if (!full.has(commandId)) {
       errors.push(

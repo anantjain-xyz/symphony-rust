@@ -163,6 +163,33 @@ test("reports missing include_str targets with the owning Rust file", (t) => {
   );
 });
 
+test("requires every bundled skill owner to have one Rust include", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/src/lib.rs",
+    `macro_rules! skill {
+  ($name:literal) => {
+    ""
+  };
+}
+fn bundled() {
+  let _ = [skill!("commit"), skill!("pull")];
+}
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /bundled skill owner src-tauri\/assets\/skills\/commit\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
+  );
+  assert.match(
+    errors,
+    /bundled skill owner src-tauri\/assets\/skills\/pull\/SKILL\.md must have exactly one Rust include_str! owner; found 0/,
+  );
+});
+
 test("ignores commented skill macros and accepts multiline inventory entries", (t) => {
   const root = harnessFixture(t);
   write(
@@ -229,5 +256,26 @@ test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
   assert.match(
     validateAgentAssets(root).join("\n"),
     /hard-codes MCP namespace mcp__linear-server__; describe the capability without assuming a server name/,
+  );
+});
+
+test("validates the script named after pnpm run in agent Markdown", (t) => {
+  const root = harnessFixture(t);
+  const prompt = join(root, "src-tauri/assets/default-prompt.md");
+  writeFileSync(
+    prompt,
+    `${readFileSync(prompt, "utf8")}
+Run \`pnpm run verify:full\`, not \`pnpm run definitely-missing\`.
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /default-prompt\.md:\d+ references missing package script pnpm run definitely-missing/,
+  );
+  assert.doesNotMatch(
+    errors,
+    /references missing package script pnpm run verify:full/,
   );
 });

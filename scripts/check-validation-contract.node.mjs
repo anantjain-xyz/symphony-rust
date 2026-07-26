@@ -32,11 +32,15 @@ function validationFixture(t) {
       "check:harness": "node scripts/check-agent-assets.mjs",
       "test:validation": "node --test scripts/fixture.node.mjs",
       "test:e2e": "playwright test",
+      typecheck: "tsc --noEmit",
+      build: "tsc && vite build",
       "verify:fast": "node scripts/run-validation.mjs fast",
       "verify:full": "node scripts/run-validation.mjs full",
     },
     devDependencies: {
       "@playwright/test": "1.0.0",
+      typescript: "1.0.0",
+      vite: "1.0.0",
     },
   });
   for (const path of [
@@ -66,14 +70,25 @@ function validationFixture(t) {
   }
   writeJson(root, "validation/contract.json", {
     version: 1,
-    executables: ["pnpm"],
+    executables: ["cargo", "pnpm"],
     entrypoints: {
       fast: { packageScript: "verify:fast", profile: "fast" },
       full: { packageScript: "verify:full", profile: "full" },
     },
     profiles: {
       fast: ["contract", "harness", "checker-tests"],
-      full: ["contract", "harness", "checker-tests", "browser-install", "browser"],
+      full: [
+        "contract",
+        "harness",
+        "checker-tests",
+        "rust-format",
+        "rust-clippy",
+        "rust-tests",
+        "frontend-typecheck",
+        "frontend-build",
+        "browser-install",
+        "browser",
+      ],
     },
     commands: {
       contract: {
@@ -90,6 +105,44 @@ function validationFixture(t) {
         label: "checker tests",
         argv: ["pnpm", "test:validation"],
         packageScript: "test:validation",
+      },
+      "rust-format": {
+        label: "Rust formatting",
+        argv: ["cargo", "fmt", "--all", "--check"],
+      },
+      "rust-clippy": {
+        label: "Rust Clippy",
+        argv: [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--exclude",
+          "symphony-desktop",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings",
+        ],
+      },
+      "rust-tests": {
+        label: "Rust tests",
+        argv: [
+          "cargo",
+          "test",
+          "--workspace",
+          "--exclude",
+          "symphony-desktop",
+        ],
+      },
+      "frontend-typecheck": {
+        label: "TypeScript typecheck",
+        argv: ["pnpm", "typecheck"],
+        packageScript: "typecheck",
+      },
+      "frontend-build": {
+        label: "frontend build",
+        argv: ["pnpm", "build"],
+        packageScript: "build",
       },
       "browser-install": {
         label: "browser install",
@@ -221,6 +274,8 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   packageJson.scripts["check:cycle"] = "pnpm check:cycle";
   packageJson.scripts["test:unsafe"] = "node scripts/fixture.node.mjs | tee result.txt";
+  packageJson.scripts["test:backgrounded"] =
+    "node scripts/fixture.node.mjs & node scripts/fixture.node.mjs";
   writeJson(root, "package.json", packageJson);
 
   const contract = JSON.parse(
@@ -236,12 +291,80 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     argv: ["pnpm", "test:unsafe"],
     packageScript: "test:unsafe",
   };
-  contract.profiles.full.push("cycle", "unsafe");
+  contract.commands.backgrounded = {
+    label: "backgrounded",
+    argv: ["pnpm", "test:backgrounded"],
+    packageScript: "test:backgrounded",
+  };
+  contract.profiles.full.push("cycle", "unsafe", "backgrounded");
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
   assert.match(errors, /package scripts contain a cycle: check:cycle -> check:cycle/);
   assert.match(errors, /package script test:unsafe uses unsupported shell syntax/);
+  assert.match(
+    errors,
+    /package script test:backgrounded uses unsupported shell syntax near "&"/,
+  );
+});
+
+test("pins required full-gate commands independently of the command inventory", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  for (const commandId of [
+    "rust-format",
+    "rust-clippy",
+    "rust-tests",
+    "frontend-typecheck",
+    "frontend-build",
+  ]) {
+    delete contract.commands[commandId];
+    contract.profiles.full = contract.profiles.full.filter(
+      (candidate) => candidate !== commandId,
+    );
+  }
+  writeJson(root, "validation/contract.json", contract);
+
+  const errors = validateValidationContract(root).join("\n");
+  for (const commandId of [
+    "rust-format",
+    "rust-clippy",
+    "rust-tests",
+    "frontend-typecheck",
+    "frontend-build",
+  ]) {
+    assert.match(
+      errors,
+      new RegExp(`full validation contract is missing required command ${commandId}`),
+    );
+  }
+});
+
+test("pins the semantics of required full-gate commands", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.commands["rust-clippy"].argv = ["cargo", "clippy"];
+  contract.commands["frontend-build"].packageScript = "typecheck";
+  contract.commands["frontend-build"].argv = ["pnpm", "typecheck"];
+  writeJson(root, "validation/contract.json", contract);
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /required command rust-clippy argv must be cargo clippy --workspace/,
+  );
+  assert.match(
+    errors,
+    /required command frontend-build argv must be pnpm build, received pnpm typecheck/,
+  );
+  assert.match(
+    errors,
+    /required command frontend-build must own package script build, received "typecheck"/,
+  );
 });
 
 test("binds canonical entrypoints to matching profiles", (t) => {
