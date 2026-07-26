@@ -13,6 +13,19 @@ const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
 const DEFAULT_PROMPT_RETURN_FUNCTION = "default_prompt_template";
 const FORBIDDEN_PORTABLE_OWNER_PATTERN = "\\bpnpm\\b";
+const REQUIRED_DISCOVERY_PROJECTION = {
+  path: ".claude/skills",
+  target: "../.agents/skills",
+};
+const REQUIRED_STANDALONE_ROOTS = [".codex/skills"];
+const REQUIRED_PNPM_BUILTINS = [
+  "add",
+  "dlx",
+  "exec",
+  "install",
+  "remove",
+  "run",
+];
 const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
   [
     "pull",
@@ -1162,6 +1175,17 @@ export function validateAgentAssets(
       )}`,
     );
   }
+  if (
+    !Array.isArray(contract.pnpmBuiltins) ||
+    JSON.stringify([...contract.pnpmBuiltins].sort()) !==
+    JSON.stringify([...REQUIRED_PNPM_BUILTINS].sort())
+  ) {
+    errors.push(
+      `pnpmBuiltins must be ${JSON.stringify(
+        REQUIRED_PNPM_BUILTINS,
+      )}, received ${JSON.stringify(contract.pnpmBuiltins)}`,
+    );
+  }
 
   const skillConfig = contract.skills ?? {};
   const prefix = skillConfig.projectionPrefix ?? "";
@@ -1255,7 +1279,7 @@ export function validateAgentAssets(
     }
     for (const [skillId, expected] of REQUIRED_ALLOWED_ADAPTATIONS) {
       if (
-        Object.hasOwn(allowedAdaptations, skillId) &&
+        !Object.hasOwn(allowedAdaptations, skillId) ||
         JSON.stringify(allowedAdaptations[skillId]) !==
         JSON.stringify(expected)
       ) {
@@ -1303,45 +1327,67 @@ export function validateAgentAssets(
   }
 
   const discovery = skillConfig.discoveryProjection;
-  if (discovery) {
+  if (
+    discovery?.path !== REQUIRED_DISCOVERY_PROJECTION.path ||
+    discovery?.target !== REQUIRED_DISCOVERY_PROJECTION.target
+  ) {
+    errors.push(
+      `skill discovery projection must be ${JSON.stringify(
+        REQUIRED_DISCOVERY_PROJECTION,
+      )}, received ${JSON.stringify(discovery)}`,
+    );
+  }
+  {
     const path = resolveInside(
       root,
-      discovery.path,
+      REQUIRED_DISCOVERY_PROJECTION.path,
       errors,
       "skill discovery projection",
     );
     if (path && !existsSync(path)) {
-      errors.push(`skill discovery projection is missing at ${discovery.path}`);
+      errors.push(
+        `skill discovery projection is missing at ${REQUIRED_DISCOVERY_PROJECTION.path}`,
+      );
     } else if (path) {
       const metadata = lstatSync(path);
       if (metadata.isSymbolicLink()) {
         const target = readlinkSync(path);
-        if (target !== discovery.target) {
+        if (target !== REQUIRED_DISCOVERY_PROJECTION.target) {
           errors.push(
-            `skill discovery projection ${discovery.path} points to ${target}; expected ${discovery.target}`,
+            `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} points to ${target}; expected ${REQUIRED_DISCOVERY_PROJECTION.target}`,
           );
         }
       } else if (metadata.isFile()) {
         const target = readFileSync(path, "utf8");
-        if (target !== discovery.target) {
+        if (target !== REQUIRED_DISCOVERY_PROJECTION.target) {
           errors.push(
-            `skill discovery projection ${discovery.path} contains ${JSON.stringify(
+            `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} contains ${JSON.stringify(
               target,
             )}; expected Git flattened symlink target ${JSON.stringify(
-              discovery.target,
+              REQUIRED_DISCOVERY_PROJECTION.target,
             )}`,
           );
         }
       } else {
         errors.push(
-          `skill discovery projection ${discovery.path} must be a symlink or Git flattened symlink file targeting ${discovery.target}`,
+          `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} must be a symlink or Git flattened symlink file targeting ${REQUIRED_DISCOVERY_PROJECTION.target}`,
         );
       }
     }
   }
 
+  if (
+    JSON.stringify(skillConfig.standaloneRoots) !==
+    JSON.stringify(REQUIRED_STANDALONE_ROOTS)
+  ) {
+    errors.push(
+      `standaloneRoots must be ${JSON.stringify(
+        REQUIRED_STANDALONE_ROOTS,
+      )}, received ${JSON.stringify(skillConfig.standaloneRoots)}`,
+    );
+  }
   const standaloneFiles = [];
-  for (const standaloneRoot of skillConfig.standaloneRoots ?? []) {
+  for (const standaloneRoot of REQUIRED_STANDALONE_ROOTS) {
     const standalone = discoverSkills(
       root,
       standaloneRoot,
@@ -1478,7 +1524,7 @@ export function validateAgentAssets(
     root,
     markdownFiles,
     packageJson,
-    contract.pnpmBuiltins,
+    REQUIRED_PNPM_BUILTINS,
     errors,
   );
 

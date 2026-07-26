@@ -438,6 +438,7 @@ jobs:
   validate:
     if: \${{ false }}
     continue-on-error: true
+    needs: disabled
     defaults:
       run:
         shell: true {0}
@@ -476,6 +477,10 @@ jobs:
   );
   assert.match(
     errors,
+    /canonical entrypoint job must not depend on other jobs; remove needs/,
+  );
+  assert.match(
+    errors,
     /must not override workflow run defaults/,
   );
 });
@@ -502,6 +507,51 @@ jobs:
   assert.match(
     errors,
     /must trigger pushes to main with branches: \[main\] and no filters/,
+  );
+});
+
+test("pins validation integrations to the canonical repository files", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.integrations.ci.path = "fixtures/ci.yml";
+  contract.integrations.contributing.path = "fixtures/CONTRIBUTING.md";
+  contract.integrations.skills.paths = ["fixtures/skill.md"];
+  writeJson(root, "validation/contract.json", contract);
+  write(
+    root,
+    "fixtures/ci.yml",
+    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
+  );
+  write(
+    root,
+    "fixtures/CONTRIBUTING.md",
+    "pnpm verify:fast\npnpm verify:full\n",
+  );
+  write(root, "fixtures/skill.md", "Run pnpm verify:full.\n");
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    "on:\n  workflow_dispatch:\njobs:\n  noop:\n    steps:\n      - run: echo noop\n",
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /CI integration path must be \.github\/workflows\/ci\.yml, received "fixtures\/ci\.yml"/,
+  );
+  assert.match(
+    errors,
+    /CI workflow \.github\/workflows\/ci\.yml must run canonical entrypoint "pnpm verify:full" exactly once; found 0/,
+  );
+  assert.match(
+    errors,
+    /contributor-guide integration path must be CONTRIBUTING\.md, received "fixtures\/CONTRIBUTING\.md"/,
+  );
+  assert.match(
+    errors,
+    /adapted-skill integration paths must be \["\.agents\/skills\/symphony-pull\/SKILL\.md","\.agents\/skills\/symphony-push\/SKILL\.md"\], received \["fixtures\/skill\.md"\]/,
   );
 });
 

@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER_SCRIPT = "scripts/run-validation.mjs";
+const CI_WORKFLOW = ".github/workflows/ci.yml";
+const CONTRIBUTOR_GUIDE = "CONTRIBUTING.md";
 const DEVELOPMENT_GUIDE = "docs/DEVELOPMENT.md";
+const ADAPTED_SKILL_PATHS = [
+  ".agents/skills/symphony-pull/SKILL.md",
+  ".agents/skills/symphony-push/SKILL.md",
+];
 export const CANONICAL_RUNNER_SOURCE = `import { runValidationProfile } from "./check-validation-contract.mjs";
 
 process.exitCode = runValidationProfile({ profileName: process.argv[2] });
@@ -570,11 +576,15 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === steps.indent &&
-        ["if", "continue-on-error", "defaults"].includes(field)
+        ["if", "continue-on-error", "defaults", "needs"].includes(field)
       ) {
         if (field === "defaults") {
           errors.push(
             `CI workflow ${workflowPath} canonical entrypoint job must not override run defaults; remove defaults`,
+          );
+        } else if (field === "needs") {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint job must not depend on other jobs; remove needs`,
           );
         } else {
           errors.push(
@@ -1116,31 +1126,38 @@ export function validateValidationContract(
         )}`,
       );
     }
-    const ciAbsolute = resolveInside(root, ci.path, errors, "CI workflow");
+    if (ci.path !== CI_WORKFLOW) {
+      errors.push(
+        `CI integration path must be ${CI_WORKFLOW}, received ${JSON.stringify(
+          ci.path,
+        )}`,
+      );
+    }
+    const ciAbsolute = resolveInside(root, CI_WORKFLOW, errors, "CI workflow");
     if (ciAbsolute && !existsSync(ciAbsolute)) {
-      errors.push(`CI workflow is missing at ${ci.path}`);
+      errors.push(`CI workflow is missing at ${CI_WORKFLOW}`);
     } else if (ciAbsolute) {
       const content = readFileSync(ciAbsolute, "utf8");
-      validateCiTriggers(content, ci.path, errors);
+      validateCiTriggers(content, CI_WORKFLOW, errors);
       const matches = ciCommand
         ? [...content.matchAll(exactRunLine(ciCommand))]
         : [];
       if (matches.length !== 1) {
         errors.push(
-          `CI workflow ${ci.path} must run canonical entrypoint ${JSON.stringify(
+          `CI workflow ${CI_WORKFLOW} must run canonical entrypoint ${JSON.stringify(
             ciCommand,
           )} exactly once; found ${matches.length}`,
         );
       }
       if (ciCommand && matches.length > 0) {
-        validateCiRunStep(content, ciCommand, ci.path, errors);
+        validateCiRunStep(content, ciCommand, CI_WORKFLOW, errors);
       }
       for (const command of Object.values(commands)) {
         const direct = command.argv?.join(" ");
         if (!direct || direct === ciCommand) continue;
         if (exactRunLine(direct).test(content)) {
           errors.push(
-            `CI workflow ${ci.path} duplicates canonical step ${JSON.stringify(
+            `CI workflow ${CI_WORKFLOW} duplicates canonical step ${JSON.stringify(
               direct,
             )}; keep validation behind ${ciCommand}`,
           );
@@ -1159,6 +1176,13 @@ export function validateValidationContract(
     if (!Array.isArray(contributing.commands)) {
       errors.push("contributor-guide integration commands must be an array");
     }
+    if (contributing.path !== CONTRIBUTOR_GUIDE) {
+      errors.push(
+        `contributor-guide integration path must be ${CONTRIBUTOR_GUIDE}, received ${JSON.stringify(
+          contributing.path,
+        )}`,
+      );
+    }
     for (const command of [canonicalFastCommand, canonicalFullCommand].filter(
       Boolean,
     )) {
@@ -1170,18 +1194,18 @@ export function validateValidationContract(
     }
     const path = resolveInside(
       root,
-      contributing.path,
+      CONTRIBUTOR_GUIDE,
       errors,
       "contributor guide",
     );
     if (path && !existsSync(path)) {
-      errors.push(`contributor guide is missing at ${contributing.path}`);
+      errors.push(`contributor guide is missing at ${CONTRIBUTOR_GUIDE}`);
     } else if (path) {
       const content = readFileSync(path, "utf8");
       for (const command of contributingCommands) {
         if (!hasMarkdownCommandLine(content, command)) {
           errors.push(
-            `contributor guide ${contributing.path} must show ${command} on a visible command line`,
+            `contributor guide ${CONTRIBUTOR_GUIDE} must show ${command} on a visible command line`,
           );
         }
       }
@@ -1218,6 +1242,16 @@ export function validateValidationContract(
     if (!Array.isArray(skills.paths)) {
       errors.push("adapted-skill integration paths must be an array");
     }
+    if (
+      JSON.stringify([...skillPaths].sort()) !==
+      JSON.stringify([...ADAPTED_SKILL_PATHS].sort())
+    ) {
+      errors.push(
+        `adapted-skill integration paths must be ${JSON.stringify(
+          ADAPTED_SKILL_PATHS,
+        )}, received ${JSON.stringify(skills.paths)}`,
+      );
+    }
     if (canonicalFullCommand && skills.command !== canonicalFullCommand) {
       errors.push(
         `adapted-skill integration command must be canonical full entrypoint ${canonicalFullCommand}, received ${JSON.stringify(
@@ -1225,7 +1259,7 @@ export function validateValidationContract(
         )}`,
       );
     }
-    for (const skillPath of skillPaths) {
+    for (const skillPath of ADAPTED_SKILL_PATHS) {
       const path = resolveInside(root, skillPath, errors, "adapted skill");
       if (path && !existsSync(path)) {
         errors.push(`adapted skill is missing at ${skillPath}`);

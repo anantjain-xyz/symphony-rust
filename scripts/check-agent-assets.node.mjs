@@ -33,6 +33,10 @@ function harnessFixture(t) {
     "7. Re-run the target repository's documented validation gate before pushing.";
   const adaptedGate =
     "7. Re-run validation (`pnpm verify:full`) before pushing.";
+  const portablePushGate =
+    "- The target repository's documented validation gate has been run for the latest commit.";
+  const adaptedPushGate =
+    "- Validation gate has been run for the latest commit (`pnpm verify:full`).";
 
   writeJson(root, "package.json", {
     scripts: {
@@ -51,6 +55,11 @@ function harnessFixture(t) {
   );
   write(
     root,
+    "src-tauri/assets/skills/push/SKILL.md",
+    skill("push", portablePushGate),
+  );
+  write(
+    root,
     ".agents/skills/symphony-commit/SKILL.md",
     skill("commit", "Commit carefully."),
   );
@@ -59,7 +68,17 @@ function harnessFixture(t) {
     ".agents/skills/symphony-pull/SKILL.md",
     skill("pull", adaptedGate),
   );
+  write(
+    root,
+    ".agents/skills/symphony-push/SKILL.md",
+    skill("push", adaptedPushGate),
+  );
   write(root, ".claude/skills", "../.agents/skills");
+  write(
+    root,
+    ".codex/skills/local/SKILL.md",
+    "---\nname: local\ndescription: local fixture\n---\n\n# Local\n\nRun the local procedure.\n",
+  );
 
   write(
     root,
@@ -75,7 +94,7 @@ fn bundled_skills() {
       }
     };
   }
-  vec![skill!("commit"), skill!("pull")]
+  vec![skill!("commit"), skill!("pull"), skill!("push")]
 }
 `,
   );
@@ -94,6 +113,7 @@ fn bundled_skills() {
 | --- | --- |
 | \`symphony-commit\` | committing |
 | \`symphony-pull\` | syncing |
+| \`symphony-push\` | publishing |
 `,
   );
   writeJson(root, "validation/agent-assets.json", {
@@ -110,9 +130,10 @@ fn bundled_skills() {
         path: ".claude/skills",
         target: "../.agents/skills",
       },
-      standaloneRoots: [],
+      standaloneRoots: [".codex/skills"],
       allowedAdaptations: {
         pull: [{ match: portableGate, replacement: adaptedGate }],
+        push: [{ match: portablePushGate, replacement: adaptedPushGate }],
       },
     },
     defaultPrompt: {
@@ -120,7 +141,7 @@ fn bundled_skills() {
       returnFunction: "default_prompt_template",
       forbiddenNamespacePattern: "mcp__[A-Za-z0-9_-]+__",
     },
-    pnpmBuiltins: ["install", "exec"],
+    pnpmBuiltins: ["add", "dlx", "exec", "install", "remove", "run"],
     forbiddenText: [],
   });
   return root;
@@ -153,6 +174,25 @@ test("rejects an invalid Git-flattened discovery projection", (t) => {
   );
 });
 
+test("requires the canonical Claude discovery projection", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  delete contract.skills.discoveryProjection;
+  writeJson(root, "validation/agent-assets.json", contract);
+  rmSync(join(root, ".claude/skills"));
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /skill discovery projection must be \{"path":"\.claude\/skills","target":"\.\.\/\.agents\/skills"\}, received undefined/,
+  );
+  assert.match(
+    errors,
+    /skill discovery projection is missing at \.claude\/skills/,
+  );
+});
+
 test("rejects every undeclared projection difference", (t) => {
   const root = harnessFixture(t);
   const projection = join(
@@ -182,6 +222,7 @@ test("pins allowed adaptations to the validation-gate substitutions", (t) => {
   ];
   contract.skills.allowedAdaptations.pull[0].replacement =
     "7. Skip validation before pushing.";
+  delete contract.skills.allowedAdaptations.push;
   writeJson(root, "validation/agent-assets.json", contract);
   write(
     root,
@@ -197,6 +238,10 @@ test("pins allowed adaptations to the validation-gate substitutions", (t) => {
   assert.match(
     errors,
     /allowed adaptations for pull must be the exact validation-gate substitution/,
+  );
+  assert.match(
+    errors,
+    /allowed adaptations for push must be the exact validation-gate substitution/,
   );
 });
 
@@ -276,6 +321,9 @@ fn bundled_skills() {
     skill!(
       "pull"
     ),
+    skill!(
+      "push"
+    ),
   ]
 }
 `,
@@ -334,8 +382,8 @@ test("rejects conditional compilation inside bundled inventory", (t) => {
   writeFileSync(
     source,
     readFileSync(source, "utf8").replace(
-      'vec![skill!("commit"), skill!("pull")]',
-      'vec![skill!("commit"), #[cfg(test)] skill!("pull")]',
+      'vec![skill!("commit"), skill!("pull"), skill!("push")]',
+      'vec![skill!("commit"), #[cfg(test)] skill!("pull"), skill!("push")]',
     ),
   );
 
@@ -551,6 +599,29 @@ description: empty standalone fixture
   );
 });
 
+test("requires validation of the canonical standalone Codex skill root", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  delete contract.skills.standaloneRoots;
+  writeJson(root, "validation/agent-assets.json", contract);
+  write(
+    root,
+    ".codex/skills/local/SKILL.md",
+    "---\nname: local\ndescription: malformed standalone fixture\n---\n",
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /standaloneRoots must be \["\.codex\/skills"\], received undefined/,
+  );
+  assert.match(
+    errors,
+    /\.codex\/skills\/local\/SKILL\.md must contain a non-empty Markdown instructional body/,
+  );
+});
+
 test("forbids every pnpm reference in portable owner manifests only", (t) => {
   const root = harnessFixture(t);
   for (const path of [
@@ -585,6 +656,29 @@ test("pins the portable owner pnpm policy", (t) => {
   assert.match(
     validateAgentAssets(root).join("\n"),
     /portableOwnerForbiddenPattern must be "\\\\bpnpm\\\\b", received undefined/,
+  );
+});
+
+test("pins pnpm builtins instead of trusting contract additions", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.pnpmBuiltins.push("definitely-missing");
+  writeJson(root, "validation/agent-assets.json", contract);
+  const prompt = join(root, "src-tauri/assets/default-prompt.md");
+  writeFileSync(
+    prompt,
+    `${readFileSync(prompt, "utf8")}\nRun \`pnpm definitely-missing\`.\n`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /pnpmBuiltins must be \["add","dlx","exec","install","remove","run"\]/,
+  );
+  assert.match(
+    errors,
+    /default-prompt\.md:\d+ references missing package script pnpm definitely-missing/,
   );
 });
 
