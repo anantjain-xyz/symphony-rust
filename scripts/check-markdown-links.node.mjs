@@ -128,6 +128,16 @@ test("reference definitions may wrap before their destination", async (context) 
   assert.deepEqual(problems, []);
 });
 
+test("reference definitions inside block quotes resolve with source locations", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-quoted-ref-",
+    ["> Read the [guide][docs].", ">", "> [docs]: missing.md"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:3:11: missing local target "missing.md"']);
+});
+
 test("indented code blocks do not contribute link targets", async (context) => {
   const problems = await checkSource(
     context,
@@ -166,6 +176,23 @@ test("raw HTML block bodies do not contribute Markdown targets", async (context)
   );
 
   assert.deepEqual(problems, ['root.md:3:6: missing local target "missing.png"']);
+});
+
+test("inline HTML tag syntax does not contribute Markdown targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-inline-html-",
+    [
+      '<span title="[ignored](attribute-missing.md)">plain</span>',
+      "<span>[rendered](content-missing.md)</span>",
+      '<a href="href-missing.md" title="[ignored](title-missing.md)">Guide</a>',
+    ].join("\n"),
+  );
+
+  assert.deepEqual(problems, [
+    'root.md:2:7: missing local target "content-missing.md"',
+    'root.md:3:4: missing local target "href-missing.md"',
+  ]);
 });
 
 test("inline links require an adjacent opening parenthesis", async (context) => {

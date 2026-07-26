@@ -13,6 +13,8 @@ const REFERENCE_USE = /(!?)\[([^\]]*)\]\s*\[([^\]]*)\]/g;
 const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-+)\s*$/;
 const HTML_BLOCK_TAG =
   /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
+const INLINE_HTML_TAG =
+  /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)$/s;
 
 function maskRangePreservingLines(value, start, end) {
   return `${value.slice(0, start)}${value
@@ -29,7 +31,7 @@ function blockQuoteLine(line) {
     content = content.slice(prefix[0].length);
     depth += 1;
   }
-  return { content, depth };
+  return { content, depth, offset: line.length - content.length };
 }
 
 function lineKeepsParagraphOpen(content) {
@@ -156,21 +158,37 @@ function maskIgnoredMarkdown(source) {
   const html = maskCodeSpans(
     lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " ")),
   );
+  const inspection = inspectHtml(html);
+  let markdown = maskRawHtmlBlocks(html);
+  for (const range of [...inspection.tagRanges].sort((left, right) => right.start - left.start)) {
+    markdown = maskRangePreservingLines(markdown, range.start, range.end);
+  }
   return {
-    html,
-    markdown: maskRawHtmlBlocks(html),
+    attributes: inspection.attributes,
+    markdown,
   };
 }
 
 const entityDecoder = new JSDOM("").window.document.createElement("textarea");
 
-function htmlAttributes(source) {
+function inspectHtml(source) {
   const dom = new JSDOM(source, { includeNodeLocations: true });
   try {
     const attributes = [];
+    const tagRanges = [];
     for (const element of dom.window.document.querySelectorAll("*")) {
       const location = dom.nodeLocation(element);
-      if (!location?.attrs) continue;
+      const startTag = location?.startTag;
+      const validStartTag =
+        startTag && INLINE_HTML_TAG.test(source.slice(startTag.startOffset, startTag.endOffset));
+      if (validStartTag) {
+        tagRanges.push({ end: startTag.endOffset, start: startTag.startOffset });
+      }
+      const endTag = location?.endTag;
+      if (endTag && INLINE_HTML_TAG.test(source.slice(endTag.startOffset, endTag.endOffset))) {
+        tagRanges.push({ end: endTag.endOffset, start: endTag.startOffset });
+      }
+      if (!validStartTag || !location.attrs) continue;
       for (const name of ["href", "id", "name", "src"]) {
         const attribute = location.attrs[name];
         if (!attribute || !element.hasAttribute(name)) continue;
@@ -183,7 +201,7 @@ function htmlAttributes(source) {
         });
       }
     }
-    return attributes;
+    return { attributes, tagRanges };
   } finally {
     dom.window.close();
   }
@@ -356,7 +374,7 @@ function markdownAnchors(source) {
       );
     }
   }
-  for (const attribute of htmlAttributes(maskedSources.html)) {
+  for (const attribute of maskedSources.attributes) {
     if (attribute.tag === "a" && ["id", "name"].includes(attribute.name)) {
       anchors.add(unescapeMarkdown(attribute.value));
     }
@@ -503,28 +521,38 @@ function extractTargets(source) {
   const maskedSources = maskIgnoredMarkdown(source);
   const masked = maskedSources.markdown;
   const maskedLines = masked.split("\n");
+  const quotedLines = maskedLines.map(blockQuoteLine);
   const targets = [];
   const definitions = new Map();
   const definitionLines = new Set();
 
   for (let index = 0; index < maskedLines.length; index += 1) {
-    const line = maskedLines[index];
-    const definition = line.match(REFERENCE_DEFINITION);
+    const line = quotedLines[index];
+    const definition = line.content.match(REFERENCE_DEFINITION);
     if (definition) {
+      const target = definition[2] ?? definition[3];
       const label = normalizeReference(definition[1]);
-      definitions.set(label, { line: index + 1, target: definition[2] ?? definition[3] });
-      targets.push({ column: 1, line: index + 1, target: definition[2] ?? definition[3] });
+      definitions.set(label, { line: index + 1, target });
+      targets.push({
+        column: line.offset + line.content.indexOf(target) + 1,
+        line: index + 1,
+        target,
+      });
       definitionLines.add(index);
       continue;
     }
-    const definitionStart = line.match(REFERENCE_DEFINITION_START);
-    const continuation = maskedLines[index + 1]?.match(REFERENCE_DEFINITION_CONTINUATION);
+    const definitionStart = line.content.match(REFERENCE_DEFINITION_START);
+    const nextLine = quotedLines[index + 1];
+    const continuation =
+      nextLine?.depth === line.depth
+        ? nextLine.content.match(REFERENCE_DEFINITION_CONTINUATION)
+        : null;
     if (definitionStart && continuation) {
       const target = continuation[1] ?? continuation[2];
       const label = normalizeReference(definitionStart[1]);
       definitions.set(label, { line: index + 1, target });
       targets.push({
-        column: (maskedLines[index + 1].indexOf(target) ?? 0) + 1,
+        column: nextLine.offset + nextLine.content.indexOf(target) + 1,
         line: index + 2,
         target,
       });
@@ -557,7 +585,7 @@ function extractTargets(source) {
       reference: label,
     });
   }
-  for (const attribute of htmlAttributes(maskedSources.html)) {
+  for (const attribute of maskedSources.attributes) {
     if (!["href", "src"].includes(attribute.name)) continue;
     targets.push({
       column: attribute.column,
