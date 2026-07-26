@@ -21,9 +21,13 @@
         "symphony-tracker"
       ]
     },
+    "symphony-contracts": {
+      "allowedInternalDependencies": ["symphony-core", "symphony-storage", "symphony-worker"]
+    },
     "symphony-desktop": {
       "allowedInternalDependencies": [
         "symphony-agents",
+        "symphony-contracts",
         "symphony-core",
         "symphony-storage",
         "symphony-tracker",
