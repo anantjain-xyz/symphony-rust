@@ -45,16 +45,14 @@ function IssuesView({
   const [selectedMode, setSelectedMode] = useState<IssueViewMode>("list");
   const [activeMode, setActiveMode] = useState<IssueViewMode>("list");
   const [isModePending, startModeTransition] = useTransition();
-  const [dependencyGraphLoadState, setDependencyGraphLoadState] = useState<
-    DependencyGraphLoadState
-  >(
-    () => (dependencyGraphReady ? "ready" : "idle"),
-  );
+  const [dependencyGraphLoadState, setDependencyGraphLoadState] =
+    useState<DependencyGraphLoadState>(() => (dependencyGraphReady ? "ready" : "idle"));
   const [dependencyAttempt, setDependencyAttempt] = useState(() =>
     DependencyGraphAttempts.latest(),
   );
   const DependencyGraphPanel = DependencyGraphAttempts.get(dependencyAttempt);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dependencyAttempt is an explicit retry signal.
   useEffect(() => {
     if (selectedMode !== "dependencies") return;
     if (dependencyGraphReady) {
@@ -253,7 +251,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}
@@ -264,6 +262,5 @@ function Empty({
 function Badge({ status }: { status: string }) {
   return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
 }
-
 
 export default IssuesView;

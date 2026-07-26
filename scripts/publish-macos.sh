@@ -29,13 +29,6 @@ fi
 
 VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 TAG="v$VERSION"
-RELEASE_REPOSITORY="$(node -p "require('./scripts/contracts/release.json').repository")"
-REPO_URL="$(gh repo view --json url -q .url)"
-REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
-if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then
-  echo "error: current repository $REPO_SLUG does not match release contract $RELEASE_REPOSITORY" >&2
-  exit 1
-fi
 
 # Only publish what's actually on GitHub: clean main, in sync with origin.
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -92,8 +85,17 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp "$DMG" "$STAGE/Symphony.dmg"
+RELEASE_REPOSITORY="$(node -p "require('./scripts/contracts/release.json').repository")"
+REPO_URL="$(gh repo view --json url -q .url)"
+REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then
+  echo "error: current repository $REPO_SLUG does not match release contract $RELEASE_REPOSITORY" >&2
+  exit 1
+fi
 UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/Symphony.app.tar.gz"
 SIGNATURE="$(<"$UPDATER_SIGNATURE")"
+# Single quotes preserve JavaScript's template literal for Node.
+# shellcheck disable=SC2016
 VERSION="$VERSION" UPDATER_URL="$UPDATER_URL" SIGNATURE="$SIGNATURE" \
   node -e '
     const feed = {

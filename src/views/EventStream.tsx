@@ -191,11 +191,12 @@ export function EventStream({
   }, [prepared]);
 
   useEffect(() => {
-    containerRef.current
-      ?.querySelectorAll("article")
-      .forEach((article) => article.setAttribute("aria-setsize", String(prepared.length)));
+    containerRef.current?.querySelectorAll("article").forEach((article) => {
+      article.setAttribute("aria-setsize", String(prepared.length));
+    });
   }, [prepared.length]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing the search term is the effect's explicit reset signal.
   useEffect(() => {
     setCurrent(0);
   }, [search.needle]);
@@ -300,6 +301,7 @@ export function EventStream({
   return (
     <div className="events-wrap">
       {searchOpen ? (
+        // biome-ignore lint/a11y/useSemanticElements: role=search retains compatibility with the desktop webview and jsdom.
         <div className="event-search" role="search">
           <input
             ref={searchInputRef}
