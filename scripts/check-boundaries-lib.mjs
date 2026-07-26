@@ -1209,11 +1209,33 @@ function lexRust(source) {
   return tokens;
 }
 
-function importStatements(tokens, ignoredTokens, invocationTokens) {
+function attributeTokens(tokens) {
+  const attributes = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value !== "#") continue;
+    let opening = index + 1;
+    if (tokens[opening]?.value === "!") opening += 1;
+    if (tokens[opening]?.value !== "[") continue;
+    const closing = matchingDelimiter(tokens, opening);
+    for (let cursor = index; cursor <= closing; cursor += 1) {
+      attributes.add(cursor);
+    }
+    index = closing;
+  }
+  return attributes;
+}
+
+function importStatements(
+  tokens,
+  ignoredTokens,
+  invocationTokens,
+  attributes,
+) {
   const statements = [];
   const groupBraces = new Set();
 
   for (let index = 0; index < tokens.length; index += 1) {
+    if (attributes.has(index)) continue;
     const insideMacroDefinition = ignoredTokens.has(index);
     const insideMacroInvocation = invocationTokens.has(index);
     let kind = null;
@@ -1696,8 +1718,9 @@ function collectBindings(tokens, statements, scopeAt) {
       }
       if (name !== "_") {
         declareBinding(scope, name, {
-          path: [imported],
-          absolute: true,
+          path: imported === "self" ? [] : [imported],
+          absolute: imported !== "self",
+          moduleScope: imported === "self" ? scope.crateScope : undefined,
           conditional: statement.conditional,
           descendantVisible: true,
         });
@@ -1846,7 +1869,8 @@ function resolvePathModuleScope(
         index += 1;
       }
     }
-    if (moduleScope === null || index >= pathSegments.length) return null;
+    if (moduleScope === null) return null;
+    if (index >= pathSegments.length) return moduleScope;
     binding = moduleScope.bindings.get(pathSegments[index]) ?? null;
     if (binding?.implicit) return null;
     remaining = pathSegments.slice(index + 1);
@@ -1908,6 +1932,64 @@ function resolvePath(
 
   if (binding === null || binding === sourceBinding) return [...pathSegments];
   return resolveBoundPath(binding, remaining, seen);
+}
+
+function combinedGlobBinding(candidates, name, scope) {
+  const unique = [...new Set(candidates)];
+  if (unique.length === 0) return null;
+  if (unique.length === 1) return unique[0];
+  return {
+    alternatives: unique,
+    conditional: true,
+    descendantVisible: false,
+    name,
+    scope,
+  };
+}
+
+function findModuleGlobMember(moduleScope, name, seenScopes = new Set()) {
+  if (moduleScope === null || seenScopes.has(moduleScope)) return null;
+  const direct = moduleScope.bindings.get(name);
+  if (direct) return direct;
+
+  seenScopes.add(moduleScope);
+  const candidates = [];
+  for (const glob of moduleScope.globs) {
+    const target = resolvePathModuleScope(
+      glob.scope,
+      glob.path,
+      glob.absolute,
+      new Set(),
+      null,
+    );
+    const candidate = findModuleGlobMember(target, name, seenScopes);
+    if (candidate) candidates.push(candidate);
+  }
+  seenScopes.delete(moduleScope);
+  return combinedGlobBinding(candidates, name, moduleScope);
+}
+
+function findGlobbedBinding(scope, name) {
+  const moduleScope = scope.moduleScope;
+  for (let current = scope; current !== null; current = current.parent) {
+    if (current.moduleScope !== moduleScope) break;
+    if (current.bindings.has(name)) return null;
+    const candidates = [];
+    for (const glob of current.globs) {
+      const target = resolvePathModuleScope(
+        glob.scope,
+        glob.path,
+        glob.absolute,
+        new Set(),
+        null,
+      );
+      const candidate = findModuleGlobMember(target, name);
+      if (candidate) candidates.push(candidate);
+    }
+    const binding = combinedGlobBinding(candidates, name, current);
+    if (binding) return binding;
+  }
+  return null;
 }
 
 function isStorageErrorPath(pathSegments) {
@@ -2035,7 +2117,7 @@ function followsLetPattern(tokens, index) {
 function isMatchesMacroPattern(tokens, index) {
   for (let opening = index - 1; opening >= 2; opening -= 1) {
     if (
-      tokens[opening].value !== "(" ||
+      !closingDelimiter.has(tokens[opening].value) ||
       tokens[opening - 1]?.value !== "!" ||
       tokens[opening - 2]?.value !== "matches"
     ) {
@@ -2119,25 +2201,34 @@ function simpleMacroRules(tokens, definitionTokens) {
       const expansionClosing = matchingDelimiter(tokens, expansionOpening);
       const matcher = tokens.slice(matcherOpening + 1, matcherClosing);
       const captures = [];
+      const matcherParts = [];
       let supported = true;
       let matcherIndex = 0;
       while (matcherIndex < matcher.length) {
         if (
-          matcher[matcherIndex].value !== "$" ||
-          !matcher[matcherIndex + 1]?.identifier ||
-          matcher[matcherIndex + 2]?.value !== ":" ||
-          !matcher[matcherIndex + 3]?.identifier
+          matcher[matcherIndex].value === "$" &&
+          matcher[matcherIndex + 1]?.identifier &&
+          matcher[matcherIndex + 2]?.value === ":" &&
+          matcher[matcherIndex + 3]?.identifier
         ) {
+          const name = matcher[matcherIndex + 1].value;
+          captures.push(name);
+          matcherParts.push({
+            kind: "capture",
+            fragment: matcher[matcherIndex + 3].value,
+            name,
+          });
+          matcherIndex += 4;
+          continue;
+        }
+        if (matcher[matcherIndex].value === "$") {
           supported = false;
           break;
         }
-        captures.push(matcher[matcherIndex + 1].value);
-        matcherIndex += 4;
-        if (matcherIndex === matcher.length) break;
-        if (matcher[matcherIndex].value !== ",") {
-          supported = false;
-          break;
-        }
+        matcherParts.push({
+          kind: "literal",
+          token: matcher[matcherIndex],
+        });
         matcherIndex += 1;
       }
       if (
@@ -2146,6 +2237,7 @@ function simpleMacroRules(tokens, definitionTokens) {
       ) {
         arms.push({
           captures,
+          matcherParts,
           expansion: tokens.slice(expansionOpening, expansionClosing + 1),
         });
       }
@@ -2167,40 +2259,104 @@ function scopeContains(ancestor, scope) {
   return false;
 }
 
-function splitSimpleMacroArguments(arguments_, count) {
-  if (count === 0) return arguments_.length === 0 ? [] : null;
-  if (count === 1) return arguments_.length === 0 ? null : [arguments_];
+function sameSimpleMacroToken(expected, actual) {
+  return (
+    expected?.value === actual?.value &&
+    expected?.raw === actual?.raw &&
+    expected?.literal === actual?.literal
+  );
+}
 
-  const values = [];
+function balancedSimpleMacroCapture(tokens) {
   const delimiters = [];
-  let start = 0;
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const value = arguments_[index].value;
-    if (closingDelimiter.has(value)) {
-      delimiters.push(closingDelimiter.get(value));
-    } else if ([")", "]", "}"].includes(value)) {
-      if (delimiters.at(-1) !== value) return null;
+  for (const token of tokens) {
+    if (closingDelimiter.has(token.value)) {
+      delimiters.push(closingDelimiter.get(token.value));
+    } else if ([")", "]", "}"].includes(token.value)) {
+      if (delimiters.at(-1) !== token.value) return false;
       delimiters.pop();
-    } else if (value === "," && delimiters.length === 0) {
-      if (index === start) return null;
-      values.push(arguments_.slice(start, index));
-      start = index + 1;
     }
   }
-  if (delimiters.length > 0 || start === arguments_.length) return null;
-  values.push(arguments_.slice(start));
-  return values.length === count ? values : null;
+  return delimiters.length === 0;
+}
+
+function validSimpleMacroCapture(fragment, tokens) {
+  if (tokens.length === 0) return fragment === "vis";
+  if (!balancedSimpleMacroCapture(tokens)) return false;
+  if (fragment === "ident") {
+    return tokens.length === 1 && tokens[0].identifier;
+  }
+  if (fragment === "lifetime") {
+    return (
+      tokens.length === 2 &&
+      tokens[0].value === "'" &&
+      tokens[1].identifier
+    );
+  }
+  if (fragment === "literal") {
+    return (
+      (tokens.length === 1 && tokens[0].value === "LITERAL") ||
+      (
+        tokens.length === 2 &&
+        tokens[0].value === "-" &&
+        tokens[1].value === "LITERAL"
+      )
+    );
+  }
+  if (fragment === "block") {
+    return (
+      tokens[0].value === "{" &&
+      matchingDelimiter(tokens, 0) === tokens.length - 1
+    );
+  }
+  if (fragment === "tt") {
+    return (
+      tokens.length === 1 ||
+      (
+        closingDelimiter.has(tokens[0].value) &&
+        matchingDelimiter(tokens, 0) === tokens.length - 1
+      )
+    );
+  }
+  return true;
+}
+
+function matchSimpleMacroArguments(arm, arguments_) {
+  function match(partIndex, argumentIndex, replacements) {
+    if (partIndex === arm.matcherParts.length) {
+      return argumentIndex === arguments_.length ? replacements : null;
+    }
+    const part = arm.matcherParts[partIndex];
+    if (part.kind === "literal") {
+      if (!sameSimpleMacroToken(part.token, arguments_[argumentIndex])) {
+        return null;
+      }
+      return match(partIndex + 1, argumentIndex + 1, replacements);
+    }
+
+    const firstEnd = part.fragment === "vis"
+      ? argumentIndex
+      : argumentIndex + 1;
+    for (let end = firstEnd; end <= arguments_.length; end += 1) {
+      const captured = arguments_.slice(argumentIndex, end);
+      if (!validSimpleMacroCapture(part.fragment, captured)) continue;
+      const next = new Map(replacements);
+      next.set(part.name, captured);
+      const result = match(partIndex + 1, end, next);
+      if (result !== null) return result;
+    }
+    return null;
+  }
+
+  return match(0, 0, new Map());
 }
 
 function substituteSimpleMacroArm(arm, arguments_, invocation) {
-  const argumentValues = splitSimpleMacroArguments(
+  const replacements = matchSimpleMacroArguments(
+    arm,
     arguments_,
-    arm.captures.length,
   );
-  if (argumentValues === null) return null;
-  const replacements = new Map(
-    arm.captures.map((capture, index) => [capture, argumentValues[index]]),
-  );
+  if (replacements === null) return null;
   const expanded = [];
   for (let index = 0; index < arm.expansion.length; index += 1) {
     const token = arm.expansion[index];
@@ -2272,10 +2428,12 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
   tokens = expandSimpleMacroInvocations(tokens);
   const ignoredTokens = macroDefinitionTokens(tokens);
   const invocationTokens = macroInvocationTokens(tokens, ignoredTokens);
+  const attributes = attributeTokens(tokens);
   const { statements, groupBraces } = importStatements(
     tokens,
     ignoredTokens,
     invocationTokens,
+    attributes,
   );
   const { moduleScopes, root, scopeAt } = lexicalScopes(tokens, groupBraces);
   collectLocalItems(tokens, scopeAt, moduleScopes);
@@ -2339,7 +2497,10 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
     const absolute = leadingAbsolute || importContext?.absolute === true;
     const binding = absolute
       ? null
-      : findBinding(scopeAt[index], sourcePath[0]);
+      : (
+          findBinding(scopeAt[index], sourcePath[0]) ??
+          findGlobbedBinding(scopeAt[index], sourcePath[0])
+        );
     const importedPath = binding === null ? null : resolveBinding(binding);
     const expanded = importedPath === null
       ? sourcePath
