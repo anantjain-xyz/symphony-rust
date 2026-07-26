@@ -519,6 +519,49 @@ function validateCiRunStep(content, command, workflowPath, errors) {
   const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const runPattern = new RegExp(`^( *)-\\s+run:\\s*${escaped}\\s*$`);
   const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const jobsBlocks = lines
+    .map((line, index) => ({ index, line }))
+    .filter(
+      ({ line }) =>
+        yamlIndent(line) === 0 && yamlFieldName(line) === "jobs",
+    );
+  if (jobsBlocks.length !== 1) {
+    errors.push(
+      `CI workflow ${workflowPath} must define exactly one top-level jobs block; found ${jobsBlocks.length}`,
+    );
+  }
+
+  const jobsStart = jobsBlocks[0]?.index ?? -1;
+  let jobsEnd = lines.length;
+  if (jobsStart !== -1) {
+    for (let index = jobsStart + 1; index < lines.length; index += 1) {
+      if (
+        lines[index].trim() === "" ||
+        lines[index].trimStart().startsWith("#")
+      ) {
+        continue;
+      }
+      if (yamlIndent(lines[index]) === 0) {
+        jobsEnd = index;
+        break;
+      }
+    }
+    const jobIds = lines
+      .slice(jobsStart + 1, jobsEnd)
+      .filter(
+        (line) =>
+          line.trim() !== "" &&
+          !line.trimStart().startsWith("#") &&
+          yamlIndent(line) === 2,
+      )
+      .map(yamlFieldName)
+      .filter(Boolean);
+    for (const duplicate of duplicates(jobIds)) {
+      errors.push(
+        `CI workflow ${workflowPath} repeats job id ${duplicate}; duplicate YAML keys can replace the canonical gate`,
+      );
+    }
+  }
 
   for (const [lineIndex, line] of lines.entries()) {
     const match = runPattern.exec(line);
@@ -547,6 +590,17 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       );
       continue;
     }
+    const jobs = previousYamlParent(lines, job.index, job.indent);
+    if (
+      !jobs ||
+      jobs.index !== jobsStart ||
+      jobs.indent !== 0 ||
+      jobs.text !== "jobs:"
+    ) {
+      errors.push(
+        `CI workflow ${workflowPath} canonical entrypoint job must be a direct child of the single top-level jobs block`,
+      );
+    }
 
     let stepEnd = lines.length;
     for (let index = lineIndex + 1; index < lines.length; index += 1) {
@@ -560,13 +614,17 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === stepIndent + 2 &&
-        ["if", "continue-on-error", "shell", "working-directory"].includes(
+        ["if", "continue-on-error", "shell", "working-directory", "env"].includes(
           field,
         )
       ) {
-        if (field === "shell" || field === "working-directory") {
+        if (
+          field === "shell" ||
+          field === "working-directory" ||
+          field === "env"
+        ) {
           errors.push(
-            `CI workflow ${workflowPath} canonical entrypoint step must use the default shell from the repository root; remove ${field}`,
+            `CI workflow ${workflowPath} canonical entrypoint step must use the default execution environment from the repository root; remove ${field}`,
           );
         } else {
           errors.push(
@@ -588,7 +646,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === steps.indent &&
-        ["if", "continue-on-error", "defaults", "needs"].includes(field)
+        ["if", "continue-on-error", "defaults", "needs", "env"].includes(field)
       ) {
         if (field === "defaults") {
           errors.push(
@@ -598,6 +656,10 @@ function validateCiRunStep(content, command, workflowPath, errors) {
           errors.push(
             `CI workflow ${workflowPath} canonical entrypoint job must not depend on other jobs; remove needs`,
           );
+        } else if (field === "env") {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint job must use the default execution environment; remove env`,
+          );
         } else {
           errors.push(
             `CI workflow ${workflowPath} canonical entrypoint job must be unconditional and failure-gating; remove ${field}`,
@@ -605,16 +667,20 @@ function validateCiRunStep(content, command, workflowPath, errors) {
         }
       }
     }
-    if (
-      lines.some(
-        (candidate) =>
-          yamlIndent(candidate) === 0 &&
-          yamlFieldName(candidate) === "defaults",
-      )
-    ) {
-      errors.push(
-        `CI workflow ${workflowPath} must not override workflow run defaults`,
-      );
+    for (const field of ["defaults", "env"]) {
+      if (
+        lines.some(
+          (candidate) =>
+            yamlIndent(candidate) === 0 &&
+            yamlFieldName(candidate) === field,
+        )
+      ) {
+        errors.push(
+          field === "defaults"
+            ? `CI workflow ${workflowPath} must not override workflow run defaults`
+            : `CI workflow ${workflowPath} must not inject a workflow execution environment`,
+        );
+      }
     }
   }
 }
@@ -846,6 +912,13 @@ export function validateValidationContract(
           expectedBody,
         )}, received ${JSON.stringify(actualBody)}`,
       );
+    }
+    for (const lifecycleScript of [`pre${scriptName}`, `post${scriptName}`]) {
+      if (Object.hasOwn(packageJson.scripts ?? {}, lifecycleScript)) {
+        errors.push(
+          `validation lifecycle hook ${lifecycleScript} is not allowed because it can mutate or suppress the canonical gate`,
+        );
+      }
     }
   }
   const executableSet = new Set(contract.executables ?? []);

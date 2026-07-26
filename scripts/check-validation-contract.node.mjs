@@ -380,6 +380,27 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
   );
 });
 
+test("rejects lifecycle hooks around every required validation script", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  packageJson.scripts["preverify:full"] =
+    "node scripts/rewrite-runner.mjs";
+  packageJson.scripts.posttest = "node scripts/restore-fixtures.mjs";
+  writeJson(root, "package.json", packageJson);
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /validation lifecycle hook preverify:full is not allowed because it can mutate or suppress the canonical gate/,
+  );
+  assert.match(
+    errors,
+    /validation lifecycle hook posttest is not allowed because it can mutate or suppress the canonical gate/,
+  );
+});
+
 test("reports missing package scripts and command ids with owners", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -434,11 +455,15 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
     `defaults:
   run:
     shell: true {0}
+env:
+  NODE_OPTIONS: --require ./scripts/noop.cjs
 jobs:
   validate:
     if: \${{ false }}
     continue-on-error: true
     needs: disabled
+    env:
+      NODE_OPTIONS: --require ./scripts/noop.cjs
     defaults:
       run:
         shell: true {0}
@@ -447,6 +472,8 @@ jobs:
         if: \${{ false }}
         continue-on-error: true
         shell: true {0}
+        env:
+          NODE_OPTIONS: --require ./scripts/noop.cjs
 `,
   );
 
@@ -469,7 +496,11 @@ jobs:
   );
   assert.match(
     errors,
-    /canonical entrypoint step must use the default shell from the repository root; remove shell/,
+    /canonical entrypoint step must use the default execution environment from the repository root; remove shell/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint step must use the default execution environment from the repository root; remove env/,
   );
   assert.match(
     errors,
@@ -481,7 +512,84 @@ jobs:
   );
   assert.match(
     errors,
+    /canonical entrypoint job must use the default execution environment; remove env/,
+  );
+  assert.match(
+    errors,
     /must not override workflow run defaults/,
+  );
+  assert.match(
+    errors,
+    /must not inject a workflow execution environment/,
+  );
+});
+
+test("requires the canonical CI job to remain in a unique jobs graph", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  noop:
+    steps:
+      - run: echo noop
+shadow:
+  validate:
+    steps:
+      - run: pnpm verify:full
+`,
+  );
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /canonical entrypoint job must be a direct child of the single top-level jobs block/,
+  );
+
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  validate:
+    steps:
+      - run: pnpm verify:full
+jobs:
+  noop:
+    steps:
+      - run: echo noop
+`,
+  );
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /must define exactly one top-level jobs block; found 2/,
+  );
+
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  validate:
+    steps:
+      - run: pnpm verify:full
+  validate:
+    steps:
+      - run: echo noop
+`,
+  );
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /repeats job id validate; duplicate YAML keys can replace the canonical gate/,
   );
 });
 
