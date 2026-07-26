@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
     "check:bindings": "node scripts/check-bindings.mjs",
+    "generate:bindings": "cargo run -p symphony-contracts --bin export-bindings -- src/bindings.ts",
     "check:ipc": "node scripts/check-ipc.mjs",
     "check:projections": "node scripts/check-projections.mjs",
     "check:release": "node scripts/check-release.mjs",

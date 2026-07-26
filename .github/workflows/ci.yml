@@ -59,3 +59,17 @@ jobs:
           name: theme-e2e-screenshots
           path: test-results/**/*.png
           if-no-files-found: error
+
+  desktop-check:
+    # The Tauri shell is intentionally excluded from Linux validation because it
+    # requires platform webview libraries. Compile it on its supported host so
+    # desktop-only dependency and API regressions still block the PR.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo check -p symphony-desktop

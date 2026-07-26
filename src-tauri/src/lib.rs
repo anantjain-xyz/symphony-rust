@@ -1194,16 +1194,6 @@ pub fn run() {
                 settings_path: app_dir.join("settings.json"),
                 database_path: db_path,
             };
-            #[cfg(debug_assertions)]
-            {
-                let bindings_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .unwrap_or_else(|| std::path::Path::new("."))
-                    .join("src/bindings.ts");
-                symphony_contracts::export_bindings(&bindings_path)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-            }
             forward_events(handle, bus);
             app.manage(state);
             Ok(())

@@ -7,31 +7,96 @@ import { compareSets, rustTokens } from "./lib/source-contracts.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+export const BACKEND_ONLY_COMMANDS = ["get_issue_detail"];
+
 function tokenSequenceAt(tokens, index, values) {
   return values.every((value, offset) => tokens[index + offset]?.value === value);
 }
 
-export function rustIpcCommands(source) {
+function duplicates(values) {
+  const seen = new Set();
+  const repeated = new Set();
+  for (const value of values) {
+    if (seen.has(value)) repeated.add(value);
+    seen.add(value);
+  }
+  return [...repeated].sort();
+}
+
+function pushHandlerSegment(registrations, segment) {
+  const identifiers = segment.filter((token) => token.kind === "ident");
+  const command = identifiers.at(-1);
+  if (command) registrations.push(command.value);
+}
+
+function commandsFromRustSource(source) {
   const tokens = rustTokens(source);
   const definitions = [];
   const registrations = [];
 
   for (let index = 0; index < tokens.length; index += 1) {
-    if (tokenSequenceAt(tokens, index, ["#", "[", "tauri", "::", "command", "]"])) {
-      let cursor = index + 6;
-      while (cursor < tokens.length && tokens[cursor].value !== "fn") cursor += 1;
-      if (tokens[cursor + 1]?.kind === "ident") definitions.push(tokens[cursor + 1].value);
-    }
-    if (tokenSequenceAt(tokens, index, ["tauri", "::", "generate_handler", "!", "["])) {
+    if (tokenSequenceAt(tokens, index, ["#", "[", "tauri", "::", "command"])) {
+      let cursor = index + 5;
       let depth = 1;
-      for (let cursor = index + 5; cursor < tokens.length && depth > 0; cursor += 1) {
+      while (cursor < tokens.length && depth > 0) {
         if (tokens[cursor].value === "[") depth += 1;
         if (tokens[cursor].value === "]") depth -= 1;
-        if (depth === 1 && tokens[cursor].kind === "ident") {
-          registrations.push(tokens[cursor].value);
-        }
+        cursor += 1;
+      }
+      while (
+        cursor < tokens.length &&
+        !(tokens[cursor].kind === "ident" && tokens[cursor].value === "fn")
+      ) {
+        cursor += 1;
+      }
+      if (tokens[cursor + 1]?.kind === "ident") {
+        definitions.push(tokens[cursor + 1].value);
       }
     }
+
+    if (
+      tokens[index].kind === "ident" &&
+      tokens[index].value === "generate_handler" &&
+      tokens[index + 1]?.value === "!" &&
+      tokens[index + 2]?.value === "["
+    ) {
+      let cursor = index + 3;
+      let depth = 1;
+      let segment = [];
+      while (cursor < tokens.length && depth > 0) {
+        const token = tokens[cursor];
+        if (token.value === "[") {
+          depth += 1;
+          if (depth > 1) segment.push(token);
+        } else if (token.value === "]") {
+          depth -= 1;
+          if (depth === 0) {
+            pushHandlerSegment(registrations, segment);
+            break;
+          }
+          segment.push(token);
+        } else if (token.value === "," && depth === 1) {
+          pushHandlerSegment(registrations, segment);
+          segment = [];
+        } else {
+          segment.push(token);
+        }
+        cursor += 1;
+      }
+    }
+  }
+  return { definitions, registrations };
+}
+
+export function rustIpcCommands(sources) {
+  const entries =
+    typeof sources === "string" ? [{ path: "<rust>", source: sources }] : sources;
+  const definitions = [];
+  const registrations = [];
+  for (const { source } of entries) {
+    const commands = commandsFromRustSource(source);
+    definitions.push(...commands.definitions);
+    registrations.push(...commands.registrations);
   }
   return { definitions, registrations };
 }
@@ -46,112 +111,166 @@ function sourceFile(path, source) {
   );
 }
 
-function variableInitializer(file, variableName) {
-  let initializer;
-  const visit = (node) => {
+function tauriInvokeBindings(file) {
+  const direct = new Set();
+  const namespaces = new Set();
+  for (const statement of file.statements) {
     if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.name.text === variableName
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== "@tauri-apps/api/core"
     ) {
-      initializer = node.initializer;
+      continue;
     }
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        if ((element.propertyName?.text ?? element.name.text) === "invoke") {
+          direct.add(element.name.text);
+        }
+      }
+    } else if (bindings && ts.isNamespaceImport(bindings)) {
+      namespaces.add(bindings.name.text);
+    }
+  }
+  return { direct, namespaces };
+}
+
+function isTauriInvokeCall(node, bindings) {
+  if (!ts.isCallExpression(node)) return false;
+  if (ts.isIdentifier(node.expression)) {
+    return bindings.direct.has(node.expression.text);
+  }
+  return (
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    bindings.namespaces.has(node.expression.expression.text) &&
+    node.expression.name.text === "invoke"
+  );
+}
+
+function namedFunction(node) {
+  if (ts.isFunctionDeclaration(node) && node.name) {
+    return { name: node.name.text, node };
+  }
+  if (
+    ts.isVariableDeclaration(node) &&
+    ts.isIdentifier(node.name) &&
+    node.initializer &&
+    (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+  ) {
+    return { name: node.name.text, node: node.initializer };
+  }
+  return null;
+}
+
+function functionsIn(file) {
+  const functions = [];
+  const visit = (node) => {
+    const entry = namedFunction(node);
+    if (entry) functions.push(entry);
     ts.forEachChild(node, visit);
   };
   visit(file);
-  if (!initializer) throw new Error(`${file.fileName}: missing ${variableName}`);
-  while (ts.isAsExpression(initializer) || ts.isSatisfiesExpression(initializer)) {
-    initializer = initializer.expression;
-  }
-  return initializer;
+  return functions;
 }
 
-function propertyName(property) {
-  if (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) {
-    return property.name.text;
-  }
-  throw new Error("contract objects must use static identifier or string keys");
+function parameterIndex(fn, argument) {
+  if (!argument || !ts.isIdentifier(argument)) return null;
+  const index = fn.parameters.findIndex(
+    (parameter) => ts.isIdentifier(parameter.name) && parameter.name.text === argument.text,
+  );
+  return index < 0 ? null : index;
 }
 
-export function frontendRegistry(source, path = "src/ipcContract.ts") {
-  const file = sourceFile(path, source);
-  const commandsNode = variableInitializer(file, "IPC_COMMANDS");
-  if (!ts.isObjectLiteralExpression(commandsNode)) {
-    throw new Error(`${path}: IPC_COMMANDS must be an object literal`);
-  }
-  const commands = new Map();
-  for (const property of commandsNode.properties) {
-    if (!ts.isPropertyAssignment(property)) {
-      throw new Error(`${path}: IPC_COMMANDS entries must be property assignments`);
+function forwardingParameters(fn, bindings, wrappers) {
+  const indexes = new Set();
+  const visit = (node) => {
+    if (node !== fn && ts.isFunctionLike(node)) return;
+    if (ts.isCallExpression(node)) {
+      let commandArgument;
+      if (isTauriInvokeCall(node, bindings)) {
+        commandArgument = node.arguments[0];
+      } else if (ts.isIdentifier(node.expression) && wrappers.has(node.expression.text)) {
+        commandArgument = node.arguments[wrappers.get(node.expression.text)];
+      }
+      const index = parameterIndex(fn, commandArgument);
+      if (index !== null) indexes.add(index);
     }
-    let value = property.initializer;
-    while (ts.isAsExpression(value) || ts.isSatisfiesExpression(value)) value = value.expression;
-    if (!ts.isObjectLiteralExpression(value)) {
-      throw new Error(`${path}: ${propertyName(property)} metadata must be an object`);
-    }
-    const previewProperty = value.properties.find(
-      (entry) => ts.isPropertyAssignment(entry) && propertyName(entry) === "preview",
-    );
-    if (!previewProperty || !ts.isPropertyAssignment(previewProperty)) {
-      throw new Error(`${path}: ${propertyName(property)} is missing preview metadata`);
-    }
-    const preview =
-      previewProperty.initializer.kind === ts.SyntaxKind.TrueKeyword
-        ? true
-        : previewProperty.initializer.kind === ts.SyntaxKind.FalseKeyword
-          ? false
-          : null;
-    if (preview === null) {
-      throw new Error(`${path}: ${propertyName(property)}.preview must be a boolean literal`);
-    }
-    commands.set(propertyName(property), preview);
-  }
-
-  const backendNode = variableInitializer(file, "BACKEND_ONLY_COMMANDS");
-  if (!ts.isArrayLiteralExpression(backendNode)) {
-    throw new Error(`${path}: BACKEND_ONLY_COMMANDS must be an array literal`);
-  }
-  const backendOnly = backendNode.elements.map((element) => {
-    if (!ts.isStringLiteral(element)) {
-      throw new Error(`${path}: backend-only commands must be string literals`);
-    }
-    return element.text;
-  });
-  return { commands, backendOnly };
+    ts.forEachChild(node, visit);
+  };
+  if (fn.body) visit(fn.body);
+  return indexes;
 }
 
-export function frontendInvokeLiterals(sources) {
+function wrapperFunctions(file, bindings) {
+  const functions = functionsIn(file);
+  const wrappers = new Map();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const fn of functions) {
+      if (wrappers.has(fn.name)) continue;
+      const indexes = forwardingParameters(fn.node, bindings, wrappers);
+      if (indexes.size === 1) {
+        wrappers.set(fn.name, [...indexes][0]);
+        changed = true;
+      }
+    }
+  }
+  const byNode = new Map();
+  for (const fn of functions) {
+    if (wrappers.has(fn.name)) byNode.set(fn.node, wrappers.get(fn.name));
+  }
+  return { byName: wrappers, byNode };
+}
+
+function enclosingFunction(node) {
+  let owner = node.parent;
+  while (owner && !ts.isFunctionLike(owner)) owner = owner.parent;
+  return owner;
+}
+
+function staticCommand(argument) {
+  if (argument && ts.isStringLiteralLike(argument)) return argument.text;
+  return null;
+}
+
+export function frontendInvokeCommands(sources) {
   const commands = [];
   const dynamic = [];
+
   for (const { path, source } of sources) {
     const file = sourceFile(path, source);
+    const bindings = tauriInvokeBindings(file);
+    const wrappers = wrapperFunctions(file, bindings);
     const visit = (node) => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-        const direct = node.expression.text === "invoke";
-        const wrapped = node.expression.text === "invokeDashboardResource";
-        if (direct || wrapped) {
-          const argument = node.arguments[wrapped ? 1 : 0];
-          if (argument && ts.isStringLiteral(argument)) {
-            commands.push(argument.text);
+      if (ts.isCallExpression(node)) {
+        let argument;
+        if (isTauriInvokeCall(node, bindings)) {
+          argument = node.arguments[0];
+        } else if (
+          ts.isIdentifier(node.expression) &&
+          wrappers.byName.has(node.expression.text)
+        ) {
+          argument = node.arguments[wrappers.byName.get(node.expression.text)];
+        }
+        if (argument) {
+          const command = staticCommand(argument);
+          if (command !== null) {
+            commands.push(command);
           } else {
-            let owner = node.parent;
-            while (owner && !ts.isFunctionLike(owner)) owner = owner.parent;
-            const isDashboardWrapper =
-              direct &&
-              argument &&
-              ts.isIdentifier(argument) &&
-              argument.text === "command" &&
-              owner &&
-              "name" in owner &&
-              owner.name &&
-              ts.isIdentifier(owner.name) &&
-              owner.name.text === "invokeDashboardResource";
-            if (isDashboardWrapper) {
-              ts.forEachChild(node, visit);
-              return;
+            const owner = enclosingFunction(node);
+            const wrapperParameter = owner ? wrappers.byNode.get(owner) : undefined;
+            const forwarded =
+              wrapperParameter !== undefined &&
+              parameterIndex(owner, argument) === wrapperParameter;
+            if (!forwarded) {
+              const { line, character } = file.getLineAndCharacterOfPosition(
+                node.getStart(file),
+              );
+              dynamic.push(`${path}:${line + 1}:${character + 1}`);
             }
-            const { line, character } = file.getLineAndCharacterOfPosition(node.getStart(file));
-            dynamic.push(`${path}:${line + 1}:${character + 1}`);
           }
         }
       }
@@ -162,72 +281,52 @@ export function frontendInvokeLiterals(sources) {
   return { commands, dynamic };
 }
 
-export function previewMockCommands(source, path = "src/preview/runtime.ts") {
-  const file = sourceFile(path, source);
-  const node = variableInitializer(file, "previewCommandMocks");
-  if (!ts.isObjectLiteralExpression(node)) {
-    throw new Error(`${path}: previewCommandMocks must be an object literal`);
-  }
-  return node.properties.map((property) => propertyName(property));
-}
-
-export function checkIpcContract({ rustSource, frontendSources, contractSource, previewSource }) {
+export function checkIpcContract({ rustSources, frontendSources, backendOnly = [] }) {
   const diagnostics = [];
-  const rust = rustIpcCommands(rustSource);
-  const registry = frontendRegistry(contractSource);
-  const frontend = frontendInvokeLiterals(frontendSources);
-  const preview = previewMockCommands(previewSource);
+  const rust = rustIpcCommands(rustSources);
+  const frontend = frontendInvokeCommands(frontendSources);
 
-  diagnostics.push(
-    ...compareSets("Rust command definitions vs generate_handler!", rust.definitions, rust.registrations),
-  );
+  for (const [label, values] of [
+    ["Rust command definitions", rust.definitions],
+    ["Rust generate_handler! registrations", rust.registrations],
+    ["backend-only command allowlist", backendOnly],
+  ]) {
+    const repeated = duplicates(values);
+    if (repeated.length > 0) {
+      diagnostics.push(`${label}: duplicates [${repeated.join(", ")}]`);
+    }
+  }
   diagnostics.push(
     ...compareSets(
-      "registered Rust commands vs frontend registry + backend-only allowlist",
+      "Rust command definitions vs generate_handler!",
+      rust.definitions,
       rust.registrations,
-      [...registry.commands.keys(), ...registry.backendOnly],
     ),
-  );
-  diagnostics.push(
-    ...compareSets("frontend invoke literals vs frontend registry", registry.commands.keys(), frontend.commands),
-  );
-  diagnostics.push(
     ...compareSets(
-      "preview mocks vs registry preview ownership",
-      [...registry.commands].filter(([, mocked]) => mocked).map(([command]) => command),
-      preview,
+      "registered Rust commands vs frontend use + backend-only allowlist",
+      rust.registrations,
+      [...frontend.commands, ...backendOnly],
+    ),
+    ...compareSets(
+      "backend-only allowlist must not overlap frontend use",
+      [],
+      backendOnly.filter((command) => frontend.commands.includes(command)),
     ),
   );
   if (frontend.dynamic.length > 0) {
     diagnostics.push(`non-literal frontend invokes: ${frontend.dynamic.join(", ")}`);
   }
-  if (registry.backendOnly.length > 5) {
-    diagnostics.push(
-      `backend-only allowlist must stay small (found ${registry.backendOnly.length}, maximum 5)`,
-    );
-  }
-  diagnostics.push(
-    ...compareSets(
-      "backend-only allowlist must not overlap the frontend registry",
-      [],
-      registry.backendOnly.filter((command) => registry.commands.has(command)),
-    ),
-  );
   return diagnostics;
 }
 
-function frontendFiles(root) {
+function sourceFiles(root, directory, extensionPattern, include) {
   const result = [];
-  const visit = (directory) => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
+  const visit = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name !== "preview") visit(path);
-      } else if (
-        /\.(?:ts|tsx)$/u.test(entry.name) &&
-        !entry.name.includes(".test.") &&
-        entry.name !== "ipcContract.ts"
-      ) {
+        visit(path);
+      } else if (extensionPattern.test(entry.name) && include(entry.name)) {
         result.push({
           path: relative(root, path),
           source: readFileSync(path, "utf8"),
@@ -235,16 +334,28 @@ function frontendFiles(root) {
       }
     }
   };
-  visit(join(root, "src"));
-  return result;
+  visit(directory);
+  return result.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function rustFiles(root) {
+  return sourceFiles(root, join(root, "src-tauri", "src"), /\.rs$/u, () => true);
+}
+
+function frontendFiles(root) {
+  return sourceFiles(
+    root,
+    join(root, "src"),
+    /\.(?:ts|tsx)$/u,
+    (name) => !name.includes(".test."),
+  );
 }
 
 export function checkIpc(root = ROOT) {
   const diagnostics = checkIpcContract({
-    rustSource: readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8"),
+    rustSources: rustFiles(root),
     frontendSources: frontendFiles(root),
-    contractSource: readFileSync(join(root, "src/ipcContract.ts"), "utf8"),
-    previewSource: readFileSync(join(root, "src/preview/runtime.ts"), "utf8"),
+    backendOnly: BACKEND_ONLY_COMMANDS,
   });
   if (diagnostics.length > 0) throw new Error(diagnostics.join("\n"));
 }

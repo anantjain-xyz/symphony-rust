@@ -125,6 +125,180 @@ export function storageChangedTables(source) {
   return { tables, dynamic };
 }
 
+// These are deliberately method/table scoped. Broad table allowlists would let
+// a new domain mutation evade the checker merely because another method has a
+// legitimate reason not to emit an independent invalidation.
+const STORAGE_NOTIFICATION_EXCEPTIONS = new Set([
+  // delete_retro's parent deletion is the observable domain change. The
+  // remaining statements are compatibility cleanup for databases where
+  // foreign-key cascades were not enabled; those child rows cannot be viewed
+  // independently once the retro is gone.
+  "delete_retro:retro_batch_items",
+  "delete_retro:retro_batches",
+  "delete_retro:retro_inputs",
+  "delete_retro:retro_suggestions",
+  // retro_batch_items is an internal join table. The retro_batches event owns
+  // the frontend invalidation for a newly reserved batch.
+  "reserve_retro_batch:retro_batch_items",
+  // This self-assignment acquires SQLite's write lock before review-state
+  // validation. It does not change observable retro state.
+  "reserve_retro_batch:retros",
+]);
+
+function matchingDelimiter(tokens, start, open, close) {
+  let depth = 0;
+  for (let index = start; index < tokens.length; index += 1) {
+    if (tokens[index].value === open) depth += 1;
+    if (tokens[index].value === close) depth -= 1;
+    if (depth === 0) return index;
+  }
+  return -1;
+}
+
+function repositoryMethods(tokens) {
+  const methods = [];
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    if (!sequenceAt(tokens, index, ["impl", "Repository"])) continue;
+    let implOpen = index + 2;
+    while (implOpen < tokens.length && tokens[implOpen].value !== "{") implOpen += 1;
+    if (implOpen === tokens.length) continue;
+    const implClose = matchingDelimiter(tokens, implOpen, "{", "}");
+    if (implClose < 0) throw new Error("Repository impl has an unclosed body");
+
+    for (let cursor = implOpen + 1; cursor < implClose; cursor += 1) {
+      if (tokens[cursor].value !== "fn") continue;
+      const name = tokens[cursor + 1];
+      if (name?.kind !== "ident") continue;
+      let bodyOpen = cursor + 2;
+      while (
+        bodyOpen < implClose &&
+        tokens[bodyOpen].value !== "{" &&
+        tokens[bodyOpen].value !== ";"
+      ) {
+        bodyOpen += 1;
+      }
+      if (tokens[bodyOpen]?.value !== "{") continue;
+      const bodyClose = matchingDelimiter(tokens, bodyOpen, "{", "}");
+      if (bodyClose < 0 || bodyClose > implClose) {
+        throw new Error(`Repository::${name.value} has an unclosed body`);
+      }
+      methods.push({
+        name: name.value,
+        tokens: tokens.slice(bodyOpen + 1, bodyClose),
+      });
+      cursor = bodyClose;
+    }
+    index = implClose;
+  }
+  return methods;
+}
+
+function callOpen(tokens, start) {
+  for (let index = start; index < Math.min(tokens.length, start + 40); index += 1) {
+    if (tokens[index].value === "(") return index;
+    if (tokens[index].value === ";" || tokens[index].value === "{") return -1;
+  }
+  return -1;
+}
+
+function sqlMutationTable(sql) {
+  const withoutLeadingComments = sql
+    .replace(/^\s*(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)/u, "")
+    .trimStart();
+  const match =
+    /^(?:insert(?:\s+or\s+[a-z_]+)?\s+into|replace\s+into|update|delete\s+from)\s+["`[]?([a-z_][a-z0-9_]*)/iu.exec(
+      withoutLeadingComments,
+    );
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function methodSqlMutations(method) {
+  const tables = [];
+  const dynamicQueries = [];
+  const tokens = method.tokens;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const sqlxQuery =
+      sequenceAt(tokens, index, ["sqlx", "::"]) &&
+      /^query(?:_as|_scalar)?$/u.test(tokens[index + 2]?.value ?? "");
+    const queryBuilder = tokens[index].value === "QueryBuilder";
+    if (!sqlxQuery && !queryBuilder) continue;
+
+    let open;
+    if (sqlxQuery) {
+      open = callOpen(tokens, index + 3);
+    } else {
+      let constructor = index + 1;
+      while (
+        constructor < Math.min(tokens.length, index + 40) &&
+        tokens[constructor].value !== "new"
+      ) {
+        constructor += 1;
+      }
+      if (tokens[constructor]?.value !== "new") continue;
+      open = callOpen(tokens, constructor + 1);
+    }
+    if (open < 0) continue;
+
+    const firstArgument = tokens[open + 1];
+    if (firstArgument?.kind !== "string") {
+      // Repository writes conventionally use sqlx::query. Refuse an opaque
+      // query here so moving a mutation into a runtime-built string cannot
+      // silently bypass notification ownership. Dynamic query_as/query_scalar
+      // and QueryBuilder calls are read paths in this repository.
+      if (sqlxQuery && tokens[index + 2].value === "query") {
+        dynamicQueries.push(firstArgument?.value ?? "<missing>");
+      }
+      continue;
+    }
+    const table = sqlMutationTable(firstArgument.value);
+    if (table) tables.push(table);
+  }
+  return { tables, dynamicQueries };
+}
+
+function methodChangedTables(method) {
+  const tables = [];
+  for (let index = 0; index < method.tokens.length; index += 1) {
+    if (!sequenceAt(method.tokens, index, ["self", ".", "changed", "("])) continue;
+    const table = method.tokens[index + 4];
+    if (table?.kind === "string") tables.push(table.value);
+  }
+  return tables;
+}
+
+export function storageMutationDiagnostics(source) {
+  const diagnostics = [];
+  const methods = repositoryMethods(rustTokens(source));
+  for (const method of methods) {
+    const mutations = methodSqlMutations(method);
+    const changed = new Set(methodChangedTables(method));
+    const missing = [
+      ...new Set(
+        mutations.tables.filter(
+          (table) =>
+            !changed.has(table) &&
+            !STORAGE_NOTIFICATION_EXCEPTIONS.has(`${method.name}:${table}`),
+        ),
+      ),
+    ].sort();
+    if (missing.length > 0) {
+      diagnostics.push(
+        `storage mutation notifications: Repository::${method.name} mutates [${missing.join(
+          ", ",
+        )}] without matching self.changed(table, …) calls`,
+      );
+    }
+    if (mutations.dynamicQueries.length > 0) {
+      diagnostics.push(
+        `storage mutation notifications: Repository::${method.name} uses non-literal sqlx::query arguments [${mutations.dynamicQueries.join(
+          ", ",
+        )}]`,
+      );
+    }
+  }
+  return diagnostics;
+}
+
 export function dashboardInvalidationTables(
   source,
   path = "src/dashboardResources.ts",
@@ -155,6 +329,7 @@ export function checkProjectionContract({
     ...compareSets("Rust prompt variables vs Settings UI", rustVariables, settingsVariables),
     ...compareSets("Rust prompt variables vs README", rustVariables, readmeVariables),
     ...compareSets("storage changed(table, …) producers vs frontend invalidations", changed.tables, invalidations),
+    ...storageMutationDiagnostics(storageSource),
   );
   for (const [label, values] of [
     ["Rust prompt variables", rustVariables],

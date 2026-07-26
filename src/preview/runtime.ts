@@ -12,7 +12,6 @@ import type {
   RunWithIssueRow,
   SkillsStatus,
 } from "../bindings";
-import type { FrontendIpcCommand } from "../ipcContract";
 import { createEventStressFixture } from "./eventStressFixture";
 
 const BUNDLED_SKILL_NAMES = [
@@ -678,37 +677,6 @@ function previewRetroDetailForId(id: string): RetroDetail | null {
     batches: [],
   };
 }
-
-type PreviewCommandMock = (args?: Record<string, unknown>) => unknown;
-
-/** Read commands represented by browser-preview fixtures. */
-export const previewCommandMocks = {
-  load_settings: () => previewSettings,
-  get_overview: () => previewOverview,
-  list_runs: () => previewRuns,
-  get_run_detail: (args) => {
-    const id = typeof args?.id === "string" ? args.id : "";
-    const run = previewRuns.find((candidate) => candidate.id === id);
-    return run ? { run, events: previewEventsByRunId[id] ?? [] } : null;
-  },
-  list_issues: () => previewIssues,
-  get_worker_status: () => ({
-    state: "running",
-    started_at: previewActiveStartedAt,
-    last_error: null,
-  }),
-  get_retro_status: () => previewRetroStatus,
-  list_retros: () => previewRetros,
-  get_retro_detail: (args) =>
-    previewRetroDetailForId(typeof args?.id === "string" ? args.id : ""),
-  has_in_progress_retro_batches: () =>
-    previewRetroDetail.batches.some((batch) => ["queued", "running"].includes(batch.state)),
-  get_skills_status: (args) =>
-    previewSkillsStatuses[typeof args?.repoUrl === "string" ? args.repoUrl.trim() : ""],
-  get_repo_workflow_status: (args) =>
-    previewWorkflowStatuses[typeof args?.repoUrl === "string" ? args.repoUrl.trim() : ""],
-} satisfies Partial<Record<FrontendIpcCommand, PreviewCommandMock>>;
-
 
 export const previewRuntime = {
   settings: previewSettings,
