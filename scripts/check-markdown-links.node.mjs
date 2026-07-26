@@ -113,6 +113,18 @@ test("headings inside list items contribute GitHub anchors", async (context) => 
   assert.deepEqual(problems, []);
 });
 
+test("heading autolinks preserve their rendered text in GitHub anchors", async (context) => {
+  assert.equal(githubHeadingSlug("<https://example.com>"), "httpsexamplecom");
+  assert.equal(githubHeadingSlug("<docs@example.com>"), "docsexamplecom");
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-autolink-heading-",
+    ["# <https://example.com>", "", "[Jump](#httpsexamplecom)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
 test("reference definitions may wrap before their destination", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-wrapped-ref-"));
   context.after(() => fs.rm(root, { force: true, recursive: true }));
@@ -178,6 +190,35 @@ test("raw HTML block bodies do not contribute Markdown targets", async (context)
   assert.deepEqual(problems, ['root.md:3:6: missing local target "missing.png"']);
 });
 
+test("custom-element HTML block bodies do not contribute Markdown targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-custom-html-block-",
+    [
+      "<x-widget>",
+      "[ignored](not-a-link.md)",
+      "<img src=missing.png>",
+      "",
+      "[rendered](also-missing.md)",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(problems, [
+    'root.md:3:6: missing local target "missing.png"',
+    'root.md:5:1: missing local target "also-missing.md"',
+  ]);
+});
+
+test("custom-element HTML blocks cannot interrupt paragraphs", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-inline-custom-element-",
+    ["Paragraph", "<x-widget>", "[rendered](missing.md)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:3:1: missing local target "missing.md"']);
+});
+
 test("inline HTML tag syntax does not contribute Markdown targets", async (context) => {
   const problems = await checkSource(
     context,
@@ -213,6 +254,23 @@ test("inline link destinations may begin on the following line", async (context)
   );
 
   assert.deepEqual(problems, ['root.md:1:1: missing local target "missing.md"']);
+});
+
+test("blank lines terminate inline links and link titles", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-blank-line-link-",
+    [
+      "[not a link](",
+      "",
+      "missing.md)",
+      '[not a link](also-missing.md "title',
+      "",
+      'continued")',
+    ].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
 });
 
 test("unterminated inline links do not contribute targets", async (context) => {
@@ -327,6 +385,16 @@ test("HTML metadata attributes are not treated as href or src targets", async (c
     'root.md:3:6: missing local target "missing.png"',
     'root.md:4:6: missing local target "unquoted.png"',
   ]);
+});
+
+test("global HTML id attributes contribute fragment anchors", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-global-id-",
+    ['<div id="details"></div>', "", "[Jump](#details)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
 });
 
 test("footnote definitions are not treated as link definitions", async (context) => {

@@ -15,6 +15,9 @@ const HTML_BLOCK_TAG =
   /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
 const INLINE_HTML_TAG =
   /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)$/s;
+const AUTOLINK_URI = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*$/;
+const AUTOLINK_EMAIL =
+  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
 
 function maskRangePreservingLines(value, start, end) {
   return `${value.slice(0, start)}${value
@@ -80,19 +83,28 @@ function maskCodeSpans(source) {
 function maskRawHtmlBlocks(source) {
   const lines = source.split("\n");
   let block = null;
+  let paragraphOpen = false;
+  let paragraphDepth = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const quote = blockQuoteLine(lines[index]);
     if (block && block.depth !== quote.depth) block = null;
     if (block) {
       if (block.untilBlank && !/\S/.test(quote.content)) {
         block = null;
+        paragraphOpen = false;
         continue;
       }
       const closes = block.closingTag?.test(quote.content) ?? false;
       lines[index] = " ".repeat(lines[index].length);
       if (closes) block = null;
+      paragraphOpen = false;
       continue;
     }
+    if (!/\S/.test(quote.content)) {
+      paragraphOpen = false;
+      continue;
+    }
+    const continuesParagraph = paragraphOpen && paragraphDepth === quote.depth;
 
     const typeOne = quote.content.match(/^\s{0,3}<(script|pre|style|textarea)(?:\s|>|$)/i);
     if (typeOne) {
@@ -100,6 +112,7 @@ function maskRawHtmlBlocks(source) {
       const closes = closingTag.test(quote.content.slice(typeOne[0].length));
       lines[index] = " ".repeat(lines[index].length);
       if (!closes) block = { closingTag, depth: quote.depth };
+      paragraphOpen = false;
       continue;
     }
 
@@ -107,7 +120,19 @@ function maskRawHtmlBlocks(source) {
     if (typeSix && HTML_BLOCK_TAG.test(typeSix[1])) {
       lines[index] = " ".repeat(lines[index].length);
       block = { depth: quote.depth, untilBlank: true };
+      paragraphOpen = false;
+      continue;
     }
+
+    const typeSeven = quote.content.match(/^\s{0,3}(<[^\n]*>)\s*$/);
+    if (!continuesParagraph && typeSeven && INLINE_HTML_TAG.test(typeSeven[1])) {
+      lines[index] = " ".repeat(lines[index].length);
+      block = { depth: quote.depth, untilBlank: true };
+      paragraphOpen = false;
+      continue;
+    }
+    paragraphOpen = lineKeepsParagraphOpen(quote.content);
+    paragraphDepth = quote.depth;
   }
   return lines.join("\n");
 }
@@ -289,7 +314,9 @@ function headingText(value) {
     referenceLabels(value)
       .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/<[^>]*>/g, ""),
+      .replace(/<([^<>]*)>/g, (_match, content) =>
+        AUTOLINK_URI.test(content) || AUTOLINK_EMAIL.test(content) ? content : "",
+      ),
   );
 }
 
@@ -375,7 +402,7 @@ function markdownAnchors(source) {
     }
   }
   for (const attribute of maskedSources.attributes) {
-    if (attribute.tag === "a" && ["id", "name"].includes(attribute.name)) {
+    if (attribute.name === "id" || (attribute.tag === "a" && attribute.name === "name")) {
       anchors.add(unescapeMarkdown(attribute.value));
     }
   }
@@ -397,20 +424,47 @@ function findClosingBracket(line, start) {
   return -1;
 }
 
+function skipInlineWhitespace(value, cursor) {
+  let lineEndings = 0;
+  while (cursor < value.length) {
+    if (value[cursor] === " " || value[cursor] === "\t") {
+      cursor += 1;
+      continue;
+    }
+    if (value[cursor] === "\r" || value[cursor] === "\n") {
+      lineEndings += 1;
+      if (lineEndings > 1) return -1;
+      if (value[cursor] === "\r" && value[cursor + 1] === "\n") cursor += 1;
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  return cursor;
+}
+
+function containsBlankLine(value) {
+  return /\n[ \t]*\n/.test(value.replace(/\r\n?/g, "\n"));
+}
+
 function closingParenthesis(line, cursor) {
-  while (/\s/.test(line[cursor] ?? "")) cursor += 1;
+  cursor = skipInlineWhitespace(line, cursor);
+  if (cursor === -1) return -1;
   if (line[cursor] === ")") return cursor;
 
   const opener = line[cursor];
   const closer = opener === "(" ? ")" : opener;
   if (!['"', "'", "("].includes(opener)) return -1;
   cursor += 1;
+  const titleStart = cursor;
   while (cursor < line.length) {
     if (line[cursor] === "\\") {
       cursor += 2;
     } else if (line[cursor] === closer) {
+      if (containsBlankLine(line.slice(titleStart, cursor))) return -1;
       cursor += 1;
-      while (/\s/.test(line[cursor] ?? "")) cursor += 1;
+      cursor = skipInlineWhitespace(line, cursor);
+      if (cursor === -1) return -1;
       return line[cursor] === ")" ? cursor : -1;
     } else {
       cursor += 1;
@@ -420,8 +474,8 @@ function closingParenthesis(line, cursor) {
 }
 
 function inlineDestination(line, open) {
-  let cursor = open + 1;
-  while (/\s/.test(line[cursor] ?? "")) cursor += 1;
+  let cursor = skipInlineWhitespace(line, open + 1);
+  if (cursor === -1) return null;
   let targetStart = cursor;
   let targetEnd = cursor;
 
@@ -454,7 +508,8 @@ function inlineDestination(line, open) {
           };
         }
         depth -= 1;
-      } else if (/\s/.test(character) && depth === 0) {
+      } else if (/\s/.test(character)) {
+        if (depth > 0) return null;
         break;
       }
       cursor += 1;
