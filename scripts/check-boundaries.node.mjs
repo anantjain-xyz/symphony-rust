@@ -478,6 +478,25 @@ test("resolves fixed imports inside macro definitions", async (t) => {
   ]);
 });
 
+test("expands simple macro metavariables before checking variants", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "enum LocalError { Sqlx }",
+      "macro_rules! make { ($error:ty) => { <$error>::Sqlx(problem) } }",
+      "fn wrong() { let _ = make!(symphony_storage::StorageError); }",
+      "fn allowed() { let _ = make!(LocalError); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("resolves simple and chained Rust type aliases", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -781,6 +800,34 @@ test("resolves child modules relative to explicit #[path] files", async (t) => {
 
   assert.deepEqual(errors, [
     "worker/generated/alt/child.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("skips cfg-disabled modules during source traversal", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "#[cfg(any())] mod absent;",
+      '#[cfg(target_os = "windows")] mod windows_only;',
+      "mod active;",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "worker", "src", "windows_only.rs"),
+    'fn disabled() { let _ = sqlx::query("select 1"); }\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "src", "active.rs"),
+    'fn wrong() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy(), {
+    activeCfg: ['target_os="linux"', "unix"],
+  });
+
+  assert.deepEqual(errors, [
+    "worker/src/active.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
 });
 

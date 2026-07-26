@@ -35,8 +35,22 @@ try {
   process.exit(1);
 }
 
+const rustc = spawnSync("rustc", ["--print", "cfg"], {
+  cwd: projectRoot,
+  encoding: "utf8",
+});
+if (rustc.error || rustc.status !== 0) {
+  const detail = rustc.error?.message ?? rustc.stderr.trim() ?? `exit ${rustc.status}`;
+  console.error(`Cargo.toml:1: rustc cfg discovery failed: ${detail}`);
+  process.exit(1);
+}
+const activeCfg = rustc.stdout
+  .split(/\r?\n/u)
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
+
 try {
-  const errors = await verifyBoundaries(metadata, policy);
+  const errors = await verifyBoundaries(metadata, policy, { activeCfg });
   if (errors.length > 0) {
     for (const error of errors) console.error(error);
     console.error(`Boundary check failed with ${errors.length} violation(s).`);

@@ -288,6 +288,149 @@ function hasCfgAttribute(tokens, declarationIndex) {
   return false;
 }
 
+function rustcCfgContext(activeCfg = []) {
+  const flags = new Set();
+  const values = new Map();
+  for (const entry of activeCfg) {
+    if (typeof entry !== "string" || entry.length === 0) continue;
+    const equals = entry.indexOf("=");
+    if (equals === -1) {
+      flags.add(entry);
+      continue;
+    }
+    const name = entry.slice(0, equals);
+    let value;
+    try {
+      value = JSON.parse(entry.slice(equals + 1));
+    } catch {
+      continue;
+    }
+    if (typeof value !== "string") continue;
+    const configured = values.get(name) ?? new Set();
+    configured.add(value);
+    values.set(name, configured);
+  }
+  return { flags, values };
+}
+
+function evaluateCfgPredicate(tokens, start, end, context) {
+  function parse(index) {
+    if (!tokens[index]?.identifier) {
+      throw new Error(
+        `unsupported cfg predicate token ${tokens[index]?.value ?? "<end>"}`,
+      );
+    }
+    const name = tokens[index].value;
+    index += 1;
+
+    if (tokens[index]?.value === "=") {
+      if (tokens[index + 1]?.value !== "LITERAL") {
+        throw new Error(`cfg ${name} value must be a string literal`);
+      }
+      const configured = context.values.get(name);
+      return {
+        index: index + 2,
+        value:
+          configured === undefined
+            ? null
+            : configured.has(tokens[index + 1].literal),
+      };
+    }
+
+    if (tokens[index]?.value !== "(") {
+      const knownBooleanFlags = new Set([
+        "debug_assertions",
+        "target_thread_local",
+        "unix",
+        "windows",
+      ]);
+      return {
+        index,
+        value:
+          context.flags.has(name)
+            ? true
+            : knownBooleanFlags.has(name)
+              ? false
+              : null,
+      };
+    }
+
+    const closing = matchingDelimiter(tokens, index);
+    const arguments_ = [];
+    index += 1;
+    while (index < closing) {
+      const argument = parse(index);
+      arguments_.push(argument.value);
+      index = argument.index;
+      if (tokens[index]?.value === ",") index += 1;
+      else if (index < closing) {
+        throw new Error(`cfg ${name} arguments must be comma-separated`);
+      }
+    }
+    if (index !== closing) {
+      throw new Error(`cfg ${name} has an invalid argument list`);
+    }
+
+    let value = null;
+    if (name === "all") {
+      value = arguments_.includes(false)
+        ? false
+        : arguments_.every((argument) => argument === true)
+          ? true
+          : null;
+    } else if (name === "any") {
+      value = arguments_.includes(true)
+        ? true
+        : arguments_.every((argument) => argument === false)
+          ? false
+          : null;
+    } else if (name === "not") {
+      if (arguments_.length !== 1) {
+        throw new Error("cfg not() must contain exactly one predicate");
+      }
+      value = arguments_[0] === null ? null : !arguments_[0];
+    }
+    return { index: closing + 1, value };
+  }
+
+  const result = parse(start);
+  if (result.index !== end) {
+    throw new Error("cfg attribute contains trailing tokens");
+  }
+  return result.value;
+}
+
+function cfgDeclarationEnabled(tokens, declarationIndex, context) {
+  let boundary = declarationIndex - 1;
+  while (
+    boundary >= 0 &&
+    ![";", "{", "}"].includes(tokens[boundary].value)
+  ) {
+    boundary -= 1;
+  }
+  for (let index = boundary + 1; index + 3 < declarationIndex; index += 1) {
+    if (
+      tokens[index].value !== "#" ||
+      tokens[index + 1]?.value !== "[" ||
+      tokens[index + 2]?.value !== "cfg" ||
+      tokens[index + 3]?.value !== "("
+    ) {
+      continue;
+    }
+    const closing = matchingDelimiter(tokens, index + 3);
+    if (tokens[closing + 1]?.value !== "]" || closing + 1 >= declarationIndex) {
+      throw new Error("malformed cfg attribute");
+    }
+    if (
+      evaluateCfgPredicate(tokens, index + 4, closing, context) === false
+    ) {
+      return false;
+    }
+    index = closing + 1;
+  }
+  return true;
+}
+
 const closingDelimiter = new Map([
   ["(", ")"],
   ["[", "]"],
@@ -394,12 +537,29 @@ function moduleChildDirectory(moduleFile, explicitPath) {
       );
 }
 
-async function collectTargetModules(files, includedFiles, entryFile) {
+function moduleFileCandidates(directory, name, explicitPath) {
+  return explicitPath === null
+    ? [
+        path.join(directory, `${name}.rs`),
+        path.join(directory, name, "mod.rs"),
+      ]
+    : [path.join(directory, explicitPath)];
+}
+
+async function collectTargetModules(
+  files,
+  includedFiles,
+  inactiveFiles,
+  activeModuleFiles,
+  cfgContext,
+  entryFile,
+) {
   const visited = new Set();
 
   async function visit(file, moduleDirectory, included = false) {
     const absolute = path.resolve(file);
     if (included) includedFiles.add(absolute);
+    else activeModuleFiles.add(absolute);
     const visitKey = `${absolute}\0${path.resolve(moduleDirectory)}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
@@ -436,21 +596,26 @@ async function collectTargetModules(files, includedFiles, entryFile) {
         }
         const name = tokens[index + 1].value;
         const terminator = tokens[index + 2]?.value;
+        const enabled = cfgDeclarationEnabled(tokens, index, cfgContext);
         if (terminator === "{") {
           const closing = matchingBrace(tokens, index + 2);
-          await scan(index + 3, closing, path.join(directory, name));
+          if (enabled) {
+            await scan(index + 3, closing, path.join(directory, name));
+          }
           index = closing;
           continue;
         }
         if (terminator !== ";") continue;
 
         const explicitPath = modulePathAttribute(tokens, index);
-        const moduleFile = explicitPath === null
-          ? await existingModuleFile([
-              path.join(directory, `${name}.rs`),
-              path.join(directory, name, "mod.rs"),
-            ])
-          : await existingModuleFile([path.join(directory, explicitPath)]);
+        const candidates = moduleFileCandidates(directory, name, explicitPath);
+        if (!enabled) {
+          for (const candidate of candidates) {
+            inactiveFiles.add(path.resolve(candidate));
+          }
+          continue;
+        }
+        const moduleFile = await existingModuleFile(candidates);
         if (moduleFile === null) {
           throw new Error(
             `cannot resolve Rust module ${name} declared at ${absolute}:${tokens[index].line}`,
@@ -472,6 +637,7 @@ async function expandedRustTokens(
   file,
   moduleDirectory,
   expandModules,
+  cfgContext,
   cache,
   trail = [],
 ) {
@@ -518,6 +684,7 @@ async function expandedRustTokens(
             includedFile,
             path.dirname(includedFile),
             expandModules,
+            cfgContext,
             cache,
             nextTrail,
           )),
@@ -527,7 +694,6 @@ async function expandedRustTokens(
       }
 
       if (
-        !expandModules ||
         tokens[index].value !== "mod" ||
         !tokens[index + 1]?.identifier
       ) {
@@ -537,6 +703,21 @@ async function expandedRustTokens(
 
       const name = tokens[index + 1].value;
       const terminator = tokens[index + 2]?.value;
+      const enabled = cfgDeclarationEnabled(tokens, index, cfgContext);
+      if (!enabled) {
+        if (terminator === "{") {
+          index = matchingBrace(tokens, index + 2);
+        } else if (terminator === ";") {
+          index += 2;
+        } else {
+          expanded.push(tokens[index]);
+        }
+        continue;
+      }
+      if (!expandModules) {
+        expanded.push(tokens[index]);
+        continue;
+      }
       if (terminator === "{") {
         const closing = matchingBrace(tokens, index + 2);
         expanded.push(
@@ -559,12 +740,9 @@ async function expandedRustTokens(
       }
 
       const explicitPath = modulePathAttribute(tokens, index);
-      const moduleFile = explicitPath === null
-        ? await existingModuleFile([
-            path.join(directory, `${name}.rs`),
-            path.join(directory, name, "mod.rs"),
-          ])
-        : await existingModuleFile([path.join(directory, explicitPath)]);
+      const moduleFile = await existingModuleFile(
+        moduleFileCandidates(directory, name, explicitPath),
+      );
       if (moduleFile === null) {
         throw new Error(
           `cannot resolve Rust module ${name} declared at ${absolute}:${tokens[index].line}`,
@@ -581,6 +759,7 @@ async function expandedRustTokens(
           moduleFile,
           childDirectory,
           true,
+          cfgContext,
           cache,
           nextTrail,
         )),
@@ -596,13 +775,15 @@ async function expandedRustTokens(
   return expanded;
 }
 
-async function packageRustFiles(pkg) {
+async function packageRustFiles(pkg, cfgContext) {
   const manifestDir = path.dirname(pkg.manifest_path);
   const roots = ["src", "tests", "examples", "benches"].map((name) =>
     path.join(manifestDir, name),
   );
   const files = new Set();
   const includedFiles = new Set();
+  const inactiveFiles = new Set();
+  const activeModuleFiles = new Set();
   for (const root of roots) {
     for (const file of await collectRustFiles(root)) files.add(path.resolve(file));
   }
@@ -618,11 +799,20 @@ async function packageRustFiles(pkg) {
     await collectTargetModules(
       files,
       includedFiles,
+      inactiveFiles,
+      activeModuleFiles,
+      cfgContext,
       path.resolve(manifestDir, target.src_path),
     );
   }
 
-  return [...files].filter((file) => !includedFiles.has(file)).sort();
+  return [...files]
+    .filter(
+      (file) =>
+        (!includedFiles.has(file) || activeModuleFiles.has(file)) &&
+        (!inactiveFiles.has(file) || activeModuleFiles.has(file)),
+    )
+    .sort();
 }
 
 function restrictedCrateAliases(pkg) {
@@ -1399,7 +1589,157 @@ function isRustPattern(tokens, index) {
   );
 }
 
+function macroRuleScopes(tokens, definitionTokens) {
+  const root = { parent: null };
+  const scopeAt = [];
+  const stack = [root];
+  for (let index = 0; index < tokens.length; index += 1) {
+    scopeAt[index] = stack.at(-1);
+    if (definitionTokens.has(index)) continue;
+    if (tokens[index].value === "{") {
+      stack.push({ parent: stack.at(-1) });
+    } else if (tokens[index].value === "}" && stack.length > 1) {
+      stack.pop();
+    }
+  }
+  return scopeAt;
+}
+
+function simpleMacroRules(tokens, definitionTokens) {
+  const scopeAt = macroRuleScopes(tokens, definitionTokens);
+  const definitions = new Map();
+  for (let index = 0; index + 3 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "macro_rules" ||
+      tokens[index].raw ||
+      tokens[index + 1]?.value !== "!" ||
+      !tokens[index + 2]?.identifier ||
+      !closingDelimiter.has(tokens[index + 3]?.value)
+    ) {
+      continue;
+    }
+    const definitionClosing = matchingDelimiter(tokens, index + 3);
+    const arms = [];
+    let cursor = index + 4;
+    while (cursor < definitionClosing) {
+      if ([",", ";"].includes(tokens[cursor].value)) {
+        cursor += 1;
+        continue;
+      }
+      if (!closingDelimiter.has(tokens[cursor].value)) break;
+      const matcherOpening = cursor;
+      const matcherClosing = matchingDelimiter(tokens, matcherOpening);
+      if (
+        tokens[matcherClosing + 1]?.value !== "=" ||
+        tokens[matcherClosing + 2]?.value !== ">" ||
+        !closingDelimiter.has(tokens[matcherClosing + 3]?.value)
+      ) {
+        break;
+      }
+      const expansionOpening = matcherClosing + 3;
+      const expansionClosing = matchingDelimiter(tokens, expansionOpening);
+      const matcher = tokens.slice(matcherOpening + 1, matcherClosing);
+      if (
+        matcher.length === 4 &&
+        matcher[0].value === "$" &&
+        matcher[1].identifier &&
+        matcher[2].value === ":" &&
+        matcher[3].identifier
+      ) {
+        arms.push({
+          capture: matcher[1].value,
+          expansion: tokens.slice(expansionOpening, expansionClosing + 1),
+        });
+      }
+      cursor = expansionClosing + 1;
+    }
+    const name = tokens[index + 2].value;
+    const named = definitions.get(name) ?? [];
+    named.push({ arms, index, scope: scopeAt[index] });
+    definitions.set(name, named);
+    index = definitionClosing;
+  }
+  return { definitions, scopeAt };
+}
+
+function scopeContains(ancestor, scope) {
+  for (let current = scope; current !== null; current = current.parent) {
+    if (current === ancestor) return true;
+  }
+  return false;
+}
+
+function substituteSimpleMacroArm(arm, arguments_, invocation) {
+  if (arguments_.length === 0) return null;
+  const expanded = [];
+  for (let index = 0; index < arm.expansion.length; index += 1) {
+    const token = arm.expansion[index];
+    if (
+      token.value === "$" &&
+      arm.expansion[index + 1]?.identifier &&
+      arm.expansion[index + 1].value === arm.capture
+    ) {
+      expanded.push(
+        ...arguments_.map((argument) => ({
+          ...argument,
+          file: invocation.file,
+          line: invocation.line,
+        })),
+      );
+      index += 1;
+      continue;
+    }
+    if (token.value === "$") return null;
+    expanded.push({
+      ...token,
+      file: invocation.file,
+      line: invocation.line,
+    });
+  }
+  return expanded;
+}
+
+function expandSimpleMacroInvocations(tokens) {
+  const definitionTokens = macroDefinitionTokens(tokens);
+  const { definitions, scopeAt } = simpleMacroRules(tokens, definitionTokens);
+  if (definitions.size === 0) return tokens;
+
+  const expanded = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (
+      !definitionTokens.has(index) &&
+      token.identifier &&
+      tokens[index + 1]?.value === "!" &&
+      closingDelimiter.has(tokens[index + 2]?.value)
+    ) {
+      const closing = matchingDelimiter(tokens, index + 2);
+      const definition = [...(definitions.get(token.value) ?? [])]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.index < index &&
+            scopeContains(candidate.scope, scopeAt[index]),
+        );
+      if (definition !== undefined) {
+        const arguments_ = tokens.slice(index + 3, closing);
+        const invocationExpansion = definition.arms
+          .map((arm) => substituteSimpleMacroArm(arm, arguments_, token))
+          .find((candidate) => candidate !== null);
+        if (invocationExpansion !== undefined) {
+          expanded.push(...invocationExpansion);
+          index = closing;
+          continue;
+        }
+      }
+    }
+    expanded.push(token);
+  }
+  return expanded;
+}
+
 function normalizedTokenStream(tokens, crateAliases = new Map()) {
+  tokens = expandSimpleMacroInvocations(tokens);
   const ignoredTokens = macroDefinitionTokens(tokens);
   const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
   const { moduleScopes, root, scopeAt } = lexicalScopes(tokens, groupBraces);
@@ -1566,10 +1906,11 @@ function locationForMatch(locations, index) {
   };
 }
 
-export async function scanRestrictedSources(metadata, policy) {
+export async function scanRestrictedSources(metadata, policy, options = {}) {
   validatePolicy(policy);
   const packages = workspacePackages(metadata);
   const errors = new Set();
+  const cfgContext = rustcCfgContext(options.activeCfg);
 
   for (const pkg of packages.sort((a, b) => a.name.localeCompare(b.name))) {
     const rules = policy.sourceRules
@@ -1588,6 +1929,7 @@ export async function scanRestrictedSources(metadata, policy) {
             file,
             moduleDirectory,
             expandModules,
+            cfgContext,
             expandedTokenCache,
           ),
           crateAliases,
@@ -1618,7 +1960,7 @@ export async function scanRestrictedSources(metadata, policy) {
       }
     }
 
-    for (const file of await packageRustFiles(pkg)) {
+    for (const file of await packageRustFiles(pkg, cfgContext)) {
       await scanExpandedSource(file, path.dirname(file), false);
     }
     const manifestDirectory = path.dirname(pkg.manifest_path);
@@ -1634,9 +1976,9 @@ export async function scanRestrictedSources(metadata, policy) {
   return [...errors].sort();
 }
 
-export async function verifyBoundaries(metadata, policy) {
+export async function verifyBoundaries(metadata, policy, options = {}) {
   return [
     ...verifyCargoMetadata(metadata, policy),
-    ...(await scanRestrictedSources(metadata, policy)),
+    ...(await scanRestrictedSources(metadata, policy, options)),
   ].sort();
 }
