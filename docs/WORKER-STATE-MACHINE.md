@@ -219,9 +219,15 @@ the operator has stopped the run.
 
 ## Restart and stranded-run recovery
 
-On worker startup, every persisted `running` row is assumed to have lost its
-owning process. It becomes `failure` with class `process_crashed`, its live
-session is removed, and the next retry is scheduled.
+Startup awaits tracker preflight before calling the local `recover()` sweep.
+If tracker preflight fails or startup is cancelled during that wait,
+persisted `pending` and `running` rows remain untouched. Recovery therefore
+does not repair stranded local runs during a tracker outage.
+
+After tracker preflight succeeds, every persisted `running` row is assumed to
+have lost its owning process. It becomes `failure` with class
+`process_crashed`, its live session is removed, and the next retry is
+scheduled.
 
 Persisted `pending` rows receive the same treatment with a message explaining
 that restart happened before the run was claimed. Orphaned placeholder live
@@ -242,8 +248,20 @@ but before normal cleanup, including while persisting an event.
 
 ## Error taxonomy
 
-Error classes are stable, machine-readable snake_case identifiers. Messages
-are bounded diagnostic detail, not the classification itself.
+Symphony-owned error classes are intended to be stable, machine-readable
+snake_case identifiers. Provider-reported classes are an exception: Codex
+preserves `error.type`, Claude and Cursor preserve result `subtype`, and
+OpenCode preserves `error.name` (for example `ProviderAuthError`). Consumers
+must treat provider classes as opaque strings rather than assuming
+snake_case.
+
+There is no universal bound on persisted error messages. Status text, many
+tool summaries, rate-limit failures, and OpenCode errors are truncated in
+their adapters, but ordinary Codex `turn.failed` messages, Claude result
+errors, and Cursor result/error text can reach `finish_run()` without
+truncation. The storage layer binds those strings directly. Consumers must not
+rely on a maximum length until bounding is applied at a shared persistence
+boundary or consistently in every adapter.
 
 | Layer | Rust representation | Persisted behavior |
 | --- | --- | --- |
@@ -264,8 +282,17 @@ need domain-specific classes so the UI, retry context, and retros can
 distinguish them. Existing compatibility mappings should be removed as
 dedicated variants are introduced, not copied into new code.
 
-Errors and events must not include secret values. Authentication failures may
-name the missing mechanism or variable, but not its contents.
+Keeping secrets out of errors and events is a required invariant, not a
+current enforcement guarantee. The worker injects credentials and configured
+session variables into the agent environment, while normalized event payloads,
+human-readable summaries, and terminal error messages are persisted without a
+redaction pass. A tool result that prints its environment can therefore expose
+an injected value in SQLite and the run-history UI even when its summary is
+length-bounded. Treat stored run output as sensitive, avoid commands that echo
+credentials, and do not claim this invariant is satisfied until known injected
+values are redacted before event, summary, retry-context, and terminal-error
+persistence. Authentication failures should still name only the missing
+mechanism or variable, never its contents.
 
 ## Change checklist
 

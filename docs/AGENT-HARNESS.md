@@ -79,6 +79,18 @@ skills-install workspace and writes the complete bundle under
 installer adds per-skill compatibility entries instead. Windows may use
 copies where creating symlinks requires extra privileges.
 
+The install writer treats the clone as untrusted input. Before writing, it
+turns every parent in `.agents/skills` and `.claude` into a real directory and
+replaces an unexpected `.claude/skills` entry. If the repository tracks
+`.agents`, `.agents/skills`, `.claude`, or `.claude/skills` as a symlink or
+regular file, that entry is currently removed and replaced rather than
+preserved or rejected. Existing per-skill Claude entries for bundled skill
+names are replaced as well. Consequently, an install PR can contain a
+deletion or type change for one of those parent/discovery entries in addition
+to the generated files. This protects the temporary clone from writes through
+hostile symlinks, but it is not a repository-content preservation guarantee;
+the install PR diff must be reviewed for conflicting tracked parents.
+
 When detection used an API token rather than authenticated `gh`, finding
 missing manifests triggers a Git default-branch preflight before the status
 can become `missing`. Missing Git transport access makes the overall status
@@ -106,8 +118,11 @@ Procedure changes, new skills, renamed skills, and altered safety rules belong
 in the embedded assets first. They are not repository adaptations.
 
 The install branch is `symphony/install-skills`. Installation must never
-force-push, rewrite history, or modify files outside `.agents/skills` and the
-Claude discovery entries.
+force-push or rewrite history. The bootstrap prompt restricts edits to
+`.agents/skills` and Claude discovery, but the parent normalization described
+above can also replace conflicting `.agents` or `.claude` entries. Preserving
+such entries would require the installer to reject the conflict before
+writing.
 
 ### 4. Dispatch-time fallback
 

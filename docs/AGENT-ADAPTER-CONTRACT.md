@@ -83,12 +83,19 @@ I/O, JSON parsing, and missing-result failures are also `AgentError` variants.
 
 ## Backend matrix
 
-| Backend | Structured mode | Terminal signal | Identifier source | Permission/sandbox source |
+| Backend | Structured mode | Completion boundary | Identifier source | Permission/sandbox source |
 | --- | --- | --- | --- | --- |
-| Codex | `exec --json` | `turn.completed` or `turn.failed`, with process exit fallback | Symphony fallback IDs; provider thread ID is surfaced in status | Normalized Codex thread/turn sandbox |
-| Claude Code | print mode with `stream-json --verbose` | `result`, with process exit fallback | Preallocated session ID | Claude permission mode plus allowed/disallowed tools and additional directories |
-| Cursor | print mode with `stream-json` | `result`, with process exit fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
+| Codex | `exec --json` | `turn.completed` or `turn.failed` selects a result; stdout EOF and process exit complete the run | Symphony fallback IDs; provider thread ID is surfaced in status | Normalized Codex thread/turn sandbox |
+| Claude Code | print mode with `stream-json --verbose` | `result` selects a result; stdout EOF and process exit complete the run | Preallocated session ID | Claude permission mode plus allowed/disallowed tools and additional directories |
+| Cursor | print mode with `stream-json` | `result` completes the run and triggers process-group cleanup; process exit is the fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
 | OpenCode | `run --format json` | Process exit; error events record failure | Event `sessionID` or Symphony fallback | `--dangerously-skip-permissions` and optional agent/model |
+
+Codex and Claude protocol result records are not early process-termination
+signals in the current adapters. They save the parsed result, continue reading
+until stdout closes, and then await the shell's exit. If a configured wrapper
+or descendant keeps stdout open past the turn deadline, timeout wins and the
+saved result is discarded. Cursor deliberately differs: its `result` record
+stops reading, terminates the process group, and returns immediately.
 
 ## Codex
 
@@ -127,8 +134,9 @@ input/output totals. The adapter must not add those fields again.
 `rate_limited`, with a locally interpreted reset time when Codex supplies one.
 Other failures preserve the provider error type when available.
 
-If the process exits without a terminal event, exit zero is success and a
-nonzero exit is `nonzero_exit`.
+If the process exits without a protocol result, exit zero is success and a
+nonzero exit is `nonzero_exit`. A `turn.completed` or `turn.failed` result is
+returned only after stdout closes and the process exits before the timeout.
 
 ## Claude Code
 
@@ -175,7 +183,8 @@ A result subtype of success is still failure when the final assistant text is
 a leading API error or when the permission checks above fail.
 
 Malformed JSON is an adapter protocol error. If no result record arrives,
-process exit is the fallback outcome.
+process exit is the fallback outcome. A parsed `result` is still provisional
+until stdout closes and the process exits before the timeout.
 
 ## Cursor
 
