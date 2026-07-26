@@ -59,9 +59,12 @@ The status has four meanings:
 - `installed`: every bundled manifest exists.
 - `pr_open`: one or more manifests are missing and the well-known install
   branch already has an open PR.
-- `missing`: detection succeeded and at least one manifest is missing.
+- `missing`: detection found at least one missing manifest and any Git
+  transport preflight required after API fallback also succeeded.
 - `unavailable`: the repository, authentication, `gh`, or response could not
-  be used. This is not equivalent to "missing."
+  be used, or API detection succeeded but Git transport credentials were
+  insufficient to offer the install path. This is not equivalent to
+  "missing."
 
 The Settings action "Mark installed" suppresses exact-bundle warnings for a
 repository that intentionally uses a different skill set. It is a UI
@@ -75,6 +78,13 @@ skills-install workspace and writes the complete bundle under
 `.agents/skills`; when a real Claude skills directory already exists, the
 installer adds per-skill compatibility entries instead. Windows may use
 copies where creating symlinks requires extra privileges.
+
+When detection used an API token rather than authenticated `gh`, finding
+missing manifests triggers a Git default-branch preflight before the status
+can become `missing`. Missing Git transport access makes the overall status
+`unavailable` even though the API listing itself succeeded, because the
+current UI must be able to offer the install-PR workflow. The preflight proves
+remote read access; a later install still needs clone and push access.
 
 The bootstrap agent may make exactly one semantic adaptation:
 
@@ -189,9 +199,11 @@ applying the request environment, preventing a stale inherited credential
 from taking precedence.
 
 Detection can use authenticated `gh` or a supported API token. Clone and push
-still require Git transport credentials. Report those cases separately:
-"repository inaccessible," "API fallback available," and "Git push
-credentials missing" lead to different recovery actions.
+still require Git transport credentials. In the API-fallback path, a failed
+Git preflight converts the result to `unavailable` after content detection;
+it does not leave the state as `missing`. Report those cases separately:
+"repository inaccessible," "API fallback read succeeded," and "Git
+transport credentials missing" lead to different recovery actions.
 
 ## Change checklist
 

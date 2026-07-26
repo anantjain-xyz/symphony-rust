@@ -13,17 +13,32 @@ The in-memory worker has three states:
 | --- | --- | --- |
 | `stopped` | No poll loop is owned by this manager. | `running` |
 | `running` | Startup, polling, or issue dispatch is active. | `stopping`, `stopped` after the task exits |
-| `stopping` | The root cancellation token has fired and the worker task is unwinding. | `stopped` |
+| `stopping` | The root cancellation token has fired and the worker task is unwinding. | `stopped`; the current `start()` implementation also accepts a restart here, which is an unsafe known gap |
 
 `start()` publishes `running` before the spawned task finishes tracker
 preflight and restart recovery. This lets the UI show startup immediately.
-Failure during startup or the poll loop eventually returns the manager to
-`stopped` and records `last_error`.
+Errors returned by startup preflight, restart recovery, or heartbeat setup
+eventually return the manager to `stopped` and record `last_error`. Once the
+poll loop is running, an individual tick error is logged and the next
+tick still runs; it does not stop the manager or update `last_error`. A failed
+live-reconfiguration preflight is different again: it leaves the worker
+running on the previous configuration and stores that error in `last_error`
+until a later accepted reconfiguration clears it.
 
 `stop()` is idempotent. It sets `stopping` and cancels the root token; the
 worker task owns the final transition to `stopped`. Tracker requests do not
 accept cancellation tokens, so startup and tick wrap each network wait and
 abandon that wait when stop fires.
+
+There is currently a stop-to-start race. `start()` rejects `running` but not
+`stopping`, so a caller can start another task while the previous task is
+unwinding. That replaces the manager's token, handle, and runtime-config
+references; when the old task exits, its unconditional cleanup can then mark
+the manager stopped and clear the new task's references even though the new
+poll loop is still alive. Callers must wait until status is `stopped` before
+restarting. The intended invariant is one manager-owned poll loop: `start()`
+must reject or serialize while `stopping`, and task cleanup must only clear
+state owned by the same task generation.
 
 The worker deliberately does not race an entire tick against cancellation. A
 tick may have committed a `pending` run but not yet spawned the task that owns
@@ -109,13 +124,23 @@ A reserved run owns the following ordered sequence:
    events when this is not the first attempt.
 9. Launch the selected agent driver and persist normalized events.
 10. Drain events sent immediately before the driver returned.
-11. Run and record `after_run`.
+11. If the driver returned an `AgentRunResult`, run and record `after_run`.
 12. Finish the run, update the retry state, and remove its live session.
 
 `after_create` returning nonzero records `after_create_failed`, finishes the
 run as failure, and schedules a retry. `before_run` and `after_run` exit codes
 are recorded for diagnostics but do not currently determine the run outcome
-by themselves.
+by themselves. `after_run` is not invoked when the driver returns an
+`AgentError` such as a spawn, protocol, I/O, missing-result, or timeout error;
+that path goes directly through cancellation arbitration and
+`dispatch_error` handling.
+
+An empty workspace-root setting expands to `<app-data>/workspaces`. A
+nonempty configured root is retained as a plain `PathBuf`; it is not rebased
+or made absolute at the configuration boundary. Relative roots can therefore
+remain relative and are interpreted against the desktop process's working
+directory when used. Requiring an absolute root (or resolving it against a
+documented base) is a proposed configuration invariant, not current behavior.
 
 Every cancellation-sensitive boundary checks the run token. This is
 intentional: cancellation can arrive during clone/setup, a hook, skill
@@ -179,10 +204,14 @@ also finish as `cancelled`, but they do not receive the user-cancelled
 suppression unless their individual cancellation was explicitly requested.
 Stopping orchestration and declaring an issue unwanted are different actions.
 
-The adapter owns its child process tree. On Unix, each agent shell is a process
-group; timeout or cancellation sends `TERM`, waits briefly, then sends `KILL`
-to the group. Dropping a driver future also kills the child, preventing an
-abandoned CLI or MCP subprocess from continuing to mutate the workspace.
+The adapter explicitly manages its child process group on Unix: timeout or
+cancellation sends `TERM`, waits briefly, then sends `KILL` to the group.
+Future-drop has weaker behavior. Tokio's `kill_on_drop` kills only the
+immediate shell child, not the entire process group, so descendants may be
+reparented and continue running. The intended invariant is that abandoning a
+driver cannot leave any descendant mutating the workspace; satisfying it
+requires explicit cancellation before drop or a process-group guard whose
+drop path kills the group.
 
 Cancellation wins over an adapter result when the worker observes the token
 before committing the terminal result. This avoids recording success after
@@ -218,7 +247,7 @@ are bounded diagnostic detail, not the classification itself.
 
 | Layer | Rust representation | Persisted behavior |
 | --- | --- | --- |
-| Tracker transport, authentication, or query | `WorkerError::Tracker` | Startup or tick error. It must not be described as a database failure. |
+| Tracker transport, authentication, or query | `WorkerError::Tracker` | Startup failure stops the worker and sets `last_error`; a normal tick failure is logged and polling continues without changing `last_error`. It must not be described as a database failure. |
 | SQLite, serialization, or storage invariant | `WorkerError::Storage` / `StorageError` | Tick or dispatch error; a reserved run is repaired by the safety net. |
 | Adapter spawn, I/O, JSON protocol, missing result, or timeout | `AgentError` | `failure`, class `dispatch_error`, retry scheduled |
 | Provider-reported failure | `AgentRunResult::Failure` with provider class | `failure`, provider class preserved, retry scheduled |
@@ -251,7 +280,8 @@ When changing worker lifecycle code:
 5. Make terminal writes single-shot or explicitly idempotent.
 6. Update retry creation, clearing, suppression, and "Retry now" together.
 7. Test worker stop and individual run stop separately.
-8. Test restart with both `pending` and `running` rows.
-9. Test failures before promotion, during event persistence, and after an
+8. Test that start cannot race a worker still in `stopping`.
+9. Test restart with both `pending` and `running` rows.
+10. Test failures before promotion, during event persistence, and after an
    adapter result.
-10. Keep tracker, storage, adapter, and domain error classes distinct.
+11. Keep tracker, storage, adapter, and domain error classes distinct.

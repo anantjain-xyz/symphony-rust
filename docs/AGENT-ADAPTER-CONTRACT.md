@@ -17,7 +17,7 @@ The contract has two purposes:
 `AgentDriver::run` receives:
 
 - the selected backend and configured command;
-- an absolute workspace path;
+- the worker-supplied workspace path;
 - the fully rendered prompt;
 - adapter-specific sandbox, permission, model, and tool settings;
 - a turn timeout;
@@ -27,6 +27,11 @@ The contract has two purposes:
 
 It returns `AgentRunResult` with stable thread/turn identifiers, an
 `AgentOutcome`, and optional error class/message.
+
+The default desktop workspace root normally makes that path absolute, but a
+nonempty configured workspace root is currently retained verbatim and may be
+relative. Adapters must not rely on `cwd` being absolute until configuration
+normalizes or rejects relative roots.
 
 The worker must know nothing about provider JSON field names. Adapters map
 their streams into:
@@ -65,8 +70,12 @@ All native adapters share these process rules:
 7. On Unix, the shell leads a dedicated process group. Timeout and
    cancellation signal the entire group with `TERM`, wait briefly, then use
    `KILL` for survivors.
-8. Child processes use kill-on-drop. An abandoned worker future must not leave
-   an agent, tool server, or language server mutating the workspace.
+8. Child processes use Tokio kill-on-drop as a last resort, but that mechanism
+   kills only the immediate shell. Unlike the explicit timeout and
+   cancellation paths, it does not signal the process group, so dropping a
+   driver future can currently leave an agent descendant, tool server, or
+   language server alive. The proposed invariant is for drop to terminate the
+   whole group as well.
 
 Cancellation returns `AgentOutcome::Cancelled` with class `cancelled`.
 Timeout is an `AgentError::Timeout`, not a provider-reported result. Spawn,
@@ -273,18 +282,20 @@ An adapter change is incomplete until it demonstrates:
 3. Success, explicit failure, nonzero exit, missing result, malformed output,
    timeout, and cancellation have deterministic outcomes.
 4. Cancellation kills descendants, not only the parent shell.
-5. Session identifiers remain stable after the first provider identifier is
+5. Future-drop behavior is tested separately from explicit cancellation and
+   cannot orphan descendants.
+6. Session identifiers remain stable after the first provider identifier is
    observed.
-6. Tool calls have stable names, call IDs where available, bounded summaries,
+7. Tool calls have stable names, call IDs where available, bounded summaries,
    and no invented success.
-7. Token accounting documents whether cache/reasoning buckets are subsets or
+8. Token accounting documents whether cache/reasoning buckets are subsets or
    additional buckets.
-8. Rate-limit detection cannot be triggered by ordinary prose.
-9. Permission or sandbox settings are verified when the provider reports
+9. Rate-limit detection cannot be triggered by ordinary prose.
+10. Permission or sandbox settings are verified when the provider reports
    their effective value.
-10. Terminal events are not lost when the provider keeps a subprocess alive
+11. Terminal events are not lost when the provider keeps a subprocess alive
     or exits immediately afterward.
-11. Request environment precedence cannot leak an inherited credential over
+12. Request environment precedence cannot leak an inherited credential over
     an explicit session credential.
-12. Tests use synthetic provider events and sanitized fixtures rather than
+13. Tests use synthetic provider events and sanitized fixtures rather than
     copied private transcripts.
