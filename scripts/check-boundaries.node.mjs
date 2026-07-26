@@ -328,6 +328,54 @@ test("detects extern-crate and use aliases written as raw identifiers", async (t
   ]);
 });
 
+test("tokenizes Unicode Rust identifiers in imports", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "use std::fmt as 格式;",
+      "use symphony_storage::StorageError as 存储错误;",
+      "fn allowed_unicode() { let _ = 格式::Error; }",
+      "fn wrong() { let _ = 存储错误::Sqlx(problem); }",
+      "mod unrelated {",
+      "    use crate::errors::StorageError as 本地错误;",
+      "    fn allowed() { let _ = 本地错误::Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("honors Cargo dependency renames when normalizing paths", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "fn wrong() { let _ = store::StorageError::Sqlx(problem); }",
+      "mod unrelated {",
+      "    mod store { pub enum StorageError { Sqlx } }",
+      "    fn allowed() { let _ = store::StorageError::Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const value = metadata(root);
+  value.packages
+    .find((pkg) => pkg.name === "worker")
+    .dependencies.push({ name: "symphony-storage", rename: "store" });
+
+  const errors = await scanRestrictedSources(value, policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:1: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("detects StorageError variants imported through scoped glob uses", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -514,6 +562,31 @@ test("detects qualified StorageError variant paths", async (t) => {
   ]);
 });
 
+test("distinguishes matching StorageError variants from constructing them", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "use symphony_storage::StorageError;",
+      "fn inspect(error: StorageError) {",
+      "    match error {",
+      "        StorageError::Sqlx(inner) => consume(inner),",
+      "        _ => {}",
+      "    }",
+      "}",
+      "fn destructure(error: StorageError) { let StorageError::Sqlx(inner) = error else { return; }; consume(inner); }",
+      "fn predicate(error: StorageError) -> bool { matches!(error, StorageError::Sqlx(_)) }",
+      "fn wrong() { let _ = StorageError::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:10: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("recursively scans modules belonging to custom Cargo targets", async (t) => {
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -632,6 +705,25 @@ test("preserves bindings across recursively included Rust fragments", async (t) 
     "worker/generated/nested/shared.inc:2: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/generated/nested/shared.inc:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
+});
+
+test("does not scan included Rust fragments as standalone roots", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "enum StorageError { Sqlx }",
+      'include!("fragment.rs");',
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "worker", "src", "fragment.rs"),
+    "fn allowed() { let _ = StorageError::Sqlx; }\n",
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, []);
 });
 
 test("resolves modules from the included fragment's directory", async (t) => {

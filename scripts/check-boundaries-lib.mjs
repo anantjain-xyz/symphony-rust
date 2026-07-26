@@ -394,11 +394,12 @@ function moduleChildDirectory(moduleFile, explicitPath) {
       );
 }
 
-async function collectTargetModules(files, entryFile) {
+async function collectTargetModules(files, includedFiles, entryFile) {
   const visited = new Set();
 
-  async function visit(file, moduleDirectory) {
+  async function visit(file, moduleDirectory, included = false) {
     const absolute = path.resolve(file);
+    if (included) includedFiles.add(absolute);
     const visitKey = `${absolute}\0${path.resolve(moduleDirectory)}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
@@ -423,7 +424,7 @@ async function collectTargetModules(files, entryFile) {
             included.includedPath,
             included.line,
           );
-          await visit(includedFile, path.dirname(includedFile));
+          await visit(includedFile, path.dirname(includedFile), true);
           index = included.closing;
           continue;
         }
@@ -601,6 +602,7 @@ async function packageRustFiles(pkg) {
     path.join(manifestDir, name),
   );
   const files = new Set();
+  const includedFiles = new Set();
   for (const root of roots) {
     for (const file of await collectRustFiles(root)) files.add(path.resolve(file));
   }
@@ -613,18 +615,39 @@ async function packageRustFiles(pkg) {
     if (!target || typeof target.src_path !== "string" || target.src_path.length === 0) {
       throw new Error(`cargo metadata target for ${pkg.name} is missing src_path`);
     }
-    await collectTargetModules(files, path.resolve(manifestDir, target.src_path));
+    await collectTargetModules(
+      files,
+      includedFiles,
+      path.resolve(manifestDir, target.src_path),
+    );
   }
 
-  return [...files].sort();
+  return [...files].filter((file) => !includedFiles.has(file)).sort();
+}
+
+function restrictedCrateAliases(pkg) {
+  const aliases = new Map();
+  for (const dependency of pkg.dependencies ?? []) {
+    if (!dependency || typeof dependency.name !== "string") continue;
+    const canonical = dependency.name.replaceAll("-", "_");
+    if (!["sqlx", "symphony_storage"].includes(canonical)) continue;
+    const exposed = String(dependency.rename ?? dependency.name).replaceAll("-", "_");
+    aliases.set(exposed, canonical);
+  }
+  return aliases;
+}
+
+function sourceCharacter(source, index) {
+  const codePoint = source.codePointAt(index);
+  return codePoint === undefined ? "" : String.fromCodePoint(codePoint);
 }
 
 function isIdentifierStart(character) {
-  return character === "_" || /[A-Za-z]/.test(character);
+  return character === "_" || /^\p{XID_Start}$/u.test(character);
 }
 
 function isIdentifierContinue(character) {
-  return character === "_" || /[A-Za-z0-9]/.test(character);
+  return character === "_" || /^\p{XID_Continue}$/u.test(character);
 }
 
 function rawStringOpening(source, index) {
@@ -680,11 +703,11 @@ function lexRust(source) {
   let line = 1;
 
   while (index < source.length) {
-    const character = source[index];
+    const character = sourceCharacter(source, index);
 
     if (/\s/.test(character)) {
       if (character === "\n") line += 1;
-      index += 1;
+      index += character.length;
       continue;
     }
 
@@ -789,13 +812,17 @@ function lexRust(source) {
     }
 
     const rawIdentifier =
-      source.startsWith("r#", index) && isIdentifierStart(source[index + 2]);
+      source.startsWith("r#", index) &&
+      isIdentifierStart(sourceCharacter(source, index + 2));
     if (rawIdentifier || isIdentifierStart(character)) {
       const start = rawIdentifier ? index + 2 : index;
       index = start;
-      index += 1;
-      while (index < source.length && isIdentifierContinue(source[index])) {
-        index += 1;
+      index += sourceCharacter(source, index).length;
+      while (
+        index < source.length &&
+        isIdentifierContinue(sourceCharacter(source, index))
+      ) {
+        index += sourceCharacter(source, index).length;
       }
       tokens.push({
         value: source.slice(start, index),
@@ -813,7 +840,7 @@ function lexRust(source) {
     }
 
     tokens.push({ value: character, line });
-    index += 1;
+    index += character.length;
   }
 
   return tokens;
@@ -993,6 +1020,11 @@ function declareBinding(scope, name, binding) {
     scope.bindings.set(name, declared);
     return;
   }
+  if (existing.implicit && !declared.implicit) {
+    scope.bindings.set(name, declared);
+    return;
+  }
+  if (declared.implicit) return;
   if (!existing.conditional || !declared.conditional) {
     throw new Error(`ambiguous Rust declarations bind ${name} more than once in one scope`);
   }
@@ -1235,6 +1267,7 @@ function resolvePath(
       return [...pathSegments];
     }
     binding = moduleScope.bindings.get(pathSegments[index]) ?? null;
+    if (binding?.implicit) return [...pathSegments];
     remaining = pathSegments.slice(index + 1);
   } else {
     binding = findBinding(scope, pathSegments[0]);
@@ -1299,11 +1332,87 @@ function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant
   return null;
 }
 
-function normalizedTokenStream(tokens) {
+function followedByMatchArm(tokens, index) {
+  const delimiters = [];
+  for (let cursor = index; cursor < tokens.length; cursor += 1) {
+    const value = tokens[cursor].value;
+    if (closingDelimiter.has(value)) {
+      delimiters.push(closingDelimiter.get(value));
+      continue;
+    }
+    if ([")", "]", "}"].includes(value)) {
+      if (delimiters.length === 0) return false;
+      if (delimiters.at(-1) !== value) return false;
+      delimiters.pop();
+      continue;
+    }
+    if (delimiters.length > 0) continue;
+    if (value === "=" && tokens[cursor + 1]?.value === ">") return true;
+    if ([",", ";"].includes(value)) return false;
+  }
+  return false;
+}
+
+function followsLetPattern(tokens, index) {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const value = tokens[cursor].value;
+    if ([";", "{", "}"].includes(value)) return false;
+    if (value === "=") return false;
+    if (value === "let" && !tokens[cursor].raw) return true;
+  }
+  return false;
+}
+
+function isMatchesMacroPattern(tokens, index) {
+  for (let opening = index - 1; opening >= 2; opening -= 1) {
+    if (
+      tokens[opening].value !== "(" ||
+      tokens[opening - 1]?.value !== "!" ||
+      tokens[opening - 2]?.value !== "matches"
+    ) {
+      continue;
+    }
+    const closing = matchingDelimiter(tokens, opening);
+    if (closing < index) continue;
+
+    const delimiters = [];
+    for (let cursor = opening + 1; cursor < index; cursor += 1) {
+      const value = tokens[cursor].value;
+      if (closingDelimiter.has(value)) {
+        delimiters.push(closingDelimiter.get(value));
+      } else if ([")", "]", "}"].includes(value)) {
+        if (delimiters.at(-1) === value) delimiters.pop();
+      } else if (value === "," && delimiters.length === 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+function isRustPattern(tokens, index) {
+  return (
+    followedByMatchArm(tokens, index) ||
+    followsLetPattern(tokens, index) ||
+    isMatchesMacroPattern(tokens, index)
+  );
+}
+
+function normalizedTokenStream(tokens, crateAliases = new Map()) {
   const ignoredTokens = macroDefinitionTokens(tokens);
   const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
-  const { moduleScopes, scopeAt } = lexicalScopes(tokens, groupBraces);
+  const { moduleScopes, root, scopeAt } = lexicalScopes(tokens, groupBraces);
   collectLocalItems(tokens, scopeAt, moduleScopes);
+  for (const scope of [root, ...moduleScopes.values()]) {
+    for (const [alias, canonical] of crateAliases) {
+      declareBinding(scope, alias, {
+        absolute: true,
+        implicit: true,
+        path: [canonical],
+      });
+    }
+  }
   const importPathPrefixes = collectBindings(tokens, statements, scopeAt);
   const importStatementTokens = new Set();
   for (const statement of statements) {
@@ -1325,7 +1434,9 @@ function normalizedTokenStream(tokens) {
       !previousIsSeparator &&
       hasStorageErrorGlob(scopeAt[index], "Sqlx")
     ) {
-      values[index] = "StorageError :: Sqlx";
+      values[index] = isRustPattern(tokens, index)
+        ? "MATCHED_STORAGE_VARIANT"
+        : "StorageError :: Sqlx";
       continue;
     }
     const previousIsSegment =
@@ -1364,6 +1475,29 @@ function normalizedTokenStream(tokens) {
       (expanded[0] === "symphony_storage" &&
         expanded[1] === "StorageError")
     ) {
+      const qualifiedClosing = qualifiedVariantClosing(
+        tokens,
+        index,
+        cursor,
+        leadingAbsolute,
+        "Sqlx",
+      );
+      if (
+        (
+          isStorageErrorVariantPath(expanded, "Sqlx") ||
+          qualifiedClosing !== null
+        ) &&
+        isRustPattern(
+          tokens,
+          qualifiedClosing === null ? cursor : qualifiedClosing + 2,
+        )
+      ) {
+        for (const tokenIndex of segmentIndices) {
+          values[tokenIndex] = "MATCHED_STORAGE_VARIANT";
+        }
+        index = cursor;
+        continue;
+      }
       if (importedPath !== null && isStorageErrorPath(importedPath)) {
         values[index] = "StorageError";
       }
@@ -1374,13 +1508,6 @@ function normalizedTokenStream(tokens) {
       ) {
         values[index] = "StorageError :: Sqlx";
       }
-      const qualifiedClosing = qualifiedVariantClosing(
-        tokens,
-        index,
-        cursor,
-        leadingAbsolute,
-        "Sqlx",
-      );
       if (qualifiedClosing !== null) {
         values[index] = "StorageError";
         for (
@@ -1451,6 +1578,7 @@ export async function scanRestrictedSources(metadata, policy) {
     if (rules.length === 0) continue;
 
     const expandedTokenCache = new Map();
+    const crateAliases = restrictedCrateAliases(pkg);
     async function scanExpandedSource(file, moduleDirectory, expandModules) {
       const relative = path.relative(metadata.workspace_root, file);
       let tokenStream;
@@ -1462,6 +1590,7 @@ export async function scanRestrictedSources(metadata, policy) {
             expandModules,
             expandedTokenCache,
           ),
+          crateAliases,
         );
       } catch (error) {
         throw new Error(`cannot lex ${relative}: ${error.message}`);
