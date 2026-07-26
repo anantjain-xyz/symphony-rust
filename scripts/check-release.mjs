@@ -398,6 +398,20 @@ function checkReleaseBuildScript(source, contract, diagnostics) {
     "updater signature owner",
     diagnostics,
   );
+  const gatekeeper = requireExactCommand(
+    statements,
+    ["spctl", "-a", "-vv", "-t", "exec", "$APP"],
+    path,
+    "Gatekeeper application verification",
+    diagnostics,
+  );
+  const notarization = requireExactCommand(
+    statements,
+    ["xcrun", "stapler", "validate", "$APP"],
+    path,
+    "stapled notarization verification",
+    diagnostics,
+  );
   const verify = requireExactCommand(
     statements,
     [
@@ -425,16 +439,20 @@ function checkReleaseBuildScript(source, contract, diagnostics) {
     app &&
     bundle &&
     signature &&
+    gatekeeper &&
+    notarization &&
     verify &&
     !(
       build.index < app.index &&
       app.index < bundle.index &&
       bundle.index < signature.index &&
-      signature.index < verify.index
+      signature.index < gatekeeper.index &&
+      gatekeeper.index < notarization.index &&
+      notarization.index < verify.index
     )
   ) {
     diagnostics.push(
-      `${path}: build, artifact ownership, and signature verification are out of order`,
+      `${path}: build, artifact ownership, Gatekeeper, notarization, and updater signature verification are out of order`,
     );
   }
 }

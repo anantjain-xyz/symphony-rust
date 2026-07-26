@@ -1,22 +1,13 @@
 import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { AgentEventRow } from "../bindings";
+import type { StorageEvent } from "../bindings";
 
-export type DbChanged = {
-  type: "db_changed";
-  table: string;
-  op: string;
-};
-
-export type AgentEvent = {
-  type: "agent_event";
-  event: AgentEventRow;
-};
-
-export type RateLimitChanged = {
-  type: "rate_limit_changed";
-  source: string;
-};
+export type DbChanged = Extract<StorageEvent, { type: "db_changed" }>;
+export type AgentEvent = Extract<StorageEvent, { type: "agent_event" }>;
+export type RateLimitChanged = Extract<
+  StorageEvent,
+  { type: "rate_limit_changed" }
+>;
 
 export type DesktopEventHandlers = {
   onDbChanged: (event: DbChanged) => void;

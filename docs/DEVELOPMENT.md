@@ -33,7 +33,7 @@ pnpm tauri dev
 
 This is the complete local runtime: it compiles `symphony-desktop`, starts Vite,
 opens the Tauri window, initializes SQLite and the keychain-backed settings
-layer, and regenerates debug IPC bindings.
+layer, and uses the checked-in IPC bindings.
 
 For the browser-only deterministic preview:
 
@@ -115,18 +115,23 @@ pnpm typecheck
 ## IPC bindings
 
 Rust types crossing the desktop/frontend boundary derive Specta `Type` and are
-listed in `export_bindings` in `src-tauri/src/lib.rs`. Debug desktop startup
-rewrites `src/bindings.ts`.
+listed by the Tauri-free exporter in `crates/symphony-contracts`.
+`src/bindings.ts` is reproducible generated output; desktop startup does not
+rewrite it.
 
 After changing an exported Rust type:
 
 1. Update its Rust definition and the export list if it is a new type.
-2. Run `pnpm tauri dev` and wait for the desktop to finish startup.
+2. Run `pnpm generate:bindings`.
 3. Inspect and commit the generated `src/bindings.ts` diff.
-4. Update string-based frontend `invoke` calls and run `pnpm typecheck`.
+4. Update frontend command/event consumers.
+5. Run `pnpm check:static`, `pnpm test:static`, and `pnpm typecheck`.
 
-Do not treat a manual edit to `src/bindings.ts` as the source of truth; the next
-debug startup can replace it.
+`pnpm check:bindings` runs the headless exporter into a temporary file and
+byte-compares it with the checked-in output. `pnpm check:ipc` verifies command
+definitions, handler registration, frontend command/argument literals, and the
+bounded backend-only allowlist. Both are included by `pnpm check:static`; do not
+hand-edit `src/bindings.ts`.
 
 ## Playwright
 

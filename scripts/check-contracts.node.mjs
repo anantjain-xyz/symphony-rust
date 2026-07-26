@@ -161,6 +161,89 @@ test("IPC checker rejects duplicate Rust and backend-only ownership", () => {
   );
 });
 
+const importedWrapperIpcFixture = {
+  rustSources: [
+    {
+      path: "src-tauri/src/commands.rs",
+      source: `
+        #[tauri::command]
+        fn frontend(
+          state: State<'_, AppState>,
+          issue_id: String,
+          retry_count: u32,
+        ) {}
+      `,
+    },
+    {
+      path: "src-tauri/src/lib.rs",
+      source: `tauri::generate_handler![commands::frontend];`,
+    },
+  ],
+  frontendSources: [
+    {
+      path: "src/desktop/bridge.ts",
+      source: `
+        import { invoke } from "@tauri-apps/api/core";
+        export function invokeCommand(
+          command: string,
+          args?: Record<string, unknown>,
+        ) {
+          return invoke(command, args);
+        }
+      `,
+    },
+    {
+      path: "src/feature/calls.ts",
+      source: `
+        import { invokeCommand as callDesktop } from "../desktop/bridge";
+        callDesktop("frontend", { issueId: "SYM-1", retryCount: 2 });
+      `,
+    },
+  ],
+  backendOnly: [],
+};
+
+test("IPC checker resolves imported wrappers and JavaScript-facing argument names", () => {
+  assert.deepEqual(checkIpcContract(importedWrapperIpcFixture), []);
+});
+
+test("IPC checker rejects frontend argument-name drift", () => {
+  const diagnostics = checkIpcContract({
+    ...importedWrapperIpcFixture,
+    frontendSources: importedWrapperIpcFixture.frontendSources.map((source) => ({
+      ...source,
+      source: source.source.replace("issueId:", "staleIssueId:"),
+    })),
+  });
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("IPC arguments for frontend") &&
+        message.includes("missing [issueId]") &&
+        message.includes("extra [staleIssueId]"),
+    ),
+  );
+});
+
+test("IPC checker rejects opaque frontend argument objects", () => {
+  const diagnostics = checkIpcContract({
+    ...importedWrapperIpcFixture,
+    frontendSources: importedWrapperIpcFixture.frontendSources.map((source) => ({
+      ...source,
+      source: source.source.replace(
+        'callDesktop("frontend", { issueId: "SYM-1", retryCount: 2 });',
+        `const args = { issueId: "SYM-1", retryCount: 2 };
+         callDesktop("frontend", args);`,
+      ),
+    })),
+  });
+  assert.ok(
+    diagnostics.some((message) =>
+      message.includes("non-literal frontend invoke argument objects"),
+    ),
+  );
+});
+
 const projectionFixture = {
   rustPromptSource: `pub const PROMPT_VARIABLES: [&str; 1] = ["issue.id"];`,
   settingsSource: `
@@ -288,6 +371,25 @@ test("projection checker rejects opaque sqlx::query ownership", () => {
   );
 });
 
+test("projection checker rejects unclassified literal SQL forms", () => {
+  assert.ok(
+    storageMutationDiagnostics(`
+      impl Repository {
+        fn clear_due_retries(&self) {
+          sqlx::query(
+            "with candidates as (select issue_id from retry_queue)
+             delete from retry_queue where issue_id in (select issue_id from candidates)"
+          );
+        }
+      }
+    `).some(
+      (message) =>
+        message.includes("Repository::clear_due_retries") &&
+        message.includes("unclassified literal sqlx::query"),
+    ),
+  );
+});
+
 const releaseContract = {
   repository: "acme/symphony",
   productName: "Symphony",
@@ -333,6 +435,8 @@ const releaseFixture = {
     APP="$ROOT/target/release/bundle/macos/Symphony.app"
     UPDATER_BUNDLE="$ROOT/target/release/bundle/macos/Symphony.app.tar.gz"
     UPDATER_SIGNATURE="$UPDATER_BUNDLE.sig"
+    spctl -a -vv -t exec "$APP"
+    xcrun stapler validate "$APP"
     cargo run --quiet --manifest-path "$ROOT/src-tauri/Cargo.toml" \\
       --example verify-updater-signature -- \\
       "$UPDATER_BUNDLE" "$UPDATER_SIGNATURE" "$ROOT/src-tauri/tauri.conf.json"
@@ -397,6 +501,29 @@ const releaseFixture = {
 test("release checker accepts synchronized versions and artifacts", () => {
   assert.deepEqual(checkReleaseContract(releaseFixture), []);
 });
+
+for (const [label, command] of [
+  ["Gatekeeper", 'spctl -a -vv -t exec "$APP"'],
+  ["stapled notarization", 'xcrun stapler validate "$APP"'],
+]) {
+  test(`release checker requires ${label} verification`, () => {
+    const releaseScript = removeExactShellLine(
+      releaseFixture.releaseScript,
+      command,
+    );
+    const diagnostics = checkReleaseContract({
+      ...releaseFixture,
+      releaseScript,
+    });
+    assert.ok(
+      diagnostics.some(
+        (message) =>
+          message.includes("scripts/release-macos.sh") &&
+          message.includes(label),
+      ),
+    );
+  });
+}
 
 function removeExactShellLine(source, expected) {
   const lines = source.split("\n");

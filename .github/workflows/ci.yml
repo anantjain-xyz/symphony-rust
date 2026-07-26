@@ -74,4 +74,4 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo check -p symphony-desktop
+      - run: cargo test -p symphony-desktop --lib

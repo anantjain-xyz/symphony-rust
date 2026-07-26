@@ -201,10 +201,14 @@ function callOpen(tokens, start) {
   return -1;
 }
 
-function sqlMutationTable(sql) {
-  const withoutLeadingComments = sql
+function sqlWithoutLeadingComments(sql) {
+  return sql
     .replace(/^\s*(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)/u, "")
     .trimStart();
+}
+
+function sqlMutationTable(sql) {
+  const withoutLeadingComments = sqlWithoutLeadingComments(sql);
   const match =
     /^(?:insert(?:\s+or\s+[a-z_]+)?\s+into|replace\s+into|update|delete\s+from)\s+["`[]?([a-z_][a-z0-9_]*)/iu.exec(
       withoutLeadingComments,
@@ -215,6 +219,7 @@ function sqlMutationTable(sql) {
 function methodSqlMutations(method) {
   const tables = [];
   const dynamicQueries = [];
+  const unclassifiedQueries = [];
   const tokens = method.tokens;
   for (let index = 0; index < tokens.length; index += 1) {
     const sqlxQuery =
@@ -251,9 +256,19 @@ function methodSqlMutations(method) {
       continue;
     }
     const table = sqlMutationTable(firstArgument.value);
-    if (table) tables.push(table);
+    if (table) {
+      tables.push(table);
+    } else if (
+      !/^(?:select|pragma|explain|values)\b/iu.test(
+        sqlWithoutLeadingComments(firstArgument.value),
+      )
+    ) {
+      unclassifiedQueries.push(
+        firstArgument.value.trim().replace(/\s+/gu, " ").slice(0, 120),
+      );
+    }
   }
-  return { tables, dynamicQueries };
+  return { tables, dynamicQueries, unclassifiedQueries };
 }
 
 function methodChangedTables(method) {
@@ -293,6 +308,13 @@ export function storageMutationDiagnostics(source) {
         `storage mutation notifications: Repository::${method.name} uses non-literal sqlx::query arguments [${mutations.dynamicQueries.join(
           ", ",
         )}]`,
+      );
+    }
+    if (mutations.unclassifiedQueries.length > 0) {
+      diagnostics.push(
+        `storage mutation notifications: Repository::${method.name} uses unclassified literal sqlx::query statements [${mutations.unclassifiedQueries.join(
+          ", ",
+        )}]; extend the checker before adding a new SQL statement form`,
       );
     }
   }
