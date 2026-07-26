@@ -70,9 +70,7 @@ import {
   type PollController,
   type PollResourceState,
 } from "./pollController";
-import {
-  SettingsValidationController,
-} from "./settingsValidationController";
+import type { SettingsValidationController } from "./settingsValidationController";
 import {
   ChunkErrorBoundary,
   ViewLoading,
@@ -828,6 +826,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       instrumentation: { enabled: DASHBOARD_COMMAND_TRACE_ENABLED },
     });
   }
+  const dashboardCoordinator = dashboardRefreshCoordinator.current;
 
   dashboardRefreshExecutor.current = async ({ keys, isAuthoritative }) => {
     if (!runtimeAvailable) return;
@@ -899,7 +898,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
                 selectedRetroIdRef.current = nextRetros[0]?.id ?? null;
                 if (selectedRetroIdRef.current !== null && viewRef.current === "retro") {
                   markResourceDirty("selectedRetro");
-                  void dashboardRefreshCoordinator.current!.request(["selectedRetro"], {
+                  void dashboardCoordinator.request(["selectedRetro"], {
                     reportFailure: false,
                   });
                 }
@@ -999,6 +998,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     }
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dependencies are ref-backed helpers intentionally held stable across renders.
   const requestInvalidatedResources = useCallback(
     (
       keys: Iterable<DashboardResourceKey>,
@@ -1013,7 +1013,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         selectedRunIdRef.current,
         selectedRetroIdRef.current,
       );
-      return dashboardRefreshCoordinator.current!.request(fetchable, options);
+      return dashboardCoordinator.request(fetchable, options);
     },
     [],
   );
@@ -1022,11 +1022,12 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     () => requestInvalidatedResources(DASHBOARD_RESOURCE_KEYS, { reportFailure: true }),
     [requestInvalidatedResources],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the coordinator and dirty tracker are stable ref-backed helpers.
   const retryDashboardResource = useCallback(async (key: DashboardResourceKey) => {
     userRetryKeys.current.add(key);
     markResourceDirty(key);
     try {
-      await dashboardRefreshCoordinator.current!.request([key], {
+      await dashboardCoordinator.request([key], {
         rejectOnFailure: true,
         reportFailure: false,
       });
@@ -1049,6 +1050,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       userRetryKeys.current.delete(key);
     }
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the updater writes through refs and must keep stable callback identity.
   const markVisibleResourceStale = useCallback(
     (key: DashboardResourceKey, nowMs: number) => {
       const current = dashboardResourcesRef.current[key] as DashboardResourceEnvelope<
@@ -1062,7 +1064,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   );
   const pollDashboardResources = useCallback(
     async (keys: readonly DashboardResourceKey[]) => {
-      await dashboardRefreshCoordinator.current!.request(keys, {
+      await dashboardCoordinator.request(keys, {
         rejectOnFailure: true,
         reportFailure: false,
       });
@@ -1070,7 +1072,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         keys.map((key) => [key, dashboardResourceValues.current.get(key)]),
       ) as Partial<Record<DashboardResourceKey, unknown>>;
     },
-    [],
+    [dashboardCoordinator],
   );
 
   const updatePollingState = useCallback(
@@ -1089,16 +1091,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   }, []);
 
   useEffect(() => {
-    const coordinator = dashboardRefreshCoordinator.current!;
+    const coordinator = dashboardCoordinator;
     coordinator.activate();
     return () => {
       coordinator.dispose();
-      refreshAffordanceTimers.current.forEach((timer) =>
-        window.clearTimeout(timer),
-      );
+      refreshAffordanceTimers.current.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
       refreshAffordanceTimers.current.clear();
     };
-  }, []);
+  }, [dashboardCoordinator]);
 
   useEffect(() => {
     setStoppingRunIds((prev) => {
@@ -1119,6 +1121,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     if (bootState.status === "error") retryButtonRef.current?.focus();
   }, [bootState.status, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrapAttempt is an explicit retry trigger; snapshot commit reads current refs.
   useEffect(() => {
     if (runtimeAvailable) return;
     let cancelled = false;
@@ -1151,6 +1154,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     };
   }, [bootstrapAttempt, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bootstrapAttempt intentionally restarts subscriptions; event helpers read current refs.
   useEffect(() => {
     if (!runtimeAvailable) return;
 
@@ -1269,10 +1273,15 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     return () => {
       cancelled = true;
       if (timer !== null) window.clearTimeout(timer);
-      unsubs.then((items) => items.forEach((unlisten) => unlisten()));
+      unsubs.then((items) =>
+        items.forEach((unlisten) => {
+          unlisten();
+        }),
+      );
     };
   }, [bootstrapAttempt, requestInvalidatedResources, runtimeAvailable]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: workflowReadinessEpoch is an explicit invalidation signal, not a captured value.
   useEffect(() => {
     if (!runtimeAvailable || bootState.status !== "ready") return;
     const viewKeys = resourcesForView(view).filter((key) =>
@@ -1285,7 +1294,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     }
     // refreshWorkflowStatus intentionally refreshes readiness only; it never
     // replaces the editable Settings draft.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     bootState.status,
     requestInvalidatedResources,
@@ -1688,6 +1696,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   // While the install session runs, poll its progress; when it lands, re-check
   // its repo so that card's status flips to "PR open" with the link.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the polling callback intentionally uses the current ref-backed repo checker.
   useEffect(() => {
     if (!runtimeAvailable || skillsInstall?.state !== "running") return;
     const controller = createPollController({
@@ -1725,7 +1734,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         delete pollControllers.current.skillsInstall;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     clearPollingState,
     runtimeAvailable,
@@ -1733,6 +1741,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
     updatePollingState,
   ]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the polling callback intentionally uses the current ref-backed repo checker.
   useEffect(() => {
     if (!runtimeAvailable || workflowTransfer?.state !== "running") return;
     const controller = createPollController({
@@ -1767,7 +1776,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
         delete pollControllers.current.workflowTransfer;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     clearPollingState,
     runtimeAvailable,
@@ -2109,6 +2117,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
 
   // Repo skill detection does not depend on the selected agent or its command,
   // so it only needs refreshing when Settings are entered or first loaded.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: entering Settings or first loading settings are the deliberate refresh triggers.
   useEffect(() => {
     if (!runtimeAvailable || view !== "settings" || !settings) return;
     const target = settingsDirtyRef.current
@@ -2116,7 +2125,6 @@ function App({ onRender }: { onRender?: () => void } = {}) {
       : settings;
     refreshSkillsStatus(target);
     refreshWorkflowStatus(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, runtimeAvailable, settings !== null]);
 
   function requestStop() {
@@ -2223,6 +2231,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
           <nav className="topnav" aria-label="Primary">
             {(["overview", "runs", "issues", "retro", "settings"] as View[]).map((item) => (
               <button
+                type="button"
                 key={item}
                 className={view === item ? "nav-active" : ""}
                 aria-current={view === item ? "page" : undefined}
@@ -2519,6 +2528,7 @@ function ResourceStalenessMonitor({
 }) {
   const visibleKeySignature = visibleKeys.join("|");
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: visibleKeySignature tracks list contents without retriggering for array identity.
   useEffect(() => {
     const timers: number[] = [];
     const now = Date.now();
@@ -2535,11 +2545,12 @@ function ResourceStalenessMonitor({
       const dirtyAt = Date.parse(resource.dirtySince);
       if (!Number.isFinite(dirtyAt)) return;
       const delay = Math.max(0, dirtyAt + 60_000 - now);
-      timers.push(
-        window.setTimeout(() => onStale(key, Date.now()), delay),
-      );
+      timers.push(window.setTimeout(() => onStale(key, Date.now()), delay));
     });
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
+    return () =>
+      timers.forEach((timer) => {
+        window.clearTimeout(timer);
+      });
   }, [onStale, resources, visibleKeySignature]);
 
   return null;
@@ -2619,7 +2630,7 @@ function ResourceNotices({
     ];
   });
 
-  return notices.length > 0 ? <>{notices}</> : null;
+  return notices.length > 0 ? notices : null;
 }
 
 function BootLoading({ preview }: { preview: boolean }) {
@@ -3033,6 +3044,7 @@ function SetupStep({
       </thead>
       <tbody>
         {runs.map((run) => (
+          // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
           <tr
             key={run.id}
             className={
@@ -3074,7 +3086,7 @@ function SetupStep({
             {lastActivity ? (
               <td className="tnum">
                 {lastActivity.has(run.id)
-                  ? <RelativeTime value={lastActivity.get(run.id)!} />
+                  ? <RelativeTime value={lastActivity.get(run.id) ?? ""} />
                   : "—"}
               </td>
             ) : null}
@@ -3135,6 +3147,7 @@ function RunTable({
       </thead>
       <tbody>
         {runs.map((run) => (
+          // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
           <tr
             key={run.id}
             className={
@@ -3176,7 +3189,7 @@ function RunTable({
             {lastActivity ? (
               <td className="tnum">
                 {lastActivity.has(run.id)
-                  ? <RelativeTime value={lastActivity.get(run.id)!} />
+                  ? <RelativeTime value={lastActivity.get(run.id) ?? ""} />
                   : "—"}
               </td>
             ) : null}
@@ -3234,7 +3247,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}

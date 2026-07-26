@@ -120,6 +120,7 @@ function RetroView({
     false;
   const deleteConfirmationActive = confirmDeleteId === selected?.row.id;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changing the selected retro is the effect's explicit reset signal.
   useEffect(() => {
     setConfirmDeleteId(null);
     if (confirmDeleteTimer.current !== null) {
@@ -233,6 +234,7 @@ function RetroView({
               </thead>
               <tbody>
                 {retros.map((retro) => (
+                  // biome-ignore lint/a11y/useSemanticElements: a table row cannot be replaced by a button without breaking table semantics.
                   <tr
                     key={retro.id}
                     className={
@@ -299,6 +301,7 @@ function RetroView({
                       : ""}
                   </small>
                 </div>
+                {/* biome-ignore lint/a11y/useSemanticElements: this is an inline button group, not a form fieldset. */}
                 <div className="retro-filter" role="group" aria-label="Filter suggestions">
                   {(["pending", "accepted", "rejected", "all"] as const).map((filter) => (
                     <button
@@ -567,6 +570,7 @@ function RetroReviewRepo({
 
 function UnifiedDiff({ diff }: { diff: string }) {
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the labeled pre is the accessible diff region exercised by the review UI.
     <pre className="retro-diff" aria-label="Proposed unified diff">
       <code>
         {diff.split("\n").map((line, index) => {
@@ -578,6 +582,7 @@ function UnifiedDiff({ diff }: { diff: string }) {
                 ? "deletion"
                 : "context";
           return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: unified diffs can contain duplicate lines with no stable identifier.
             <span className={`diff-${kind}`} key={`${index}-${line}`}>
               {line || " "}
               {"\n"}
@@ -602,7 +607,12 @@ function RetroBatchResults({ batches }: { batches: RetroBatchRow[] }) {
           </div>
           <Badge status={batch.state} />
           {batch.pr_url ? (
-            <button type="button" onClick={() => openUrl(batch.pr_url!).catch(() => undefined)}>
+            <button
+              type="button"
+              onClick={() => {
+                if (batch.pr_url) openUrl(batch.pr_url).catch(() => undefined);
+              }}
+            >
               View PR
             </button>
           ) : null}
@@ -716,7 +726,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}

@@ -19,7 +19,9 @@ export function getRelativeTimeServerSnapshot() {
 
 function publish() {
   snapshot = Date.now();
-  listeners.forEach((listener) => listener());
+  listeners.forEach((listener) => {
+    listener();
+  });
 }
 
 function scheduleNextBoundary() {
@@ -74,6 +76,7 @@ export function RelativeTime({ value }: { value: string }) {
   const absolute = shortTime(value);
   const relative = relativeTime(value, now);
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the label intentionally combines relative and absolute time for assistive technology.
     <time
       dateTime={date.toISOString()}
       title={absolute}
@@ -90,6 +93,7 @@ export function AbsoluteTime({ value }: { value: string }) {
 
   const absolute = shortTime(value);
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the explicit label keeps the full timestamp available to assistive technology.
     <time dateTime={date.toISOString()} title={absolute} aria-label={absolute}>
       {timeOnly(value)}
     </time>

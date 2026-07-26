@@ -7,7 +7,15 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "check:hygiene": "pnpm lint && pnpm format:check && pnpm check:workflows && pnpm check:shell && pnpm check:links",
+    "check:links": "node scripts/check-markdown-links.mjs",
+    "check:shell": "node scripts/check-shell.mjs",
+    "check:workflows": "node scripts/check-workflows.mjs",
+    "format:check": "node scripts/check-biome-format.mjs",
+    "install:hygiene-tools": "node scripts/install-hygiene-tools.mjs",
+    "lint": "biome lint --error-on-warnings .",
     "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
+    "test:hygiene": "node --test scripts/check-hygiene-tools.node.mjs scripts/check-markdown-links.node.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
@@ -28,6 +36,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.5",
     "@playwright/test": "1.61.1",
     "@tauri-apps/cli": "^2",
     "@testing-library/react": "^16.3.0",

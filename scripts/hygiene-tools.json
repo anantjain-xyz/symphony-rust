@@ -1,0 +1,56 @@
+{
+  "actionlint": {
+    "version": "1.7.12",
+    "repository": "rhysd/actionlint",
+    "versionFlag": "-version",
+    "assets": {
+      "darwin-arm64": {
+        "archive": "actionlint_1.7.12_darwin_arm64.tar.gz",
+        "sha256": "aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f",
+        "binaryPath": "actionlint"
+      },
+      "darwin-x64": {
+        "archive": "actionlint_1.7.12_darwin_amd64.tar.gz",
+        "sha256": "5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644",
+        "binaryPath": "actionlint"
+      },
+      "linux-arm64": {
+        "archive": "actionlint_1.7.12_linux_arm64.tar.gz",
+        "sha256": "325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6",
+        "binaryPath": "actionlint"
+      },
+      "linux-x64": {
+        "archive": "actionlint_1.7.12_linux_amd64.tar.gz",
+        "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+        "binaryPath": "actionlint"
+      }
+    }
+  },
+  "shellcheck": {
+    "version": "0.11.0",
+    "repository": "koalaman/shellcheck",
+    "versionFlag": "--version",
+    "assets": {
+      "darwin-arm64": {
+        "archive": "shellcheck-v0.11.0.darwin.aarch64.tar.gz",
+        "sha256": "339b930feb1ea764467013cc1f72d09cd6b869ebf1013296ba9055ab2ffbd26f",
+        "binaryPath": "shellcheck-v0.11.0/shellcheck"
+      },
+      "darwin-x64": {
+        "archive": "shellcheck-v0.11.0.darwin.x86_64.tar.gz",
+        "sha256": "c2c15e08df0e8fbc374c335b230a7ee958c313fa5714817a59aa59f1aa594f51",
+        "binaryPath": "shellcheck-v0.11.0/shellcheck"
+      },
+      "linux-arm64": {
+        "archive": "shellcheck-v0.11.0.linux.aarch64.tar.gz",
+        "sha256": "68a8133197a50beb8803f8d42f9908d1af1c5540d4bb05fdfca8c1fa47decefc",
+        "binaryPath": "shellcheck-v0.11.0/shellcheck"
+      },
+      "linux-x64": {
+        "archive": "shellcheck-v0.11.0.linux.x86_64.tar.gz",
+        "sha256": "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6",
+        "binaryPath": "shellcheck-v0.11.0/shellcheck"
+      }
+    }
+  }
+}

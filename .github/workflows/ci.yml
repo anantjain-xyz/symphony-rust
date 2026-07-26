@@ -32,6 +32,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm install:hygiene-tools
+      - run: pnpm check:hygiene
+      - run: pnpm test:hygiene
 
       # Rust: pure crates only. Excluding symphony-desktop (the Tauri shell) avoids
       # webkit2gtk system deps and keeps the job fast and apt-free.

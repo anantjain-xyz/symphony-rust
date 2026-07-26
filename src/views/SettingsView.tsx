@@ -419,6 +419,7 @@ function SettingsFeature({
     setFocusInvalidSummary(false);
   }, [focusInvalidSummary, validationState.status]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revisionRef.current is mutable validation state, not a render dependency.
   const handleSave = useCallback(async () => {
     if (savePendingRef.current) return;
     const activeController = ensureController();
@@ -478,8 +479,8 @@ function SettingsFeature({
     const linearApiKeySet = await onRemoveKey();
     if (linearApiKeySet === undefined) return;
     setLinearKey("");
-    setSettingsDraft({ ...draftRef.current!, linear_api_key_set: linearApiKeySet });
-  }, [draftRef, onRemoveKey, setLinearKey, setSettingsDraft]);
+    setSettingsDraft({ ...(draftRef.current ?? draft), linear_api_key_set: linearApiKeySet });
+  }, [draft, draftRef, onRemoveKey, setLinearKey, setSettingsDraft]);
 
   const handleResetPrompt = useCallback(async () => {
     const prompt = await onResetPrompt();
@@ -748,7 +749,7 @@ function SettingsView({
                 href={`#${validationFieldId(validationState.result)}`}
                 onClick={() =>
                   document
-                    .getElementById(validationFieldId(validationState.result)!)
+                    .getElementById(validationFieldId(validationState.result) ?? "")
                     ?.focus()
                 }
               >
@@ -788,7 +789,10 @@ function SettingsView({
             return (
               <fieldset
                 className={expanded ? "repo-card expanded" : "repo-card collapsed"}
-                key={index}
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: editable unsaved repositories do not have stable identifiers yet.
+                  index
+                }
               >
                 <div className="repo-card-head">
                   <button
@@ -890,9 +894,10 @@ function SettingsView({
                         Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
                       </small>
                     </label>
-                    <label>
+                    <label htmlFor={`repo-${index}-linear-teams`}>
                       Linear teams
                       <ListInput
+                        id={`repo-${index}-linear-teams`}
                         value={repo.team_prefixes}
                         disabled={!runtimeAvailable}
                         separator="comma"
@@ -904,9 +909,10 @@ function SettingsView({
                         project rule says otherwise.
                       </small>
                     </label>
-                    <label>
+                    <label htmlFor={`repo-${index}-linear-projects`}>
                       Linear projects
                       <ListInput
+                        id={`repo-${index}-linear-projects`}
                         value={repo.project_ids}
                         disabled={!runtimeAvailable}
                         separator="comma"
@@ -1100,7 +1106,7 @@ function SettingsView({
               <small className="test-result err">{linearViewerError}</small>
             ) : null}
           </label>
-          <label>
+          <label htmlFor="settings-active-states">
             Active states
             <ListInput
               id="settings-active-states"
@@ -1129,9 +1135,10 @@ function SettingsView({
               </small>
             ) : null}
           </label>
-          <label>
+          <label htmlFor="settings-terminal-states">
             Terminal states
             <ListInput
+              id="settings-terminal-states"
               value={settings.terminal_states}
               disabled={!runtimeAvailable}
               separator="comma"
@@ -1218,9 +1225,10 @@ function SettingsView({
               . Leave blank to run <code>{settings.agent_backend}</code> directly.
             </small>
           </label>
-          <label>
+          <label htmlFor="settings-turn-timeout">
             Turn timeout (seconds)
             <SettingsNumberInput
+              id="settings-turn-timeout"
               min={0}
               minValue={0}
               step="any"
@@ -1234,9 +1242,10 @@ function SettingsView({
               Max time for one agent turn. 3600 = 1 hour.
             </small>
           </label>
-          <label>
+          <label htmlFor="settings-session-environment">
             Session environment
             <EnvInput
+              id="settings-session-environment"
               value={settings.session_env}
               disabled={!runtimeAvailable}
               onChange={(next) => setSettings({ ...settings, session_env: next })}
@@ -1348,9 +1357,10 @@ function SettingsView({
                   How Claude Code handles tool permissions during unattended runs.
                 </small>
               </label>
-              <label>
+              <label htmlFor="settings-claude-allowed-tools">
                 Allowed tools
                 <ListInput
+                  id="settings-claude-allowed-tools"
                   value={settings.claude_allowed_tools}
                   disabled={!runtimeAvailable}
                   separator="newline"
@@ -1363,9 +1373,10 @@ function SettingsView({
                   repo-specific extras on top.
                 </small>
               </label>
-              <label>
+              <label htmlFor="settings-claude-disallowed-tools">
                 Disallowed tools
                 <ListInput
+                  id="settings-claude-disallowed-tools"
                   value={settings.claude_disallowed_tools}
                   disabled={!runtimeAvailable}
                   separator="newline"
@@ -1374,9 +1385,10 @@ function SettingsView({
                 />
                 <small className="hint">One rule per line. Takes precedence over allowed tools.</small>
               </label>
-              <label>
+              <label htmlFor="settings-claude-additional-directories">
                 Additional directories
                 <ListInput
+                  id="settings-claude-additional-directories"
                   value={settings.claude_add_dirs}
                   disabled={!runtimeAvailable}
                   separator="newline"
@@ -1548,9 +1560,10 @@ function SettingsView({
 
         <section className="settings-section">
           <h3>Worker</h3>
-          <label>
+          <label htmlFor="settings-polling-interval">
             Polling interval (seconds)
             <SettingsNumberInput
+              id="settings-polling-interval"
               min={0}
               minValue={0}
               step="any"
@@ -1565,9 +1578,10 @@ function SettingsView({
               worker wakes and uses the new interval on its next loop.
             </small>
           </label>
-          <label>
+          <label htmlFor="settings-max-concurrent-agents">
             Max concurrent agents
             <SettingsNumberInput
+              id="settings-max-concurrent-agents"
               min={0}
               minValue={0}
               value={settings.max_concurrent_agents}
@@ -1581,9 +1595,10 @@ function SettingsView({
               already-running agents continue.
             </small>
           </label>
-          <label>
+          <label htmlFor="settings-max-retry-backoff">
             Max retry backoff (seconds)
             <SettingsNumberInput
+              id="settings-max-retry-backoff"
               min={0}
               minValue={0}
               step="any"
@@ -1597,9 +1612,10 @@ function SettingsView({
               Cap on the delay between retries of a failed run. 300 = 5 min.
             </small>
           </label>
-          <label>
+          <label htmlFor="settings-hook-timeout">
             Hook timeout (seconds)
             <SettingsNumberInput
+              id="settings-hook-timeout"
               min={0}
               minValue={0}
               step="any"
@@ -1831,10 +1847,12 @@ function ListInput({
 }
 
 function EnvInput({
+  id,
   value,
   onChange,
   disabled,
 }: {
+  id?: string;
   value: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
   disabled: boolean;
@@ -1877,6 +1895,7 @@ function EnvInput({
 
   return (
     <textarea
+      id={id}
       {...literalInputProps}
       className="mono-input"
       value={draft}
@@ -1935,7 +1954,7 @@ function AgentCliStatus({
   const command = validation[`${backend}_command`];
 
   return (
-    <div className="agent-cli-status-block" aria-label={`${label} CLI availability`}>
+    <section className="agent-cli-status-block" aria-label={`${label} CLI availability`}>
       <div className="agent-cli-status-row">
         <span>
           <strong>{label} CLI</strong>
@@ -1959,7 +1978,7 @@ function AgentCliStatus({
           ? `Open ${label} CLI once to confirm you're signed in and a default model is configured.`
           : `After installing, open ${label} CLI once to sign in and choose a default model.`}
       </small>
-    </div>
+    </section>
   );
 }
 
@@ -2117,20 +2136,27 @@ function BackendSelect({
         </svg>
       </button>
       {open ? (
-        <ul className="icon-select-list" id="backend-listbox" role="listbox">
+        <div className="icon-select-list" id="backend-listbox" role="listbox">
           {BACKEND_OPTIONS.map((option, index) => (
-            <li
+            <div
               key={option.value}
               id={`backend-option-${option.value}`}
               role="option"
+              tabIndex={-1}
               aria-selected={option.value === value}
               className={index === activeIndex ? "icon-select-option active" : "icon-select-option"}
               onPointerMove={() => setActiveIndex(index)}
               onClick={() => commit(index)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  commit(index);
+                }
+              }}
             >
               <span className="icon-select-check" aria-hidden="true">
                 {option.value === value ? (
-                  <svg viewBox="0 0 16 16" width="12" height="12">
+                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
                     <path
                       d="M3 8.5l3.5 3.5L13 4.5"
                       fill="none"
@@ -2144,9 +2170,9 @@ function BackendSelect({
               </span>
               <BackendIcon backend={option.value} />
               {option.label}
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       ) : null}
     </div>
   );
@@ -2304,7 +2330,11 @@ function WorkflowBlock({
     detail =
       "Symphony is copying the saved default workflow into SYMPHONY-WORKFLOW.md on a temporary branch.";
     meta = transfer?.message ?? "Preparing transfer...";
-    actions = <button disabled>Creating PR...</button>;
+    actions = (
+      <button type="button" disabled>
+        Creating PR...
+      </button>
+    );
   } else if (transfer?.state === "failed") {
     tone = "error";
     headline = "Workflow PR was not created.";
@@ -2673,7 +2703,7 @@ export function SettingsHeaderActions({
       : "save-status";
 
   return (
-    <div className="settings-header-actions" aria-label="Settings actions">
+    <section className="settings-header-actions" aria-label="Settings actions">
       <div className="settings-action-row">
         <span className={statusClass} aria-live="polite">
           {status}
@@ -2687,7 +2717,7 @@ export function SettingsHeaderActions({
           Save
         </button>
       </div>
-    </div>
+    </section>
   );
 }
 

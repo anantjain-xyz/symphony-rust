@@ -157,20 +157,14 @@ type UpdatePhase =
 type ConfirmationStage = "start" | "install" | "restart";
 
 function hasUnsafeWork(safety: UpdateSafety) {
-  return (
-    safety.activeRunCount > 0 ||
-    safety.backgroundWork.length > 0 ||
-    safety.hasUnsavedSettings
-  );
+  return safety.activeRunCount > 0 || safety.backgroundWork.length > 0 || safety.hasUnsavedSettings;
 }
 
 function safetyFingerprint(safety: UpdateSafety) {
   return JSON.stringify({
     activeRunIds: [...safety.activeRunIds].sort(),
     backgroundWork: [...safety.backgroundWork].sort(),
-    settingsFingerprint: safety.hasUnsavedSettings
-      ? safety.settingsFingerprint
-      : null,
+    settingsFingerprint: safety.hasUnsavedSettings ? safety.settingsFingerprint : null,
   });
 }
 
@@ -211,8 +205,7 @@ export function AppUpdate({
 
   safetyRef.current = safety;
   prepareForInstallRef.current = prepareForInstall;
-  verifyInstallSafetyRef.current =
-    verifyInstallSafety ?? (async () => safetyRef.current);
+  verifyInstallSafetyRef.current = verifyInstallSafety ?? (async () => safetyRef.current);
   onInstallLockChangeRef.current = onInstallLockChange ?? (() => undefined);
   onActionErrorRef.current = onActionError;
 
@@ -312,9 +305,7 @@ export function AppUpdate({
 
   const confirmUpdate = () => {
     const stage = confirmation;
-    approvedSafetyRef.current = safetyFingerprint(
-      confirmationSafety ?? safetyRef.current,
-    );
+    approvedSafetyRef.current = safetyFingerprint(confirmationSafety ?? safetyRef.current);
     setConfirmation(null);
     setConfirmationSafety(null);
     if (stage === "start") {
@@ -375,9 +366,7 @@ export function AppUpdate({
       await installAndRestart();
     } catch (error) {
       setPhase("ready");
-      onActionErrorRef.current(
-        `Could not verify update safety: ${errorMessage(error)}`,
-      );
+      onActionErrorRef.current(`Could not verify update safety: ${errorMessage(error)}`);
     }
   };
 
@@ -473,6 +462,7 @@ export function AppUpdate({
       </button>
 
       {confirmation ? (
+        // biome-ignore lint/a11y/noStaticElementInteractions: pointer interaction is limited to the non-focusable modal backdrop.
         <div
           className="update-dialog-backdrop"
           onMouseDown={(event) => {
@@ -488,15 +478,9 @@ export function AppUpdate({
             aria-describedby="update-dialog-description"
           >
             <h2 id="update-dialog-title">Update and restart Symphony?</h2>
-            <p id="update-dialog-description">
-              {safetyDescription(confirmationSafety ?? safety)}
-            </p>
+            <p id="update-dialog-description">{safetyDescription(confirmationSafety ?? safety)}</p>
             <div className="update-dialog-actions">
-              <button
-                ref={cancelButtonRef}
-                type="button"
-                onClick={() => setConfirmation(null)}
-              >
+              <button ref={cancelButtonRef} type="button" onClick={() => setConfirmation(null)}>
                 Not now
               </button>
               <button type="button" className="primary" onClick={confirmUpdate}>

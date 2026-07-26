@@ -1,0 +1,15 @@
+# Fixture
+
+[Guide](guide.md.fixture#repeated-heading)
+[Second duplicate](guide.md.fixture#repeated-heading-1)
+![Pixel](pixel.png)
+[External](https://example.com/not-fetched)
+[Reference][guide]
+
+[guide]: guide.md.fixture#repeated-heading
+
+`[Ignored](missing.md)`
+
+```md
+[Also ignored](missing.md)
+```
