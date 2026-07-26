@@ -7,6 +7,12 @@ const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
 const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-+)\s*$/;
 const HTML_BLOCK_TAG =
   /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
+const RAW_HTML_BLOCKS = [
+  { closing: /-->/, opening: /^\s{0,3}<!--/ },
+  { closing: /\?>/, opening: /^\s{0,3}<\?/ },
+  { closing: />/, opening: /^\s{0,3}<![A-Z]/ },
+  { closing: /\]\]>/, opening: /^\s{0,3}<!\[CDATA\[/ },
+];
 const INLINE_HTML_TAG =
   /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)$/s;
 const AUTOLINK_URI = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*$/;
@@ -31,11 +37,11 @@ function blockQuoteLine(line) {
   return { content, depth, offset: line.length - content.length };
 }
 
-function lineKeepsParagraphOpen(content) {
+function lineKeepsParagraphOpen(content, continuesParagraph = false) {
   return (
     !/^\s{0,3}#{1,6}(?:\s|$)/.test(content) &&
     !SETEXT_UNDERLINE.test(content) &&
-    !parseReferenceDefinition(content)
+    (continuesParagraph || !parseReferenceDefinition(content))
   );
 }
 
@@ -99,6 +105,16 @@ function maskRawHtmlBlocks(source) {
     }
     const continuesParagraph = paragraphOpen && paragraphDepth === quote.depth;
 
+    const rawBlock = RAW_HTML_BLOCKS.find(({ opening }) => opening.test(quote.content));
+    if (rawBlock) {
+      const opening = quote.content.match(rawBlock.opening);
+      const closes = rawBlock.closing.test(quote.content.slice(opening?.[0].length ?? 0));
+      lines[index] = " ".repeat(lines[index].length);
+      if (!closes) block = { closingTag: rawBlock.closing, depth: quote.depth };
+      paragraphOpen = false;
+      continue;
+    }
+
     const typeOne = quote.content.match(/^\s{0,3}<(script|pre|style|textarea)(?:\s|>|$)/i);
     if (typeOne) {
       const closingTag = new RegExp(`</${typeOne[1]}\\s*>`, "i");
@@ -124,7 +140,7 @@ function maskRawHtmlBlocks(source) {
       paragraphOpen = false;
       continue;
     }
-    paragraphOpen = lineKeepsParagraphOpen(quote.content);
+    paragraphOpen = lineKeepsParagraphOpen(quote.content, continuesParagraph);
     paragraphDepth = quote.depth;
   }
   return lines.join("\n");
@@ -154,7 +170,7 @@ function maskIgnoredMarkdown(source) {
       }
       continue;
     }
-    if (marker) {
+    if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
       fence = { character: marker[1][0], length: marker[1].length };
       lines[index] = " ".repeat(line.length);
       indentedCode = false;
@@ -175,7 +191,7 @@ function maskIgnoredMarkdown(source) {
     indentedCode = false;
 
     lines[index] = line;
-    paragraphOpen = lineKeepsParagraphOpen(content);
+    paragraphOpen = lineKeepsParagraphOpen(content, continuesParagraph);
     paragraphQuoteDepth = blockQuote.depth;
   }
   const html = maskCodeSpans(
@@ -334,11 +350,13 @@ function startsMarkdownBlock(line) {
 function listStrippedLine(line) {
   let content = line;
   let offset = 0;
+  let startsListItem = false;
   while (true) {
     const marker = content.match(/^\s{0,3}(?:[*+-]|\d{1,9}[.)])[ \t]+/);
-    if (!marker) return { content, offset };
+    if (!marker) return { content, offset, startsListItem };
     content = content.slice(marker[0].length);
     offset += marker[0].length;
+    startsListItem = true;
   }
 }
 
@@ -431,6 +449,30 @@ function findClosingBracket(line, start) {
   return -1;
 }
 
+function validDefinitionRemainder(line, start) {
+  let cursor = start;
+  while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
+  if (cursor === line.length) return true;
+  if (cursor === start) return false;
+
+  const opener = line[cursor];
+  const closer = opener === "(" ? ")" : opener;
+  if (!['"', "'", "("].includes(opener)) return false;
+  cursor += 1;
+  while (cursor < line.length) {
+    if (line[cursor] === "\\" && cursor + 1 < line.length) {
+      cursor += 2;
+    } else if (line[cursor] === closer) {
+      cursor += 1;
+      while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
+      return cursor === line.length;
+    } else {
+      cursor += 1;
+    }
+  }
+  return false;
+}
+
 function definitionDestination(line, start) {
   let cursor = start;
   let targetStart = cursor;
@@ -447,13 +489,26 @@ function definitionDestination(line, start) {
     targetEnd = cursor;
     cursor += 1;
   } else {
-    while (cursor < line.length && !/[ \t]/.test(line[cursor])) cursor += 1;
-    if (cursor === start) return null;
+    let depth = 0;
+    while (cursor < line.length && !/[ \t]/.test(line[cursor])) {
+      const character = line[cursor];
+      if (character === "\\" && cursor + 1 < line.length) {
+        cursor += 2;
+        continue;
+      }
+      if (character === "<" || character === ">" || character.charCodeAt(0) < 0x20) return null;
+      if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        if (depth === 0) return null;
+        depth -= 1;
+      }
+      cursor += 1;
+    }
+    if (cursor === start || depth !== 0) return null;
     targetEnd = cursor;
   }
-  if (!/^(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/.test(line.slice(cursor))) {
-    return null;
-  }
+  if (!validDefinitionRemainder(line, cursor)) return null;
   return {
     target: line.slice(targetStart, targetEnd),
     targetStart,
@@ -485,6 +540,7 @@ function referenceContainerLine(line) {
     content: listed.content,
     depth: quoted.depth,
     offset: quoted.offset + listed.offset,
+    startsListItem: listed.startsListItem,
   };
 }
 
@@ -668,36 +724,59 @@ function extractTargets(source) {
   const targets = [];
   const definitions = new Map();
   const definitionLines = new Set();
+  let paragraphDepth = 0;
+  let paragraphOpen = false;
 
   for (let index = 0; index < maskedLines.length; index += 1) {
     const line = containerLines[index];
-    const definition = parseReferenceDefinition(line.content);
+    if (!/\S/.test(line.content)) {
+      paragraphOpen = false;
+      continue;
+    }
+    const continuesParagraph =
+      paragraphOpen && paragraphDepth === line.depth && !line.startsListItem;
+    const definition = continuesParagraph ? null : parseReferenceDefinition(line.content);
     if (definition && !definition.startOnly) {
       const label = normalizeReference(definition.label);
-      definitions.set(label, { line: index + 1, target: definition.target });
-      targets.push({
-        column: line.offset + definition.targetStart + 1,
-        line: index + 1,
-        target: definition.target,
-      });
+      if (!definitions.has(label)) {
+        definitions.set(label, { line: index + 1, target: definition.target });
+        targets.push({
+          column: line.offset + definition.targetStart + 1,
+          line: index + 1,
+          target: definition.target,
+        });
+      }
       definitionLines.add(index);
+      paragraphOpen = false;
+      paragraphDepth = line.depth;
       continue;
     }
     const nextLine = containerLines[index + 1];
     const continuation =
-      nextLine?.depth === line.depth ? parseReferenceContinuation(nextLine.content) : null;
+      nextLine?.depth === line.depth && !nextLine.startsListItem
+        ? parseReferenceContinuation(nextLine.content)
+        : null;
     if (definition?.startOnly && continuation) {
       const label = normalizeReference(definition.label);
-      definitions.set(label, { line: index + 1, target: continuation.target });
-      targets.push({
-        column: nextLine.offset + continuation.targetStart + 1,
-        line: index + 2,
-        target: continuation.target,
-      });
+      if (!definitions.has(label)) {
+        definitions.set(label, { line: index + 1, target: continuation.target });
+        targets.push({
+          column: nextLine.offset + continuation.targetStart + 1,
+          line: index + 2,
+          target: continuation.target,
+        });
+      }
       definitionLines.add(index);
       definitionLines.add(index + 1);
+      paragraphOpen = false;
+      paragraphDepth = line.depth;
       index += 1;
+      continue;
     }
+    paragraphOpen = definition?.startOnly
+      ? true
+      : lineKeepsParagraphOpen(line.content, continuesParagraph);
+    paragraphDepth = line.depth;
   }
   const inlineSource = maskedLines
     .map((line, index) => (definitionLines.has(index) ? " ".repeat(line.length) : line))

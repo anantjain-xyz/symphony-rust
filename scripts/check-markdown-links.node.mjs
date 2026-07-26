@@ -177,6 +177,61 @@ test("empty angle-bracket reference destinations target the current document", a
   assert.deepEqual(problems, []);
 });
 
+test("reference-definition titles may contain escaped delimiters", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-title-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[Guide][docs]", "", '[docs]: guide.md "the \\"guide\\""'].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("reference definitions require balanced bare destination parentheses", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-parentheses-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[Guide][docs]", "", "[docs]: guide(one).md", "", "[bad]: missing).md"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide(one).md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide(one).md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("reference definitions cannot interrupt paragraphs", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-reference-paragraph-start-",
+    ["ordinary text", "[docs]: missing.md"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("duplicate reference definitions retain and validate only the first destination", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-duplicate-reference-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[Guide][docs]", "", "[docs]: guide.md", "[docs]: missing.md"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
 test("reference definitions inside block quotes resolve with source locations", async (context) => {
   const problems = await checkSource(
     context,
@@ -217,6 +272,16 @@ test("fence-like lines with trailing content do not close fenced code blocks", a
   assert.deepEqual(problems, []);
 });
 
+test("backtick fence info strings cannot contain backticks", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-fence-opener-",
+    ["```bad`info", "[Guide](missing.md)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:2:1: missing local target "missing.md"']);
+});
+
 test("escaped backticks do not mask rendered links", async (context) => {
   const problems = await checkSource(
     context,
@@ -235,6 +300,27 @@ test("raw HTML block bodies do not contribute Markdown targets", async (context)
   );
 
   assert.deepEqual(problems, ['root.md:3:6: missing local target "missing.png"']);
+});
+
+test("processing, declaration, and CDATA HTML blocks do not contribute Markdown targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-raw-html-types-",
+    [
+      "<?xml",
+      "[ignored](processing.md)",
+      "?>",
+      "<!DOCTYPE",
+      "[ignored](declaration.md)",
+      ">",
+      "<![CDATA[",
+      "[ignored](cdata.md)",
+      "]]>",
+      "[Guide](missing.md)",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:10:1: missing local target "missing.md"']);
 });
 
 test("custom-element HTML block bodies do not contribute Markdown targets", async (context) => {
