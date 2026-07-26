@@ -181,35 +181,324 @@ async function collectRustFiles(root) {
   return files;
 }
 
+async function addRustFile(files, file, { optional = false } = {}) {
+  const absolute = path.resolve(file);
+  let stat;
+  try {
+    stat = await fs.lstat(absolute);
+  } catch (error) {
+    if (optional && error.code === "ENOENT") return;
+    throw new Error(`cannot inspect Rust source ${absolute}: ${error.message}`);
+  }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`boundary scan refuses symbolic link ${absolute}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Cargo target source is not a file: ${absolute}`);
+  }
+  files.add(absolute);
+}
+
 async function packageRustFiles(pkg) {
   const manifestDir = path.dirname(pkg.manifest_path);
   const roots = ["src", "tests", "examples", "benches"].map((name) =>
     path.join(manifestDir, name),
   );
-  const files = [];
-  for (const root of roots) files.push(...(await collectRustFiles(root)));
-  const buildScript = path.join(manifestDir, "build.rs");
-  try {
-    const stat = await fs.lstat(buildScript);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`boundary scan refuses symbolic link ${buildScript}`);
-    }
-    if (stat.isFile()) files.push(buildScript);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+  const files = new Set();
+  for (const root of roots) {
+    for (const file of await collectRustFiles(root)) files.add(path.resolve(file));
   }
-  return files.sort();
+  await addRustFile(files, path.join(manifestDir, "build.rs"), { optional: true });
+
+  const targets = [...(pkg.targets ?? [])].sort((a, b) =>
+    String(a.src_path).localeCompare(String(b.src_path)),
+  );
+  for (const target of targets) {
+    if (!target || typeof target.src_path !== "string" || target.src_path.length === 0) {
+      throw new Error(`cargo metadata target for ${pkg.name} is missing src_path`);
+    }
+    await addRustFile(files, path.resolve(manifestDir, target.src_path));
+  }
+
+  return [...files].sort();
+}
+
+function isIdentifierStart(character) {
+  return character === "_" || /[A-Za-z]/.test(character);
+}
+
+function isIdentifierContinue(character) {
+  return character === "_" || /[A-Za-z0-9]/.test(character);
+}
+
+function rawStringOpening(source, index) {
+  const prefixes = ["br", "cr", "rb", "rc", "r"];
+  const prefix = prefixes.find((candidate) => source.startsWith(candidate, index));
+  if (!prefix) return null;
+
+  let cursor = index + prefix.length;
+  let hashes = 0;
+  while (source[cursor] === "#") {
+    hashes += 1;
+    cursor += 1;
+  }
+  if (source[cursor] !== '"') return null;
+
+  return {
+    contentStart: cursor + 1,
+    closing: `"${"#".repeat(hashes)}`,
+  };
+}
+
+function characterLiteralEnd(source, quoteIndex) {
+  let cursor = quoteIndex + 1;
+  if (cursor >= source.length || source[cursor] === "\n" || source[cursor] === "\r") {
+    return null;
+  }
+
+  if (source[cursor] === "\\") {
+    cursor += 1;
+    if (source[cursor] === "u" && source[cursor + 1] === "{") {
+      cursor = source.indexOf("}", cursor + 2);
+      if (cursor === -1) return null;
+      cursor += 1;
+    } else if (source[cursor] === "x") {
+      cursor += 3;
+    } else {
+      const codePoint = source.codePointAt(cursor);
+      if (codePoint === undefined) return null;
+      cursor += codePoint > 0xffff ? 2 : 1;
+    }
+  } else {
+    const codePoint = source.codePointAt(cursor);
+    if (codePoint === undefined || source[cursor] === "'") return null;
+    cursor += codePoint > 0xffff ? 2 : 1;
+  }
+
+  return source[cursor] === "'" ? cursor + 1 : null;
+}
+
+function lexRust(source) {
+  const tokens = [];
+  let index = 0;
+  let line = 1;
+
+  while (index < source.length) {
+    const character = source[index];
+
+    if (/\s/.test(character)) {
+      if (character === "\n") line += 1;
+      index += 1;
+      continue;
+    }
+
+    if (source.startsWith("//", index)) {
+      index += 2;
+      while (index < source.length && source[index] !== "\n") index += 1;
+      continue;
+    }
+
+    if (source.startsWith("/*", index)) {
+      const openingLine = line;
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (source.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          if (source[index] === "\n") line += 1;
+          index += 1;
+        }
+      }
+      if (depth > 0) {
+        throw new Error(`unterminated block comment starting on line ${openingLine}`);
+      }
+      continue;
+    }
+
+    const rawString = rawStringOpening(source, index);
+    if (rawString) {
+      const openingLine = line;
+      index = rawString.contentStart;
+      while (index < source.length && !source.startsWith(rawString.closing, index)) {
+        if (source[index] === "\n") line += 1;
+        index += 1;
+      }
+      if (index >= source.length) {
+        throw new Error(`unterminated raw string starting on line ${openingLine}`);
+      }
+      index += rawString.closing.length;
+      tokens.push({ value: "LITERAL", line: openingLine });
+      continue;
+    }
+
+    let quoteIndex = null;
+    if (character === '"') {
+      quoteIndex = index;
+    } else if (
+      (character === "b" || character === "c") &&
+      source[index + 1] === '"'
+    ) {
+      quoteIndex = index + 1;
+    }
+    if (quoteIndex !== null) {
+      const openingLine = line;
+      index = quoteIndex + 1;
+      let closed = false;
+      while (index < source.length) {
+        if (source[index] === "\\") {
+          index += 1;
+          if (source[index] === "\n") line += 1;
+          if (index < source.length) index += 1;
+        } else if (source[index] === '"') {
+          index += 1;
+          closed = true;
+          break;
+        } else {
+          if (source[index] === "\n") line += 1;
+          index += 1;
+        }
+      }
+      if (!closed) {
+        throw new Error(`unterminated string starting on line ${openingLine}`);
+      }
+      tokens.push({ value: "LITERAL", line: openingLine });
+      continue;
+    }
+
+    let characterEnd = null;
+    const characterLine = line;
+    if (character === "'") {
+      characterEnd = characterLiteralEnd(source, index);
+    } else if (character === "b" && source[index + 1] === "'") {
+      characterEnd = characterLiteralEnd(source, index + 1);
+    }
+    if (characterEnd !== null) {
+      index = characterEnd;
+      tokens.push({ value: "LITERAL", line: characterLine });
+      continue;
+    }
+
+    if (isIdentifierStart(character)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && isIdentifierContinue(source[index])) {
+        index += 1;
+      }
+      tokens.push({ value: source.slice(start, index), line });
+      continue;
+    }
+
+    if (source.startsWith("::", index)) {
+      tokens.push({ value: "::", line });
+      index += 2;
+      continue;
+    }
+
+    tokens.push({ value: character, line });
+    index += 1;
+  }
+
+  return tokens;
+}
+
+function relevantUseAliases(tokens) {
+  const aliases = new Map();
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    let statementStart = null;
+    if (tokens[index].value === "use") {
+      statementStart = index + 1;
+    } else if (
+      tokens[index].value === "extern" &&
+      tokens[index + 1]?.value === "crate"
+    ) {
+      statementStart = index + 2;
+    }
+    if (statementStart === null) continue;
+
+    let statementEnd = statementStart;
+    while (statementEnd < tokens.length && tokens[statementEnd].value !== ";") {
+      statementEnd += 1;
+    }
+    const root = tokens
+      .slice(statementStart, statementEnd)
+      .find((token) => isIdentifierStart(token.value[0]))?.value;
+
+    for (let cursor = statementStart; cursor < statementEnd; cursor += 1) {
+      if (tokens[cursor].value !== "as") continue;
+      const alias = tokens[cursor + 1]?.value;
+      if (!alias || alias === "_" || !isIdentifierStart(alias[0])) continue;
+
+      let previous = cursor - 1;
+      while (
+        previous >= statementStart &&
+        !isIdentifierStart(tokens[previous].value[0])
+      ) {
+        previous -= 1;
+      }
+      const imported = tokens[previous]?.value;
+      if (root === "sqlx" || imported === "sqlx") {
+        aliases.set(alias, "sqlx");
+      } else if (
+        imported === "StorageError" ||
+        (imported === "self" && root === "StorageError")
+      ) {
+        aliases.set(alias, "StorageError");
+      }
+    }
+
+    index = statementEnd;
+  }
+
+  return aliases;
+}
+
+function normalizedTokenStream(tokens) {
+  const aliases = relevantUseAliases(tokens);
+  let source = "";
+  const locations = [];
+
+  for (const token of tokens) {
+    if (source.length > 0) source += " ";
+    const start = source.length;
+    const value = aliases.get(token.value) ?? token.value;
+    source += value;
+    locations.push({ start, end: source.length, line: token.line });
+  }
+
+  return { source, locations };
+}
+
+function lineForMatch(locations, index) {
+  let low = 0;
+  let high = locations.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (locations[middle].end <= index) {
+      low = middle + 1;
+    } else if (locations[middle].start > index) {
+      high = middle - 1;
+    } else {
+      return locations[middle].line;
+    }
+  }
+  return locations[Math.min(low, locations.length - 1)]?.line ?? 1;
 }
 
 export async function scanRestrictedSources(metadata, policy) {
   validatePolicy(policy);
   const packages = workspacePackages(metadata);
-  const errors = [];
+  const errors = new Set();
 
   for (const pkg of packages.sort((a, b) => a.name.localeCompare(b.name))) {
     const rules = policy.sourceRules
       .filter((rule) => !rule.allowedPackages.includes(pkg.name))
-      .map((rule) => ({ ...rule, regex: new RegExp(rule.pattern) }));
+      .map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, "g") }));
     if (rules.length === 0) continue;
 
     for (const file of await packageRustFiles(pkg)) {
@@ -220,23 +509,30 @@ export async function scanRestrictedSources(metadata, policy) {
         throw new Error(`cannot read ${file}: ${error.message}`);
       }
       const relative = path.relative(metadata.workspace_root, file);
-      for (const [index, line] of source.split(/\r?\n/).entries()) {
-        for (const rule of rules) {
-          if (rule.regex.test(line)) {
-            errors.push(
-              diagnostic(
-                relative,
-                index + 1,
-                `[${rule.id}] ${rule.message} (package ${pkg.name})`,
-              ),
-            );
-          }
+      let tokenStream;
+      try {
+        tokenStream = normalizedTokenStream(lexRust(source));
+      } catch (error) {
+        throw new Error(`cannot lex ${relative}: ${error.message}`);
+      }
+      for (const rule of rules) {
+        rule.regex.lastIndex = 0;
+        let match;
+        while ((match = rule.regex.exec(tokenStream.source)) !== null) {
+          errors.add(
+            diagnostic(
+              relative,
+              lineForMatch(tokenStream.locations, match.index),
+              `[${rule.id}] ${rule.message} (package ${pkg.name})`,
+            ),
+          );
+          if (match[0].length === 0) rule.regex.lastIndex += 1;
         }
       }
     }
   }
 
-  return errors.sort();
+  return [...errors].sort();
 }
 
 export async function verifyBoundaries(metadata, policy) {
