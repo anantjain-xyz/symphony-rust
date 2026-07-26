@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppUpdateProps, UpdateSafety } from "./appUpdateTypes";
 import type { AppSettings, Overview, WorkerStatus } from "./bindings";
-import { desktopCommands } from "./desktop/commands";
+import * as desktopCommands from "./desktop/commands";
 import {
   checkForDesktopUpdate,
   relaunchDesktopApp,

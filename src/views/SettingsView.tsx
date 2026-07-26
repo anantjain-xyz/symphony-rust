@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { desktopCommands } from "../desktop/commands";
+import * as desktopCommands from "../desktop/commands";
 import {
   getDesktopVersion,
   openExternalUrl,

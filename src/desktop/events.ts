@@ -25,19 +25,12 @@ export type DesktopEventHandlers = {
   onError: (error: unknown) => void;
 };
 
-function runCleanupOnce(unlisteners: readonly UnlistenFn[]) {
-  let cleaned = false;
-  return () => {
-    if (cleaned) return;
-    cleaned = true;
-    for (const unlisten of unlisteners) {
-      try {
-        unlisten();
-      } catch {
-        // One broken bridge cleanup must not strand the remaining listeners.
-      }
-    }
-  };
+function cleanListener(unlisten: UnlistenFn) {
+  try {
+    unlisten();
+  } catch {
+    // One broken bridge cleanup must not strand the remaining listeners.
+  }
 }
 
 /**
@@ -48,13 +41,13 @@ function runCleanupOnce(unlisteners: readonly UnlistenFn[]) {
  */
 export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => void {
   let disposed = false;
-  const cleanups = new Set<() => void>();
+  const unlisteners: UnlistenFn[] = [];
 
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    for (const cleanup of cleanups) cleanup();
-    cleanups.clear();
+    for (const unlisten of unlisteners) cleanListener(unlisten);
+    unlisteners.length = 0;
   };
 
   const fail = (error: unknown) => {
@@ -73,11 +66,10 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
       return;
     }
     void registration.then((unlisten) => {
-      const cleanup = runCleanupOnce([unlisten]);
       if (disposed) {
-        cleanup();
+        cleanListener(unlisten);
       } else {
-        cleanups.add(cleanup);
+        unlisteners.push(unlisten);
       }
     }, fail);
   };

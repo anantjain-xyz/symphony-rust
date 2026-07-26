@@ -45,7 +45,7 @@ import {
   visibleResources,
   type DashboardResourceKey,
 } from "./dashboardResources";
-import { desktopCommands } from "./desktop/commands";
+import * as desktopCommands from "./desktop/commands";
 import { subscribeDesktopEvents } from "./desktop/events";
 import { isDesktopRuntime } from "./desktop/runtime";
 import {
