@@ -13,6 +13,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -131,31 +132,254 @@ function dynamicImports(root, owner, content, errors) {
   return modules;
 }
 
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function e2eCoversLabel(content, label) {
-  return new RegExp(
-    `getByRole\\([\\s\\S]{0,180}?name:\\s*["']${escapeRegex(label)}["']`,
-  ).test(content);
-}
-
-function fixtureHasPath(content, path) {
-  const parts = path.split(".");
-  if (parts.length === 1) {
-    return new RegExp(
-      `export\\s+const\\s+previewRuntime\\s*=\\s*\\{[\\s\\S]*?\\b${escapeRegex(
-        parts[0],
-      )}\\s*:`,
-    ).test(content);
+function parseTypeScript(content, path, errors) {
+  const source = ts.createSourceFile(
+    path,
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+    path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  for (const diagnostic of source.parseDiagnostics) {
+    const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+    errors.push(`${path} is not valid TypeScript: ${message}`);
   }
-  if (parts.length === 2 && parts[0] === "dashboard") {
-    return new RegExp(
-      `\\bdashboard\\s*:\\s*\\{[\\s\\S]*?\\b${escapeRegex(parts[1])}\\s*:`,
-    ).test(content);
+  return source;
+}
+
+function unwrapExpression(expression) {
+  let current = expression;
+  while (
+    ts.isAsExpression(current) ||
+    ts.isSatisfiesExpression(current) ||
+    ts.isParenthesizedExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function propertyName(property) {
+  if (!property.name || ts.isComputedPropertyName(property.name)) return null;
+  if (
+    ts.isIdentifier(property.name) ||
+    ts.isStringLiteral(property.name) ||
+    ts.isNumericLiteral(property.name)
+  ) {
+    return property.name.text;
+  }
+  return null;
+}
+
+function objectProperty(object, name) {
+  return object.properties.find(
+    (property) =>
+      (ts.isPropertyAssignment(property) ||
+        ts.isShorthandPropertyAssignment(property) ||
+        ts.isMethodDeclaration(property) ||
+        ts.isGetAccessorDeclaration(property) ||
+        ts.isSetAccessorDeclaration(property)) &&
+      propertyName(property) === name,
+  );
+}
+
+function previewRuntimeObject(content, path, errors) {
+  const source = parseTypeScript(content, path, errors);
+  for (const statement of source.statements) {
+    if (
+      !ts.isVariableStatement(statement) ||
+      !statement.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+      )
+    ) {
+      continue;
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        !ts.isIdentifier(declaration.name) ||
+        declaration.name.text !== "previewRuntime" ||
+        !declaration.initializer
+      ) {
+        continue;
+      }
+      const initializer = unwrapExpression(declaration.initializer);
+      if (ts.isObjectLiteralExpression(initializer)) return initializer;
+      errors.push(
+        `${path} must export previewRuntime as an object literal`,
+      );
+      return null;
+    }
+  }
+  errors.push(`${path} must export previewRuntime as an object literal`);
+  return null;
+}
+
+function fixtureHasPath(rootObject, path) {
+  const parts = path.split(".");
+  if (parts.some((part) => part === "")) return false;
+  let object = rootObject;
+  for (const [index, part] of parts.entries()) {
+    const property = objectProperty(object, part);
+    if (!property) return false;
+    if (index === parts.length - 1) return true;
+    if (!ts.isPropertyAssignment(property)) return false;
+    const initializer = unwrapExpression(property.initializer);
+    if (!ts.isObjectLiteralExpression(initializer)) return false;
+    object = initializer;
   }
   return false;
+}
+
+function walkSyntax(node, visit) {
+  visit(node);
+  ts.forEachChild(node, (child) => walkSyntax(child, visit));
+}
+
+function walkStepSyntax(node, visit) {
+  visit(node);
+  ts.forEachChild(node, (child) => {
+    if (
+      ts.isArrowFunction(child) ||
+      ts.isFunctionExpression(child) ||
+      ts.isFunctionDeclaration(child) ||
+      ts.isMethodDeclaration(child)
+    ) {
+      return;
+    }
+    walkStepSyntax(child, visit);
+  });
+}
+
+function literalText(node) {
+  return ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+    ? node.text
+    : null;
+}
+
+function namedObjectProperty(object, name) {
+  if (!object || !ts.isObjectLiteralExpression(object)) return null;
+  const property = objectProperty(object, name);
+  return property && ts.isPropertyAssignment(property)
+    ? unwrapExpression(property.initializer)
+    : null;
+}
+
+function roleQuery(call, expected) {
+  if (
+    !ts.isCallExpression(call) ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    call.expression.name.text !== "getByRole" ||
+    literalText(call.arguments[0]) !== expected.role
+  ) {
+    return false;
+  }
+  const name = namedObjectProperty(call.arguments[1], "name");
+  if (!name) return false;
+  if (typeof expected.name === "string") {
+    return literalText(name) === expected.name;
+  }
+  if (
+    typeof expected.namePattern === "string" &&
+    ts.isRegularExpressionLiteral(name)
+  ) {
+    return name.text.includes(expected.namePattern);
+  }
+  return false;
+}
+
+function isPageMethodCall(call, method) {
+  return (
+    ts.isCallExpression(call) &&
+    ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.name.text === method &&
+    ts.isIdentifier(call.expression.expression) &&
+    call.expression.expression.text === "page"
+  );
+}
+
+function interactionPosition(stepBody, interaction) {
+  let position = null;
+  walkStepSyntax(stepBody, (node) => {
+    if (position !== null || !ts.isCallExpression(node)) return;
+    if (interaction.kind === "goto" && isPageMethodCall(node, "goto")) {
+      position = node.getStart();
+      return;
+    }
+    if (
+      interaction.kind !== "click" ||
+      !ts.isPropertyAccessExpression(node.expression)
+    ) {
+      return;
+    }
+    const action = node.expression.name.text;
+    if (
+      action !== "click" &&
+      !(
+        action === "dispatchEvent" &&
+        literalText(node.arguments[0]) === "click"
+      )
+    ) {
+      return;
+    }
+    if (roleQuery(node.expression.expression, interaction)) {
+      position = node.getStart();
+    }
+  });
+  return position;
+}
+
+function loadedAssertionPosition(stepBody, loaded) {
+  let position = null;
+  walkStepSyntax(stepBody, (node) => {
+    if (
+      position !== null ||
+      !ts.isCallExpression(node) ||
+      !ts.isPropertyAccessExpression(node.expression) ||
+      node.expression.name.text !== "toBeVisible"
+    ) {
+      return;
+    }
+    const expectCall = node.expression.expression;
+    if (
+      !ts.isCallExpression(expectCall) ||
+      !ts.isIdentifier(expectCall.expression) ||
+      expectCall.expression.text !== "expect"
+    ) {
+      return;
+    }
+    if (roleQuery(expectCall.arguments[0], loaded)) {
+      position = node.getStart();
+    }
+  });
+  return position;
+}
+
+function routeStepBodies(content, path, errors) {
+  const source = parseTypeScript(content, path, errors);
+  const steps = new Map();
+  walkSyntax(source, (node) => {
+    if (
+      !ts.isCallExpression(node) ||
+      !ts.isPropertyAccessExpression(node.expression) ||
+      !ts.isIdentifier(node.expression.expression) ||
+      node.expression.expression.text !== "test" ||
+      node.expression.name.text !== "step"
+    ) {
+      return;
+    }
+    const label = literalText(node.arguments[0]);
+    const callback = node.arguments[1];
+    if (
+      !label ||
+      (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback))
+    ) {
+      return;
+    }
+    if (!steps.has(label)) steps.set(label, []);
+    steps.get(label).push(callback.body);
+  });
+  return steps;
 }
 
 export function validatePreviewCoverage(
@@ -327,11 +551,21 @@ export function validatePreviewCoverage(
     "preview runtime fixture",
   );
   if (fixtureContent !== null) {
-    for (const route of routes) {
-      if (!fixtureHasPath(fixtureContent, route.fixture)) {
-        errors.push(
-          `${contract.previewFixture} is missing fixture projection ${route.fixture} for route ${route.id}`,
-        );
+    const runtimeObject = previewRuntimeObject(
+      fixtureContent,
+      contract.previewFixture,
+      errors,
+    );
+    if (runtimeObject) {
+      for (const route of routes) {
+        if (
+          typeof route.fixture !== "string" ||
+          !fixtureHasPath(runtimeObject, route.fixture)
+        ) {
+          errors.push(
+            `${contract.previewFixture} is missing fixture projection ${route.fixture} for route ${route.id}`,
+          );
+        }
       }
     }
   }
@@ -343,10 +577,43 @@ export function validatePreviewCoverage(
     "preview route E2E owner",
   );
   if (routeE2e !== null) {
+    const steps = routeStepBodies(
+      routeE2e,
+      contract.routeE2eOwner,
+      errors,
+    );
     for (const route of routes) {
-      if (!e2eCoversLabel(routeE2e, route.label)) {
+      const stepLabel = `preview-route:${route.id}`;
+      const bodies = steps.get(stepLabel) ?? [];
+      if (bodies.length !== 1) {
         errors.push(
-          `${contract.routeE2eOwner} is missing preview interaction coverage for ${route.id} (${route.label})`,
+          `${contract.routeE2eOwner} must define exactly one ${stepLabel} step`,
+        );
+        continue;
+      }
+      if (!route.e2e || !route.e2e.interaction || !route.e2e.loaded) {
+        errors.push(
+          `preview route ${route.id} must declare e2e interaction and loaded selectors`,
+        );
+        continue;
+      }
+      const interaction = interactionPosition(
+        bodies[0],
+        route.e2e.interaction,
+      );
+      const loaded = loadedAssertionPosition(bodies[0], route.e2e.loaded);
+      if (interaction === null) {
+        errors.push(
+          `${stepLabel} is missing its declared preview interaction`,
+        );
+      }
+      if (loaded === null) {
+        errors.push(
+          `${stepLabel} is missing its declared loaded assertion`,
+        );
+      } else if (interaction !== null && loaded <= interaction) {
+        errors.push(
+          `${stepLabel} loaded assertion must follow its preview interaction`,
         );
       }
     }

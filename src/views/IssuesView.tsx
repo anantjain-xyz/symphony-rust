@@ -7,6 +7,7 @@ import { RelativeTime } from "../RelativeTime";
 import "./IssuesView.css";
 
 type IssueViewMode = "list" | "dependencies";
+type DependencyGraphLoadState = "idle" | "loading" | "ready" | "error";
 
 let dependencyGraphPromise: Promise<typeof import("./DependencyGraphPanel")> | null = null;
 let dependencyGraphReady = false;
@@ -44,8 +45,10 @@ function IssuesView({
   const [selectedMode, setSelectedMode] = useState<IssueViewMode>("list");
   const [activeMode, setActiveMode] = useState<IssueViewMode>("list");
   const [isModePending, startModeTransition] = useTransition();
-  const [isDependencyGraphReady, setDependencyGraphReady] = useState(
-    () => dependencyGraphReady,
+  const [dependencyGraphLoadState, setDependencyGraphLoadState] = useState<
+    DependencyGraphLoadState
+  >(
+    () => (dependencyGraphReady ? "ready" : "idle"),
   );
   const [dependencyAttempt, setDependencyAttempt] = useState(() =>
     DependencyGraphAttempts.latest(),
@@ -53,21 +56,26 @@ function IssuesView({
   const DependencyGraphPanel = DependencyGraphAttempts.get(dependencyAttempt);
 
   useEffect(() => {
-    if (selectedMode !== "dependencies" || isDependencyGraphReady) return;
+    if (selectedMode !== "dependencies") return;
+    if (dependencyGraphReady) {
+      setDependencyGraphLoadState("ready");
+      return;
+    }
 
     let cancelled = false;
+    setDependencyGraphLoadState("loading");
     void loadDependencyGraphPanel().then(
       () => {
-        if (!cancelled) setDependencyGraphReady(true);
+        if (!cancelled) setDependencyGraphLoadState("ready");
       },
       () => {
-        if (!cancelled) setDependencyGraphReady(false);
+        if (!cancelled) setDependencyGraphLoadState("error");
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [dependencyAttempt, isDependencyGraphReady, selectedMode]);
+  }, [dependencyAttempt, selectedMode]);
 
   const selectMode = (nextMode: IssueViewMode) => {
     if (nextMode === selectedMode) return;
@@ -111,7 +119,8 @@ function IssuesView({
           selectedMode === "dependencies" &&
           (isModePending ||
             activeMode !== "dependencies" ||
-            !isDependencyGraphReady)
+            dependencyGraphLoadState === "idle" ||
+            dependencyGraphLoadState === "loading")
         }
       >
         <Panel title={selectedMode === "list" ? "Watched issues" : "Dependency graph"}>
@@ -128,7 +137,10 @@ function IssuesView({
             <ChunkErrorBoundary
               key={dependencyAttempt}
               view="Dependency graph"
-              onRetry={() => setDependencyAttempt(DependencyGraphAttempts.add())}
+              onRetry={() => {
+                setDependencyGraphLoadState("loading");
+                setDependencyAttempt(DependencyGraphAttempts.add());
+              }}
             >
               <Suspense fallback={<DependencyGraphLoading />}>
                 <DependencyGraphPanel issues={issues} />

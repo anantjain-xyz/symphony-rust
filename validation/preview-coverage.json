@@ -17,37 +17,101 @@
       "label": "Dependencies",
       "module": "src/views/DependencyGraphPanel.tsx",
       "parent": "issues",
-      "fixture": "dashboard.issues"
+      "fixture": "dashboard.issues",
+      "e2e": {
+        "interaction": {
+          "kind": "click",
+          "role": "tab",
+          "name": "Dependencies"
+        },
+        "loaded": {
+          "role": "group",
+          "namePattern": "Dependency graph with"
+        }
+      }
     },
     {
       "id": "issues",
       "label": "Issues",
       "module": "src/views/IssuesView.tsx",
-      "fixture": "dashboard.issues"
+      "fixture": "dashboard.issues",
+      "e2e": {
+        "interaction": {
+          "kind": "click",
+          "role": "button",
+          "name": "Issues"
+        },
+        "loaded": {
+          "role": "heading",
+          "name": "Issues"
+        }
+      }
     },
     {
       "id": "overview",
       "label": "Overview",
       "module": null,
-      "fixture": "dashboard.overview"
+      "fixture": "dashboard.overview",
+      "e2e": {
+        "interaction": {
+          "kind": "goto"
+        },
+        "loaded": {
+          "role": "heading",
+          "name": "Overview"
+        }
+      }
     },
     {
       "id": "retro",
       "label": "Retro",
       "module": "src/views/RetroView.tsx",
-      "fixture": "dashboard.retroStatus"
+      "fixture": "dashboard.retroStatus",
+      "e2e": {
+        "interaction": {
+          "kind": "click",
+          "role": "button",
+          "name": "Retro"
+        },
+        "loaded": {
+          "role": "heading",
+          "name": "Retro"
+        }
+      }
     },
     {
       "id": "runs",
       "label": "Runs",
       "module": "src/views/RunsView.tsx",
-      "fixture": "dashboard.runs"
+      "fixture": "dashboard.runs",
+      "e2e": {
+        "interaction": {
+          "kind": "click",
+          "role": "button",
+          "name": "Runs"
+        },
+        "loaded": {
+          "role": "heading",
+          "name": "Runs"
+        }
+      }
     },
     {
       "id": "settings",
       "label": "Settings",
       "module": "src/views/SettingsView.tsx",
-      "fixture": "settings"
+      "fixture": "settings",
+      "e2e": {
+        "interaction": {
+          "kind": "click",
+          "role": "button",
+          "name": "Settings"
+        },
+        "loaded": {
+          "role": "heading",
+          "name": "Settings"
+        }
+      }
     }
   ],
   "infrastructureEntries": [

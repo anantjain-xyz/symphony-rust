@@ -75,8 +75,14 @@ export const FORBIDDEN_EAGER_ENTRIES = [
   write(
     root,
     "e2e/lazy-chunks.e2e.ts",
-    `page.getByRole("heading", { name: "Overview" });
-page.getByRole("button", { name: "Runs" });
+    `await test.step("preview-route:overview", async () => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+await test.step("preview-route:runs", async () => {
+  await page.getByRole("button", { name: "Runs" }).click();
+  await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
+});
 `,
   );
   write(
@@ -101,12 +107,20 @@ page.locator('[data-preview-fixture="updater-geometry"]');
         label: "Overview",
         module: null,
         fixture: "dashboard.overview",
+        e2e: {
+          interaction: { kind: "goto" },
+          loaded: { role: "heading", name: "Overview" },
+        },
       },
       {
         id: "runs",
         label: "Runs",
         module: "src/views/RunsView.tsx",
         fixture: "dashboard.runs",
+        e2e: {
+          interaction: { kind: "click", role: "button", name: "Runs" },
+          loaded: { role: "heading", name: "Runs" },
+        },
       },
     ],
     infrastructureEntries: [
@@ -144,14 +158,21 @@ export const FORBIDDEN_EAGER_ENTRIES = [
   write(
     root,
     "e2e/lazy-chunks.e2e.ts",
-    'page.getByRole("heading", { name: "Overview" });\n',
+    `await test.step("preview-route:overview", async () => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+// Merely mentioning both Runs labels does not exercise or assert the route.
+page.getByRole("button", { name: "Runs" });
+page.getByRole("heading", { name: "Runs" });
+`,
   );
 
   const errors = validatePreviewCoverage(root).join("\n");
   assert.match(errors, /bundle lazy view entries is missing src\/views\/RunsView\.tsx/);
   assert.match(
     errors,
-    /lazy-chunks\.e2e\.ts is missing preview interaction coverage for runs/,
+    /lazy-chunks\.e2e\.ts must define exactly one preview-route:runs step/,
   );
 });
 
@@ -183,5 +204,91 @@ export { extra, preview, updater };
   assert.match(
     errors,
     /preview\/runtime\.ts is missing fixture projection dashboard\.runs for route runs/,
+  );
+});
+
+test("fixture projections must belong to the exported runtime object at the exact path", (t) => {
+  const root = previewFixture(t);
+  write(
+    root,
+    "src/preview/runtime.ts",
+    `const unrelated = {
+  dashboard: {
+    runs: [],
+  },
+};
+export const previewRuntime = {
+  dashboard: {
+    overview: {},
+    nested: {
+      runs: [],
+    },
+  },
+  unrelated,
+};
+`,
+  );
+
+  const errors = validatePreviewCoverage(root).join("\n");
+  assert.match(
+    errors,
+    /preview\/runtime\.ts is missing fixture projection dashboard\.runs for route runs/,
+  );
+});
+
+test("E2E route steps require both their own interaction and loaded assertion", (t) => {
+  const root = previewFixture(t);
+  write(
+    root,
+    "e2e/lazy-chunks.e2e.ts",
+    `await test.step("preview-route:overview", async () => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+await test.step("preview-route:runs", async () => {
+  page.getByRole("button", { name: "Runs" });
+  await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
+});
+`,
+  );
+  assert.match(
+    validatePreviewCoverage(root).join("\n"),
+    /preview-route:runs is missing its declared preview interaction/,
+  );
+
+  write(
+    root,
+    "e2e/lazy-chunks.e2e.ts",
+    `await test.step("preview-route:overview", async () => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+await test.step("preview-route:runs", async () => {
+  await page.getByRole("button", { name: "Runs" }).click();
+  page.getByRole("heading", { name: "Runs" });
+});
+`,
+  );
+  assert.match(
+    validatePreviewCoverage(root).join("\n"),
+    /preview-route:runs is missing its declared loaded assertion/,
+  );
+
+  write(
+    root,
+    "e2e/lazy-chunks.e2e.ts",
+    `await test.step("preview-route:overview", async () => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+await test.step("preview-route:runs", async () => {
+  await expect(page.getByRole("heading", { name: "Runs" })).toBeVisible();
+  await page.getByRole("button", { name: "Runs" }).click();
+});
+`,
+  );
+  assert.match(
+    validatePreviewCoverage(root).join("\n"),
+    /preview-route:runs loaded assertion must follow its preview interaction/,
   );
 });
