@@ -20,17 +20,29 @@ export function isGeneratedOrVendor(file) {
 }
 
 export function repositoryFiles(root) {
-  const git = spawnSync("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
+  const listed = spawnSync("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
     cwd: root,
     encoding: "utf8",
   });
-  if (git.error || git.status !== 0) {
-    const detail = git.error?.message ?? git.stderr.trim() ?? `exit ${git.status}`;
+  if (listed.error || listed.status !== 0) {
+    const detail = listed.error?.message ?? listed.stderr.trim() ?? `exit ${listed.status}`;
     throw new Error(`git ls-files failed: ${detail}`);
   }
-  return git.stdout
+
+  const deleted = spawnSync("git", ["ls-files", "--deleted", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (deleted.error || deleted.status !== 0) {
+    const detail = deleted.error?.message ?? deleted.stderr.trim() ?? `exit ${deleted.status}`;
+    throw new Error(`git ls-files --deleted failed: ${detail}`);
+  }
+  const deletedFiles = new Set(deleted.stdout.split("\0").filter(Boolean));
+
+  return listed.stdout
     .split("\0")
     .filter(Boolean)
+    .filter((file) => !deletedFiles.has(file))
     .filter((file) => !isGeneratedOrVendor(file))
     .sort();
 }

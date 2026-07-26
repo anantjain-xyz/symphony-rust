@@ -16,6 +16,7 @@ export async function loadToolPolicy() {
       throw new Error(`${policyPath}: ${name} must declare an exact semantic version`);
     }
     for (const [platform, asset] of Object.entries(tool.assets ?? {})) {
+      assertSafeArchiveAsset(asset);
       if (!/^[a-f0-9]{64}$/.test(asset.sha256 ?? "")) {
         throw new Error(`${policyPath}: ${name}/${platform} must declare a SHA-256 checksum`);
       }
@@ -38,6 +39,60 @@ export function platformKey(platform = process.platform, architecture = process.
 
 export function releaseUrl(tool, asset) {
   return `https://github.com/${tool.repository}/releases/download/v${tool.version}/${asset.archive}`;
+}
+
+function extractionMode(archive) {
+  if (archive.endsWith(".tar.gz")) return "-xzOf";
+  if (archive.endsWith(".tar.xz")) return "-xJOf";
+  throw new Error(`unsupported hygiene tool archive format: ${archive}`);
+}
+
+function assertSafeArchiveAsset(asset) {
+  if (
+    typeof asset.archive !== "string" ||
+    path.posix.basename(asset.archive) !== asset.archive ||
+    asset.archive.includes("\\") ||
+    asset.archive.includes("\0")
+  ) {
+    throw new Error("hygiene tool archive must be a safe filename");
+  }
+  if (
+    typeof asset.binaryPath !== "string" ||
+    !asset.binaryPath ||
+    path.posix.isAbsolute(asset.binaryPath) ||
+    path.posix.normalize(asset.binaryPath) !== asset.binaryPath ||
+    asset.binaryPath === ".." ||
+    asset.binaryPath.startsWith("../") ||
+    asset.binaryPath.startsWith("-") ||
+    asset.binaryPath.includes("\\") ||
+    asset.binaryPath.includes("\0")
+  ) {
+    throw new Error("hygiene tool binary must use a safe relative path");
+  }
+  extractionMode(asset.archive);
+}
+
+export function extractArchiveBinary(archivePath, asset) {
+  assertSafeArchiveAsset(asset);
+  // Stream only the checksum-pinned member to stdout. Archive-controlled paths
+  // are never materialized, so traversal and link entries cannot write outside
+  // the installer staging directory.
+  const extracted = spawnSync(
+    "tar",
+    [extractionMode(asset.archive), archivePath, "--", asset.binaryPath],
+    {
+      cwd: projectRoot,
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  if (extracted.error || extracted.status !== 0) {
+    const detail =
+      extracted.error?.message ??
+      extracted.stderr?.toString("utf8").trim() ??
+      `exit ${extracted.status}`;
+    throw new Error(`could not extract ${asset.archive}: ${detail}`);
+  }
+  return extracted.stdout;
 }
 
 function cacheDirectory(name, tool, key) {
@@ -178,21 +233,11 @@ export async function installTool(name) {
     }
 
     const archivePath = path.join(temporary, asset.archive);
-    const extracted = path.join(temporary, "extracted");
     const staged = path.join(temporary, "staged");
-    await Promise.all([fs.writeFile(archivePath, archive), fs.mkdir(extracted), fs.mkdir(staged)]);
-    const tar = spawnSync("tar", ["-xzf", archivePath, "-C", extracted], {
-      cwd: projectRoot,
-      encoding: "utf8",
-    });
-    if (tar.error || tar.status !== 0) {
-      const detail = tar.error?.message ?? tar.stderr.trim() ?? `exit ${tar.status}`;
-      throw new Error(`could not extract ${asset.archive}: ${detail}`);
-    }
+    await Promise.all([fs.writeFile(archivePath, archive), fs.mkdir(staged)]);
 
-    const source = path.join(extracted, asset.binaryPath);
     const executable = path.join(staged, name);
-    await fs.copyFile(source, executable);
+    await fs.writeFile(executable, extractArchiveBinary(archivePath, asset));
     await fs.chmod(executable, 0o755);
     await fs.writeFile(
       path.join(staged, ".installed.json"),

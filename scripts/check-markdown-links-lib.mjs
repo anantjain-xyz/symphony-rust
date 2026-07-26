@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { JSDOM } from "jsdom";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
 const HTML_ATTRIBUTE = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const REFERENCE_DEFINITION =
   /^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
@@ -52,13 +54,19 @@ function maskIgnoredMarkdown(source) {
   return lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
 }
 
+const entityDecoder = new JSDOM("").window.document.createElement("textarea");
+
+function decodeHtmlEntities(value) {
+  return value.replace(HTML_ENTITY, (entity) => {
+    // Match only a single entity token so arbitrary Markdown is never parsed as
+    // HTML merely to decode CommonMark's full named and numeric entity set.
+    entityDecoder.innerHTML = entity;
+    return entityDecoder.value;
+  });
+}
+
 function unescapeMarkdown(value) {
-  return value
-    .replaceAll("&amp;", "&")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replace(/\\([\\!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-])/g, "$1");
+  return decodeHtmlEntities(value).replace(/\\([\\!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-])/g, "$1");
 }
 
 function headingText(value) {
@@ -243,8 +251,20 @@ async function exactPath(root, relative) {
 }
 
 function decodeTarget(target) {
+  const unescaped = unescapeMarkdown(target);
+  const hash = unescaped.indexOf("#");
+  const pathAndQuery = hash === -1 ? unescaped : unescaped.slice(0, hash);
+  const encodedFragment = hash === -1 ? "" : unescaped.slice(hash + 1);
+  const question = pathAndQuery.indexOf("?");
+  const encodedPath = question === -1 ? pathAndQuery : pathAndQuery.slice(0, question);
+  const encodedQuery = question === -1 ? "" : pathAndQuery.slice(question + 1);
   try {
-    return decodeURIComponent(unescapeMarkdown(target));
+    return {
+      external: EXTERNAL_TARGET.test(unescaped),
+      fragment: decodeURIComponent(encodedFragment),
+      path: decodeURIComponent(encodedPath),
+      query: decodeURIComponent(encodedQuery),
+    };
   } catch {
     return null;
   }
@@ -288,16 +308,12 @@ export async function checkMarkdownFiles(root, files) {
         problems.push(`${location}: invalid percent-encoding in link "${target.target}"`);
         continue;
       }
-      if (!decoded || EXTERNAL_TARGET.test(decoded)) continue;
+      if ((!decoded.path && !decoded.query && !decoded.fragment) || decoded.external) continue;
 
-      const hash = decoded.indexOf("#");
-      const rawPath = hash === -1 ? decoded : decoded.slice(0, hash);
-      const fragment = hash === -1 ? "" : decoded.slice(hash + 1);
-      const pathWithoutQuery = rawPath.split("?", 1)[0];
-      const relative = pathWithoutQuery
-        ? pathWithoutQuery.startsWith("/")
-          ? pathWithoutQuery.slice(1)
-          : path.posix.normalize(path.posix.join(path.posix.dirname(file), pathWithoutQuery))
+      const relative = decoded.path
+        ? decoded.path.startsWith("/")
+          ? decoded.path.slice(1)
+          : path.posix.normalize(path.posix.join(path.posix.dirname(file), decoded.path))
         : file;
       if (relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) {
         problems.push(`${location}: local link escapes the repository: "${target.target}"`);
@@ -315,10 +331,10 @@ export async function checkMarkdownFiles(root, files) {
         problems.push(`${location}: missing local target "${target.target}"`);
         continue;
       }
-      if (fragment && (markdownFiles.has(relative) || /\.md$/i.test(relative))) {
+      if (decoded.fragment && (markdownFiles.has(relative) || /\.md$/i.test(relative))) {
         const targetAnchors = await anchorsFor(relative, absolute);
-        if (!targetAnchors.has(fragment)) {
-          problems.push(`${location}: missing heading "#${fragment}" in ${relative}`);
+        if (!targetAnchors.has(decoded.fragment)) {
+          problems.push(`${location}: missing heading "#${decoded.fragment}" in ${relative}`);
         }
       }
     }
