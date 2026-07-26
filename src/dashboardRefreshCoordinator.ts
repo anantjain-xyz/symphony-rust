@@ -58,7 +58,9 @@ export function createDashboardRefreshCoordinator<Key extends string>({
   const resolveAllWaiters = () => {
     const waiters = requestWaiters;
     requestWaiters = [];
-    waiters.forEach(({ resolve }) => resolve());
+    waiters.forEach(({ resolve }) => {
+      resolve();
+    });
   };
 
   const settleWaiters = (
@@ -93,7 +95,7 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       if (reportableKeys.size > 0) {
         try {
           onFailure?.(failure, [...reportableKeys]);
-        } catch (observerError) {
+        } catch {
           log("failure-observer-error", {
             activeGeneration: generation,
             queuedKeys: [...queuedKeys],
@@ -163,9 +165,9 @@ export function createDashboardRefreshCoordinator<Key extends string>({
           const nextKeys = [...queuedKeys];
           queuedKeys.clear();
           const nextBatchGeneration = ++nextGeneration;
-          nextKeys.forEach((key) =>
-            authoritativeGenerations.set(key, nextBatchGeneration),
-          );
+          nextKeys.forEach((key) => {
+            authoritativeGenerations.set(key, nextBatchGeneration);
+          });
           start(nextKeys, nextBatchGeneration);
           return;
         }
@@ -202,15 +204,17 @@ export function createDashboardRefreshCoordinator<Key extends string>({
       );
 
       if (active) {
-        requestedKeys.forEach((key) => queuedKeys.add(key));
+        requestedKeys.forEach((key) => {
+          queuedKeys.add(key);
+        });
         log("queue", {
           activeGeneration,
           queuedKeys: [...queuedKeys],
         });
       } else {
-        requestedKeys.forEach((key) =>
-          authoritativeGenerations.set(key, requestedGeneration),
-        );
+        requestedKeys.forEach((key) => {
+          authoritativeGenerations.set(key, requestedGeneration);
+        });
         start(requestedKeys, requestedGeneration);
       }
       return settled;

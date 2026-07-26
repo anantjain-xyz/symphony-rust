@@ -35,13 +35,14 @@ function createHarness(loader: ViewLoader) {
       <main>
         <nav aria-label="Primary">
           <button
+            type="button"
             onPointerEnter={preload}
             onFocus={preload}
             onClick={() => setActive(true)}
           >
             Runs
           </button>
-          <button onClick={() => setShellRefresh((value) => value + 1)}>
+          <button type="button" onClick={() => setShellRefresh((value) => value + 1)}>
             Refresh shell
           </button>
         </nav>
@@ -123,7 +124,9 @@ describe("lazy view boundaries", () => {
     ];
     let cached: Promise<ViewModule> | null = null;
     const importView = vi.fn<() => Promise<ViewModule>>();
-    imports.forEach(({ promise }) => importView.mockImplementationOnce(() => promise));
+    imports.forEach(({ promise }) => {
+      importView.mockImplementationOnce(() => promise);
+    });
     const loader = () => {
       if (!cached) {
         cached = importView().catch((error) => {
@@ -187,7 +190,7 @@ describe("lazy view boundaries", () => {
       const [visible, setVisible] = useState(true);
       return (
         <main>
-          <button onClick={() => setVisible((value) => !value)}>
+          <button type="button" onClick={() => setVisible((value) => !value)}>
             {visible ? "Hide graph" : "Show graph"}
           </button>
           {visible ? <NestedBoundary /> : null}
@@ -223,7 +226,9 @@ describe("lazy view boundaries", () => {
       return (
         <section>
           <h2>Runs</h2>
-          <button onClick={() => setCount((value) => value + 1)}>Count {count}</button>
+          <button type="button" onClick={() => setCount((value) => value + 1)}>
+            Count {count}
+          </button>
         </section>
       );
     }

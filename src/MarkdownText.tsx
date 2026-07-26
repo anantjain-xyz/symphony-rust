@@ -115,8 +115,10 @@ export function MarkdownText({
       {blocks.map((block, index) => {
         if (block.type === "paragraph") {
           return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: parsed blocks are immutable and may contain duplicate text.
             <p key={index}>
               {block.lines.map((line, lineIndex) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: duplicate lines have no stable domain identifier.
                 <Fragment key={lineIndex}>
                   {lineIndex > 0 ? <br /> : null}
                   {renderText(line)}
@@ -127,17 +129,20 @@ export function MarkdownText({
         }
         if (block.type === "code") {
           return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: parsed blocks are immutable and may contain duplicate text.
             <pre key={index} className="markdown-code">
               <code>{renderText(block.text)}</code>
             </pre>
           );
         }
         return (
+          // biome-ignore lint/suspicious/noArrayIndexKey: parsed blocks are immutable and may contain duplicate tables.
           <div key={index} className="markdown-table-wrap">
             <table className="markdown-table">
               <thead>
                 <tr>
                   {block.headers.map((cell, cellIndex) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: duplicate table headers have no stable identifier.
                     <th key={cellIndex} style={textAlignStyle(block.alignments[cellIndex])}>
                       {renderText(cell)}
                     </th>
@@ -146,8 +151,10 @@ export function MarkdownText({
               </thead>
               <tbody>
                 {block.rows.map((row, rowIndex) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: duplicate table rows have no stable identifier.
                   <tr key={rowIndex}>
                     {row.map((cell, cellIndex) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: duplicate table cells have no stable identifier.
                       <td key={cellIndex} style={textAlignStyle(block.alignments[cellIndex])}>
                         {renderText(cell)}
                       </td>

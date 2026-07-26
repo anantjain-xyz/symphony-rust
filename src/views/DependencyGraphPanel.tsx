@@ -54,12 +54,13 @@ function DependencyGraphView({ graph }: { graph: GraphModel }) {
 
   return (
     <div className="dependency-view">
-      <div className="dependency-summary" aria-label="Dependency summary">
+      <section className="dependency-summary" aria-label="Dependency summary">
         <DependencyStat label="Watched issues" value={graph.issueCount} />
         <DependencyStat label="Blocked issues" value={graph.blockedIssueCount} />
         <DependencyStat label="Blocking links" value={graph.edges.length} />
         <DependencyStat label="External blockers" value={graph.externalBlockerCount} />
-      </div>
+      </section>
+      {/* biome-ignore lint/a11y/useSemanticElements: the labeled group contains a visual graph and cannot use fieldset semantics. */}
       <div
         className="dependency-graph-shell"
         role="group"
@@ -393,7 +394,7 @@ function Empty({
       <strong>{title}</strong>
       {text ? <span>{text}</span> : null}
       {actionLabel ? (
-        <button disabled={actionDisabled} onClick={onAction}>
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
           {actionLabel}
         </button>
       ) : null}

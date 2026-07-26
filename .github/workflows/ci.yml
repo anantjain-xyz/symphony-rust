@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Baseline verifiers compare exceptions with the pull request's base.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -32,6 +35,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm install:hygiene-tools
+      - run: pnpm check:hygiene
+        env:
+          # On main pushes, compare baseline exceptions with the pre-push SHA.
+          BIOME_FORMAT_BASE_REF: ${{ github.event.before }}
+      - run: pnpm test:hygiene
 
       # Architecture
       - run: pnpm check:boundaries

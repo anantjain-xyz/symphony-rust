@@ -1,10 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -55,11 +50,7 @@ export const previewRuntime = {
 };
 `,
   );
-  write(
-    root,
-    "src/AppUpdate.tsx",
-    "export function AppUpdateGeometryPreview() {}\n",
-  );
+  write(root, "src/AppUpdate.tsx", "export function AppUpdateGeometryPreview() {}\n");
   write(
     root,
     "scripts/check-bundle-budget.mjs",
@@ -123,10 +114,7 @@ page.locator('[data-preview-fixture="updater-geometry"]');
         },
       },
     ],
-    infrastructureEntries: [
-      "src/AppUpdate.tsx",
-      "src/preview/runtime.ts",
-    ],
+    infrastructureEntries: ["src/AppUpdate.tsx", "src/preview/runtime.ts"],
     updaterGeometry: {
       component: "AppUpdateGeometryPreview",
       module: "src/AppUpdate.tsx",
@@ -170,10 +158,7 @@ page.getByRole("heading", { name: "Runs" });
 
   const errors = validatePreviewCoverage(root).join("\n");
   assert.match(errors, /bundle lazy view entries is missing src\/views\/RunsView\.tsx/);
-  assert.match(
-    errors,
-    /lazy-chunks\.e2e\.ts must define exactly one preview-route:runs step/,
-  );
+  assert.match(errors, /lazy-chunks\.e2e\.ts must define exactly one preview-route:runs step/);
 });
 
 test("rejects undeclared dynamic entries and stale preview fixtures", (t) => {

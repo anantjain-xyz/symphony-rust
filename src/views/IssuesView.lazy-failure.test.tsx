@@ -46,30 +46,18 @@ afterEach(() => {
 
 it("ends the busy state after import rejection and restores it only while retrying", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
-  render(
-    <IssuesView
-      issues={[issue]}
-      linearWorkspace={null}
-      onOpenSettings={() => undefined}
-    />,
-  );
+  render(<IssuesView issues={[issue]} linearWorkspace={null} onOpenSettings={() => undefined} />);
 
   fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
 
   expect((await screen.findByRole("alert")).textContent).toContain(
     "Unable to load Dependency graph",
   );
-  await waitFor(() =>
-    expect(screen.getByRole("tabpanel").getAttribute("aria-busy")).toBe("false"),
-  );
+  await waitFor(() => expect(screen.getByRole("tabpanel").getAttribute("aria-busy")).toBe("false"));
 
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.getByRole("tabpanel").getAttribute("aria-busy")).toBe("true");
-  expect(
-    await screen.findByRole("group", { name: "Recovered dependency graph" }),
-  ).toBeTruthy();
-  await waitFor(() =>
-    expect(screen.getByRole("tabpanel").getAttribute("aria-busy")).toBe("false"),
-  );
+  expect(await screen.findByRole("group", { name: "Recovered dependency graph" })).toBeTruthy();
+  await waitFor(() => expect(screen.getByRole("tabpanel").getAttribute("aria-busy")).toBe("false"));
   expect(graphMock.attempts).toBe(2);
 });
