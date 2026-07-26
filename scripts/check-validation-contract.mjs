@@ -99,13 +99,7 @@ const REQUIRED_FULL_COMMANDS = new Map([
   [
     "rust-tests",
     {
-      argv: [
-        "cargo",
-        "test",
-        "--workspace",
-        "--exclude",
-        "symphony-desktop",
-      ],
+      argv: ["cargo", "test", "--workspace", "--exclude", "symphony-desktop"],
     },
   ],
   [
@@ -146,14 +140,7 @@ const REQUIRED_FULL_COMMANDS = new Map([
   [
     "browser-install",
     {
-      argv: [
-        "pnpm",
-        "exec",
-        "playwright",
-        "install",
-        "--with-deps",
-        "chromium",
-      ],
+      argv: ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
     },
   ],
   [
@@ -168,27 +155,15 @@ const REQUIRED_FULL_COMMANDS = new Map([
 const REQUIRED_PACKAGE_SCRIPTS = new Map([
   ["verify:fast", `node ${RUNNER_SCRIPT} fast`],
   ["verify:full", `node ${RUNNER_SCRIPT} full`],
-  [
-    "check:validation-contract",
-    "node scripts/check-validation-contract.mjs",
-  ],
+  ["check:validation-contract", "node scripts/check-validation-contract.mjs"],
   ["check:harness", "node scripts/check-agent-assets.mjs"],
   [
     "test:validation",
     "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
   ],
-  [
-    "check:frontend-contracts",
-    "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
-  ],
-  [
-    "check:frontend-boundaries",
-    "node scripts/check-frontend-boundaries.mjs",
-  ],
-  [
-    "check:preview-coverage",
-    "node scripts/check-preview-coverage.mjs",
-  ],
+  ["check:frontend-contracts", "pnpm check:frontend-boundaries && pnpm check:preview-coverage"],
+  ["check:frontend-boundaries", "node scripts/check-frontend-boundaries.mjs"],
+  ["check:preview-coverage", "node scripts/check-preview-coverage.mjs"],
   [
     "test:frontend-contracts",
     "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs && vitest run src/desktop/events.test.ts src/dashboardRefreshCoordinator.test.ts src/pollController.test.ts src/settingsValidationController.test.ts",
@@ -231,7 +206,11 @@ function resolveInside(root, path, errors, label) {
   }
   const absolute = resolve(root, path);
   const fromRoot = relative(root, absolute);
-  if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+  if (
+    isAbsolute(fromRoot) ||
+    fromRoot === ".." ||
+    fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+  ) {
     errors.push(`${label} escapes the repository root: ${path}`);
     return null;
   }
@@ -350,13 +329,7 @@ function parseSimpleShellScript(script, scriptName, errors) {
   return commands;
 }
 
-function validatePackageExecutable(
-  root,
-  scriptName,
-  tokens,
-  packageJson,
-  errors,
-) {
+function validatePackageExecutable(root, scriptName, tokens, packageJson, errors) {
   const executable = tokens[0];
   if (!SUPPORTED_SCRIPT_EXECUTABLES.has(executable)) {
     errors.push(
@@ -408,9 +381,7 @@ function validatePackageScript(
 ) {
   if (validated.has(scriptName)) return;
   if (stack.includes(scriptName)) {
-    errors.push(
-      `package scripts contain a cycle: ${[...stack, scriptName].join(" -> ")}`,
-    );
+    errors.push(`package scripts contain a cycle: ${[...stack, scriptName].join(" -> ")}`);
     return;
   }
   const body = packageJson.scripts?.[scriptName];
@@ -439,19 +410,10 @@ function validatePackageScript(
       continue;
     }
     if (!packageJson.scripts?.[referenced]) {
-      errors.push(
-        `package script ${scriptName} references missing package script ${referenced}`,
-      );
+      errors.push(`package script ${scriptName} references missing package script ${referenced}`);
       continue;
     }
-    validatePackageScript(
-      root,
-      referenced,
-      packageJson,
-      errors,
-      validated,
-      nextStack,
-    );
+    validatePackageScript(root, referenced, packageJson, errors, validated, nextStack);
   }
   validated.add(scriptName);
 }
@@ -496,10 +458,7 @@ function yamlIndent(line) {
 }
 
 function yamlFieldName(line) {
-  const match =
-    /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_-]*))\s*:/.exec(
-      line.trim(),
-    );
+  const match = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_-]*))\s*:/.exec(line.trim());
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
 }
 
@@ -521,10 +480,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
   const lines = content.replace(/\r\n?/g, "\n").split("\n");
   const jobsBlocks = lines
     .map((line, index) => ({ index, line }))
-    .filter(
-      ({ line }) =>
-        yamlIndent(line) === 0 && yamlFieldName(line) === "jobs",
-    );
+    .filter(({ line }) => yamlIndent(line) === 0 && yamlFieldName(line) === "jobs");
   if (jobsBlocks.length !== 1) {
     errors.push(
       `CI workflow ${workflowPath} must define exactly one top-level jobs block; found ${jobsBlocks.length}`,
@@ -535,10 +491,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
   let jobsEnd = lines.length;
   if (jobsStart !== -1) {
     for (let index = jobsStart + 1; index < lines.length; index += 1) {
-      if (
-        lines[index].trim() === "" ||
-        lines[index].trimStart().startsWith("#")
-      ) {
+      if (lines[index].trim() === "" || lines[index].trimStart().startsWith("#")) {
         continue;
       }
       if (yamlIndent(lines[index]) === 0) {
@@ -549,10 +502,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
     const jobIds = lines
       .slice(jobsStart + 1, jobsEnd)
       .filter(
-        (line) =>
-          line.trim() !== "" &&
-          !line.trimStart().startsWith("#") &&
-          yamlIndent(line) === 2,
+        (line) => line.trim() !== "" && !line.trimStart().startsWith("#") && yamlIndent(line) === 2,
       )
       .map(yamlFieldName)
       .filter(Boolean);
@@ -568,11 +518,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
     if (!match) continue;
     const stepIndent = match[1].length;
     const steps = previousYamlParent(lines, lineIndex, stepIndent);
-    if (
-      !steps ||
-      steps.indent !== stepIndent - 2 ||
-      steps.text !== "steps:"
-    ) {
+    if (!steps || steps.indent !== stepIndent - 2 || steps.text !== "steps:") {
       errors.push(
         `CI workflow ${workflowPath} canonical entrypoint must be a direct workflow step under steps`,
       );
@@ -580,23 +526,12 @@ function validateCiRunStep(content, command, workflowPath, errors) {
     }
 
     const job = previousYamlParent(lines, steps.index, steps.indent);
-    if (
-      !job ||
-      job.indent !== steps.indent - 2 ||
-      !/^[A-Za-z_][A-Za-z0-9_-]*:$/.test(job.text)
-    ) {
-      errors.push(
-        `CI workflow ${workflowPath} canonical entrypoint must belong to a job`,
-      );
+    if (!job || job.indent !== steps.indent - 2 || !/^[A-Za-z_][A-Za-z0-9_-]*:$/.test(job.text)) {
+      errors.push(`CI workflow ${workflowPath} canonical entrypoint must belong to a job`);
       continue;
     }
     const jobs = previousYamlParent(lines, job.index, job.indent);
-    if (
-      !jobs ||
-      jobs.index !== jobsStart ||
-      jobs.indent !== 0 ||
-      jobs.text !== "jobs:"
-    ) {
+    if (!jobs || jobs.index !== jobsStart || jobs.indent !== 0 || jobs.text !== "jobs:") {
       errors.push(
         `CI workflow ${workflowPath} canonical entrypoint job must be a direct child of the single top-level jobs block`,
       );
@@ -614,15 +549,9 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === stepIndent + 2 &&
-        ["if", "continue-on-error", "shell", "working-directory", "env"].includes(
-          field,
-        )
+        ["if", "continue-on-error", "shell", "working-directory", "env"].includes(field)
       ) {
-        if (
-          field === "shell" ||
-          field === "working-directory" ||
-          field === "env"
-        ) {
+        if (field === "shell" || field === "working-directory" || field === "env") {
           errors.push(
             `CI workflow ${workflowPath} canonical entrypoint step must use the default execution environment from the repository root; remove ${field}`,
           );
@@ -669,11 +598,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
     }
     for (const field of ["defaults", "env"]) {
       if (
-        lines.some(
-          (candidate) =>
-            yamlIndent(candidate) === 0 &&
-            yamlFieldName(candidate) === field,
-        )
+        lines.some((candidate) => yamlIndent(candidate) === 0 && yamlFieldName(candidate) === field)
       ) {
         errors.push(
           field === "defaults"
@@ -689,9 +614,7 @@ function validateCiTriggers(content, workflowPath, errors) {
   const lines = content.replace(/\r\n?/g, "\n").split("\n");
   const triggerBlocks = lines
     .map((line, index) => ({ index, line }))
-    .filter(
-      ({ line }) => yamlIndent(line) === 0 && line.trim() === "on:",
-    );
+    .filter(({ line }) => yamlIndent(line) === 0 && line.trim() === "on:");
   if (triggerBlocks.length !== 1) {
     errors.push(
       `CI workflow ${workflowPath} must define exactly one top-level on trigger block; found ${triggerBlocks.length}`,
@@ -714,11 +637,7 @@ function validateCiTriggers(content, workflowPath, errors) {
   const directTriggers = new Map();
   for (let index = triggerStart + 1; index < triggerEnd; index += 1) {
     const line = lines[index];
-    if (
-      line.trim() === "" ||
-      line.trimStart().startsWith("#") ||
-      yamlIndent(line) !== 2
-    ) {
+    if (line.trim() === "" || line.trimStart().startsWith("#") || yamlIndent(line) !== 2) {
       continue;
     }
     const match = /^([A-Za-z_][A-Za-z0-9_-]*):\s*$/.exec(line.trim());
@@ -730,9 +649,7 @@ function validateCiTriggers(content, workflowPath, errors) {
 
   const pullRequestIndexes = directTriggers.get("pull_request") ?? [];
   if (pullRequestIndexes.length !== 1) {
-    errors.push(
-      `CI workflow ${workflowPath} must trigger every pull_request without filters`,
-    );
+    errors.push(`CI workflow ${workflowPath} must trigger every pull_request without filters`);
   } else {
     const pullRequestIndex = pullRequestIndexes[0];
     const nextTriggerIndex = [...directTriggers.values()]
@@ -742,14 +659,9 @@ function validateCiTriggers(content, workflowPath, errors) {
     const pullRequestEnd = nextTriggerIndex ?? triggerEnd;
     const filters = lines
       .slice(pullRequestIndex + 1, pullRequestEnd)
-      .filter(
-        (line) =>
-          line.trim() !== "" && !line.trimStart().startsWith("#"),
-      );
+      .filter((line) => line.trim() !== "" && !line.trimStart().startsWith("#"));
     if (filters.length > 0) {
-      errors.push(
-        `CI workflow ${workflowPath} must trigger every pull_request without filters`,
-      );
+      errors.push(`CI workflow ${workflowPath} must trigger every pull_request without filters`);
     }
   }
 
@@ -767,10 +679,7 @@ function validateCiTriggers(content, workflowPath, errors) {
     const pushEnd = nextTriggerIndex ?? triggerEnd;
     const pushConfiguration = lines
       .slice(pushIndex + 1, pushEnd)
-      .filter(
-        (line) =>
-          line.trim() !== "" && !line.trimStart().startsWith("#"),
-      );
+      .filter((line) => line.trim() !== "" && !line.trimStart().startsWith("#"));
     if (
       pushConfiguration.length !== 1 ||
       yamlIndent(pushConfiguration[0]) !== 4 ||
@@ -794,13 +703,9 @@ export function runValidationProfile({
 } = {}) {
   let contract;
   try {
-    contract = JSON.parse(
-      readFileSync(resolve(root, "validation/contract.json"), "utf8"),
-    );
+    contract = JSON.parse(readFileSync(resolve(root, "validation/contract.json"), "utf8"));
   } catch (error) {
-    stderr(
-      `Validation runner: cannot read validation/contract.json: ${error.message}`,
-    );
+    stderr(`Validation runner: cannot read validation/contract.json: ${error.message}`);
     return 2;
   }
 
@@ -824,23 +729,15 @@ export function runValidationProfile({
   for (const [index, commandId] of commandIds.entries()) {
     const command = contract.commands?.[commandId];
     if (!command || !Array.isArray(command.argv) || command.argv.length === 0) {
-      stderr(
-        `Validation runner: profile ${profileName} references invalid command ${commandId}`,
-      );
+      stderr(`Validation runner: profile ${profileName} references invalid command ${commandId}`);
       return 2;
     }
 
     const [executable, ...args] = command.argv;
     const usesWindowsPnpm = platform === "win32" && executable === "pnpm";
     const platformExecutable = usesWindowsPnpm ? "cmd.exe" : executable;
-    const platformArgs = usesWindowsPnpm
-      ? ["/d", "/s", "/c", "pnpm.cmd", ...args]
-      : args;
-    stdout(
-      `\n==> [${index + 1}/${commandIds.length}] ${
-        command.label ?? commandId
-      }`,
-    );
+    const platformArgs = usesWindowsPnpm ? ["/d", "/s", "/c", "pnpm.cmd", ...args] : args;
+    stdout(`\n==> [${index + 1}/${commandIds.length}] ${command.label ?? commandId}`);
     stdout(`$ ${command.argv.join(" ")}`);
 
     const result = spawn(platformExecutable, platformArgs, {
@@ -849,28 +746,20 @@ export function runValidationProfile({
       stdio: "inherit",
     });
     if (result.error) {
-      stderr(
-        `Validation command ${commandId} could not start: ${result.error.message}`,
-      );
+      stderr(`Validation command ${commandId} could not start: ${result.error.message}`);
       return 1;
     }
     if (result.signal) {
-      stderr(
-        `Validation command ${commandId} terminated by signal ${result.signal}`,
-      );
+      stderr(`Validation command ${commandId} terminated by signal ${result.signal}`);
       return 1;
     }
     if (result.status !== 0) {
-      stderr(
-        `Validation command ${commandId} failed with exit ${result.status}`,
-      );
+      stderr(`Validation command ${commandId} failed with exit ${result.status}`);
       return result.status ?? 1;
     }
   }
 
-  stdout(
-    `\nValidation profile ${profileName} passed (${commandIds.length} commands).`,
-  );
+  stdout(`\nValidation profile ${profileName} passed (${commandIds.length} commands).`);
   return 0;
 }
 
@@ -879,27 +768,18 @@ export function validateValidationContract(
   contractRelativePath = "validation/contract.json",
 ) {
   const errors = [];
-  const contract = readJson(
-    root,
-    contractRelativePath,
-    errors,
-    "validation contract",
-  );
+  const contract = readJson(root, contractRelativePath, errors, "validation contract");
   const packageJson = readJson(root, "package.json", errors, "package.json");
   if (!contract || !packageJson) return errors;
 
   if (contract.version !== 1) {
     errors.push(
-      `validation contract version must be 1, received ${JSON.stringify(
-        contract.version,
-      )}`,
+      `validation contract version must be 1, received ${JSON.stringify(contract.version)}`,
     );
   }
 
   const commands =
-    contract.commands && typeof contract.commands === "object"
-      ? contract.commands
-      : {};
+    contract.commands && typeof contract.commands === "object" ? contract.commands : {};
   const commandIds = Object.keys(commands);
   if (commandIds.length === 0) {
     errors.push("validation contract must define at least one command");
@@ -935,9 +815,7 @@ export function validateValidationContract(
       continue;
     }
     if (!executableSet.has(command.argv[0])) {
-      errors.push(
-        `validation command ${commandId} uses undeclared executable ${command.argv[0]}`,
-      );
+      errors.push(`validation command ${commandId} uses undeclared executable ${command.argv[0]}`);
     }
     if (typeof command.label !== "string" || command.label.trim() === "") {
       errors.push(`validation command ${commandId} must have a descriptive label`);
@@ -962,13 +840,7 @@ export function validateValidationContract(
           `validation command ${commandId} references missing package script ${scriptName}`,
         );
       } else {
-        validatePackageScript(
-          root,
-          scriptName,
-          packageJson,
-          errors,
-          validatedPackageScripts,
-        );
+        validatePackageScript(root, scriptName, packageJson, errors, validatedPackageScripts);
       }
     }
   }
@@ -983,9 +855,7 @@ export function validateValidationContract(
   }
 
   const profiles =
-    contract.profiles && typeof contract.profiles === "object"
-      ? contract.profiles
-      : {};
+    contract.profiles && typeof contract.profiles === "object" ? contract.profiles : {};
   for (const required of ["fast", "full"]) {
     if (!Array.isArray(profiles[required]) || profiles[required].length === 0) {
       errors.push(`validation profile ${required} must be a non-empty array`);
@@ -998,15 +868,11 @@ export function validateValidationContract(
       continue;
     }
     for (const duplicate of duplicates(ids)) {
-      errors.push(
-        `validation profile ${profileName} repeats command ${duplicate}`,
-      );
+      errors.push(`validation profile ${profileName} repeats command ${duplicate}`);
     }
     for (const commandId of ids) {
       if (!commands[commandId]) {
-        errors.push(
-          `validation profile ${profileName} references missing command ${commandId}`,
-        );
+        errors.push(`validation profile ${profileName} references missing command ${commandId}`);
       }
     }
   }
@@ -1015,17 +881,13 @@ export function validateValidationContract(
   const full = new Set(Array.isArray(profiles.full) ? profiles.full : []);
   for (const commandId of REQUIRED_FAST_COMMANDS) {
     if (!fast.has(commandId)) {
-      errors.push(
-        `fast validation profile must include required command ${commandId}`,
-      );
+      errors.push(`fast validation profile must include required command ${commandId}`);
     }
   }
   for (const [commandId, expected] of REQUIRED_FULL_COMMANDS) {
     const command = commands[commandId];
     if (!command) {
-      errors.push(
-        `full validation contract is missing required command ${commandId}`,
-      );
+      errors.push(`full validation contract is missing required command ${commandId}`);
       continue;
     }
     if (JSON.stringify(command.argv) !== JSON.stringify(expected.argv)) {
@@ -1035,10 +897,7 @@ export function validateValidationContract(
         )}, received ${command.argv?.join(" ") ?? "<missing>"}`,
       );
     }
-    if (
-      expected.packageScript !== undefined &&
-      command.packageScript !== expected.packageScript
-    ) {
+    if (expected.packageScript !== undefined && command.packageScript !== expected.packageScript) {
       errors.push(
         `required command ${commandId} must own package script ${expected.packageScript}, received ${JSON.stringify(
           command.packageScript,
@@ -1054,33 +913,23 @@ export function validateValidationContract(
       );
     }
     if (!full.has(commandId)) {
-      errors.push(
-        `full validation profile must include required command ${commandId}`,
-      );
+      errors.push(`full validation profile must include required command ${commandId}`);
     }
   }
   for (const commandId of fast) {
     if (!full.has(commandId)) {
-      errors.push(
-        `full validation profile must include fast command ${commandId}`,
-      );
+      errors.push(`full validation profile must include fast command ${commandId}`);
     }
     if (commands[commandId]?.requiresBrowser) {
-      errors.push(
-        `fast validation profile must not require a browser (${commandId})`,
-      );
+      errors.push(`fast validation profile must not require a browser (${commandId})`);
     }
     if (commands[commandId]?.installsBrowser) {
-      errors.push(
-        `fast validation profile must not install a browser (${commandId})`,
-      );
+      errors.push(`fast validation profile must not install a browser (${commandId})`);
     }
   }
   for (const commandId of commandIds) {
     if (!full.has(commandId)) {
-      errors.push(
-        `full validation profile omits declared command ${commandId}`,
-      );
+      errors.push(`full validation profile omits declared command ${commandId}`);
     }
   }
   for (const scriptName of Object.keys(packageJson.scripts ?? {})
@@ -1107,9 +956,7 @@ export function validateValidationContract(
     errors.push("full validation profile must include a browser command");
   }
   if (commands["browser-install"]?.installsBrowser !== true) {
-    errors.push(
-      "required command browser-install must declare installsBrowser: true",
-    );
+    errors.push("required command browser-install must declare installsBrowser: true");
   }
   for (const [index, commandId] of fullIds.entries()) {
     if (
@@ -1133,19 +980,11 @@ export function validateValidationContract(
     );
   }
 
-  const runnerAbsolute = resolveInside(
-    root,
-    RUNNER_SCRIPT,
-    errors,
-    "validation runner",
-  );
+  const runnerAbsolute = resolveInside(root, RUNNER_SCRIPT, errors, "validation runner");
   if (runnerAbsolute && !existsSync(runnerAbsolute)) {
     errors.push(`validation runner is missing at ${RUNNER_SCRIPT}`);
   } else if (runnerAbsolute) {
-    const runnerSource = readFileSync(runnerAbsolute, "utf8").replace(
-      /\r\n?/g,
-      "\n",
-    );
+    const runnerSource = readFileSync(runnerAbsolute, "utf8").replace(/\r\n?/g, "\n");
     if (runnerSource !== CANONICAL_RUNNER_SOURCE) {
       errors.push(
         `validation runner ${RUNNER_SCRIPT} must delegate to the tested canonical profile executor`,
@@ -1153,16 +992,12 @@ export function validateValidationContract(
     }
   }
 
-  for (const [entrypointName, entrypoint] of Object.entries(
-    contract.entrypoints ?? {},
-  )) {
+  for (const [entrypointName, entrypoint] of Object.entries(contract.entrypoints ?? {})) {
     const packageScript = entrypoint?.packageScript;
     const profile = entrypoint?.profile;
     if (!profiles[profile]) {
       errors.push(
-        `entrypoint ${entrypointName} references missing profile ${JSON.stringify(
-          profile,
-        )}`,
+        `entrypoint ${entrypointName} references missing profile ${JSON.stringify(profile)}`,
       );
       continue;
     }
@@ -1188,14 +1023,9 @@ export function validateValidationContract(
       errors.push(`validation contract is missing ${required} entrypoint`);
     }
   }
-  for (const [entrypointName, expected] of Object.entries(
-    REQUIRED_ENTRYPOINTS,
-  )) {
+  for (const [entrypointName, expected] of Object.entries(REQUIRED_ENTRYPOINTS)) {
     const actual = contract.entrypoints?.[entrypointName];
-    if (
-      actual?.packageScript !== expected.packageScript ||
-      actual?.profile !== expected.profile
-    ) {
+    if (actual?.packageScript !== expected.packageScript || actual?.profile !== expected.profile) {
       errors.push(
         `entrypoint ${entrypointName} must be ${JSON.stringify(
           expected,
@@ -1209,9 +1039,7 @@ export function validateValidationContract(
   const ci = contract.integrations?.ci;
   if (ci) {
     const ciCommand =
-      typeof ci.command === "string" && ci.command.trim() !== ""
-        ? ci.command
-        : null;
+      typeof ci.command === "string" && ci.command.trim() !== "" ? ci.command : null;
     if (!ciCommand) {
       errors.push("CI integration command must be a non-empty string");
     }
@@ -1224,9 +1052,7 @@ export function validateValidationContract(
     }
     if (ci.path !== CI_WORKFLOW) {
       errors.push(
-        `CI integration path must be ${CI_WORKFLOW}, received ${JSON.stringify(
-          ci.path,
-        )}`,
+        `CI integration path must be ${CI_WORKFLOW}, received ${JSON.stringify(ci.path)}`,
       );
     }
     const ciAbsolute = resolveInside(root, CI_WORKFLOW, errors, "CI workflow");
@@ -1235,9 +1061,7 @@ export function validateValidationContract(
     } else if (ciAbsolute) {
       const content = readFileSync(ciAbsolute, "utf8");
       validateCiTriggers(content, CI_WORKFLOW, errors);
-      const matches = ciCommand
-        ? [...content.matchAll(exactRunLine(ciCommand))]
-        : [];
+      const matches = ciCommand ? [...content.matchAll(exactRunLine(ciCommand))] : [];
       if (matches.length !== 1) {
         errors.push(
           `CI workflow ${CI_WORKFLOW} must run canonical entrypoint ${JSON.stringify(
@@ -1266,9 +1090,7 @@ export function validateValidationContract(
 
   const contributing = contract.integrations?.contributing;
   if (contributing) {
-    const contributingCommands = Array.isArray(contributing.commands)
-      ? contributing.commands
-      : [];
+    const contributingCommands = Array.isArray(contributing.commands) ? contributing.commands : [];
     if (!Array.isArray(contributing.commands)) {
       errors.push("contributor-guide integration commands must be an array");
     }
@@ -1279,21 +1101,12 @@ export function validateValidationContract(
         )}`,
       );
     }
-    for (const command of [canonicalFastCommand, canonicalFullCommand].filter(
-      Boolean,
-    )) {
+    for (const command of [canonicalFastCommand, canonicalFullCommand].filter(Boolean)) {
       if (!contributingCommands.includes(command)) {
-        errors.push(
-          `contributor-guide integration must include canonical entrypoint ${command}`,
-        );
+        errors.push(`contributor-guide integration must include canonical entrypoint ${command}`);
       }
     }
-    const path = resolveInside(
-      root,
-      CONTRIBUTOR_GUIDE,
-      errors,
-      "contributor guide",
-    );
+    const path = resolveInside(root, CONTRIBUTOR_GUIDE, errors, "contributor guide");
     if (path && !existsSync(path)) {
       errors.push(`contributor guide is missing at ${CONTRIBUTOR_GUIDE}`);
     } else if (path) {
@@ -1311,21 +1124,10 @@ export function validateValidationContract(
   }
 
   if (canonicalFullCommand) {
-    const path = resolveInside(
-      root,
-      DEVELOPMENT_GUIDE,
-      errors,
-      "development guide",
-    );
+    const path = resolveInside(root, DEVELOPMENT_GUIDE, errors, "development guide");
     if (path && !existsSync(path)) {
       errors.push(`development guide is missing at ${DEVELOPMENT_GUIDE}`);
-    } else if (
-      path &&
-      !hasMarkdownCommandLine(
-        readFileSync(path, "utf8"),
-        canonicalFullCommand,
-      )
-    ) {
+    } else if (path && !hasMarkdownCommandLine(readFileSync(path, "utf8"), canonicalFullCommand)) {
       errors.push(
         `development guide ${DEVELOPMENT_GUIDE} must show canonical full entrypoint ${canonicalFullCommand} on a visible command line`,
       );
@@ -1339,8 +1141,7 @@ export function validateValidationContract(
       errors.push("adapted-skill integration paths must be an array");
     }
     if (
-      JSON.stringify([...skillPaths].sort()) !==
-      JSON.stringify([...ADAPTED_SKILL_PATHS].sort())
+      JSON.stringify([...skillPaths].sort()) !== JSON.stringify([...ADAPTED_SKILL_PATHS].sort())
     ) {
       errors.push(
         `adapted-skill integration paths must be ${JSON.stringify(
@@ -1388,9 +1189,6 @@ function runCli() {
   console.log("Validation contract passed.");
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli();
 }

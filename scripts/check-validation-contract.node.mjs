@@ -1,11 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -31,13 +25,10 @@ function validationFixture(t) {
 
   writeJson(root, "package.json", {
     scripts: {
-      "check:validation-contract":
-        "node scripts/check-validation-contract.mjs",
+      "check:validation-contract": "node scripts/check-validation-contract.mjs",
       "check:bundle": "node scripts/check-bundle-budget.mjs",
-      "check:frontend-boundaries":
-        "node scripts/check-frontend-boundaries.mjs",
-      "check:frontend-contracts":
-        "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
+      "check:frontend-boundaries": "node scripts/check-frontend-boundaries.mjs",
+      "check:frontend-contracts": "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
       "check:harness": "node scripts/check-agent-assets.mjs",
       "check:preview-coverage": "node scripts/check-preview-coverage.mjs",
       test: "vitest run",
@@ -80,22 +71,10 @@ function validationFixture(t) {
     ".github/workflows/ci.yml",
     "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
   );
-  write(
-    root,
-    "CONTRIBUTING.md",
-    "```sh\npnpm verify:fast\n\npnpm verify:full\n```\n",
-  );
-  write(
-    root,
-    "docs/DEVELOPMENT.md",
-    "The canonical CI gate is:\n\n```sh\npnpm verify:full\n```\n",
-  );
+  write(root, "CONTRIBUTING.md", "```sh\npnpm verify:fast\n\npnpm verify:full\n```\n");
+  write(root, "docs/DEVELOPMENT.md", "The canonical CI gate is:\n\n```sh\npnpm verify:full\n```\n");
   for (const name of ["pull", "push"]) {
-    write(
-      root,
-      `.agents/skills/symphony-${name}/SKILL.md`,
-      "Run `pnpm verify:full`.\n",
-    );
+    write(root, `.agents/skills/symphony-${name}/SKILL.md`, "Run `pnpm verify:full`.\n");
   }
   writeJson(root, "validation/contract.json", {
     version: 1,
@@ -181,13 +160,7 @@ function validationFixture(t) {
       },
       "rust-tests": {
         label: "Rust tests",
-        argv: [
-          "cargo",
-          "test",
-          "--workspace",
-          "--exclude",
-          "symphony-desktop",
-        ],
+        argv: ["cargo", "test", "--workspace", "--exclude", "symphony-desktop"],
       },
       "frontend-typecheck": {
         label: "TypeScript typecheck",
@@ -216,14 +189,7 @@ function validationFixture(t) {
       },
       "browser-install": {
         label: "browser install",
-        argv: [
-          "pnpm",
-          "exec",
-          "playwright",
-          "install",
-          "--with-deps",
-          "chromium",
-        ],
+        argv: ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
         installsBrowser: true,
       },
       "browser-e2e": {
@@ -243,10 +209,7 @@ function validationFixture(t) {
         commands: ["pnpm verify:fast", "pnpm verify:full"],
       },
       skills: {
-        paths: [
-          ".agents/skills/symphony-pull/SKILL.md",
-          ".agents/skills/symphony-push/SKILL.md",
-        ],
+        paths: [".agents/skills/symphony-pull/SKILL.md", ".agents/skills/symphony-push/SKILL.md"],
         command: "pnpm verify:full",
       },
     },
@@ -261,9 +224,7 @@ test("accepts a complete canonical validation contract", (t) => {
 
 test("pins every command required by the advertised fast profile", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.profiles.fast = ["validation-contract"];
   writeJson(root, "validation/contract.json", contract);
 
@@ -281,9 +242,7 @@ test("pins every command required by the advertised fast profile", (t) => {
   ]) {
     assert.match(
       errors,
-      new RegExp(
-        `fast validation profile must include required command ${commandId}`,
-      ),
+      new RegExp(`fast validation profile must include required command ${commandId}`),
     );
   }
 });
@@ -300,9 +259,7 @@ test("requires the tested canonical validation runner entrypoint", (t) => {
 
 test("validation runner traverses profiles and propagates failures", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   const invocations = [];
   const successStatus = runValidationProfile({
     root,
@@ -382,11 +339,8 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
 
 test("rejects lifecycle hooks around every required validation script", (t) => {
   const root = validationFixture(t);
-  const packageJson = JSON.parse(
-    readFileSync(join(root, "package.json"), "utf8"),
-  );
-  packageJson.scripts["preverify:full"] =
-    "node scripts/rewrite-runner.mjs";
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["preverify:full"] = "node scripts/rewrite-runner.mjs";
   packageJson.scripts.posttest = "node scripts/restore-fixtures.mjs";
   writeJson(root, "package.json", packageJson);
 
@@ -406,9 +360,7 @@ test("reports missing package scripts and command ids with owners", (t) => {
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   delete packageJson.scripts["check:harness"];
   writeJson(root, "package.json", packageJson);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.profiles.fast.push("not-defined");
   writeJson(root, "validation/contract.json", contract);
 
@@ -417,10 +369,7 @@ test("reports missing package scripts and command ids with owners", (t) => {
     errors,
     /validation command agent-assets references missing package script check:harness/,
   );
-  assert.match(
-    errors,
-    /validation profile fast references missing command not-defined/,
-  );
+  assert.match(errors, /validation profile fast references missing command not-defined/);
 });
 
 test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
@@ -430,17 +379,10 @@ test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
     ".github/workflows/ci.yml",
     "jobs:\n  validate:\n    steps:\n      - run: pnpm test:e2e\n",
   );
-  write(
-    root,
-    ".agents/skills/symphony-pull/SKILL.md",
-    "Run a copied command list.\n",
-  );
+  write(root, ".agents/skills/symphony-pull/SKILL.md", "Run a copied command list.\n");
 
   const errors = validateValidationContract(root).join("\n");
-  assert.match(
-    errors,
-    /must run canonical entrypoint "pnpm verify:full" exactly once; found 0/,
-  );
+  assert.match(errors, /must run canonical entrypoint "pnpm verify:full" exactly once; found 0/);
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
@@ -502,26 +444,14 @@ jobs:
     errors,
     /canonical entrypoint step must use the default execution environment from the repository root; remove env/,
   );
-  assert.match(
-    errors,
-    /canonical entrypoint job must not override run defaults; remove defaults/,
-  );
-  assert.match(
-    errors,
-    /canonical entrypoint job must not depend on other jobs; remove needs/,
-  );
+  assert.match(errors, /canonical entrypoint job must not override run defaults; remove defaults/);
+  assert.match(errors, /canonical entrypoint job must not depend on other jobs; remove needs/);
   assert.match(
     errors,
     /canonical entrypoint job must use the default execution environment; remove env/,
   );
-  assert.match(
-    errors,
-    /must not override workflow run defaults/,
-  );
-  assert.match(
-    errors,
-    /must not inject a workflow execution environment/,
-  );
+  assert.match(errors, /must not override workflow run defaults/);
+  assert.match(errors, /must not inject a workflow execution environment/);
 });
 
 test("requires the canonical CI job to remain in a unique jobs graph", (t) => {
@@ -608,21 +538,13 @@ jobs:
   );
 
   const errors = validateValidationContract(root).join("\n");
-  assert.match(
-    errors,
-    /must trigger every pull_request without filters/,
-  );
-  assert.match(
-    errors,
-    /must trigger pushes to main with branches: \[main\] and no filters/,
-  );
+  assert.match(errors, /must trigger every pull_request without filters/);
+  assert.match(errors, /must trigger pushes to main with branches: \[main\] and no filters/);
 });
 
 test("pins validation integrations to the canonical repository files", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.integrations.ci.path = "fixtures/ci.yml";
   contract.integrations.contributing.path = "fixtures/CONTRIBUTING.md";
   contract.integrations.skills.paths = ["fixtures/skill.md"];
@@ -632,11 +554,7 @@ test("pins validation integrations to the canonical repository files", (t) => {
     "fixtures/ci.yml",
     "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
   );
-  write(
-    root,
-    "fixtures/CONTRIBUTING.md",
-    "pnpm verify:fast\npnpm verify:full\n",
-  );
+  write(root, "fixtures/CONTRIBUTING.md", "pnpm verify:fast\npnpm verify:full\n");
   write(root, "fixtures/skill.md", "Run pnpm verify:full.\n");
   write(
     root,
@@ -665,31 +583,13 @@ test("pins validation integrations to the canonical repository files", (t) => {
 
 test("requires visible contributor and adapted-skill gate references", (t) => {
   const root = validationFixture(t);
-  write(
-    root,
-    "CONTRIBUTING.md",
-    "<!--\npnpm verify:fast\npnpm verify:full\n-->\n",
-  );
-  write(
-    root,
-    ".agents/skills/symphony-pull/SKILL.md",
-    "<!-- Run pnpm verify:full. -->\n",
-  );
-  write(
-    root,
-    "docs/DEVELOPMENT.md",
-    "<!--\npnpm verify:full\n-->\n",
-  );
+  write(root, "CONTRIBUTING.md", "<!--\npnpm verify:fast\npnpm verify:full\n-->\n");
+  write(root, ".agents/skills/symphony-pull/SKILL.md", "<!-- Run pnpm verify:full. -->\n");
+  write(root, "docs/DEVELOPMENT.md", "<!--\npnpm verify:full\n-->\n");
 
   const errors = validateValidationContract(root).join("\n");
-  assert.match(
-    errors,
-    /CONTRIBUTING\.md must show pnpm verify:fast on a visible command line/,
-  );
-  assert.match(
-    errors,
-    /CONTRIBUTING\.md must show pnpm verify:full on a visible command line/,
-  );
+  assert.match(errors, /CONTRIBUTING\.md must show pnpm verify:fast on a visible command line/);
+  assert.match(errors, /CONTRIBUTING\.md must show pnpm verify:full on a visible command line/);
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
@@ -716,15 +616,12 @@ test("rejects validation scripts omitted from the canonical full profile", (t) =
 test("validates nested pnpm and Cargo validation scripts without executing them", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  packageJson.scripts["check:static"] =
-    "pnpm check:harness && pnpm run test:runtime-contracts";
+  packageJson.scripts["check:static"] = "pnpm check:harness && pnpm run test:runtime-contracts";
   packageJson.scripts["test:runtime-contracts"] =
     "cargo test -p symphony-worker runtime_contracts && cargo test -p symphony-storage transition_contracts";
   writeJson(root, "package.json", packageJson);
 
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.commands.static = {
     label: "static contracts",
     argv: ["pnpm", "check:static"],
@@ -748,9 +645,7 @@ test("accepts quoted and escaped hashes in validation script arguments", (t) => 
     'node scripts/fixture.node.mjs "value # literal" value\\#literal';
   writeJson(root, "package.json", packageJson);
 
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.commands["hash-args"] = {
     label: "hash arguments",
     argv: ["pnpm", "test:hash-args"],
@@ -769,15 +664,11 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
   packageJson.scripts["test:unsafe"] = "node scripts/fixture.node.mjs | tee result.txt";
   packageJson.scripts["test:backgrounded"] =
     "node scripts/fixture.node.mjs & node scripts/fixture.node.mjs";
-  packageJson.scripts["test:commented"] =
-    "node scripts/fixture.node.mjs # && vitest run";
-  packageJson.scripts["test:line-break"] =
-    "vitest run\nnode scripts/fixture.node.mjs";
+  packageJson.scripts["test:commented"] = "node scripts/fixture.node.mjs # && vitest run";
+  packageJson.scripts["test:line-break"] = "vitest run\nnode scripts/fixture.node.mjs";
   writeJson(root, "package.json", packageJson);
 
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.commands.cycle = {
     label: "cycle",
     argv: ["pnpm", "check:cycle"],
@@ -803,37 +694,23 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
     argv: ["pnpm", "test:line-break"],
     packageScript: "test:line-break",
   };
-  contract.profiles.full.push(
-    "cycle",
-    "unsafe",
-    "backgrounded",
-    "commented",
-    "line-break",
-  );
+  contract.profiles.full.push("cycle", "unsafe", "backgrounded", "commented", "line-break");
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
   assert.match(errors, /package scripts contain a cycle: check:cycle -> check:cycle/);
   assert.match(errors, /package script test:unsafe uses unsupported shell syntax/);
-  assert.match(
-    errors,
-    /package script test:backgrounded uses unsupported shell syntax near "&"/,
-  );
+  assert.match(errors, /package script test:backgrounded uses unsupported shell syntax near "&"/);
   assert.match(
     errors,
     /package script test:commented uses unsupported shell comment syntax near "#"/,
   );
-  assert.match(
-    errors,
-    /package script test:line-break uses unsupported shell line break/,
-  );
+  assert.match(errors, /package script test:line-break uses unsupported shell line break/);
 });
 
 test("pins required full-gate commands independently of the command inventory", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   for (const commandId of [
     "validation-contract",
     "agent-assets",
@@ -852,9 +729,7 @@ test("pins required full-gate commands independently of the command inventory", 
     "browser-e2e",
   ]) {
     delete contract.commands[commandId];
-    contract.profiles.full = contract.profiles.full.filter(
-      (candidate) => candidate !== commandId,
-    );
+    contract.profiles.full = contract.profiles.full.filter((candidate) => candidate !== commandId);
   }
   writeJson(root, "validation/contract.json", contract);
 
@@ -885,31 +760,20 @@ test("pins required full-gate commands independently of the command inventory", 
 
 test("pins the semantics of required full-gate commands", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.commands["rust-clippy"].argv = ["cargo", "clippy"];
   contract.commands["frontend-build"].packageScript = "typecheck";
   contract.commands["frontend-build"].argv = ["pnpm", "typecheck"];
   contract.commands["frontend-tests"].argv = ["pnpm", "typecheck"];
   contract.commands["bundle-budget"].packageScript = "test:bundle";
   contract.commands["bundle-tests"].argv = ["pnpm", "check:bundle"];
-  contract.commands["browser-install"].argv = [
-    "pnpm",
-    "exec",
-    "playwright",
-    "install",
-    "chromium",
-  ];
+  contract.commands["browser-install"].argv = ["pnpm", "exec", "playwright", "install", "chromium"];
   contract.commands["browser-install"].installsBrowser = false;
   contract.commands["browser-e2e"].requiresBrowser = false;
   writeJson(root, "validation/contract.json", contract);
 
   const errors = validateValidationContract(root).join("\n");
-  assert.match(
-    errors,
-    /required command rust-clippy argv must be cargo clippy --workspace/,
-  );
+  assert.match(errors, /required command rust-clippy argv must be cargo clippy --workspace/);
   assert.match(
     errors,
     /required command frontend-build argv must be pnpm build, received pnpm typecheck/,
@@ -934,21 +798,13 @@ test("pins the semantics of required full-gate commands", (t) => {
     errors,
     /required command browser-install argv must be pnpm exec playwright install --with-deps chromium/,
   );
-  assert.match(
-    errors,
-    /required command browser-install must declare installsBrowser: true/,
-  );
-  assert.match(
-    errors,
-    /required command browser-e2e must declare requiresBrowser: true/,
-  );
+  assert.match(errors, /required command browser-install must declare installsBrowser: true/);
+  assert.match(errors, /required command browser-e2e must declare requiresBrowser: true/);
 });
 
 test("binds canonical entrypoints to matching profiles", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.entrypoints.full.profile = "fast";
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   packageJson.scripts["verify:full"] = "node scripts/run-validation.mjs fast";
@@ -963,19 +819,13 @@ test("binds canonical entrypoints to matching profiles", (t) => {
 
 test("pins the canonical validation entrypoint script names", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.entrypoints.fast.packageScript = "verify:quick";
   contract.entrypoints.full.packageScript = "verify:ci";
   contract.integrations.ci.command = "pnpm verify:ci";
-  const packageJson = JSON.parse(
-    readFileSync(join(root, "package.json"), "utf8"),
-  );
-  packageJson.scripts["verify:quick"] =
-    "node scripts/run-validation.mjs fast";
-  packageJson.scripts["verify:ci"] =
-    "node scripts/run-validation.mjs full";
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["verify:quick"] = "node scripts/run-validation.mjs fast";
+  packageJson.scripts["verify:ci"] = "node scripts/run-validation.mjs full";
   writeJson(root, "validation/contract.json", contract);
   writeJson(root, "package.json", packageJson);
 
@@ -988,17 +838,12 @@ test("pins the canonical validation entrypoint script names", (t) => {
     errors,
     /entrypoint full must be \{"packageScript":"verify:full","profile":"full"\}, received \{"packageScript":"verify:ci","profile":"full"\}/,
   );
-  assert.match(
-    errors,
-    /CI integration command must be canonical full entrypoint pnpm verify:full/,
-  );
+  assert.match(errors, /CI integration command must be canonical full entrypoint pnpm verify:full/);
 });
 
 test("requires browser installation before browser validation", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   contract.profiles.full = contract.profiles.full.filter(
     (command) => command !== "browser-install",
   );
@@ -1013,12 +858,8 @@ test("requires browser installation before browser validation", (t) => {
 
 test("requires production build before bundle inspection", (t) => {
   const root = validationFixture(t);
-  const contract = JSON.parse(
-    readFileSync(join(root, "validation/contract.json"), "utf8"),
-  );
-  contract.profiles.full = contract.profiles.full.filter(
-    (command) => command !== "frontend-build",
-  );
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
+  contract.profiles.full = contract.profiles.full.filter((command) => command !== "frontend-build");
   contract.profiles.full.splice(
     contract.profiles.full.indexOf("bundle-budget") + 1,
     0,
