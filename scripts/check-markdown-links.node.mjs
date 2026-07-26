@@ -12,6 +12,13 @@ const fixtureRoot = path.join(
   "markdown-links",
 );
 
+async function checkSource(context, prefix, source) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await fs.writeFile(path.join(root, "root.md"), source);
+  return checkMarkdownFiles(root, ["root.md"]);
+}
+
 test("GitHub-compatible headings de-duplicate", () => {
   assert.equal(githubHeadingSlug("Hello, _World_!"), "hello-world");
 });
@@ -50,6 +57,36 @@ test("multi-line Setext headings slug the complete paragraph", async (context) =
   assert.deepEqual(problems, []);
 });
 
+test("headings inside block quotes contribute GitHub anchors", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-quoted-heading-",
+    [
+      "> # Quoted ATX",
+      ">",
+      "> Quoted",
+      "> Setext",
+      "> ---",
+      "",
+      "[ATX](#quoted-atx)",
+      "[Setext](#quoted-setext)",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("heading code spans preserve underscores in GitHub anchors", async (context) => {
+  assert.equal(githubHeadingSlug("`foo_bar`"), "foo_bar");
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-code-heading-",
+    ["# `foo_bar`", "", "[Jump](#foo_bar)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
 test("reference definitions may wrap before their destination", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-wrapped-ref-"));
   context.after(() => fs.rm(root, { force: true, recursive: true }));
@@ -62,6 +99,46 @@ test("reference definitions may wrap before their destination", async (context) 
   ]);
 
   const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("indented code blocks do not contribute link targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-indented-code-",
+    "    [example](missing.md)\n",
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("inline links require an adjacent opening parenthesis", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-spaced-link-",
+    "[not a link] (missing.md)\n",
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("unterminated inline links do not contribute targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-unterminated-link-",
+    "[not a link](missing.md\n",
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("escaped reference openers remain literal text", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-escaped-reference-",
+    "\\[label][unknown]\n",
+  );
+
   assert.deepEqual(problems, []);
 });
 
@@ -110,13 +187,18 @@ test("HTML metadata attributes are not treated as href or src targets", async (c
   await fs.writeFile(
     path.join(root, "root.md"),
     [
-      '<img data-src="placeholder.png" data-href="metadata.md" xlink:href="sprite.svg">',
+      "Document src=prose.png without creating an HTML image.",
+      '<img data-src=placeholder.png data-href="metadata.md" xlink:href="sprite.svg">',
       '<img src="missing.png">',
+      "<img src=unquoted.png>",
     ].join("\n"),
   );
 
   const problems = await checkMarkdownFiles(root, ["root.md"]);
-  assert.deepEqual(problems, ['root.md:2:6: missing local target "missing.png"']);
+  assert.deepEqual(problems, [
+    'root.md:3:6: missing local target "missing.png"',
+    'root.md:4:6: missing local target "unquoted.png"',
+  ]);
 });
 
 test("footnote definitions are not treated as link definitions", async (context) => {

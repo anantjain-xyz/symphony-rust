@@ -4,7 +4,6 @@ import { JSDOM } from "jsdom";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
-const HTML_ATTRIBUTE = /(?<!\S)(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const REFERENCE_DEFINITION =
   /^\s{0,3}\[(?!\^)([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
 const REFERENCE_DEFINITION_START = /^\s{0,3}\[(?!\^)([^\]]+)\]:[ \t]*$/;
@@ -17,14 +16,41 @@ function maskRange(value, start, end) {
   return `${value.slice(0, start)}${" ".repeat(end - start)}${value.slice(end)}`;
 }
 
+function blockQuoteLine(line) {
+  let content = line;
+  let depth = 0;
+  while (true) {
+    const prefix = content.match(/^ {0,3}>[ \t]?/);
+    if (!prefix) break;
+    content = content.slice(prefix[0].length);
+    depth += 1;
+  }
+  return { content, depth };
+}
+
+function lineKeepsParagraphOpen(content) {
+  return (
+    !/^\s{0,3}#{1,6}(?:\s|$)/.test(content) &&
+    !SETEXT_UNDERLINE.test(content) &&
+    !REFERENCE_DEFINITION.test(content) &&
+    !REFERENCE_DEFINITION_START.test(content)
+  );
+}
+
 function maskIgnoredMarkdown(source) {
   const lines = source.split("\n");
   let fence = null;
+  let indentedCode = false;
+  let paragraphOpen = false;
+  let paragraphQuoteDepth = 0;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const blockQuote = blockQuoteLine(line);
+    const content = blockQuote.content;
+    const marker = content.match(/^\s{0,3}(`{3,}|~{3,})/);
     if (fence) {
       lines[index] = " ".repeat(line.length);
+      paragraphOpen = false;
       if (marker && marker[1][0] === fence.character && marker[1].length >= fence.length) {
         fence = null;
       }
@@ -33,8 +59,22 @@ function maskIgnoredMarkdown(source) {
     if (marker) {
       fence = { character: marker[1][0], length: marker[1].length };
       lines[index] = " ".repeat(line.length);
+      indentedCode = false;
+      paragraphOpen = false;
       continue;
     }
+    if (!/\S/.test(content)) {
+      paragraphOpen = false;
+      continue;
+    }
+    const continuesParagraph = paragraphOpen && paragraphQuoteDepth === blockQuote.depth;
+    if (/^(?: {4}| {0,3}\t)/.test(content) && (indentedCode || !continuesParagraph)) {
+      lines[index] = " ".repeat(line.length);
+      indentedCode = true;
+      paragraphOpen = false;
+      continue;
+    }
+    indentedCode = false;
 
     let masked = line;
     for (let cursor = 0; cursor < masked.length; ) {
@@ -54,11 +94,38 @@ function maskIgnoredMarkdown(source) {
       cursor = closing + delimiter.length;
     }
     lines[index] = masked;
+    paragraphOpen = lineKeepsParagraphOpen(content);
+    paragraphQuoteDepth = blockQuote.depth;
   }
   return lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
 }
 
 const entityDecoder = new JSDOM("").window.document.createElement("textarea");
+
+function htmlAttributes(source) {
+  const dom = new JSDOM(source, { includeNodeLocations: true });
+  try {
+    const attributes = [];
+    for (const element of dom.window.document.querySelectorAll("*")) {
+      const location = dom.nodeLocation(element);
+      if (!location?.attrs) continue;
+      for (const name of ["href", "id", "name", "src"]) {
+        const attribute = location.attrs[name];
+        if (!attribute || !element.hasAttribute(name)) continue;
+        attributes.push({
+          column: attribute.startCol,
+          line: attribute.startLine,
+          name,
+          tag: element.localName,
+          value: element.getAttribute(name) ?? "",
+        });
+      }
+    }
+    return attributes;
+  } finally {
+    dom.window.close();
+  }
+}
 
 function decodeHtmlEntities(value) {
   return value.replace(HTML_ENTITY, (entity) => {
@@ -73,13 +140,63 @@ function unescapeMarkdown(value) {
   return decodeHtmlEntities(value).replace(/\\([\\!"#$%&'()*+,./:;<=>?@[\]^_`{|}~-])/g, "$1");
 }
 
+function isEscaped(value, index) {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function referenceLabels(value) {
+  return value.replace(REFERENCE_USE, (match, image, label, _reference, offset, source) =>
+    isEscaped(source, offset + image.length) ? match : label,
+  );
+}
+
+function inlineHeadingText(value) {
+  let result = "";
+  for (let cursor = 0; cursor < value.length; ) {
+    if (value[cursor] !== "`") {
+      if (!/[*_~]/.test(value[cursor])) result += value[cursor];
+      cursor += 1;
+      continue;
+    }
+
+    let delimiterEnd = cursor;
+    while (value[delimiterEnd] === "`") delimiterEnd += 1;
+    const delimiterLength = delimiterEnd - cursor;
+    let closing = delimiterEnd;
+    while (closing < value.length) {
+      if (value[closing] !== "`") {
+        closing += 1;
+        continue;
+      }
+      let closingEnd = closing;
+      while (value[closingEnd] === "`") closingEnd += 1;
+      if (closingEnd - closing === delimiterLength) break;
+      closing = closingEnd;
+    }
+    if (closing >= value.length) {
+      cursor = delimiterEnd;
+      continue;
+    }
+
+    let code = value.slice(delimiterEnd, closing).replace(/\s+/g, " ");
+    if (/^ .* $/.test(code) && /\S/.test(code)) code = code.slice(1, -1);
+    result += code;
+    cursor = closing + delimiterLength;
+  }
+  return result;
+}
+
 function headingText(value) {
-  return value
-    .replace(REFERENCE_USE, (_match, _image, label) => label)
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/<[^>]*>/g, "")
-    .replace(/[`*_~]/g, "");
+  return inlineHeadingText(
+    referenceLabels(value)
+      .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/<[^>]*>/g, ""),
+  );
 }
 
 function startsMarkdownBlock(line) {
@@ -104,6 +221,8 @@ function markdownAnchors(source) {
   const masked = maskIgnoredMarkdown(source);
   const originalLines = source.split("\n");
   const maskedLines = masked.split("\n");
+  const headingLines = maskedLines.map(blockQuoteLine);
+  const originalHeadingLines = originalLines.map(blockQuoteLine);
   const anchors = new Set();
 
   const addHeading = (value) => {
@@ -117,31 +236,39 @@ function markdownAnchors(source) {
   };
 
   for (let index = 0; index < maskedLines.length; index += 1) {
-    const line = maskedLines[index];
+    const line = headingLines[index].content;
     const atx = line.match(/^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/);
     if (atx) {
-      const originalAtx = originalLines[index].match(/^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/);
+      const originalAtx = originalHeadingLines[index].content.match(
+        /^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$/,
+      );
       addHeading(originalAtx?.[1] ?? atx[1]);
     } else if (
-      index + 1 < maskedLines.length &&
+      index + 1 < headingLines.length &&
       /\S/.test(line) &&
-      SETEXT_UNDERLINE.test(maskedLines[index + 1])
+      headingLines[index + 1].depth === headingLines[index].depth &&
+      SETEXT_UNDERLINE.test(headingLines[index + 1].content)
     ) {
       let firstLine = index;
       while (
         firstLine > 0 &&
-        /\S/.test(maskedLines[firstLine - 1]) &&
-        !startsMarkdownBlock(maskedLines[firstLine - 1])
+        headingLines[firstLine - 1].depth === headingLines[index].depth &&
+        /\S/.test(headingLines[firstLine - 1].content) &&
+        !startsMarkdownBlock(headingLines[firstLine - 1].content)
       ) {
         firstLine -= 1;
       }
-      addHeading(originalLines.slice(firstLine, index + 1).join("\n"));
+      addHeading(
+        originalHeadingLines
+          .slice(firstLine, index + 1)
+          .map((entry) => entry.content)
+          .join("\n"),
+      );
     }
-
-    for (const match of line.matchAll(
-      /<a\b[^>]*\b(?:id|name)\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>/gi,
-    )) {
-      anchors.add(unescapeMarkdown(match[1] ?? match[2]));
+  }
+  for (const attribute of htmlAttributes(masked)) {
+    if (attribute.tag === "a" && ["id", "name"].includes(attribute.name)) {
+      anchors.add(unescapeMarkdown(attribute.value));
     }
   }
   return anchors;
@@ -162,48 +289,97 @@ function findClosingBracket(line, start) {
   return -1;
 }
 
+function closingParenthesis(line, cursor) {
+  while (/[ \t]/.test(line[cursor] ?? "")) cursor += 1;
+  if (line[cursor] === ")") return cursor;
+
+  const opener = line[cursor];
+  const closer = opener === "(" ? ")" : opener;
+  if (!['"', "'", "("].includes(opener)) return -1;
+  cursor += 1;
+  while (cursor < line.length) {
+    if (line[cursor] === "\\") {
+      cursor += 2;
+    } else if (line[cursor] === closer) {
+      cursor += 1;
+      while (/[ \t]/.test(line[cursor] ?? "")) cursor += 1;
+      return line[cursor] === ")" ? cursor : -1;
+    } else {
+      cursor += 1;
+    }
+  }
+  return -1;
+}
+
+function inlineDestination(line, open) {
+  let cursor = open + 1;
+  while (/[ \t]/.test(line[cursor] ?? "")) cursor += 1;
+  let targetStart = cursor;
+  let targetEnd = cursor;
+
+  if (line[cursor] === "<") {
+    targetStart += 1;
+    cursor += 1;
+    while (cursor < line.length && line[cursor] !== ">") {
+      if (line[cursor] === "\\") cursor += 1;
+      cursor += 1;
+    }
+    if (line[cursor] !== ">") return null;
+    targetEnd = cursor;
+    cursor += 1;
+  } else {
+    let depth = 0;
+    while (cursor < line.length) {
+      const character = line[cursor];
+      if (character === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        if (depth === 0) {
+          return {
+            closing: cursor,
+            target: line.slice(targetStart, cursor),
+          };
+        }
+        depth -= 1;
+      } else if (/[ \t]/.test(character) && depth === 0) {
+        break;
+      }
+      cursor += 1;
+    }
+    targetEnd = cursor;
+  }
+
+  const closing = closingParenthesis(line, cursor);
+  if (closing === -1) return null;
+  return {
+    closing,
+    target: line.slice(targetStart, targetEnd),
+  };
+}
+
 function inlineLinks(line) {
   const links = [];
   for (let cursor = 0; cursor < line.length; cursor += 1) {
     const labelStart = line[cursor] === "!" && line[cursor + 1] === "[" ? cursor + 1 : cursor;
-    if (line[labelStart] !== "[" || line[labelStart - 1] === "\\") continue;
+    if (line[labelStart] !== "[" || isEscaped(line, labelStart)) continue;
     const labelEnd = findClosingBracket(line, labelStart + 1);
     if (labelEnd === -1) continue;
-    let open = labelEnd + 1;
-    while (/\s/.test(line[open] ?? "")) open += 1;
+    const open = labelEnd + 1;
     if (line[open] !== "(") continue;
-
-    let targetStart = open + 1;
-    while (/\s/.test(line[targetStart] ?? "")) targetStart += 1;
-    let targetEnd = targetStart;
-    if (line[targetStart] === "<") {
-      targetStart += 1;
-      targetEnd = line.indexOf(">", targetStart);
-      if (targetEnd === -1) continue;
-    } else {
-      let depth = 0;
-      for (; targetEnd < line.length; targetEnd += 1) {
-        const character = line[targetEnd];
-        if (character === "\\") {
-          targetEnd += 1;
-        } else if (character === "(") {
-          depth += 1;
-        } else if (character === ")") {
-          if (depth === 0) break;
-          depth -= 1;
-        } else if (/\s/.test(character) && depth === 0) {
-          break;
-        }
-      }
-    }
+    const destination = inlineDestination(line, open);
+    if (!destination) continue;
 
     links.push({
       column: cursor + 1,
-      end: targetEnd,
+      end: destination.closing + 1,
       start: cursor,
-      target: line.slice(targetStart, targetEnd),
+      target: destination.target,
     });
-    cursor = Math.max(cursor, targetEnd);
+    cursor = destination.closing;
   }
   return links;
 }
@@ -213,7 +389,8 @@ function normalizeReference(value) {
 }
 
 function extractTargets(source) {
-  const maskedLines = maskIgnoredMarkdown(source).split("\n");
+  const masked = maskIgnoredMarkdown(source);
+  const maskedLines = masked.split("\n");
   const targets = [];
   const definitions = new Map();
 
@@ -248,6 +425,8 @@ function extractTargets(source) {
       references = maskRange(references, link.start, link.end);
     }
     for (const match of references.matchAll(REFERENCE_USE)) {
+      const opener = (match.index ?? 0) + match[1].length;
+      if (isEscaped(references, opener)) continue;
       const label = normalizeReference(match[3] || match[2]);
       targets.push({
         column: (match.index ?? 0) + 1,
@@ -255,13 +434,14 @@ function extractTargets(source) {
         reference: label,
       });
     }
-    for (const match of line.matchAll(HTML_ATTRIBUTE)) {
-      targets.push({
-        column: (match.index ?? 0) + 1,
-        line: index + 1,
-        target: match[1] ?? match[2],
-      });
-    }
+  }
+  for (const attribute of htmlAttributes(masked)) {
+    if (!["href", "src"].includes(attribute.name)) continue;
+    targets.push({
+      column: attribute.column,
+      line: attribute.line,
+      target: attribute.value,
+    });
   }
 
   return targets.map((target) => {
