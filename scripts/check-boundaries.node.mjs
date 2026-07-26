@@ -552,6 +552,46 @@ test("expands simple macro metavariables before checking variants", async (t) =>
   ]);
 });
 
+test("expands multiple simple macro captures before checking variants", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "enum LocalError { Sqlx }",
+      "macro_rules! make { ($error:ty, $value:expr) => { <$error>::Sqlx($value) } }",
+      "fn wrong() { let _ = make!(symphony_storage::StorageError, wrap(problem, context)); }",
+      "fn allowed() { let _ = make!(LocalError, problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("preserves module scopes through local module aliases", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub use symphony_storage::StorageError; }",
+      "mod local { pub enum StorageError { Sqlx(Problem) } }",
+      "use crate::errors as errs;",
+      "use crate::local as local_errors;",
+      "fn wrong() { let _ = errs::StorageError::Sqlx(problem); }",
+      "fn allowed() { let _ = local_errors::StorageError::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("resolves simple and chained Rust type aliases", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
