@@ -853,6 +853,39 @@ test("binds canonical entrypoints to matching profiles", (t) => {
   );
 });
 
+test("pins the canonical validation entrypoint script names", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.entrypoints.fast.packageScript = "verify:quick";
+  contract.entrypoints.full.packageScript = "verify:ci";
+  contract.integrations.ci.command = "pnpm verify:ci";
+  const packageJson = JSON.parse(
+    readFileSync(join(root, "package.json"), "utf8"),
+  );
+  packageJson.scripts["verify:quick"] =
+    "node scripts/run-validation.mjs fast";
+  packageJson.scripts["verify:ci"] =
+    "node scripts/run-validation.mjs full";
+  writeJson(root, "validation/contract.json", contract);
+  writeJson(root, "package.json", packageJson);
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /entrypoint fast must be \{"packageScript":"verify:fast","profile":"fast"\}, received \{"packageScript":"verify:quick","profile":"fast"\}/,
+  );
+  assert.match(
+    errors,
+    /entrypoint full must be \{"packageScript":"verify:full","profile":"full"\}, received \{"packageScript":"verify:ci","profile":"full"\}/,
+  );
+  assert.match(
+    errors,
+    /CI integration command must be canonical full entrypoint pnpm verify:full/,
+  );
+});
+
 test("requires browser installation before browser validation", (t) => {
   const root = validationFixture(t);
   const contract = JSON.parse(

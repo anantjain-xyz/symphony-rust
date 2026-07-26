@@ -12,6 +12,16 @@ const ADAPTED_SKILL_PATHS = [
   ".agents/skills/symphony-pull/SKILL.md",
   ".agents/skills/symphony-push/SKILL.md",
 ];
+const REQUIRED_ENTRYPOINTS = {
+  fast: {
+    packageScript: "verify:fast",
+    profile: "fast",
+  },
+  full: {
+    packageScript: "verify:full",
+    profile: "full",
+  },
+};
 export const CANONICAL_RUNNER_SOURCE = `import { runValidationProfile } from "./check-validation-contract.mjs";
 
 process.exitCode = runValidationProfile({ profileName: process.argv[2] });
@@ -156,6 +166,8 @@ const REQUIRED_FULL_COMMANDS = new Map([
   ],
 ]);
 const REQUIRED_PACKAGE_SCRIPTS = new Map([
+  ["verify:fast", `node ${RUNNER_SCRIPT} fast`],
+  ["verify:full", `node ${RUNNER_SCRIPT} full`],
   [
     "check:validation-contract",
     "node scripts/check-validation-contract.mjs",
@@ -1103,12 +1115,23 @@ export function validateValidationContract(
       errors.push(`validation contract is missing ${required} entrypoint`);
     }
   }
-  const canonicalFastCommand = contract.entrypoints?.fast?.packageScript
-    ? `pnpm ${contract.entrypoints.fast.packageScript}`
-    : null;
-  const canonicalFullCommand = contract.entrypoints?.full?.packageScript
-    ? `pnpm ${contract.entrypoints.full.packageScript}`
-    : null;
+  for (const [entrypointName, expected] of Object.entries(
+    REQUIRED_ENTRYPOINTS,
+  )) {
+    const actual = contract.entrypoints?.[entrypointName];
+    if (
+      actual?.packageScript !== expected.packageScript ||
+      actual?.profile !== expected.profile
+    ) {
+      errors.push(
+        `entrypoint ${entrypointName} must be ${JSON.stringify(
+          expected,
+        )}, received ${JSON.stringify(actual)}`,
+      );
+    }
+  }
+  const canonicalFastCommand = "pnpm verify:fast";
+  const canonicalFullCommand = "pnpm verify:full";
 
   const ci = contract.integrations?.ci;
   if (ci) {

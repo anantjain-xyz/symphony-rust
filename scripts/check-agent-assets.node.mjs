@@ -106,6 +106,7 @@ fn bundled_skills() {
 }
 `,
   );
+  write(root, "crates/fixture.rs", "const FIXTURE: &str = \"fixture\";\n");
   write(
     root,
     "src-tauri/assets/default-prompt.md",
@@ -118,7 +119,7 @@ fn bundled_skills() {
   );
   writeJson(root, "validation/agent-assets.json", {
     version: 1,
-    rustSourceRoots: ["src-tauri"],
+    rustSourceRoots: ["crates", "src-tauri"],
     skills: {
       ownerRoot: "src-tauri/assets/skills",
       inventoryFile: "src-tauri/src/lib.rs",
@@ -190,6 +191,50 @@ test("requires the canonical Claude discovery projection", (t) => {
   assert.match(
     errors,
     /skill discovery projection is missing at \.claude\/skills/,
+  );
+});
+
+test("pins the canonical agent asset source topology", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.rustSourceRoots = ["fixtures/rust"];
+  contract.skills.ownerRoot = "fixtures/owners";
+  contract.skills.inventoryFile = "fixtures/inventory.rs";
+  contract.skills.inventoryFunction = "fixture_inventory";
+  contract.skills.projectionRoot = "fixtures/projections";
+  contract.skills.projectionPrefix = "fixture-";
+  contract.defaultPrompt.path = "fixtures/default-prompt.md";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /rustSourceRoots must be \["crates","src-tauri"\], received \["fixtures\/rust"\]/,
+  );
+  assert.match(
+    errors,
+    /skill ownerRoot must be src-tauri\/assets\/skills, received "fixtures\/owners"/,
+  );
+  assert.match(
+    errors,
+    /skill inventoryFile must be src-tauri\/src\/lib\.rs, received "fixtures\/inventory\.rs"/,
+  );
+  assert.match(
+    errors,
+    /skill inventoryFunction must be bundled_skills, received "fixture_inventory"/,
+  );
+  assert.match(
+    errors,
+    /skill projectionRoot must be \.agents\/skills, received "fixtures\/projections"/,
+  );
+  assert.match(
+    errors,
+    /skill projectionPrefix must be symphony-, received "fixture-"/,
+  );
+  assert.match(
+    errors,
+    /defaultPrompt path must be src-tauri\/assets\/default-prompt\.md, received "fixtures\/default-prompt\.md"/,
   );
 });
 

@@ -13,6 +13,15 @@ const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
 const DEFAULT_PROMPT_RETURN_FUNCTION = "default_prompt_template";
 const FORBIDDEN_PORTABLE_OWNER_PATTERN = "\\bpnpm\\b";
+const REQUIRED_RUST_SOURCE_ROOTS = ["crates", "src-tauri"];
+const REQUIRED_SKILL_TOPOLOGY = {
+  ownerRoot: "src-tauri/assets/skills",
+  inventoryFile: "src-tauri/src/lib.rs",
+  inventoryFunction: "bundled_skills",
+  projectionRoot: ".agents/skills",
+  projectionPrefix: "symphony-",
+};
+const REQUIRED_DEFAULT_PROMPT_PATH = "src-tauri/assets/default-prompt.md";
 const REQUIRED_DISCOVERY_PROJECTION = {
   path: ".claude/skills",
   target: "../.agents/skills",
@@ -1187,18 +1196,31 @@ export function validateAgentAssets(
     );
   }
 
-  const skillConfig = contract.skills ?? {};
-  const prefix = skillConfig.projectionPrefix ?? "";
-  if (skillConfig.inventoryFunction !== "bundled_skills") {
+  if (
+    JSON.stringify(contract.rustSourceRoots) !==
+    JSON.stringify(REQUIRED_RUST_SOURCE_ROOTS)
+  ) {
     errors.push(
-      `skill inventoryFunction must be bundled_skills, received ${JSON.stringify(
-        skillConfig.inventoryFunction,
-      )}`,
+      `rustSourceRoots must be ${JSON.stringify(
+        REQUIRED_RUST_SOURCE_ROOTS,
+      )}, received ${JSON.stringify(contract.rustSourceRoots)}`,
     );
   }
+
+  const skillConfig = contract.skills ?? {};
+  for (const [field, expected] of Object.entries(REQUIRED_SKILL_TOPOLOGY)) {
+    if (skillConfig[field] !== expected) {
+      errors.push(
+        `skill ${field} must be ${expected}, received ${JSON.stringify(
+          skillConfig[field],
+        )}`,
+      );
+    }
+  }
+  const prefix = REQUIRED_SKILL_TOPOLOGY.projectionPrefix;
   const owners = discoverSkills(
     root,
-    skillConfig.ownerRoot,
+    REQUIRED_SKILL_TOPOLOGY.ownerRoot,
     (id) => `${prefix}${id}`,
     errors,
     "skill owner root",
@@ -1230,15 +1252,15 @@ export function validateAgentAssets(
   }
   const bundled = inventoryFromRust(
     root,
-    skillConfig.inventoryFile,
-    "bundled_skills",
+    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
+    REQUIRED_SKILL_TOPOLOGY.inventoryFunction,
     prefix,
     errors,
   );
   const inventory = bundled.ids;
   const projectionsByDirectory = discoverSkills(
     root,
-    skillConfig.projectionRoot,
+    REQUIRED_SKILL_TOPOLOGY.projectionRoot,
     (id) => id,
     errors,
     "skill projection root",
@@ -1406,7 +1428,7 @@ export function validateAgentAssets(
     ...bundled.references,
     ...checkRustIncludes(
       root,
-      contract.rustSourceRoots,
+      REQUIRED_RUST_SOURCE_ROOTS,
       bundled.verifiedDynamicIncludes,
       errors,
     ),
@@ -1431,6 +1453,13 @@ export function validateAgentAssets(
   const promptConfig = contract.defaultPrompt;
   let promptFile = null;
   if (promptConfig) {
+    if (promptConfig.path !== REQUIRED_DEFAULT_PROMPT_PATH) {
+      errors.push(
+        `defaultPrompt path must be ${REQUIRED_DEFAULT_PROMPT_PATH}, received ${JSON.stringify(
+          promptConfig.path,
+        )}`,
+      );
+    }
     if (promptConfig.returnFunction !== DEFAULT_PROMPT_RETURN_FUNCTION) {
       errors.push(
         `defaultPrompt returnFunction must be ${DEFAULT_PROMPT_RETURN_FUNCTION}, received ${JSON.stringify(
@@ -1452,17 +1481,17 @@ export function validateAgentAssets(
     }
     promptFile = resolveInside(
       root,
-      promptConfig.path,
+      REQUIRED_DEFAULT_PROMPT_PATH,
       errors,
       "default prompt",
     );
     if (promptFile && !existsSync(promptFile)) {
-      errors.push(`default prompt is missing at ${promptConfig.path}`);
+      errors.push(`default prompt is missing at ${REQUIRED_DEFAULT_PROMPT_PATH}`);
     }
     if (promptFile) {
       defaultPromptReturnReference(
         root,
-        contract.rustSourceRoots,
+        REQUIRED_RUST_SOURCE_ROOTS,
         promptFile,
         errors,
       );
@@ -1474,7 +1503,7 @@ export function validateAgentAssets(
           .map((reference) => relativePath(root, reference.source))
           .sort();
         errors.push(
-          `default prompt ${promptConfig.path} must have exactly one Rust include_str! owner; found ${promptIncludes.length}${
+          `default prompt ${REQUIRED_DEFAULT_PROMPT_PATH} must have exactly one Rust include_str! owner; found ${promptIncludes.length}${
             owners.length > 0 ? ` (${owners.join(", ")})` : ""
           }`,
         );
@@ -1501,7 +1530,7 @@ export function validateAgentAssets(
       const match = namespacePattern.exec(prompt);
       if (match) {
         errors.push(
-          `${promptConfig.path}:${lineNumber(
+          `${REQUIRED_DEFAULT_PROMPT_PATH}:${lineNumber(
             prompt,
             match.index,
           )} hard-codes MCP namespace ${match[0]}; describe the capability without assuming a server name`,
