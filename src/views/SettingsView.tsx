@@ -1,13 +1,6 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import {
-  startTransition,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import * as desktopCommands from "../desktop/commands";
+import { getDesktopVersion, openExternalUrl, revealDesktopPath } from "../desktop/shell";
 import type { InputHTMLAttributes } from "react";
 import type {
   AppSettings,
@@ -124,12 +117,24 @@ const PROMPT_VARIABLES: { name: string; description: string; example: string }[]
   { name: "issue.title", description: "Issue title", example: "Add user login" },
   { name: "issue.description", description: "Full issue body; empty if none", example: "" },
   { name: "issue.state", description: "Current Linear state", example: "Todo" },
-  { name: "issue.branch", description: "Git branch from Linear; may be empty", example: "symphony/SYM-42" },
+  {
+    name: "issue.branch",
+    description: "Git branch from Linear; may be empty",
+    example: "symphony/SYM-42",
+  },
   { name: "issue.labels", description: "Labels, comma-separated", example: "bug, ui" },
-  { name: "issue.blockers", description: "Blocking issues, one bullet per line", example: "- SYM-41" },
+  {
+    name: "issue.blockers",
+    description: "Blocking issues, one bullet per line",
+    example: "- SYM-41",
+  },
   { name: "issue.id", description: "Internal Linear ID", example: "" },
   { name: "repo.name", description: "Name of the repo this issue routed to", example: "widgets" },
-  { name: "repo.url", description: "Git URL of the routed repo", example: "git@github.com:org/repo.git" },
+  {
+    name: "repo.url",
+    description: "Git URL of the routed repo",
+    example: "git@github.com:org/repo.git",
+  },
 ];
 
 type SettingsFeatureProps = {
@@ -160,11 +165,7 @@ type SettingsFeatureProps = {
   savePending: boolean;
   onSavePendingChange: (pending: boolean) => void;
   onValidationResult: (result: ValidationResult) => void;
-  onDraftChange: (
-    next: AppSettings,
-    linearKey: string,
-    previous: AppSettings,
-  ) => void;
+  onDraftChange: (next: AppSettings, linearKey: string, previous: AppSettings) => void;
   onSave: (
     settings: AppSettings,
     linearKey: string,
@@ -173,15 +174,9 @@ type SettingsFeatureProps = {
   onTestConnection: (settings: AppSettings, linearKey: string) => void;
   onRemoveKey: () => Promise<boolean | undefined>;
   onResetPrompt: () => Promise<string>;
-  onRefreshSkills: (
-    repoUrl: string,
-    sessionEnv: AppSettings["session_env"],
-  ) => void;
+  onRefreshSkills: (repoUrl: string, sessionEnv: AppSettings["session_env"]) => void;
   onInstallSkills: (settings: AppSettings, repoUrl: string) => void;
-  onRefreshWorkflow: (
-    repoUrl: string,
-    sessionEnv: AppSettings["session_env"],
-  ) => void;
+  onRefreshWorkflow: (repoUrl: string, sessionEnv: AppSettings["session_env"]) => void;
   onTransferWorkflow: (repoUrl: string) => void;
 };
 
@@ -247,16 +242,12 @@ function SettingsFeature({
       return existing;
     }
     // Drop the previous instance only when Save does not own it.
-    if (
-      existing &&
-      !existing.isDisposed &&
-      saveControllerRef.current !== existing
-    ) {
+    if (existing && !existing.isDisposed && saveControllerRef.current !== existing) {
       existing.dispose();
     }
     const created = new SettingsValidationController(
       viewProps.runtimeAvailable,
-      (settings) => invoke<ValidationResult>("validate_settings", { settings }),
+      desktopCommands.validateSettings,
       (state) => {
         if (!mountedRef.current) return;
         // Keep pending updates low-priority, but flush terminal states immediately
@@ -278,10 +269,7 @@ function SettingsFeature({
   const scheduleValidation = useCallback(
     (revision: { id: number; settings: AppSettings }) => {
       const controller = ensureController();
-      if (
-        savePendingRef.current &&
-        saveControllerRef.current !== controller
-      ) {
+      if (savePendingRef.current && saveControllerRef.current !== controller) {
         deferredValidationRef.current = true;
         return;
       }
@@ -319,15 +307,7 @@ function SettingsFeature({
       scheduleValidation(revision);
       updateDirty(normalized, linearKeyRef.current);
     },
-    [
-      draft,
-      draftRef,
-      linearKeyRef,
-      onDraftChange,
-      revisionRef,
-      scheduleValidation,
-      updateDirty,
-    ],
+    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, scheduleValidation, updateDirty],
   );
 
   const setPromptDraft = useCallback(
@@ -342,15 +322,7 @@ function SettingsFeature({
       scheduleValidation({ id: ++revisionRef.current, settings: next });
       updateDirty(next, linearKeyRef.current);
     },
-    [
-      draft,
-      draftRef,
-      linearKeyRef,
-      onDraftChange,
-      revisionRef,
-      scheduleValidation,
-      updateDirty,
-    ],
+    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, scheduleValidation, updateDirty],
   );
 
   const setLinearKey = useCallback(
@@ -391,14 +363,7 @@ function SettingsFeature({
     deferredValidationRef.current = false;
     const current = draftRef.current ?? savedSettings;
     ensureController().schedule({ id: revisionRef.current, settings: current });
-  }, [
-    draftRef,
-    ensureController,
-    revisionRef,
-    saveControllerRef,
-    savePending,
-    savedSettings,
-  ]);
+  }, [draftRef, ensureController, revisionRef, saveControllerRef, savePending, savedSettings]);
 
   useEffect(() => {
     const next = reconcileSettingsDraft(savedSettings, draftRef.current ?? draft, dirtyRef.current);
@@ -409,10 +374,7 @@ function SettingsFeature({
 
   useEffect(() => {
     if (!focusInvalidSummary) return;
-    if (
-      validationState.status !== "invalid" &&
-      validationState.status !== "unavailable"
-    ) {
+    if (validationState.status !== "invalid" && validationState.status !== "unavailable") {
       return;
     }
     summaryRef.current?.focus();
@@ -523,9 +485,7 @@ function SettingsFeature({
         const current = draftRef.current ?? draft;
         onRefreshSkills(repoUrl, current.session_env);
       }}
-      onInstallSkills={(repoUrl) =>
-        onInstallSkills(draftRef.current ?? draft, repoUrl)
-      }
+      onInstallSkills={(repoUrl) => onInstallSkills(draftRef.current ?? draft, repoUrl)}
       onRefreshWorkflow={(repoUrl) => {
         const current = draftRef.current ?? draft;
         onRefreshWorkflow(repoUrl, current.session_env);
@@ -612,7 +572,7 @@ function SettingsView({
   useEffect(() => {
     if (!runtimeAvailable) return;
     let cancelled = false;
-    void getVersion()
+    void getDesktopVersion()
       .then((version) => {
         if (!cancelled) setAppVersion(version);
       })
@@ -697,28 +657,27 @@ function SettingsView({
 
       {!runtimeAvailable ? (
         <div className="banner info">
-          Settings are shown in preview mode. Open Symphony as a Tauri desktop app to edit, validate, and save configuration.
+          Settings are shown in preview mode. Open Symphony as a Tauri desktop app to edit,
+          validate, and save configuration.
         </div>
       ) : null}
       {runtimeAvailable && workerRunning ? (
         <div className="banner info">
           <strong>
-            {workerConfigError || liveReconfigureSkipped
-              ? "Worker configuration"
-              : "Live worker"}
+            {workerConfigError || liveReconfigureSkipped ? "Worker configuration" : "Live worker"}
           </strong>
           <span>
             {workerConfigError
               ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
               : liveReconfigureSkipped
                 ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
-              : `Saved settings apply to future dispatches without restarting the worker. ${
-                  activeRunCount > 0
-                    ? `${activeRunCount} active ${
-                        activeRunCount === 1 ? "run keeps" : "runs keep"
-                      } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
-                    : "No active runs are using an older config."
-                }`}
+                : `Saved settings apply to future dispatches without restarting the worker. ${
+                    activeRunCount > 0
+                      ? `${activeRunCount} active ${
+                          activeRunCount === 1 ? "run keeps" : "runs keep"
+                        } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                      : "No active runs are using an older config."
+                  }`}
           </span>
         </div>
       ) : null}
@@ -731,9 +690,7 @@ function SettingsView({
         aria-live="polite"
         aria-busy={validationState.status === "pending" ? "true" : undefined}
         tabIndex={-1}
-        hidden={
-          validationState.status === "valid" || validationState.status === "idle"
-        }
+        hidden={validationState.status === "valid" || validationState.status === "idle"}
       >
         {validationState.status === "pending" ? (
           <>
@@ -748,9 +705,7 @@ function SettingsView({
               <a
                 href={`#${validationFieldId(validationState.result)}`}
                 onClick={() =>
-                  document
-                    .getElementById(validationFieldId(validationState.result) ?? "")
-                    ?.focus()
+                  document.getElementById(validationFieldId(validationState.result) ?? "")?.focus()
                 }
               >
                 Go to the first affected field
@@ -774,10 +729,9 @@ function SettingsView({
         <section className="settings-section" id="settings-repositories" tabIndex={-1}>
           <h3>Repositories</h3>
           <small className="hint">
-            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching
-            bare label in Linear wins, then the repo claiming the issue's project,
-            then its team, then the default. Clear the default to require an
-            explicit route.
+            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching bare label
+            in Linear wins, then the repo claiming the issue's project, then its team, then the
+            default. Clear the default to require an explicit route.
           </small>
           {settings.repos.map((repo, index) => {
             const repoTitle = repo.name.trim() || `Repository ${index + 1}`;
@@ -806,7 +760,13 @@ function SettingsView({
                       setExpandedRepoIndex((current) => (current === index ? null : index))
                     }
                   >
-                    <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+                    <svg
+                      className="chevron"
+                      viewBox="0 0 16 16"
+                      width="12"
+                      height="12"
+                      aria-hidden="true"
+                    >
                       <path
                         d="M6 4l4 4-4 4"
                         fill="none"
@@ -853,8 +813,8 @@ function SettingsView({
                         placeholder="widgets"
                       />
                       <small className="hint">
-                        Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear
-                        to send it here.
+                        Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear to
+                        send it here.
                       </small>
                     </label>
                     <label>
@@ -868,9 +828,7 @@ function SettingsView({
                           updateRepo(index, {
                             url,
                             skills_marked_installed:
-                              url.trim() === repo.url.trim()
-                                ? repo.skills_marked_installed
-                                : false,
+                              url.trim() === repo.url.trim() ? repo.skills_marked_installed : false,
                           });
                         }}
                         placeholder="git@github.com:org/repo.git"
@@ -905,8 +863,8 @@ function SettingsView({
                         onChange={(next) => updateRepo(index, { team_prefixes: next })}
                       />
                       <small className="hint">
-                        Optional. Issues from these team keys land here unless a label or
-                        project rule says otherwise.
+                        Optional. Issues from these team keys land here unless a label or project
+                        rule says otherwise.
                       </small>
                     </label>
                     <label htmlFor={`repo-${index}-linear-projects`}>
@@ -927,9 +885,7 @@ function SettingsView({
                       status={workflowStatus}
                       checking={workflowChecking[repo.url.trim()] ?? false}
                       transfer={
-                        workflowTransfer?.repo_url === repo.url.trim()
-                          ? workflowTransfer
-                          : null
+                        workflowTransfer?.repo_url === repo.url.trim() ? workflowTransfer : null
                       }
                       transferRunning={workflowTransfer?.state === "running"}
                       settingsDirty={settingsDirty}
@@ -943,18 +899,14 @@ function SettingsView({
                       status={skillsStatuses[repo.url.trim()] ?? null}
                       checking={skillsChecking[repo.url.trim()] ?? false}
                       manuallyInstalled={repo.skills_marked_installed}
-                      install={
-                        skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
-                      }
+                      install={skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null}
                       installRunning={skillsInstall?.state === "running"}
                       busy={busy}
                       runtimeAvailable={runtimeAvailable}
                       repoConfigured={repo.url.trim() !== ""}
                       onRefresh={() => onRefreshSkills(repo.url)}
                       onInstall={() => onInstallSkills(repo.url)}
-                      onMarkInstalled={() =>
-                        updateRepo(index, { skills_marked_installed: true })
-                      }
+                      onMarkInstalled={() => updateRepo(index, { skills_marked_installed: true })}
                       onUseAutomaticCheck={() => {
                         updateRepo(index, { skills_marked_installed: false });
                         onRefreshSkills(repo.url);
@@ -985,18 +937,16 @@ function SettingsView({
               placeholder="App data directory"
             />
             <small className="hint">
-              Where per-run workspaces are created (one folder per repo, then per
-              issue). Leave blank to use the app data directory.
+              Where per-run workspaces are created (one folder per repo, then per issue). Leave
+              blank to use the app data directory.
             </small>
           </label>
           <small className="hint">
-            Agent skills are procedural guides (symphony-workpad,
-            symphony-commit, symphony-push, …) that Symphony agents follow. Each
-            run gets bundled fallback copies locally when a repo does not ship
-            them. Each card above shows whether its repo has checked-in skills;
+            Agent skills are procedural guides (symphony-workpad, symphony-commit, symphony-push, …)
+            that Symphony agents follow. Each run gets bundled fallback copies locally when a repo
+            does not ship them. Each card above shows whether its repo has checked-in skills;
             installing starts an agent session that opens a PR adding them under{" "}
-            <code>.agents/skills/</code>, with validation commands adapted to
-            that repo's toolchain.
+            <code>.agents/skills/</code>, with validation commands adapted to that repo's toolchain.
           </small>
         </section>
 
@@ -1099,8 +1049,8 @@ function SettingsView({
               ) : null}
             </span>
             <small className="hint">
-              When enabled, Symphony dispatches matching active issues only from
-              the Linear user tied to the configured API key.
+              When enabled, Symphony dispatches matching active issues only from the Linear user
+              tied to the configured API key.
             </small>
             {settings.tracker_assigned_to_me && linearViewerError ? (
               <small className="test-result err">{linearViewerError}</small>
@@ -1150,11 +1100,7 @@ function SettingsView({
             </small>
           </label>
           <div className="section-row">
-            <button
-              type="button"
-              disabled={busy || !runtimeAvailable}
-              onClick={onTestConnection}
-            >
+            <button type="button" disabled={busy || !runtimeAvailable} onClick={onTestConnection}>
               Test connection
             </button>
             {trackerTest ? (
@@ -1180,10 +1126,7 @@ function SettingsView({
               onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
             />
             {validation ? (
-              <AgentCliStatus
-                backend={settings.agent_backend}
-                validation={validation}
-              />
+              <AgentCliStatus backend={settings.agent_backend} validation={validation} />
             ) : null}
           </div>
           <label>
@@ -1213,16 +1156,12 @@ function SettingsView({
                   setSettings({ ...settings, opencode_command: value });
                 }
               }}
-              placeholder={
-                settings.agent_backend === "cursor" ? "agent" : settings.agent_backend
-              }
+              placeholder={settings.agent_backend === "cursor" ? "agent" : settings.agent_backend}
             />
             <small className="hint">
               Optional. How the agent is launched — e.g. a wrapper like{" "}
-              <code className="command-example">
-                {`mycode --agent ${settings.agent_backend}`}
-              </code>
-              . Leave blank to run <code>{settings.agent_backend}</code> directly.
+              <code className="command-example">{`mycode --agent ${settings.agent_backend}`}</code>.
+              Leave blank to run <code>{settings.agent_backend}</code> directly.
             </small>
           </label>
           <label htmlFor="settings-turn-timeout">
@@ -1238,9 +1177,7 @@ function SettingsView({
                 setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) })
               }
             />
-            <small className="hint">
-              Max time for one agent turn. 3600 = 1 hour.
-            </small>
+            <small className="hint">Max time for one agent turn. 3600 = 1 hour.</small>
           </label>
           <label htmlFor="settings-session-environment">
             Session environment
@@ -1251,8 +1188,8 @@ function SettingsView({
               onChange={(next) => setSettings({ ...settings, session_env: next })}
             />
             <small className="hint">
-              Optional. One <code>KEY=value</code> per line, injected into the agent process
-              (e.g. <code>CURSOR_API_KEY</code> for Cursor). Values are saved in settings.
+              Optional. One <code>KEY=value</code> per line, injected into the agent process (e.g.{" "}
+              <code>CURSOR_API_KEY</code> for Cursor). Values are saved in settings.
             </small>
           </label>
           {settings.agent_backend === "codex" ? (
@@ -1383,7 +1320,9 @@ function SettingsView({
                   rows={3}
                   onChange={(next) => setSettings({ ...settings, claude_disallowed_tools: next })}
                 />
-                <small className="hint">One rule per line. Takes precedence over allowed tools.</small>
+                <small className="hint">
+                  One rule per line. Takes precedence over allowed tools.
+                </small>
               </label>
               <label htmlFor="settings-claude-additional-directories">
                 Additional directories
@@ -1550,8 +1489,8 @@ function SettingsView({
                 />
                 Skip permissions
                 <small className="hint">
-                  Maps to <code>--dangerously-skip-permissions</code>. Required for unattended runs —
-                  without it opencode auto-rejects every tool call.
+                  Maps to <code>--dangerously-skip-permissions</code>. Required for unattended runs
+                  — without it opencode auto-rejects every tool call.
                 </small>
               </label>
             </>
@@ -1574,8 +1513,8 @@ function SettingsView({
               }
             />
             <small className="hint">
-              How often Linear is polled for issues. Applies after Save; the live
-              worker wakes and uses the new interval on its next loop.
+              How often Linear is polled for issues. Applies after Save; the live worker wakes and
+              uses the new interval on its next loop.
             </small>
           </label>
           <label htmlFor="settings-max-concurrent-agents">
@@ -1591,8 +1530,8 @@ function SettingsView({
               }
             />
             <small className="hint">
-              Issues worked on in parallel. Applies to future dispatch decisions;
-              already-running agents continue.
+              Issues worked on in parallel. Applies to future dispatch decisions; already-running
+              agents continue.
             </small>
           </label>
           <label htmlFor="settings-max-retry-backoff">
@@ -1626,19 +1565,18 @@ function SettingsView({
               }
             />
             <small className="hint">
-              Max time for each hook script. Applies to hooks that start after
-              Save; a hook already running keeps its current timeout.
+              Max time for each hook script. Applies to hooks that start after Save; a hook already
+              running keeps its current timeout.
             </small>
           </label>
           <details className="hooks-details">
             <summary>Hooks (advanced)</summary>
             <small className="hint">
-              Shell scripts run at workspace lifecycle points. They receive{" "}
-              <code>$REPO_URL</code>, <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>,{" "}
-              <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as{" "}
-              <code>$SYMPHONY_HOOK</code>. <code>after_create</code> only runs for
-              fresh workspaces, so existing ready workspaces are not reinitialized
-              by saving hook changes.
+              Shell scripts run at workspace lifecycle points. They receive <code>$REPO_URL</code>,{" "}
+              <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>,{" "}
+              <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as <code>$SYMPHONY_HOOK</code>.{" "}
+              <code>after_create</code> only runs for fresh workspaces, so existing ready workspaces
+              are not reinitialized by saving hook changes.
             </small>
             <label>
               After create
@@ -1653,8 +1591,8 @@ function SettingsView({
                 }
               />
               <small className="hint">
-                Runs once per fresh workspace — clone, branch, install. Changes affect
-                the next new workspace, not an existing ready workspace.
+                Runs once per fresh workspace — clone, branch, install. Changes affect the next new
+                workspace, not an existing ready workspace.
               </small>
             </label>
             <label>
@@ -1719,11 +1657,7 @@ function SettingsView({
           }
         />
         <div className="section-row">
-          <button
-            type="button"
-            disabled={busy || !runtimeAvailable}
-            onClick={onResetPrompt}
-          >
+          <button type="button" disabled={busy || !runtimeAvailable} onClick={onResetPrompt}>
             Reset to default
           </button>
           <small className="hint">
@@ -1738,18 +1672,14 @@ function SettingsView({
           <div className="storage-actions">
             <button
               type="button"
-              onClick={() =>
-                revealItemInDir(validation.database_path).catch(() => undefined)
-              }
+              onClick={() => revealDesktopPath(validation.database_path).catch(() => undefined)}
             >
               Reveal database
             </button>
             <button
               type="button"
               onClick={() =>
-                revealItemInDir(`${validation.app_data_dir}/logs`).catch(
-                  () => undefined,
-                )
+                revealDesktopPath(`${validation.app_data_dir}/logs`).catch(() => undefined)
               }
             >
               Reveal logs
@@ -1793,8 +1723,7 @@ function ListInput({
   "aria-invalid"?: boolean;
   "aria-describedby"?: string;
 }) {
-  const join = (items: string[]) =>
-    separator === "comma" ? items.join(", ") : items.join("\n");
+  const join = (items: string[]) => (separator === "comma" ? items.join(", ") : items.join("\n"));
   const parse = (text: string) =>
     text
       .split(separator === "comma" ? "," : "\n")
@@ -1967,7 +1896,7 @@ function AgentCliStatus({
           <button
             type="button"
             className="link-button outlined"
-            onClick={() => openUrl(installUrl).catch(() => undefined)}
+            onClick={() => openExternalUrl(installUrl).catch(() => undefined)}
           >
             Install {label}
           </button>
@@ -2073,7 +2002,12 @@ function BackendSelect({
   const selected = BACKEND_OPTIONS.find((option) => option.value === value) ?? BACKEND_OPTIONS[0];
 
   function openList() {
-    setActiveIndex(Math.max(0, BACKEND_OPTIONS.findIndex((option) => option.value === value)));
+    setActiveIndex(
+      Math.max(
+        0,
+        BACKEND_OPTIONS.findIndex((option) => option.value === value),
+      ),
+    );
     setOpen(true);
   }
 
@@ -2118,7 +2052,9 @@ function BackendSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? "backend-listbox" : undefined}
-        aria-activedescendant={open ? `backend-option-${BACKEND_OPTIONS[activeIndex].value}` : undefined}
+        aria-activedescendant={
+          open ? `backend-option-${BACKEND_OPTIONS[activeIndex].value}` : undefined
+        }
         onClick={() => (open ? setOpen(false) : openList())}
         onKeyDown={handleKeyDown}
       >
@@ -2269,8 +2205,8 @@ function PromptEditor({
           ))}
         </ul>
         <p className="hint">
-          On retries, Symphony appends a <code>## Retry context</code> section with the prior
-          run's error automatically.
+          On retries, Symphony appends a <code>## Retry context</code> section with the prior run's
+          error automatically.
         </p>
       </aside>
     </div>
@@ -2360,7 +2296,7 @@ function WorkflowBlock({
     detail = "A repository workflow transfer is waiting for review.";
     actions = (
       <>
-        <button type="button" onClick={() => openUrl(prUrl).catch(() => undefined)}>
+        <button type="button" onClick={() => openExternalUrl(prUrl).catch(() => undefined)}>
           View PR
         </button>
         {checkAgain}
@@ -2418,7 +2354,13 @@ function WorkflowBlock({
         <div className="skills-install-copy">
           <strong>{headline}</strong>
           <small>{detail}</small>
-          {meta ? <small className={tone === "error" ? "skills-install-detail error" : "skills-install-detail"}>{meta}</small> : null}
+          {meta ? (
+            <small
+              className={tone === "error" ? "skills-install-detail error" : "skills-install-detail"}
+            >
+              {meta}
+            </small>
+          ) : null}
         </div>
         {actions ? <div className="skills-install-actions">{actions}</div> : null}
       </div>
@@ -2460,10 +2402,7 @@ function SkillsBlock({
   const actionsDisabled = busy || installRunning || !runtimeAvailable || !repoConfigured;
   const manualActionsDisabled = busy || !runtimeAvailable || !repoConfigured;
   // A just-finished install knows the PR URL before the next status check does.
-  const prUrl =
-    (install?.state === "completed" ? install.pr_url : null) ??
-    status?.pr_url ??
-    null;
+  const prUrl = (install?.state === "completed" ? install.pr_url : null) ?? status?.pr_url ?? null;
 
   let tone: "neutral" | "info" | "success" | "warning" | "error" = "neutral";
   let headline = "Check this repo for Symphony skills.";
@@ -2495,11 +2434,7 @@ function SkillsBlock({
       "Symphony will stop warning when this repo does not match the exact bundled skill set.";
     meta = "Use automatic check to compare the default branch against the bundled manifests again.";
     actions = (
-      <button
-        type="button"
-        disabled={manualActionsDisabled}
-        onClick={onUseAutomaticCheck}
-      >
+      <button type="button" disabled={manualActionsDisabled} onClick={onUseAutomaticCheck}>
         Use automatic check
       </button>
     );
@@ -2517,16 +2452,10 @@ function SkillsBlock({
   } else if (install?.state === "failed") {
     tone = "error";
     headline = "Install PR was not created.";
-    detail =
-      "Fix the reported GitHub or agent access problem, then retry the install session.";
+    detail = "Fix the reported GitHub or agent access problem, then retry the install session.";
     meta = install.error ?? "Install failed.";
     actions = (
-      <button
-        type="button"
-        className="primary"
-        disabled={actionsDisabled}
-        onClick={onInstall}
-      >
+      <button type="button" className="primary" disabled={actionsDisabled} onClick={onInstall}>
         Retry install PR
       </button>
     );
@@ -2542,14 +2471,10 @@ function SkillsBlock({
   } else if (prUrl) {
     tone = "warning";
     headline = "An install PR is waiting for review.";
-    detail =
-      "Symphony will inject local fallback skills until the PR lands on the default branch.";
+    detail = "Symphony will inject local fallback skills until the PR lands on the default branch.";
     actions = (
       <>
-        <button
-          type="button"
-          onClick={() => openUrl(prUrl).catch(() => undefined)}
-        >
+        <button type="button" onClick={() => openExternalUrl(prUrl).catch(() => undefined)}>
           View PR
         </button>
         {markInstalledButton}
@@ -2563,12 +2488,7 @@ function SkillsBlock({
     meta = `${status.missing.length} of ${BUNDLED_SKILL_COUNT} bundled skills are missing.`;
     actions = (
       <>
-        <button
-          type="button"
-          className="primary"
-          disabled={actionsDisabled}
-          onClick={onInstall}
-        >
+        <button type="button" className="primary" disabled={actionsDisabled} onClick={onInstall}>
           Create install PR
         </button>
         {markInstalledButton}
@@ -2617,11 +2537,7 @@ function SkillsBlock({
           <small>{detail}</small>
           {meta ? (
             <small
-              className={
-                tone === "error"
-                  ? "skills-install-detail error"
-                  : "skills-install-detail"
-              }
+              className={tone === "error" ? "skills-install-detail error" : "skills-install-detail"}
             >
               {meta}
             </small>
@@ -2633,18 +2549,12 @@ function SkillsBlock({
   );
 }
 
-function ExternalLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
+function ExternalLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <button
       type="button"
       className="inline-link"
-      onClick={() => openUrl(href).catch(() => undefined)}
+      onClick={() => openExternalUrl(href).catch(() => undefined)}
     >
       {children}
     </button>
@@ -2659,7 +2569,6 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
     </section>
   );
 }
-
 
 export function SettingsHeaderActions({
   validation,
@@ -2697,10 +2606,10 @@ export function SettingsHeaderActions({
         : "");
   const statusClass =
     validationError || (savedFlash && (workerConfigError || liveReconfigureSkipped))
-    ? "save-status invalid"
-    : savedFlash
-      ? "save-status ok"
-      : "save-status";
+      ? "save-status invalid"
+      : savedFlash
+        ? "save-status ok"
+        : "save-status";
 
   return (
     <section className="settings-header-actions" aria-label="Settings actions">

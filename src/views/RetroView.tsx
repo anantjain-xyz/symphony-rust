@@ -1,4 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import type {
   RetroBatchRow,
@@ -8,6 +7,7 @@ import type {
   RetroStatus,
   RetroSuggestionRow,
 } from "../bindings";
+import { openExternalUrl } from "../desktop/shell";
 import { shortTime, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import { retroRepoBatchState } from "../viewHelpers";
@@ -42,9 +42,9 @@ function RetroView({
   onApplyWorkflow: (retroId: string) => void;
   onCreatePrs: (retroId: string) => void;
 }) {
-  const [reviewFilter, setReviewFilter] = useState<
-    "all" | "pending" | "accepted" | "rejected"
-  >("pending");
+  const [reviewFilter, setReviewFilter] = useState<"all" | "pending" | "accepted" | "rejected">(
+    "pending",
+  );
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const confirmDeleteTimer = useRef<number | null>(null);
   const activeReport = selected ? selected.report : status.report;
@@ -55,9 +55,7 @@ function RetroView({
   const pendingCount = readySuggestions.filter(
     (suggestion) => suggestion.decision === "pending",
   ).length;
-  const accepted = readySuggestions.filter(
-    (suggestion) => suggestion.decision === "accepted",
-  );
+  const accepted = readySuggestions.filter((suggestion) => suggestion.decision === "accepted");
   const rejectedCount = readySuggestions.filter(
     (suggestion) => suggestion.decision === "rejected",
   ).length;
@@ -111,8 +109,7 @@ function RetroView({
   const staleRepoCount = [...acceptedRepoNames].filter(
     (repoName) => retroRepoBatchState(selected?.batches ?? [], repoName) === "stale",
   ).length;
-  const canStart =
-    !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
+  const canStart = !busy && status.state !== "running" && (!runtimeAvailable || !setupBlocked);
   const deletionBlocked =
     status.state === "running" ||
     selected?.row.status === "running" ||
@@ -161,8 +158,8 @@ function RetroView({
         <div>
           <h2>Retro</h2>
           <p>
-            Finds repeated confusion in runs and workpads, then suggests prompt or
-            skill changes per repo.
+            Finds repeated confusion in runs and workpads, then suggests prompt or skill changes per
+            repo.
           </p>
         </div>
         <div className="actions">
@@ -238,9 +235,7 @@ function RetroView({
                   <tr
                     key={retro.id}
                     className={
-                      selected?.row.id === retro.id
-                        ? "clickable-row selected"
-                        : "clickable-row"
+                      selected?.row.id === retro.id ? "clickable-row selected" : "clickable-row"
                     }
                     tabIndex={0}
                     role="button"
@@ -332,9 +327,7 @@ function RetroView({
                     busy={busy}
                     runtimeAvailable={runtimeAvailable}
                     workflowLocked={workflowLocked}
-                    repoLocked={
-                      retroRepoBatchState(selected.batches, repo.repo_name) === "locked"
-                    }
+                    repoLocked={retroRepoBatchState(selected.batches, repo.repo_name) === "locked"}
                     onDecide={onDecideSuggestion}
                   />
                 ))
@@ -395,8 +388,8 @@ function RetroView({
                       {eligibleRepoNames.size > 0
                         ? `Create ${eligibleRepoNames.size} implementation PR${eligibleRepoNames.size === 1 ? "" : "s"}`
                         : staleRepoCount > 0
-                        ? "Generate a new retro"
-                        : "PR creation started"}
+                          ? "Generate a new retro"
+                          : "PR creation started"}
                     </button>
                   ) : null}
                 </div>
@@ -456,8 +449,7 @@ function RetroReviewRepo({
       <div className="retro-suggestion-list">
         {suggestions.map((suggestion) => {
           const finding = repo.findings[suggestion.finding_index];
-          const locked =
-            suggestion.target_type === "prompt" ? workflowLocked : repoLocked;
+          const locked = suggestion.target_type === "prompt" ? workflowLocked : repoLocked;
           return (
             <article
               className={`retro-suggestion-card decision-${suggestion.decision}`}
@@ -574,13 +566,14 @@ function UnifiedDiff({ diff }: { diff: string }) {
     <pre className="retro-diff" aria-label="Proposed unified diff">
       <code>
         {diff.split("\n").map((line, index) => {
-          const kind = line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")
-            ? "meta"
-            : line.startsWith("+")
-              ? "addition"
-              : line.startsWith("-")
-                ? "deletion"
-                : "context";
+          const kind =
+            line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")
+              ? "meta"
+              : line.startsWith("+")
+                ? "addition"
+                : line.startsWith("-")
+                  ? "deletion"
+                  : "context";
           return (
             // biome-ignore lint/suspicious/noArrayIndexKey: unified diffs can contain duplicate lines with no stable identifier.
             <span className={`diff-${kind}`} key={`${index}-${line}`}>
@@ -610,7 +603,9 @@ function RetroBatchResults({ batches }: { batches: RetroBatchRow[] }) {
             <button
               type="button"
               onClick={() => {
-                if (batch.pr_url) openUrl(batch.pr_url).catch(() => undefined);
+                if (batch.pr_url) {
+                  openExternalUrl(batch.pr_url).catch(() => undefined);
+                }
               }}
             >
               View PR
@@ -737,6 +732,5 @@ function Empty({
 function Badge({ status }: { status: string }) {
   return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
 }
-
 
 export default RetroView;

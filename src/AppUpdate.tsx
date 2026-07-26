@@ -1,10 +1,13 @@
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check } from "@tauri-apps/plugin-updater";
-import { invoke } from "@tauri-apps/api/core";
-import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import { useEffect, useRef, useState } from "react";
 import type { AppUpdateProps, UpdateSafety } from "./appUpdateTypes";
 import type { AppSettings, Overview, WorkerStatus } from "./bindings";
+import * as desktopCommands from "./desktop/commands";
+import {
+  checkForDesktopUpdate,
+  relaunchDesktopApp,
+  type DesktopDownloadEvent,
+  type DesktopUpdate,
+} from "./desktop/updater";
 import "./AppUpdate.css";
 
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -44,24 +47,24 @@ function settingsFingerprint(settings: AppSettings, linearKey: string) {
 export function AppUpdateFeature(props: AppUpdateFeatureProps) {
   async function prepareForInstall() {
     const [installWorker, installOverview] = await Promise.all([
-      invoke<WorkerStatus>("get_worker_status"),
-      invoke<Overview>("get_overview"),
+      desktopCommands.getWorkerStatus(),
+      desktopCommands.getOverview(),
     ]);
     props.onWorkerChange(installWorker);
     props.onOverviewChange(installOverview);
     const workerWasRunning = installWorker.state === "running";
     const restoreWorker = async () => {
       if (!workerWasRunning) return;
-      const status = await invoke<WorkerStatus>("get_worker_status");
+      const status = await desktopCommands.getWorkerStatus();
       if (status.state === "stopped") {
-        props.onWorkerChange(await invoke<WorkerStatus>("start_worker"));
+        props.onWorkerChange(await desktopCommands.startWorker());
       }
     };
     const restoreWorkerWhenStopped = async () => {
       if (!workerWasRunning) return;
       for (;;) {
         try {
-          const status = await invoke<WorkerStatus>("get_worker_status");
+          const status = await desktopCommands.getWorkerStatus();
           props.onWorkerChange(status);
           if (status.state === "stopped") {
             await restoreWorker();
@@ -75,13 +78,13 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
     };
 
     if (installWorker.state !== "stopped") {
-      props.onWorkerChange(await invoke<WorkerStatus>("stop_worker"));
+      props.onWorkerChange(await desktopCommands.stopWorker());
       try {
         const deadline = Date.now() + 30_000;
         while (Date.now() < deadline) {
           const [nextWorker, nextOverview] = await Promise.all([
-            invoke<WorkerStatus>("get_worker_status"),
-            invoke<Overview>("get_overview"),
+            desktopCommands.getWorkerStatus(),
+            desktopCommands.getOverview(),
           ]);
           props.onWorkerChange(nextWorker);
           props.onOverviewChange(nextOverview);
@@ -102,8 +105,8 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
 
   async function verifyInstallSafety(): Promise<UpdateSafety> {
     const [nextOverview, nextHasRetroBatches] = await Promise.all([
-      invoke<Overview>("get_overview"),
-      invoke<boolean>("has_in_progress_retro_batches"),
+      desktopCommands.getOverview(),
+      desktopCommands.hasInProgressRetroBatches(),
     ]);
     props.onOverviewChange(nextOverview);
     props.onRetroBatchWorkChange(nextHasRetroBatches);
@@ -145,6 +148,43 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
   );
 }
 
+const geometryPreviewSafety: UpdateSafety = {
+  activeRunCount: 0,
+  activeRunIds: [],
+  backgroundWork: [],
+  hasUnsavedSettings: false,
+  settingsFingerprint: null,
+  transientBusy: false,
+};
+
+const geometryPreviewUpdate = {
+  version: "preview",
+  close: async () => undefined,
+  download: async () => undefined,
+  install: async () => undefined,
+} as unknown as DesktopUpdate;
+
+const resolveGeometryPreviewUpdate = async () => geometryPreviewUpdate;
+
+export function AppUpdateGeometryPreview() {
+  return (
+    <main className="app" data-preview-fixture="updater-geometry">
+      <header className="topbar">
+        <div className="brand">
+          <h1>Updater geometry</h1>
+          <AppUpdate
+            enabled
+            safety={geometryPreviewSafety}
+            checkForUpdate={resolveGeometryPreviewUpdate}
+            prepareForInstall={async () => async () => undefined}
+            onActionError={() => undefined}
+          />
+        </div>
+      </header>
+    </main>
+  );
+}
+
 type UpdatePhase =
   | "hidden"
   | "available"
@@ -181,13 +221,18 @@ export function AppUpdate({
   prepareForInstall,
   onInstallLockChange,
   onActionError,
-}: AppUpdateProps) {
+  checkForUpdate = checkForDesktopUpdate,
+  relaunchApp = relaunchDesktopApp,
+}: AppUpdateProps & {
+  checkForUpdate?: () => Promise<DesktopUpdate | null>;
+  relaunchApp?: () => Promise<void>;
+}) {
   const [phase, setPhase] = useState<UpdatePhase>("hidden");
-  const [candidate, setCandidate] = useState<Update | null>(null);
+  const [candidate, setCandidate] = useState<DesktopUpdate | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationStage | null>(null);
   const [confirmationSafety, setConfirmationSafety] = useState<UpdateSafety | null>(null);
-  const candidateRef = useRef<Update | null>(null);
+  const candidateRef = useRef<DesktopUpdate | null>(null);
   const checkingRef = useRef(false);
   const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
@@ -246,11 +291,11 @@ export function AppUpdate({
     if (!enabled) return;
     let cancelled = false;
 
-    const checkForUpdate = async () => {
+    const refreshAvailableUpdate = async () => {
       if (checkingRef.current || candidateRef.current) return;
       checkingRef.current = true;
       try {
-        const update = await check();
+        const update = await checkForUpdate();
         if (cancelled) {
           await update?.close().catch(() => undefined);
           return;
@@ -271,13 +316,13 @@ export function AppUpdate({
       }
     };
 
-    void checkForUpdate();
-    const interval = window.setInterval(checkForUpdate, UPDATE_CHECK_INTERVAL_MS);
+    void refreshAvailableUpdate();
+    const interval = window.setInterval(refreshAvailableUpdate, UPDATE_CHECK_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [enabled]);
+  }, [checkForUpdate, enabled]);
 
   useEffect(
     () => () => {
@@ -323,7 +368,7 @@ export function AppUpdate({
     let downloaded = 0;
     let contentLength: number | undefined;
     try {
-      await candidate.download((event: DownloadEvent) => {
+      await candidate.download((event: DesktopDownloadEvent) => {
         if (event.event === "Started") {
           contentLength = event.data.contentLength;
           setProgress(contentLength === 0 ? 0 : null);
@@ -387,7 +432,7 @@ export function AppUpdate({
 
     try {
       setPhase("restarting");
-      await relaunch();
+      await relaunchApp();
     } catch (error) {
       await restoreWorker?.().catch(() => undefined);
       onInstallLockChangeRef.current(false);
@@ -404,7 +449,7 @@ export function AppUpdate({
       setPhase("restarting");
       onInstallLockChangeRef.current(true);
       restoreWorker = await prepareForInstallRef.current();
-      await relaunch();
+      await relaunchApp();
     } catch (error) {
       await restoreWorker?.().catch(() => undefined);
       onInstallLockChangeRef.current(false);
@@ -457,7 +502,9 @@ export function AppUpdate({
         aria-label={title}
         aria-live="polite"
       >
-        {working ? <UpdateSpinner /> : <UpdateIcon />}
+        <span className="update-button-icon-slot">
+          {working ? <UpdateSpinner /> : <UpdateIcon />}
+        </span>
         <span className="update-button-label">{buttonLabel}</span>
       </button>
 

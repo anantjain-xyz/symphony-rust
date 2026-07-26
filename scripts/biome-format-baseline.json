@@ -1,9 +1,7 @@
 {
-  "e2e/lazy-chunks.e2e.ts": "4996360221a565a570698821b3766eba6769b9ea6d1d429ad07becaac2681466",
   "scripts/check-bundle-budget.mjs": "edeb295fb7597ebc6012f3a9d6a080590c28c3a94f9371faa9875526b9e37626",
   "scripts/check-bundle-budget.node.mjs": "a01becc05f3c55c7b96f71c730047d450461ae3f9188c56df66b5b898188bae3",
   "src/App.test.tsx": "862e1c8587ae06e14d9bdb9bd1b701674d7e57cece22729d09fd18d4dad8433b",
-  "src/App.tsx": "8c58171177c12cdb80b60afb0719869a5e8ab4dabe68f96d2b9c6ccc3dbba1cc",
   "src/AppUpdate.test.tsx": "36fd1215215e010aa8763d3b4f605f7e68d9a6ef00e6b93d7e73c755a11940c9",
   "src/ChunkBoundary.test.tsx": "24fdbbb7547d9f1495ad79bf800291a392f2ded4f3d8c0022587af4c67b25ea8",
   "src/MarkdownText.test.tsx": "aa1dbda5ae777ed9429d684e873047c1470e3f50d4a2cb0716ad1fbe6c2203df",
@@ -27,10 +25,7 @@
   "src/views/DependencyGraphPanel.tsx": "cce365ede74f0c882b830d8938ec80119dae0c4c113dc32e323fc5cd544267c2",
   "src/views/EventStream.test.tsx": "a13fb6a162a409e90dba727275600693f3d1fc6c9c30651f9753844a3a993240",
   "src/views/EventStream.tsx": "c41c3993a9e1ec22f4445655a696a5d7b44be00c4b4434d7db43fefea6465ad7",
-  "src/views/IssuesView.tsx": "e2ee28de3aa9cb8909614f14c816de1160287cb4cf8ed9eab918e3c836cdcbe9",
-  "src/views/RetroView.tsx": "7597b6d776bb19f7eef4a2bd40e81ead4a672d0740c16f7290cbdd7a0f82c2fb",
   "src/views/RunsView.tsx": "e8e43d2e885dbc2d929ff7a1302138662e5c28a11b3c2224c4b7d5e304b66d57",
-  "src/views/SettingsView.tsx": "659ed0baca98d0d77ad83ef90114b86d46de6080cfe4274235fabfaa250efbea",
   "src/views/eventStreamModel.test.ts": "535c496ec5e3f3771c3acb3bd847c43cd99f19cb8d3b18dd1a06b1256f461026",
   "src/views/eventStreamModel.ts": "5e3cc32bd7bd9628e4e49c962cab06bf82642a14cb1cae71253e0bf18d545808"
 }
