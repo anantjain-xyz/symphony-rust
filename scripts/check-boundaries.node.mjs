@@ -737,7 +737,7 @@ test("retains cfg-conditioned import alternatives", async (t) => {
   ]);
 });
 
-test("detects qualified StorageError variant paths", async (t) => {
+test("detects qualified and turbofish StorageError variant paths", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
       "mod errors { pub enum StorageError { Sqlx } }",
@@ -746,8 +746,11 @@ test("detects qualified StorageError variant paths", async (t) => {
       "fn absolute() { let _ = <::symphony_storage::StorageError>::Sqlx(problem); }",
       "fn aliased() { let _ = <E>::Sqlx(problem); }",
       "fn parenthesized() { let _ = <((symphony_storage::StorageError))>::Sqlx(problem); }",
+      "fn turbofish() { let _ = symphony_storage::StorageError::<>::Sqlx(problem); }",
+      "fn aliased_turbofish() { let _ = E::<>::Sqlx(problem); }",
       "fn allowed() { let _ = <crate::errors::StorageError>::Sqlx; }",
       "fn allowed_parenthesized() { let _ = <((crate::errors::StorageError))>::Sqlx; }",
+      "fn allowed_turbofish() { let _ = crate::errors::StorageError::<>::Sqlx; }",
       "",
     ].join("\n"),
   });
@@ -760,6 +763,8 @@ test("detects qualified StorageError variant paths", async (t) => {
     "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:7: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:8: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -802,6 +807,7 @@ test("distinguishes match guard expressions from arm patterns", async (t) => {
       "        _ => {}",
       "    }",
       "}",
+      "fn predicate(error: StorageError) -> bool { matches!(error, _ if StorageError::Sqlx(problem) == other) }",
       "",
     ].join("\n"),
   });
@@ -810,6 +816,7 @@ test("distinguishes match guard expressions from arm patterns", async (t) => {
   const errors = await scanRestrictedSources(metadata(root), policy());
 
   assert.deepEqual(errors, [
+    "worker/src/lib.rs:10: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
@@ -955,6 +962,46 @@ test("traverses include! sources emitted by invoked local macros", async (t) => 
   assert.deepEqual(errors, [
     "worker/generated/part.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
+});
+
+test("recursively expands chained local macros before source traversal", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      'macro_rules! inner { () => { include!("../generated/part.rs"); } }',
+      "macro_rules! outer { () => { inner!(); } }",
+      "outer!();",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "part.rs"),
+    'fn wrong() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/generated/part.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("fails closed on cyclic local macro expansion", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "macro_rules! first { () => { second!() } }",
+      "macro_rules! second { () => { first!() } }",
+      "first!();",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    scanRestrictedSources(metadata(root), policy()),
+    /simple local macro expansion exceeds 64 passes/,
+  );
 });
 
 test("preserves bindings across recursively included Rust fragments", async (t) => {

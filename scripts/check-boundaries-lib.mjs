@@ -2046,6 +2046,24 @@ function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant
   return null;
 }
 
+function turbofishVariantClosing(tokens, cursor, variant) {
+  if (
+    tokens[cursor + 1]?.value !== "::" ||
+    tokens[cursor + 2]?.value !== "<"
+  ) {
+    return null;
+  }
+  const closing = matchingAngle(tokens, cursor + 2);
+  if (
+    closing === null ||
+    tokens[closing + 1]?.value !== "::" ||
+    tokens[closing + 2]?.value !== variant
+  ) {
+    return null;
+  }
+  return closing;
+}
+
 function followsMatchGuard(tokens, index) {
   const openingForClosing = new Map([
     [")", "("],
@@ -2127,17 +2145,26 @@ function isMatchesMacroPattern(tokens, index) {
     if (closing < index) continue;
 
     const delimiters = [];
+    let patternStarted = false;
     for (let cursor = opening + 1; cursor < index; cursor += 1) {
       const value = tokens[cursor].value;
       if (closingDelimiter.has(value)) {
         delimiters.push(closingDelimiter.get(value));
       } else if ([")", "]", "}"].includes(value)) {
         if (delimiters.at(-1) === value) delimiters.pop();
-      } else if (value === "," && delimiters.length === 0) {
-        return true;
+      } else if (delimiters.length === 0) {
+        if (value === "," && !patternStarted) {
+          patternStarted = true;
+        } else if (
+          patternStarted &&
+          value === "if" &&
+          !tokens[cursor].raw
+        ) {
+          return false;
+        }
       }
     }
-    return false;
+    return patternStarted;
   }
   return false;
 }
@@ -2385,12 +2412,15 @@ function substituteSimpleMacroArm(arm, arguments_, invocation) {
   return expanded;
 }
 
-function expandSimpleMacroInvocations(tokens) {
+function expandSimpleMacroInvocationsOnce(tokens) {
   const definitionTokens = macroDefinitionTokens(tokens);
   const { definitions, scopeAt } = simpleMacroRules(tokens, definitionTokens);
-  if (definitions.size === 0) return tokens;
+  if (definitions.size === 0) {
+    return { expansionCount: 0, tokens };
+  }
 
   const expanded = [];
+  let expansionCount = 0;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (
@@ -2414,6 +2444,7 @@ function expandSimpleMacroInvocations(tokens) {
           .find((candidate) => candidate !== null);
         if (invocationExpansion !== undefined) {
           expanded.push(...invocationExpansion);
+          expansionCount += 1;
           index = closing;
           continue;
         }
@@ -2421,7 +2452,36 @@ function expandSimpleMacroInvocations(tokens) {
     }
     expanded.push(token);
   }
-  return expanded;
+  return { expansionCount, tokens: expanded };
+}
+
+function simpleMacroExpansionFingerprint(tokens) {
+  return JSON.stringify(
+    tokens.map((token) => [
+      token.value,
+      token.literal ?? null,
+      token.raw ?? null,
+    ]),
+  );
+}
+
+function expandSimpleMacroInvocations(tokens) {
+  const seen = new Set();
+  const maximumPasses = 64;
+  for (let pass = 0; pass < maximumPasses; pass += 1) {
+    const fingerprint = simpleMacroExpansionFingerprint(tokens);
+    if (seen.has(fingerprint)) {
+      throw new Error("cyclic simple local macro expansion");
+    }
+    seen.add(fingerprint);
+
+    const expanded = expandSimpleMacroInvocationsOnce(tokens);
+    if (expanded.expansionCount === 0) return tokens;
+    tokens = expanded.tokens;
+  }
+  throw new Error(
+    `simple local macro expansion exceeds ${maximumPasses} passes`,
+  );
 }
 
 function normalizedTokenStream(tokens, crateAliases = new Map()) {
@@ -2520,13 +2580,15 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
       (expanded[0] === "symphony_storage" &&
         expanded[1] === "StorageError")
     ) {
-      const qualifiedClosing = qualifiedVariantClosing(
-        tokens,
-        index,
-        cursor,
-        leadingAbsolute,
-        "Sqlx",
-      );
+      const qualifiedClosing =
+        qualifiedVariantClosing(
+          tokens,
+          index,
+          cursor,
+          leadingAbsolute,
+          "Sqlx",
+        ) ??
+        turbofishVariantClosing(tokens, cursor, "Sqlx");
       if (
         (
           isStorageErrorVariantPath(expanded, "Sqlx") ||
