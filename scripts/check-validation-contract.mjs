@@ -27,6 +27,20 @@ const REQUIRED_FULL_COMMANDS = new Map([
     },
   ],
   [
+    "frontend-contracts",
+    {
+      argv: ["pnpm", "check:frontend-contracts"],
+      packageScript: "check:frontend-contracts",
+    },
+  ],
+  [
+    "frontend-contract-tests",
+    {
+      argv: ["pnpm", "test:frontend-contracts"],
+      packageScript: "test:frontend-contracts",
+    },
+  ],
+  [
     "rust-format",
     {
       argv: ["cargo", "fmt", "--all", "--check"],
@@ -126,6 +140,22 @@ const REQUIRED_PACKAGE_SCRIPTS = new Map([
   [
     "test:validation",
     "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
+  ],
+  [
+    "check:frontend-contracts",
+    "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
+  ],
+  [
+    "check:frontend-boundaries",
+    "node scripts/check-frontend-boundaries.mjs",
+  ],
+  [
+    "check:preview-coverage",
+    "node scripts/check-preview-coverage.mjs",
+  ],
+  [
+    "test:frontend-contracts",
+    "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs && vitest run src/desktop/events.test.ts src/dashboardRefreshCoordinator.test.ts src/pollController.test.ts src/settingsValidationController.test.ts",
   ],
   ["typecheck", "tsc --noEmit"],
   ["test", "vitest run"],
@@ -718,6 +748,7 @@ export function validateValidationContract(
     .sort()) {
     const owners = packageScriptOwners.get(scriptName) ?? [];
     if (owners.length === 0) {
+      if (validatedPackageScripts.has(scriptName)) continue;
       errors.push(
         `validation package script ${scriptName} is not owned by a command in validation/contract.json and included in the full profile`,
       );

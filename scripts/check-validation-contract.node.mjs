@@ -30,9 +30,16 @@ function validationFixture(t) {
       "check:validation-contract":
         "node scripts/check-validation-contract.mjs",
       "check:bundle": "node scripts/check-bundle-budget.mjs",
+      "check:frontend-boundaries":
+        "node scripts/check-frontend-boundaries.mjs",
+      "check:frontend-contracts":
+        "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
       "check:harness": "node scripts/check-agent-assets.mjs",
+      "check:preview-coverage": "node scripts/check-preview-coverage.mjs",
       test: "vitest run",
       "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
+      "test:frontend-contracts":
+        "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs && vitest run src/desktop/events.test.ts src/dashboardRefreshCoordinator.test.ts src/pollController.test.ts src/settingsValidationController.test.ts",
       "test:validation":
         "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
       "test:e2e": "playwright test",
@@ -55,6 +62,10 @@ function validationFixture(t) {
     "scripts/check-agent-assets.node.mjs",
     "scripts/check-bundle-budget.mjs",
     "scripts/check-bundle-budget.node.mjs",
+    "scripts/check-frontend-boundaries.mjs",
+    "scripts/check-frontend-boundaries.node.mjs",
+    "scripts/check-preview-coverage.mjs",
+    "scripts/check-preview-coverage.node.mjs",
     "scripts/fixture.node.mjs",
     "scripts/run-validation.mjs",
   ]) {
@@ -85,11 +96,19 @@ function validationFixture(t) {
       full: { packageScript: "verify:full", profile: "full" },
     },
     profiles: {
-      fast: ["validation-contract", "agent-assets", "validation-tests"],
+      fast: [
+        "validation-contract",
+        "agent-assets",
+        "validation-tests",
+        "frontend-contracts",
+        "frontend-contract-tests",
+      ],
       full: [
         "validation-contract",
         "agent-assets",
         "validation-tests",
+        "frontend-contracts",
+        "frontend-contract-tests",
         "rust-format",
         "rust-clippy",
         "rust-tests",
@@ -117,6 +136,16 @@ function validationFixture(t) {
         label: "checker tests",
         argv: ["pnpm", "test:validation"],
         packageScript: "test:validation",
+      },
+      "frontend-contracts": {
+        label: "frontend static contracts",
+        argv: ["pnpm", "check:frontend-contracts"],
+        packageScript: "check:frontend-contracts",
+      },
+      "frontend-contract-tests": {
+        label: "frontend contract tests",
+        argv: ["pnpm", "test:frontend-contracts"],
+        packageScript: "test:frontend-contracts",
       },
       "rust-format": {
         label: "Rust formatting",
@@ -220,11 +249,17 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   packageJson.scripts["test:validation"] = "node --help";
+  packageJson.scripts["check:frontend-boundaries"] = "node --help";
   writeJson(root, "package.json", packageJson);
 
+  const errors = validateValidationContract(root).join("\n");
   assert.match(
-    validateValidationContract(root).join("\n"),
+    errors,
     /required package script test:validation must be "node --test scripts\/check-agent-assets\.node\.mjs scripts\/check-validation-contract\.node\.mjs", received "node --help"/,
+  );
+  assert.match(
+    errors,
+    /required package script check:frontend-boundaries must be "node scripts\/check-frontend-boundaries\.mjs", received "node --help"/,
   );
 });
 
@@ -470,6 +505,8 @@ test("pins required full-gate commands independently of the command inventory", 
     "validation-contract",
     "agent-assets",
     "validation-tests",
+    "frontend-contracts",
+    "frontend-contract-tests",
     "rust-format",
     "rust-clippy",
     "rust-tests",
@@ -493,6 +530,8 @@ test("pins required full-gate commands independently of the command inventory", 
     "validation-contract",
     "agent-assets",
     "validation-tests",
+    "frontend-contracts",
+    "frontend-contract-tests",
     "rust-format",
     "rust-clippy",
     "rust-tests",

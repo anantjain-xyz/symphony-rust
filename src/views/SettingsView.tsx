@@ -1,6 +1,3 @@
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   startTransition,
   useCallback,
@@ -8,6 +5,12 @@ import {
   useRef,
   useState,
 } from "react";
+import * as desktopCommands from "../desktop/commands";
+import {
+  getDesktopVersion,
+  openExternalUrl,
+  revealDesktopPath,
+} from "../desktop/shell";
 import type { InputHTMLAttributes } from "react";
 import type {
   AppSettings,
@@ -256,7 +259,7 @@ function SettingsFeature({
     }
     const created = new SettingsValidationController(
       viewProps.runtimeAvailable,
-      (settings) => invoke<ValidationResult>("validate_settings", { settings }),
+      desktopCommands.validateSettings,
       (state) => {
         if (!mountedRef.current) return;
         // Keep pending updates low-priority, but flush terminal states immediately
@@ -611,7 +614,7 @@ function SettingsView({
   useEffect(() => {
     if (!runtimeAvailable) return;
     let cancelled = false;
-    void getVersion()
+    void getDesktopVersion()
       .then((version) => {
         if (!cancelled) setAppVersion(version);
       })
@@ -1723,7 +1726,7 @@ function SettingsView({
             <button
               type="button"
               onClick={() =>
-                revealItemInDir(validation.database_path).catch(() => undefined)
+                revealDesktopPath(validation.database_path).catch(() => undefined)
               }
             >
               Reveal database
@@ -1731,7 +1734,7 @@ function SettingsView({
             <button
               type="button"
               onClick={() =>
-                revealItemInDir(`${validation.app_data_dir}/logs`).catch(
+                revealDesktopPath(`${validation.app_data_dir}/logs`).catch(
                   () => undefined,
                 )
               }
@@ -1948,7 +1951,7 @@ function AgentCliStatus({
           <button
             type="button"
             className="link-button outlined"
-            onClick={() => openUrl(installUrl).catch(() => undefined)}
+            onClick={() => openExternalUrl(installUrl).catch(() => undefined)}
           >
             Install {label}
           </button>
@@ -2330,7 +2333,10 @@ function WorkflowBlock({
     detail = "A repository workflow transfer is waiting for review.";
     actions = (
       <>
-        <button type="button" onClick={() => openUrl(prUrl).catch(() => undefined)}>
+        <button
+          type="button"
+          onClick={() => openExternalUrl(prUrl).catch(() => undefined)}
+        >
           View PR
         </button>
         {checkAgain}
@@ -2518,7 +2524,7 @@ function SkillsBlock({
       <>
         <button
           type="button"
-          onClick={() => openUrl(prUrl).catch(() => undefined)}
+          onClick={() => openExternalUrl(prUrl).catch(() => undefined)}
         >
           View PR
         </button>
@@ -2614,7 +2620,7 @@ function ExternalLink({
     <button
       type="button"
       className="inline-link"
-      onClick={() => openUrl(href).catch(() => undefined)}
+      onClick={() => openExternalUrl(href).catch(() => undefined)}
     >
       {children}
     </button>

@@ -19,6 +19,8 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
+      "frontend-contracts",
+      "frontend-contract-tests",
       "rust-format",
       "rust-clippy",
       "rust-tests",
@@ -29,6 +31,8 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
+      "frontend-contracts",
+      "frontend-contract-tests",
       "rust-format",
       "rust-clippy",
       "rust-tests",
@@ -65,6 +69,22 @@
         "test:validation"
       ],
       "packageScript": "test:validation"
+    },
+    "frontend-contracts": {
+      "label": "frontend static contracts",
+      "argv": [
+        "pnpm",
+        "check:frontend-contracts"
+      ],
+      "packageScript": "check:frontend-contracts"
+    },
+    "frontend-contract-tests": {
+      "label": "frontend contract tests",
+      "argv": [
+        "pnpm",
+        "test:frontend-contracts"
+      ],
+      "packageScript": "test:frontend-contracts"
     },
     "rust-format": {
       "label": "Rust formatting",
