@@ -1,4 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import type {
   RetroBatchRow,
@@ -8,6 +7,7 @@ import type {
   RetroStatus,
   RetroSuggestionRow,
 } from "../bindings";
+import { openExternalUrl } from "../desktop/shell";
 import { shortTime, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import { retroRepoBatchState } from "../viewHelpers";
@@ -602,7 +602,10 @@ function RetroBatchResults({ batches }: { batches: RetroBatchRow[] }) {
           </div>
           <Badge status={batch.state} />
           {batch.pr_url ? (
-            <button type="button" onClick={() => openUrl(batch.pr_url!).catch(() => undefined)}>
+            <button
+              type="button"
+              onClick={() => openExternalUrl(batch.pr_url!).catch(() => undefined)}
+            >
               View PR
             </button>
           ) : null}

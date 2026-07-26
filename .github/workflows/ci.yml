@@ -45,6 +45,8 @@ jobs:
       - run: cargo test --workspace --exclude symphony-desktop
 
       # Frontend
+      - run: pnpm check:frontend-contracts
+      - run: pnpm test:frontend-contracts
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
