@@ -134,7 +134,9 @@ function rustGenericArguments(tokens) {
   const closing = matchingTokenDelimiter(tokens, opening);
   if (closing < 0) return [];
   return splitTopLevelTokens(tokens.slice(opening + 1, closing)).filter(
-    (argument) => argument.some((token) => token.kind === "ident"),
+    (argument) =>
+      argument.length > 0 &&
+      !(argument[0].value === "'" && argument.length <= 2),
   );
 }
 
@@ -213,6 +215,36 @@ function rustWireType(typeTokens, aliases = new Map(), resolving = new Set()) {
       rustWireType(argument, aliases, resolving),
     ),
   };
+}
+
+function commandReturnType(tokens, closing, aliases) {
+  let cursor = closing + 1;
+  if (tokens[cursor]?.value !== "-" || tokens[cursor + 1]?.value !== ">") {
+    return { kind: "null" };
+  }
+  cursor += 2;
+  const start = cursor;
+  const stack = [];
+  while (cursor < tokens.length) {
+    const value = tokens[cursor].value;
+    if (["(", "[", "<"].includes(value)) {
+      stack.push({ "(": ")", "[": "]", "<": ">" }[value]);
+    } else if ([")", "]", ">"].includes(value)) {
+      if (stack.at(-1) === value) stack.pop();
+    } else if (
+      stack.length === 0 &&
+      (value === "{" || value === ";" || value === "where")
+    ) {
+      break;
+    }
+    cursor += 1;
+  }
+  const returnTokens = tokens.slice(start, cursor);
+  if (rustTypeName(trimRustTypeTokens(returnTokens)) === "Result") {
+    const [success] = rustGenericArguments(returnTokens);
+    return rustWireType(success ?? [], aliases);
+  }
+  return rustWireType(returnTokens, aliases);
 }
 
 function rustTypeAliases(entries) {
@@ -355,6 +387,10 @@ function commandsFromRustSource(source, aliases) {
                   commandRenameAll(attributeTokens),
                   aliases,
                 ),
+          returnType:
+            closing < 0
+              ? { kind: "unknown", source: "unparsed Rust command return type" }
+              : commandReturnType(tokens, closing, aliases),
         });
       }
     }
@@ -765,6 +801,14 @@ function staticCommand(argument) {
   return null;
 }
 
+function staticFrontendReturnType(call, checker) {
+  if (call.typeArguments?.length !== 1) return null;
+  return frontendWireType(
+    checker,
+    checker.getTypeFromTypeNode(call.typeArguments[0]),
+  );
+}
+
 function unwrapExpression(expression) {
   while (
     expression &&
@@ -1016,6 +1060,7 @@ export function frontendInvokeCommands(sources) {
   const commands = [];
   const dynamic = [];
   const dynamicArguments = [];
+  const dynamicReturnTypes = [];
   const usages = [];
 
   for (const record of frontendSourceRecords(sources).values()) {
@@ -1043,7 +1088,17 @@ export function frontendInvokeCommands(sources) {
             if (arguments_ === null) {
               dynamicArguments.push(`${command} at ${location}`);
             } else {
-              usages.push({ command, arguments: arguments_, location });
+              const returnType = staticFrontendReturnType(node, checker);
+              if (returnType === null) {
+                dynamicReturnTypes.push(`${command} at ${location}`);
+              } else {
+                usages.push({
+                  command,
+                  arguments: arguments_,
+                  returnType,
+                  location,
+                });
+              }
             }
           } else {
             const owner = enclosingFunction(node);
@@ -1062,7 +1117,13 @@ export function frontendInvokeCommands(sources) {
     };
     visit(file);
   }
-  return { commands, dynamic, dynamicArguments, usages };
+  return {
+    commands,
+    dynamic,
+    dynamicArguments,
+    dynamicReturnTypes,
+    usages,
+  };
 }
 
 function namedWireType(type) {
@@ -1236,6 +1297,13 @@ export function checkIpcContract({ rustSources, frontendSources, backendOnly = [
       )}`,
     );
   }
+  if (frontend.dynamicReturnTypes.length > 0) {
+    diagnostics.push(
+      `frontend invokes without one explicit result type: ${frontend.dynamicReturnTypes.join(
+        ", ",
+      )}`,
+    );
+  }
   const definitions = new Map(
     rust.definitions.map((definition) => [definition.name, definition]),
   );
@@ -1274,6 +1342,13 @@ export function checkIpcContract({ rustSources, frontendSources, backendOnly = [
           )} != frontend ${wireTypeText(actual.type)}`,
         );
       }
+    }
+    if (!wireTypesCompatible(usage.returnType, definition.returnType)) {
+      diagnostics.push(
+        `IPC return value type for ${usage.command} at ${usage.location}: Rust ${wireTypeText(
+          definition.returnType,
+        )} != frontend ${wireTypeText(usage.returnType)}`,
+      );
     }
   }
   return diagnostics;

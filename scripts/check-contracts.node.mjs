@@ -48,7 +48,7 @@ const ipcFixture = {
         function invokeCommand(command: string, args?: Record<string, unknown>) {
           return tauriInvoke(command, args);
         }
-        invokeCommand("frontend");
+        invokeCommand<void>("frontend");
       `,
     },
   ],
@@ -196,7 +196,7 @@ const importedWrapperIpcFixture = {
       path: "src/feature/calls.ts",
       source: `
         import { invokeCommand as callDesktop } from "../desktop/bridge";
-        callDesktop("frontend", { issueId: "SYM-1", retryCount: 2 });
+        callDesktop<void>("frontend", { issueId: "SYM-1", retryCount: 2 });
       `,
     },
   ],
@@ -243,6 +243,34 @@ test("IPC checker rejects serialized argument value-type drift", () => {
   );
 });
 
+test("IPC checker rejects serialized command return-type drift", () => {
+  const diagnostics = checkIpcContract({
+    ...importedWrapperIpcFixture,
+    rustSources: importedWrapperIpcFixture.rustSources.map((source) => ({
+      ...source,
+      source: source.source.replace(
+        "        ) {}",
+        "        ) -> Result<Option<String>, String> { todo!() }",
+      ),
+    })),
+    frontendSources: importedWrapperIpcFixture.frontendSources.map((source) => ({
+      ...source,
+      source: source.source.replace(
+        'callDesktop<void>("frontend"',
+        'callDesktop<string>("frontend"',
+      ),
+    })),
+  });
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("IPC return value type for frontend") &&
+        message.includes("Rust string | null") &&
+        message.includes("frontend string"),
+    ),
+  );
+});
+
 const compositeIpcFixture = {
   rustSources: [
     {
@@ -284,7 +312,7 @@ const compositeIpcFixture = {
           pair: [string, number],
           payload: Payload,
         ) {
-          return callDesktop("serialized", { maybe, names, env, pair, payload });
+          return callDesktop<void>("serialized", { maybe, names, env, pair, payload });
         }
       `,
     },
@@ -323,9 +351,9 @@ test("IPC checker rejects opaque frontend argument objects", () => {
     frontendSources: importedWrapperIpcFixture.frontendSources.map((source) => ({
       ...source,
       source: source.source.replace(
-        'callDesktop("frontend", { issueId: "SYM-1", retryCount: 2 });',
+        'callDesktop<void>("frontend", { issueId: "SYM-1", retryCount: 2 });',
         `const args = { issueId: "SYM-1", retryCount: 2 };
-         callDesktop("frontend", args);`,
+         callDesktop<void>("frontend", args);`,
       ),
     })),
   });
@@ -361,6 +389,19 @@ const projectionFixture = {
       issues: ["overview"],
     };
   `,
+  rustEventSource: `
+    fn forward(handle: AppHandle) {
+      handle.emit("db_changed", &event);
+      handle.emit("agent_event", &event);
+      handle.emit("rate_limit_changed", &event);
+    }
+  `,
+  frontendEventSource: `
+    import { listen as subscribe } from "@tauri-apps/api/event";
+    subscribe("db_changed", handler);
+    subscribe("agent_event", handler);
+    subscribe("rate_limit_changed", handler);
+  `,
 };
 
 test("projection checker accepts matching prompt and invalidation owners", () => {
@@ -391,6 +432,24 @@ test("projection checker reports both missing and extra values", () => {
         message.includes("frontend invalidations") &&
         message.includes("missing [issues]") &&
         message.includes("extra [runs]"),
+    ),
+  );
+});
+
+test("projection checker rejects backend and frontend event-name drift", () => {
+  const diagnostics = checkProjectionContract({
+    ...projectionFixture,
+    rustEventSource: projectionFixture.rustEventSource.replace(
+      '"agent_event"',
+      '"agent_event_renamed"',
+    ),
+  });
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("backend emitted events vs frontend subscriptions") &&
+        message.includes("missing [agent_event_renamed]") &&
+        message.includes("extra [agent_event]"),
     ),
   );
 });
@@ -537,6 +596,12 @@ const releaseFixture = {
     set -euo pipefail
     VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
     TAG="v$VERSION"
+    RELEASE_REPOSITORY="$(node -p "require('./scripts/contracts/release.json').repository")"
+    REPO_URL="$(gh repo view --json url -q .url)"
+    REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+    if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then
+      exit 1
+    fi
     COMMIT="$(git rev-parse HEAD)"
     bash "$ROOT/scripts/release-macos.sh"
     DMGS=("$ROOT"/target/release/bundle/dmg/Symphony_"$VERSION"_*.dmg)
@@ -551,7 +616,6 @@ const releaseFixture = {
     UPDATER_SIGNATURE="$UPDATER_BUNDLE.sig"
     STAGE="$(mktemp -d)"
     cp "$DMG" "$STAGE/Symphony.dmg"
-    REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
     UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/Symphony.app.tar.gz"
     SIGNATURE="$(<"$UPDATER_SIGNATURE")"
     VERSION="$VERSION" UPDATER_URL="$UPDATER_URL" SIGNATURE="$SIGNATURE" \\
@@ -592,6 +656,20 @@ const releaseFixture = {
 
 test("release checker accepts synchronized versions and artifacts", () => {
   assert.deepEqual(checkReleaseContract(releaseFixture), []);
+});
+
+test("release checker binds publication to the configured repository", () => {
+  const publishScript = releaseFixture.publishScript.replace(
+    'if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then',
+    'if [[ "$REPO_SLUG" == "$RELEASE_REPOSITORY" ]]; then',
+  );
+  assert.notEqual(publishScript, releaseFixture.publishScript);
+  const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
+  assert.ok(
+    diagnostics.some((message) =>
+      message.includes("release repository contract guard"),
+    ),
+  );
 });
 
 for (const [label, command] of [

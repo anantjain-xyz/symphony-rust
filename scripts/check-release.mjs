@@ -503,6 +503,14 @@ function checkPublishScript(source, contract, diagnostics) {
       "release version owner",
     ],
     ['TAG="v$VERSION"', "release tag owner"],
+    [
+      `RELEASE_REPOSITORY="$(node -p "require('./scripts/contracts/release.json').repository")"`,
+      "release contract repository owner",
+    ],
+    [
+      'REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"',
+      "release repository owner",
+    ],
     ['COMMIT="$(git rev-parse HEAD)"', "release commit owner"],
     ['bash "$ROOT/scripts/release-macos.sh"', "signed release build"],
     [
@@ -516,10 +524,6 @@ function checkPublishScript(source, contract, diagnostics) {
     ],
     ['UPDATER_SIGNATURE="$UPDATER_BUNDLE.sig"', "updater signature owner"],
     [`cp "$DMG" "$STAGE/${contract.stableDmg}"`, "stable DMG staging"],
-    [
-      'REPO_SLUG="$(gh repo view --json nameWithOwner -q .nameWithOwner)"',
-      "release repository owner",
-    ],
     [
       `UPDATER_URL="https://github.com/$REPO_SLUG/releases/download/$TAG/${contract.updaterBundle}"`,
       "updater bundle URL",
@@ -549,6 +553,36 @@ function checkPublishScript(source, contract, diagnostics) {
   );
   if (failClosed && failClosed.index !== 0) {
     diagnostics.push(`${path}:${failClosed.line}: fail-closed shell mode must be first`);
+  }
+  const repositoryGuard = requireFailingGuard(
+    statements,
+    'if [[ "$REPO_SLUG" != "$RELEASE_REPOSITORY" ]]; then',
+    path,
+    "release repository contract guard",
+    diagnostics,
+  );
+  const contractRepository = owners.get("release contract repository owner");
+  const repository = owners.get("release repository owner");
+  const updaterUrl = owners.get("updater bundle URL");
+  if (repositoryGuard && repositoryGuard.index >= create.index) {
+    diagnostics.push(
+      `${path}:${repositoryGuard.line}: release repository contract guard must precede gh release create`,
+    );
+  }
+  if (
+    contractRepository &&
+    repository &&
+    repositoryGuard &&
+    updaterUrl &&
+    !(
+      contractRepository.index < repository.index &&
+      repository.index < repositoryGuard.index &&
+      repositoryGuard.index < updaterUrl.index
+    )
+  ) {
+    diagnostics.push(
+      `${path}: release contract repository, resolved repository, equality guard, and updater URL are out of order`,
+    );
   }
   const signedBuild = owners.get("signed release build");
   const dmgDiscovery = owners.get("versioned DMG discovery");

@@ -8,7 +8,8 @@ that contract and what must change together.
 
 **Current behavior** below describes the repository today. The static contract
 suite makes generated types, command ownership, command argument names, storage
-invalidation, and release projections fail closed in CI.
+invalidation, command/event wire types, and release projections fail closed in
+CI.
 
 ## Contract layers and ownership
 
@@ -23,7 +24,7 @@ invalidation, and release projections fail closed in CI.
 | Shared data type declarations | Rust types deriving `specta::Type`, explicitly listed by `symphony_contracts::export_bindings()` | [`src/bindings.ts`](../src/bindings.ts) |
 | Frontend command call | Typed wrappers in [`src/desktop/commands.ts`](../src/desktop/commands.ts) | React code |
 | Event wire shape | [`StorageEvent`](../crates/symphony-storage/src/lib.rs) and serde attributes | Tauri event forwarder and React listeners |
-| Event name | `forward_events` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | listener names in [`src/App.tsx`](../src/App.tsx) |
+| Event name | `forward_events` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | listener names in [`src/desktop/events.ts`](../src/desktop/events.ts) |
 
 Rust owns the runtime contract. A TypeScript generic on `invoke<T>()` is only a
 compile-time assertion by the caller; it does not validate a response at
@@ -73,10 +74,11 @@ the Rust wire shape unchanged.
 
 It scans all desktop Rust modules and frontend TypeScript modules, follows
 imported invoke wrappers, and compares JavaScript-facing argument-object keys
-and serialized value types with Rust command parameters. The type comparison
-normalizes aliases, nullable options, arrays, maps, tuples, and named generated
-DTOs. `pnpm test:static` exercises positive and negative fixtures for these
-rules.
+and serialized value types with Rust command parameters. It also compares each
+Rust command's direct or `Result` success type with the explicit frontend
+`invoke<T>` result type. The comparison normalizes aliases, nullable options,
+arrays, maps, tuples, and named generated DTOs. `pnpm test:static` exercises
+positive and negative fixtures for these rules.
 
 ## Specta bindings
 
@@ -157,9 +159,10 @@ Typed events may provide immediate UI updates, but durable `db_changed`
 invalidation remains the recovery path if a typed event is missed or received
 for a hidden resource.
 
-`pnpm check:projections` compares backend-emitted table literals with the
-frontend map, rejects unknown or orphaned names, and requires durable
-repository writes to emit their matching invalidation.
+`pnpm check:projections` compares backend `emit` event literals with frontend
+`listen` literals, compares backend-emitted table literals with the frontend
+map, rejects unknown or orphaned names, and requires durable repository writes
+to emit their matching invalidation.
 
 ## Error and compatibility rules
 

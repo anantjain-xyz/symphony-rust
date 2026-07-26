@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -123,6 +123,86 @@ export function storageChangedTables(source) {
     }
   }
   return { tables, dynamic };
+}
+
+export function rustEmittedEvents(sources) {
+  const entries =
+    typeof sources === "string"
+      ? [{ path: "<rust>", source: sources }]
+      : sources;
+  const events = [];
+  const dynamic = [];
+  for (const { path, source } of entries) {
+    const tokens = rustTokens(source);
+    for (let index = 1; index + 2 < tokens.length; index += 1) {
+      if (
+        tokens[index - 1].value !== "." ||
+        tokens[index].value !== "emit" ||
+        tokens[index + 1]?.value !== "("
+      ) {
+        continue;
+      }
+      const event = tokens[index + 2];
+      if (event?.kind === "string") events.push(event.value);
+      else dynamic.push(`${path}:${event?.value ?? "<missing>"}`);
+    }
+  }
+  return { events, dynamic };
+}
+
+export function frontendListenedEvents(
+  source,
+  path = "src/desktop/events.ts",
+) {
+  const file = sourceFile(path, source);
+  const direct = new Set();
+  const namespaces = new Set();
+  for (const statement of file.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== "@tauri-apps/api/event"
+    ) {
+      continue;
+    }
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        if ((element.propertyName?.text ?? element.name.text) === "listen") {
+          direct.add(element.name.text);
+        }
+      }
+    } else if (bindings && ts.isNamespaceImport(bindings)) {
+      namespaces.add(bindings.name.text);
+    }
+  }
+
+  const events = [];
+  const dynamic = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const callsListen =
+        (ts.isIdentifier(node.expression) &&
+          direct.has(node.expression.text)) ||
+        (ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          namespaces.has(node.expression.expression.text) &&
+          node.expression.name.text === "listen");
+      if (callsListen) {
+        const event = node.arguments[0];
+        if (event && ts.isStringLiteralLike(event)) events.push(event.text);
+        else {
+          const { line, character } = file.getLineAndCharacterOfPosition(
+            node.getStart(file),
+          );
+          dynamic.push(`${path}:${line + 1}:${character + 1}`);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return { events, dynamic };
 }
 
 // These are deliberately method/table scoped. Broad table allowlists would let
@@ -339,6 +419,8 @@ export function checkProjectionContract({
   readmeSource,
   storageSource,
   dashboardSource,
+  rustEventSource,
+  frontendEventSource,
 }) {
   const diagnostics = [];
   const rustVariables = rustPromptVariables(rustPromptSource);
@@ -346,6 +428,14 @@ export function checkProjectionContract({
   const readmeVariables = readmePromptVariables(readmeSource);
   const changed = storageChangedTables(storageSource);
   const invalidations = dashboardInvalidationTables(dashboardSource);
+  const emitted =
+    rustEventSource === undefined
+      ? null
+      : rustEmittedEvents(rustEventSource);
+  const listened =
+    frontendEventSource === undefined
+      ? null
+      : frontendListenedEvents(frontendEventSource);
 
   diagnostics.push(
     ...compareSets("Rust prompt variables vs Settings UI", rustVariables, settingsVariables),
@@ -353,11 +443,26 @@ export function checkProjectionContract({
     ...compareSets("storage changed(table, …) producers vs frontend invalidations", changed.tables, invalidations),
     ...storageMutationDiagnostics(storageSource),
   );
+  if (emitted && listened) {
+    diagnostics.push(
+      ...compareSets(
+        "backend emitted events vs frontend subscriptions",
+        emitted.events,
+        listened.events,
+      ),
+    );
+  } else if (emitted || listened) {
+    diagnostics.push(
+      "event projection requires both the Rust emitter source and frontend subscription source",
+    );
+  }
   for (const [label, values] of [
     ["Rust prompt variables", rustVariables],
     ["Settings prompt variables", settingsVariables],
     ["README prompt variables", readmeVariables],
     ["frontend invalidation tables", invalidations],
+    ["backend emitted events", emitted?.events ?? []],
+    ["frontend event subscriptions", listened?.events ?? []],
   ]) {
     const repeated = duplicates(values);
     if (repeated.length > 0) diagnostics.push(`${label}: duplicates [${repeated.join(", ")}]`);
@@ -367,7 +472,40 @@ export function checkProjectionContract({
       `storage changed(table, …) producers must use literal table names: [${changed.dynamic.join(", ")}]`,
     );
   }
+  if ((emitted?.dynamic.length ?? 0) > 0) {
+    diagnostics.push(
+      `backend emit calls must use literal event names: [${emitted.dynamic.join(
+        ", ",
+      )}]`,
+    );
+  }
+  if ((listened?.dynamic.length ?? 0) > 0) {
+    diagnostics.push(
+      `frontend listen calls must use literal event names: [${listened.dynamic.join(
+        ", ",
+      )}]`,
+    );
+  }
   return diagnostics;
+}
+
+function rustSourceFiles(directory, root = directory) {
+  const sources = [];
+  const entries = readdirSync(directory, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  );
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      sources.push(...rustSourceFiles(path, root));
+    } else if (entry.name.endsWith(".rs")) {
+      sources.push({
+        path: path.slice(root.length + 1),
+        source: readFileSync(path, "utf8"),
+      });
+    }
+  }
+  return sources;
 }
 
 export function checkProjections(root = ROOT) {
@@ -377,6 +515,8 @@ export function checkProjections(root = ROOT) {
     readmeSource: readFileSync(join(root, "README.md"), "utf8"),
     storageSource: readFileSync(join(root, "crates/symphony-storage/src/repo.rs"), "utf8"),
     dashboardSource: readFileSync(join(root, "src/dashboardResources.ts"), "utf8"),
+    rustEventSource: rustSourceFiles(join(root, "src-tauri", "src")),
+    frontendEventSource: readFileSync(join(root, "src/desktop/events.ts"), "utf8"),
   });
   if (diagnostics.length > 0) throw new Error(diagnostics.join("\n"));
 }
