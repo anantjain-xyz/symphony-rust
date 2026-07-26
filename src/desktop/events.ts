@@ -4,10 +4,7 @@ import type { StorageEvent } from "../bindings";
 
 export type DbChanged = Extract<StorageEvent, { type: "db_changed" }>;
 export type AgentEvent = Extract<StorageEvent, { type: "agent_event" }>;
-export type RateLimitChanged = Extract<
-  StorageEvent,
-  { type: "rate_limit_changed" }
->;
+export type RateLimitChanged = Extract<StorageEvent, { type: "rate_limit_changed" }>;
 
 export type DesktopEventHandlers = {
   onDbChanged: (event: DbChanged) => void;

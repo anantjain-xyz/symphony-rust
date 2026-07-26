@@ -306,7 +306,7 @@ const previewEventsByRunId: Record<string, AgentEventRow[]> = {
       kind: "tool_call",
       payload: JSON.stringify({
         tool: "bash",
-        args: { command: "rg -n \"stop_run|CancellationToken\"" },
+        args: { command: 'rg -n "stop_run|CancellationToken"' },
         call_id: "call-preview-search",
         result_summary: "exit 0",
       }),
@@ -482,8 +482,7 @@ const previewRetroReport: RetroReport = {
           target_type: "skill",
           target_id: "symphony-screenshot",
           title: "Clarify screenshot evidence for widgets",
-          body:
-            "Add guidance to symphony-screenshot for when user-facing dashboard work requires full-page Playwright captures, including loading/error/mobile states.",
+          body: "Add guidance to symphony-screenshot for when user-facing dashboard work requires full-page Playwright captures, including loading/error/mobile states.",
           rationale: "3 occurrences found in widgets with medium severity.",
           confidence: "high",
         },
@@ -491,8 +490,7 @@ const previewRetroReport: RetroReport = {
           target_type: "prompt",
           target_id: "common prompt",
           title: "Clarify validation timing for widgets",
-          body:
-            "Add guidance to the common prompt that typecheck/test validation should run before each push and after UI proof artifacts are cleaned up.",
+          body: "Add guidance to the common prompt that typecheck/test validation should run before each push and after UI proof artifacts are cleaned up.",
           rationale: "2 occurrences found in widgets with high severity.",
           confidence: "high",
         },
@@ -554,8 +552,7 @@ const previewRetroReport: RetroReport = {
           target_type: "prompt",
           target_id: "common prompt",
           title: "Clarify repo setup discovery for api",
-          body:
-            "Add guidance that repo-specific validation prerequisites should be captured in the workpad after the first failed setup command, not repeatedly rediscovered on retries.",
+          body: "Add guidance that repo-specific validation prerequisites should be captured in the workpad after the first failed setup command, not repeatedly rediscovered on retries.",
           rationale: "1 occurrence found in api with low severity.",
           confidence: "low",
         },
@@ -563,8 +560,7 @@ const previewRetroReport: RetroReport = {
           target_type: "skill",
           target_id: "symphony-workpad",
           title: "Record validation prerequisites for api",
-          body:
-            "Add a workpad note pattern for persistent repo prerequisites such as auth fixtures, migration commands, or seeded services.",
+          body: "Add a workpad note pattern for persistent repo prerequisites such as auth fixtures, migration commands, or seeded services.",
           rationale: "2 occurrences found in api with high severity.",
           confidence: "high",
         },

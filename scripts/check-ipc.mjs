@@ -29,12 +29,7 @@ function pushHandlerSegment(registrations, segment) {
   if (command) registrations.push(command.value);
 }
 
-const RUST_INJECTED_ARGUMENT_TYPES = new Set([
-  "AppHandle",
-  "State",
-  "WebviewWindow",
-  "Window",
-]);
+const RUST_INJECTED_ARGUMENT_TYPES = new Set(["AppHandle", "State", "WebviewWindow", "Window"]);
 
 const RUST_STRING_TYPES = new Set(["String", "str", "char"]);
 const RUST_NUMBER_TYPES = new Set([
@@ -134,9 +129,7 @@ function rustGenericArguments(tokens) {
   const closing = matchingTokenDelimiter(tokens, opening);
   if (closing < 0) return [];
   return splitTopLevelTokens(tokens.slice(opening + 1, closing)).filter(
-    (argument) =>
-      argument.length > 0 &&
-      !(argument[0].value === "'" && argument.length <= 2),
+    (argument) => argument.length > 0 && !(argument[0].value === "'" && argument.length <= 2),
   );
 }
 
@@ -147,9 +140,7 @@ function rustWireType(typeTokens, aliases = new Map(), resolving = new Set()) {
   if (tokens[0].value === "(") {
     const closing = matchingTokenDelimiter(tokens, 0);
     if (closing === tokens.length - 1) {
-      const items = splitTopLevelTokens(tokens.slice(1, closing)).filter(
-        (item) => item.length > 0,
-      );
+      const items = splitTopLevelTokens(tokens.slice(1, closing)).filter((item) => item.length > 0);
       if (items.length === 0) return { kind: "null" };
       return {
         kind: "tuple",
@@ -178,10 +169,7 @@ function rustWireType(typeTokens, aliases = new Map(), resolving = new Set()) {
   if (name === "Option") {
     return {
       kind: "union",
-      variants: [
-        rustWireType(genericArguments.at(-1) ?? [], aliases, resolving),
-        { kind: "null" },
-      ],
+      variants: [rustWireType(genericArguments.at(-1) ?? [], aliases, resolving), { kind: "null" }],
     };
   }
   if (RUST_ARRAY_TYPES.has(name)) {
@@ -211,9 +199,7 @@ function rustWireType(typeTokens, aliases = new Map(), resolving = new Set()) {
   return {
     kind: "named",
     name,
-    arguments: genericArguments.map((argument) =>
-      rustWireType(argument, aliases, resolving),
-    ),
+    arguments: genericArguments.map((argument) => rustWireType(argument, aliases, resolving)),
   };
 }
 
@@ -231,10 +217,7 @@ function commandReturnType(tokens, closing, aliases) {
       stack.push({ "(": ")", "[": "]", "<": ">" }[value]);
     } else if ([")", "]", ">"].includes(value)) {
       if (stack.at(-1) === value) stack.pop();
-    } else if (
-      stack.length === 0 &&
-      (value === "{" || value === ";" || value === "where")
-    ) {
+    } else if (stack.length === 0 && (value === "{" || value === ";" || value === "where")) {
       break;
     }
     cursor += 1;
@@ -295,7 +278,6 @@ function rustArgumentName(name, renameAll) {
       return words.join("");
     case "UPPERCASE":
       return words.join("").toUpperCase();
-    case "camelCase":
     default:
       return (
         (words[0] ?? "") +
@@ -332,11 +314,7 @@ function commandArguments(tokens, opening, closing, renameAll, aliases) {
       .at(-1)?.value;
     const typeTokens = parameter.slice(colon + 1);
     const outerType = rustTypeName(trimRustTypeTokens(typeTokens));
-    if (
-      !name ||
-      name === "self" ||
-      RUST_INJECTED_ARGUMENT_TYPES.has(outerType)
-    ) {
+    if (!name || name === "self" || RUST_INJECTED_ARGUMENT_TYPES.has(outerType)) {
       continue;
     }
     arguments_.push({
@@ -430,8 +408,7 @@ function commandsFromRustSource(source, aliases) {
 }
 
 export function rustIpcCommands(sources) {
-  const entries =
-    typeof sources === "string" ? [{ path: "<rust>", source: sources }] : sources;
+  const entries = typeof sources === "string" ? [{ path: "<rust>", source: sources }] : sources;
   const aliases = rustTypeAliases(entries);
   const definitions = [];
   const registrations = [];
@@ -465,10 +442,7 @@ function frontendProgram(sources) {
     target: ts.ScriptTarget.Latest,
   };
   const virtualPaths = new Map(
-    sources.map(({ path }) => [
-      path,
-      posix.join(FRONTEND_VIRTUAL_ROOT, path),
-    ]),
+    sources.map(({ path }) => [path, posix.join(FRONTEND_VIRTUAL_ROOT, path)]),
   );
   const virtualSources = new Map(
     sources.map(({ path, source }) => [virtualPaths.get(path), source]),
@@ -478,25 +452,13 @@ function frontendProgram(sources) {
   const defaultReadFile = host.readFile.bind(host);
   const defaultGetSourceFile = host.getSourceFile.bind(host);
   host.getCurrentDirectory = () => FRONTEND_VIRTUAL_ROOT;
-  host.fileExists = (path) =>
-    virtualSources.has(posix.normalize(path)) || defaultFileExists(path);
-  host.readFile = (path) =>
-    virtualSources.get(posix.normalize(path)) ?? defaultReadFile(path);
-  host.getSourceFile = (
-    path,
-    languageVersion,
-    onError,
-    shouldCreateNewSourceFile,
-  ) => {
+  host.fileExists = (path) => virtualSources.has(posix.normalize(path)) || defaultFileExists(path);
+  host.readFile = (path) => virtualSources.get(posix.normalize(path)) ?? defaultReadFile(path);
+  host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) => {
     const normalized = posix.normalize(path);
     const source = virtualSources.get(normalized);
     return source === undefined
-      ? defaultGetSourceFile(
-          path,
-          languageVersion,
-          onError,
-          shouldCreateNewSourceFile,
-        )
+      ? defaultGetSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile)
       : sourceFile(normalized, source);
   };
   const sourcePaths = new Set(virtualPaths.keys());
@@ -505,25 +467,16 @@ function frontendProgram(sources) {
       const importer = [...virtualPaths].find(
         ([, virtualPath]) => virtualPath === posix.normalize(containingFile),
       )?.[0];
-      const target = importer
-        ? sourceImportPath(importer, specifier, sourcePaths)
-        : null;
+      const target = importer ? sourceImportPath(importer, specifier, sourcePaths) : null;
       if (target) {
         const resolvedFileName = virtualPaths.get(target);
         return {
-          extension: target.endsWith("x")
-            ? ts.Extension.Tsx
-            : ts.Extension.Ts,
+          extension: target.endsWith("x") ? ts.Extension.Tsx : ts.Extension.Ts,
           isExternalLibraryImport: false,
           resolvedFileName,
         };
       }
-      return ts.resolveModuleName(
-        specifier,
-        containingFile,
-        options,
-        host,
-      ).resolvedModule;
+      return ts.resolveModuleName(specifier, containingFile, options, host).resolvedModule;
     });
   const program = ts.createProgram({
     rootNames: [...virtualPaths.values()],
@@ -533,10 +486,7 @@ function frontendProgram(sources) {
   return {
     checker: program.getTypeChecker(),
     files: new Map(
-      [...virtualPaths].map(([path, virtualPath]) => [
-        path,
-        program.getSourceFile(virtualPath),
-      ]),
+      [...virtualPaths].map(([path, virtualPath]) => [path, program.getSourceFile(virtualPath)]),
     ),
   };
 }
@@ -625,11 +575,7 @@ function wrapperForCall(node, bindings, wrappers) {
     ts.isPropertyAccessExpression(node.expression) &&
     ts.isIdentifier(node.expression.expression)
   ) {
-    return (
-      wrappers.get(
-        `${node.expression.expression.text}.${node.expression.name.text}`,
-      ) ?? null
-    );
+    return wrappers.get(`${node.expression.expression.text}.${node.expression.name.text}`) ?? null;
   }
   return null;
 }
@@ -641,16 +587,12 @@ function forwardingSignature(fn, bindings, wrappers) {
     if (node !== fn && ts.isFunctionLike(node)) return;
     if (ts.isCallExpression(node)) {
       const called = wrapperForCall(node, bindings, wrappers);
-      const commandArgument = called
-        ? node.arguments[called.commandIndex]
-        : undefined;
+      const commandArgument = called ? node.arguments[called.commandIndex] : undefined;
       const index = parameterIndex(fn, commandArgument);
       if (index !== null) {
         const argumentsIndex = parameterIndex(
           fn,
-          called?.argumentsIndex === null
-            ? undefined
-            : node.arguments[called?.argumentsIndex],
+          called?.argumentsIndex === null ? undefined : node.arguments[called?.argumentsIndex],
         );
         commandIndexes.add(index);
         if (argumentsIndex !== null) argumentsIndexes.add(argumentsIndex);
@@ -662,8 +604,7 @@ function forwardingSignature(fn, bindings, wrappers) {
   if (commandIndexes.size !== 1 || argumentsIndexes.size > 1) return null;
   return {
     commandIndex: [...commandIndexes][0],
-    argumentsIndex:
-      argumentsIndexes.size === 1 ? [...argumentsIndexes][0] : null,
+    argumentsIndex: argumentsIndexes.size === 1 ? [...argumentsIndexes][0] : null,
   };
 }
 
@@ -710,17 +651,10 @@ function importedWrapperBindings(record, records) {
   const imported = new Map();
   const sourcePaths = new Set(records.keys());
   for (const statement of record.file.statements) {
-    if (
-      !ts.isImportDeclaration(statement) ||
-      !ts.isStringLiteral(statement.moduleSpecifier)
-    ) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) {
       continue;
     }
-    const targetPath = sourceImportPath(
-      record.path,
-      statement.moduleSpecifier.text,
-      sourcePaths,
-    );
+    const targetPath = sourceImportPath(record.path, statement.moduleSpecifier.text, sourcePaths);
     const target = targetPath ? records.get(targetPath) : null;
     if (!target) continue;
     const bindings = statement.importClause?.namedBindings;
@@ -803,10 +737,7 @@ function staticCommand(argument) {
 
 function staticFrontendReturnType(call, checker) {
   if (call.typeArguments?.length !== 1) return null;
-  return frontendWireType(
-    checker,
-    checker.getTypeFromTypeNode(call.typeArguments[0]),
-  );
+  return frontendWireType(checker, checker.getTypeFromTypeNode(call.typeArguments[0]));
 }
 
 function unwrapExpression(expression) {
@@ -858,12 +789,8 @@ function unionWireType(variants) {
   const flattened = variants.flatMap((variant) =>
     variant.kind === "union" ? variant.variants : [variant],
   );
-  const unique = new Map(
-    flattened.map((variant) => [wireTypeKey(variant), variant]),
-  );
-  const sorted = [...unique].sort(([left], [right]) =>
-    left.localeCompare(right),
-  );
+  const unique = new Map(flattened.map((variant) => [wireTypeKey(variant), variant]));
+  const sorted = [...unique].sort(([left], [right]) => left.localeCompare(right));
   if (sorted.length === 1) return sorted[0][1];
   return { kind: "union", variants: sorted.map(([, variant]) => variant) };
 }
@@ -884,10 +811,7 @@ function frontendWireType(checker, type, resolving = new Set()) {
   }
   if (type.flags & ts.TypeFlags.NumberLike) return { kind: "number" };
   if (type.flags & ts.TypeFlags.BooleanLike) return { kind: "boolean" };
-  if (
-    type.flags &
-    (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)
-  ) {
+  if (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
     return { kind: "null" };
   }
   if (type.flags & ts.TypeFlags.BigIntLike) return { kind: "bigint" };
@@ -907,26 +831,18 @@ function frontendWireType(checker, type, resolving = new Set()) {
       type.types.map((variant) => frontendWireType(checker, variant, nested)),
     );
     const alias = type.aliasSymbol?.getName();
-    return alias
-      ? { kind: "alias", name: alias, target }
-      : target;
+    return alias ? { kind: "alias", name: alias, target } : target;
   }
   if (checker.isTupleType(type)) {
     return {
       kind: "tuple",
-      items: checker
-        .getTypeArguments(type)
-        .map((item) => frontendWireType(checker, item, nested)),
+      items: checker.getTypeArguments(type).map((item) => frontendWireType(checker, item, nested)),
     };
   }
   if (checker.isArrayType(type)) {
     return {
       kind: "array",
-      item: frontendWireType(
-        checker,
-        checker.getTypeArguments(type)[0],
-        nested,
-      ),
+      item: frontendWireType(checker, checker.getTypeArguments(type)[0], nested),
     };
   }
 
@@ -939,19 +855,14 @@ function frontendWireType(checker, type, resolving = new Set()) {
       value: frontendWireType(checker, aliasArguments[1], nested),
     };
   }
-  if (
-    ["NonNullable", "Readonly", "Required"].includes(alias) &&
-    aliasArguments.length === 1
-  ) {
+  if (["NonNullable", "Readonly", "Required"].includes(alias) && aliasArguments.length === 1) {
     return frontendWireType(checker, aliasArguments[0], nested);
   }
   if (alias) {
     return {
       kind: "named",
       name: alias,
-      arguments: aliasArguments.map((argument) =>
-        frontendWireType(checker, argument, nested),
-      ),
+      arguments: aliasArguments.map((argument) => frontendWireType(checker, argument, nested)),
     };
   }
 
@@ -974,8 +885,7 @@ function frontendWireType(checker, type, resolving = new Set()) {
       kind: "object",
       fields: properties
         .map((property) => {
-          const declaration =
-            property.valueDeclaration ?? property.declarations?.[0];
+          const declaration = property.valueDeclaration ?? property.declarations?.[0];
           return {
             name: property.getName(),
             type: declaration
@@ -1001,9 +911,7 @@ function frontendExpressionWireType(expression, checker) {
   if (value && ts.isArrayLiteralExpression(value)) {
     return {
       kind: "tuple",
-      items: value.elements.map((element) =>
-        frontendExpressionWireType(element, checker),
-      ),
+      items: value.elements.map((element) => frontendExpressionWireType(element, checker)),
     };
   }
   if (value && ts.isObjectLiteralExpression(value)) {
@@ -1017,17 +925,11 @@ function frontendExpressionWireType(expression, checker) {
             .sort((left, right) => left.name.localeCompare(right.name)),
         };
   }
-  return frontendWireType(
-    checker,
-    checker.getTypeAtLocation(value ?? expression),
-  );
+  return frontendWireType(checker, checker.getTypeAtLocation(value ?? expression));
 }
 
 function staticArgumentEntries(argument, checker) {
-  if (
-    !argument ||
-    (ts.isIdentifier(argument) && argument.text === "undefined")
-  ) {
+  if (!argument || (ts.isIdentifier(argument) && argument.text === "undefined")) {
     return [];
   }
   const expression = unwrapExpression(argument);
@@ -1068,21 +970,15 @@ export function frontendInvokeCommands(sources) {
     const visit = (node) => {
       if (ts.isCallExpression(node)) {
         const called = wrapperForCall(node, bindings, wrappers.byName);
-        const argument = called
-          ? node.arguments[called.commandIndex]
-          : undefined;
+        const argument = called ? node.arguments[called.commandIndex] : undefined;
         if (argument) {
-          const { line, character } = file.getLineAndCharacterOfPosition(
-            node.getStart(file),
-          );
+          const { line, character } = file.getLineAndCharacterOfPosition(node.getStart(file));
           const location = `${path}:${line + 1}:${character + 1}`;
           const command = staticCommand(argument);
           if (command !== null) {
             commands.push(command);
             const arguments_ = staticArgumentEntries(
-              called?.argumentsIndex === null
-                ? undefined
-                : node.arguments[called?.argumentsIndex],
+              called?.argumentsIndex === null ? undefined : node.arguments[called?.argumentsIndex],
               checker,
             );
             if (arguments_ === null) {
@@ -1105,8 +1001,7 @@ export function frontendInvokeCommands(sources) {
             const wrapperParameter = owner ? wrappers.byNode.get(owner) : undefined;
             const forwarded =
               wrapperParameter !== undefined &&
-              parameterIndex(owner, argument) ===
-                wrapperParameter.commandIndex;
+              parameterIndex(owner, argument) === wrapperParameter.commandIndex;
             if (!forwarded) {
               dynamic.push(location);
             }
@@ -1158,30 +1053,21 @@ function wireTypesCompatible(expected, actual, comparing = new Set()) {
     return !["bigint", "unknown"].includes(actual.kind);
   }
   if (expected.kind === "union") {
-    const actualVariants =
-      actual.kind === "union" ? actual.variants : [actual];
+    const actualVariants = actual.kind === "union" ? actual.variants : [actual];
     return actualVariants.every((variant) =>
-      expected.variants.some((candidate) =>
-        wireTypesCompatible(candidate, variant, nested),
-      ),
+      expected.variants.some((candidate) => wireTypesCompatible(candidate, variant, nested)),
     );
   }
   if (actual.kind === "union") {
-    return actual.variants.every((variant) =>
-      wireTypesCompatible(expected, variant, nested),
-    );
+    return actual.variants.every((variant) => wireTypesCompatible(expected, variant, nested));
   }
   if (expected.kind === "array" && actual.kind === "tuple") {
-    return actual.items.every((item) =>
-      wireTypesCompatible(expected.item, item, nested),
-    );
+    return actual.items.every((item) => wireTypesCompatible(expected.item, item, nested));
   }
   if (expected.kind === "map" && actual.kind === "object") {
     return (
       expected.key.kind === "string" &&
-      actual.fields.every((field) =>
-        wireTypesCompatible(expected.value, field.type, nested),
-      )
+      actual.fields.every((field) => wireTypesCompatible(expected.value, field.type, nested))
     );
   }
   if (expected.kind !== actual.kind) return false;
@@ -1292,9 +1178,7 @@ export function checkIpcContract({ rustSources, frontendSources, backendOnly = [
   }
   if (frontend.dynamicArguments.length > 0) {
     diagnostics.push(
-      `non-literal frontend invoke argument objects: ${frontend.dynamicArguments.join(
-        ", ",
-      )}`,
+      `non-literal frontend invoke argument objects: ${frontend.dynamicArguments.join(", ")}`,
     );
   }
   if (frontend.dynamicReturnTypes.length > 0) {
@@ -1304,9 +1188,7 @@ export function checkIpcContract({ rustSources, frontendSources, backendOnly = [
       )}`,
     );
   }
-  const definitions = new Map(
-    rust.definitions.map((definition) => [definition.name, definition]),
-  );
+  const definitions = new Map(rust.definitions.map((definition) => [definition.name, definition]));
   for (const usage of frontend.usages) {
     const definition = definitions.get(usage.command);
     if (!definition) continue;
@@ -1327,15 +1209,10 @@ export function checkIpcContract({ rustSources, frontendSources, backendOnly = [
         )}]`,
       );
     }
-    const actualByName = new Map(
-      usage.arguments.map((argument) => [argument.name, argument]),
-    );
+    const actualByName = new Map(usage.arguments.map((argument) => [argument.name, argument]));
     for (const expected of definition.arguments) {
       const actual = actualByName.get(expected.name);
-      if (
-        actual &&
-        !wireTypesCompatible(expected.type, actual.type)
-      ) {
+      if (actual && !wireTypesCompatible(expected.type, actual.type)) {
         diagnostics.push(
           `IPC argument value type for ${usage.command}.${expected.name} at ${usage.location}: Rust ${wireTypeText(
             expected.type,
@@ -1378,12 +1255,7 @@ function rustFiles(root) {
 }
 
 function frontendFiles(root) {
-  return sourceFiles(
-    root,
-    join(root, "src"),
-    /\.(?:ts|tsx)$/u,
-    (name) => !name.includes(".test."),
-  );
+  return sourceFiles(root, join(root, "src"), /\.(?:ts|tsx)$/u, (name) => !name.includes(".test."));
 }
 
 export function checkIpc(root = ROOT) {

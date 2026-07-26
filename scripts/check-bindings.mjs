@@ -45,11 +45,7 @@ export function checkBindings(root = ROOT) {
     );
     if (result.status !== 0) {
       throw new Error(
-        [
-          "headless Specta export failed",
-          result.stdout.trim(),
-          result.stderr.trim(),
-        ]
+        ["headless Specta export failed", result.stdout.trim(), result.stderr.trim()]
           .filter(Boolean)
           .join("\n"),
       );

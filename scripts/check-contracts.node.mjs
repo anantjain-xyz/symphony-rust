@@ -3,10 +3,7 @@ import test from "node:test";
 
 import { bindingsDifference } from "./check-bindings.mjs";
 import { checkIpcContract } from "./check-ipc.mjs";
-import {
-  checkProjectionContract,
-  storageMutationDiagnostics,
-} from "./check-projections.mjs";
+import { checkProjectionContract, storageMutationDiagnostics } from "./check-projections.mjs";
 import { checkReleaseContract } from "./check-release.mjs";
 
 test("bindings byte comparison accepts equality and pinpoints drift", () => {
@@ -115,8 +112,7 @@ test("IPC checker ignores unrelated invoke functions without a Tauri import", ()
   assert.ok(
     diagnostics.some(
       (message) =>
-        message.includes("frontend use + backend-only") &&
-        message.includes("missing [frontend]"),
+        message.includes("frontend use + backend-only") && message.includes("missing [frontend]"),
     ),
   );
 });
@@ -141,8 +137,7 @@ test("IPC checker rejects duplicate Rust and backend-only ownership", () => {
   assert.ok(
     diagnostics.some(
       (message) =>
-        message.includes("Rust command definitions") &&
-        message.includes("duplicates [frontend]"),
+        message.includes("Rust command definitions") && message.includes("duplicates [frontend]"),
     ),
   );
   assert.ok(
@@ -329,10 +324,7 @@ test("IPC checker rejects a nested serialized container type mismatch", () => {
     ...compositeIpcFixture,
     frontendSources: compositeIpcFixture.frontendSources.map((source) => ({
       ...source,
-      source: source.source.replace(
-        "env: Record<string, string>",
-        "env: Record<string, number>",
-      ),
+      source: source.source.replace("env: Record<string, string>", "env: Record<string, number>"),
     })),
   });
   assert.ok(
@@ -358,9 +350,7 @@ test("IPC checker rejects opaque frontend argument objects", () => {
     })),
   });
   assert.ok(
-    diagnostics.some((message) =>
-      message.includes("non-literal frontend invoke argument objects"),
-    ),
+    diagnostics.some((message) => message.includes("non-literal frontend invoke argument objects")),
   );
 });
 
@@ -516,8 +506,7 @@ test("projection checker rejects opaque sqlx::query ownership", () => {
       }
     `).some(
       (message) =>
-        message.includes("Repository::save") &&
-        message.includes("non-literal sqlx::query"),
+        message.includes("Repository::save") && message.includes("non-literal sqlx::query"),
     ),
   );
 });
@@ -561,9 +550,7 @@ const releaseFixture = {
     version: "1.2.3",
     plugins: {
       updater: {
-        endpoints: [
-          "https://github.com/acme/symphony/releases/latest/download/latest.json",
-        ],
+        endpoints: ["https://github.com/acme/symphony/releases/latest/download/latest.json"],
       },
     },
   },
@@ -665,11 +652,7 @@ test("release checker binds publication to the configured repository", () => {
   );
   assert.notEqual(publishScript, releaseFixture.publishScript);
   const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
-  assert.ok(
-    diagnostics.some((message) =>
-      message.includes("release repository contract guard"),
-    ),
-  );
+  assert.ok(diagnostics.some((message) => message.includes("release repository contract guard")));
 });
 
 for (const [label, command] of [
@@ -677,19 +660,14 @@ for (const [label, command] of [
   ["stapled notarization", 'xcrun stapler validate "$APP"'],
 ]) {
   test(`release checker requires ${label} verification`, () => {
-    const releaseScript = removeExactShellLine(
-      releaseFixture.releaseScript,
-      command,
-    );
+    const releaseScript = removeExactShellLine(releaseFixture.releaseScript, command);
     const diagnostics = checkReleaseContract({
       ...releaseFixture,
       releaseScript,
     });
     assert.ok(
       diagnostics.some(
-        (message) =>
-          message.includes("scripts/release-macos.sh") &&
-          message.includes(label),
+        (message) => message.includes("scripts/release-macos.sh") && message.includes(label),
       ),
     );
   });
@@ -715,8 +693,7 @@ test("release checker rejects version and artifact drift", () => {
   assert.ok(diagnostics.some((message) => message.includes("package.json")));
   assert.ok(
     diagnostics.some(
-      (message) =>
-        message.includes("scripts/publish-macos.sh") && message.includes("Symphony.dmg"),
+      (message) => message.includes("scripts/publish-macos.sh") && message.includes("Symphony.dmg"),
     ),
   );
 });
@@ -754,23 +731,19 @@ for (const [label, asset] of [
     assert.ok(
       diagnostics.some(
         (message) =>
-          message.includes("assets verified after upload") ||
-          message.includes("verification loop"),
+          message.includes("assets verified after upload") || message.includes("verification loop"),
       ),
     );
   });
 }
 
 test("release checker requires draft creation targeted at the verified commit", () => {
-  for (const flagLine of ['--draft \\', '--target "$COMMIT" \\']) {
+  for (const flagLine of ["--draft \\", '--target "$COMMIT" \\']) {
     const publishScript = removeExactShellLine(releaseFixture.publishScript, flagLine);
     const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
     assert.ok(
-      diagnostics.some(
-        (message) =>
-          message.includes(
-            flagLine.startsWith("--draft") ? "draft release" : "--target $COMMIT",
-          ),
+      diagnostics.some((message) =>
+        message.includes(flagLine.startsWith("--draft") ? "draft release" : "--target $COMMIT"),
       ),
     );
   }
@@ -783,9 +756,7 @@ test("release checker requires exact-name post-upload verification to fail close
   );
   assert.notEqual(publishScript, releaseFixture.publishScript);
   const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
-  assert.ok(
-    diagnostics.some((message) => message.includes("exact-name gh release view")),
-  );
+  assert.ok(diagnostics.some((message) => message.includes("exact-name gh release view")));
 });
 
 test("release checker rejects publication before post-upload verification", () => {

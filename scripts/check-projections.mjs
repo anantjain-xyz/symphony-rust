@@ -105,7 +105,8 @@ export function readmePromptVariables(source) {
     if (!line.startsWith("|")) break;
     const firstCell = line.split("|")[1]?.trim() ?? "";
     const match = /^`\{\{([^{}]+)\}\}`$/u.exec(firstCell);
-    if (!match) throw new Error(`README.md:${index + 1}: malformed prompt placeholder ${firstCell}`);
+    if (!match)
+      throw new Error(`README.md:${index + 1}: malformed prompt placeholder ${firstCell}`);
     variables.push(match[1].trim());
   }
   return variables;
@@ -126,10 +127,7 @@ export function storageChangedTables(source) {
 }
 
 export function rustEmittedEvents(sources) {
-  const entries =
-    typeof sources === "string"
-      ? [{ path: "<rust>", source: sources }]
-      : sources;
+  const entries = typeof sources === "string" ? [{ path: "<rust>", source: sources }] : sources;
   const events = [];
   const dynamic = [];
   for (const { path, source } of entries) {
@@ -150,10 +148,7 @@ export function rustEmittedEvents(sources) {
   return { events, dynamic };
 }
 
-export function frontendListenedEvents(
-  source,
-  path = "src/desktop/events.ts",
-) {
+export function frontendListenedEvents(source, path = "src/desktop/events.ts") {
   const file = sourceFile(path, source);
   const direct = new Set();
   const namespaces = new Set();
@@ -182,8 +177,7 @@ export function frontendListenedEvents(
   const visit = (node) => {
     if (ts.isCallExpression(node)) {
       const callsListen =
-        (ts.isIdentifier(node.expression) &&
-          direct.has(node.expression.text)) ||
+        (ts.isIdentifier(node.expression) && direct.has(node.expression.text)) ||
         (ts.isPropertyAccessExpression(node.expression) &&
           ts.isIdentifier(node.expression.expression) &&
           namespaces.has(node.expression.expression.text) &&
@@ -192,9 +186,7 @@ export function frontendListenedEvents(
         const event = node.arguments[0];
         if (event && ts.isStringLiteralLike(event)) events.push(event.text);
         else {
-          const { line, character } = file.getLineAndCharacterOfPosition(
-            node.getStart(file),
-          );
+          const { line, character } = file.getLineAndCharacterOfPosition(node.getStart(file));
           dynamic.push(`${path}:${line + 1}:${character + 1}`);
         }
       }
@@ -282,9 +274,7 @@ function callOpen(tokens, start) {
 }
 
 function sqlWithoutLeadingComments(sql) {
-  return sql
-    .replace(/^\s*(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)/u, "")
-    .trimStart();
+  return sql.replace(/^\s*(?:--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)/u, "").trimStart();
 }
 
 function sqlMutationTable(sql) {
@@ -312,15 +302,15 @@ function methodSqlMutations(method) {
     if (sqlxQuery) {
       open = callOpen(tokens, index + 3);
     } else {
-      let constructor = index + 1;
+      let constructorIndex = index + 1;
       while (
-        constructor < Math.min(tokens.length, index + 40) &&
-        tokens[constructor].value !== "new"
+        constructorIndex < Math.min(tokens.length, index + 40) &&
+        tokens[constructorIndex].value !== "new"
       ) {
-        constructor += 1;
+        constructorIndex += 1;
       }
-      if (tokens[constructor]?.value !== "new") continue;
-      open = callOpen(tokens, constructor + 1);
+      if (tokens[constructorIndex]?.value !== "new") continue;
+      open = callOpen(tokens, constructorIndex + 1);
     }
     if (open < 0) continue;
 
@@ -339,13 +329,9 @@ function methodSqlMutations(method) {
     if (table) {
       tables.push(table);
     } else if (
-      !/^(?:select|pragma|explain|values)\b/iu.test(
-        sqlWithoutLeadingComments(firstArgument.value),
-      )
+      !/^(?:select|pragma|explain|values)\b/iu.test(sqlWithoutLeadingComments(firstArgument.value))
     ) {
-      unclassifiedQueries.push(
-        firstArgument.value.trim().replace(/\s+/gu, " ").slice(0, 120),
-      );
+      unclassifiedQueries.push(firstArgument.value.trim().replace(/\s+/gu, " ").slice(0, 120));
     }
   }
   return { tables, dynamicQueries, unclassifiedQueries };
@@ -371,8 +357,7 @@ export function storageMutationDiagnostics(source) {
       ...new Set(
         mutations.tables.filter(
           (table) =>
-            !changed.has(table) &&
-            !STORAGE_NOTIFICATION_EXCEPTIONS.has(`${method.name}:${table}`),
+            !changed.has(table) && !STORAGE_NOTIFICATION_EXCEPTIONS.has(`${method.name}:${table}`),
         ),
       ),
     ].sort();
@@ -401,10 +386,7 @@ export function storageMutationDiagnostics(source) {
   return diagnostics;
 }
 
-export function dashboardInvalidationTables(
-  source,
-  path = "src/dashboardResources.ts",
-) {
+export function dashboardInvalidationTables(source, path = "src/dashboardResources.ts") {
   const file = sourceFile(path, source);
   const object = variableInitializer(file, "TABLE_INVALIDATIONS");
   if (!ts.isObjectLiteralExpression(object)) {
@@ -428,19 +410,18 @@ export function checkProjectionContract({
   const readmeVariables = readmePromptVariables(readmeSource);
   const changed = storageChangedTables(storageSource);
   const invalidations = dashboardInvalidationTables(dashboardSource);
-  const emitted =
-    rustEventSource === undefined
-      ? null
-      : rustEmittedEvents(rustEventSource);
+  const emitted = rustEventSource === undefined ? null : rustEmittedEvents(rustEventSource);
   const listened =
-    frontendEventSource === undefined
-      ? null
-      : frontendListenedEvents(frontendEventSource);
+    frontendEventSource === undefined ? null : frontendListenedEvents(frontendEventSource);
 
   diagnostics.push(
     ...compareSets("Rust prompt variables vs Settings UI", rustVariables, settingsVariables),
     ...compareSets("Rust prompt variables vs README", rustVariables, readmeVariables),
-    ...compareSets("storage changed(table, …) producers vs frontend invalidations", changed.tables, invalidations),
+    ...compareSets(
+      "storage changed(table, …) producers vs frontend invalidations",
+      changed.tables,
+      invalidations,
+    ),
     ...storageMutationDiagnostics(storageSource),
   );
   if (emitted && listened) {
@@ -474,16 +455,12 @@ export function checkProjectionContract({
   }
   if ((emitted?.dynamic.length ?? 0) > 0) {
     diagnostics.push(
-      `backend emit calls must use literal event names: [${emitted.dynamic.join(
-        ", ",
-      )}]`,
+      `backend emit calls must use literal event names: [${emitted.dynamic.join(", ")}]`,
     );
   }
   if ((listened?.dynamic.length ?? 0) > 0) {
     diagnostics.push(
-      `frontend listen calls must use literal event names: [${listened.dynamic.join(
-        ", ",
-      )}]`,
+      `frontend listen calls must use literal event names: [${listened.dynamic.join(", ")}]`,
     );
   }
   return diagnostics;
@@ -491,8 +468,8 @@ export function checkProjectionContract({
 
 function rustSourceFiles(directory, root = directory) {
   const sources = [];
-  const entries = readdirSync(directory, { withFileTypes: true }).sort(
-    (left, right) => left.name.localeCompare(right.name),
+  const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+    left.name.localeCompare(right.name),
   );
   for (const entry of entries) {
     const path = join(directory, entry.name);

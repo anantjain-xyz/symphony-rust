@@ -214,8 +214,7 @@ function staticPropertyName(property) {
 
 function objectProperty(object, name) {
   const matches = object.properties.filter(
-    (property) =>
-      ts.isPropertyAssignment(property) && staticPropertyName(property) === name,
+    (property) => ts.isPropertyAssignment(property) && staticPropertyName(property) === name,
   );
   return matches.length === 1 ? matches[0].initializer : null;
 }
@@ -325,9 +324,7 @@ function checkFeedGenerator(source, contract, createLine, diagnostics) {
       ? objectProperty(platforms, contract.updaterTarget)
       : null;
   const url =
-    platform && ts.isObjectLiteralExpression(platform)
-      ? objectProperty(platform, "url")
-      : null;
+    platform && ts.isObjectLiteralExpression(platform) ? objectProperty(platform, "url") : null;
   const signature =
     platform && ts.isObjectLiteralExpression(platform)
       ? objectProperty(platform, "signature")
@@ -517,6 +514,7 @@ function checkPublishScript(source, contract, diagnostics) {
       `DMGS=("$ROOT"/target/release/bundle/dmg/${contract.productName}_"$VERSION"_*.dmg)`,
       "versioned DMG discovery",
     ],
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this matches literal shell expansion.
     ['DMG="${DMGS[0]}"', "versioned DMG owner"],
     [
       `UPDATER_BUNDLE="$ROOT/target/release/bundle/macos/${contract.updaterBundle}"`,
@@ -532,13 +530,7 @@ function checkPublishScript(source, contract, diagnostics) {
   ];
   const owners = new Map();
   for (const [expected, label] of requiredBeforeCreate) {
-    const statement = requireExactStatement(
-      statements,
-      expected,
-      path,
-      label,
-      diagnostics,
-    );
+    const statement = requireExactStatement(statements, expected, path, label, diagnostics);
     if (statement && statement.index >= create.index) {
       diagnostics.push(`${path}:${statement.line}: ${label} must precede gh release create`);
     }
@@ -594,11 +586,13 @@ function checkPublishScript(source, contract, diagnostics) {
 
   const cardinalityGuard = requireFailingGuard(
     statements,
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this matches literal shell expansion.
     "if (( ${#DMGS[@]} != 1 )); then",
     path,
     "versioned DMG cardinality guard",
     diagnostics,
   );
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: this constructs literal shell expansion.
   const versionedDmg = contract.versionedDmg.replace("<version>", "${VERSION}");
   const filenameGuard = requireFailingGuard(
     statements,
@@ -652,9 +646,7 @@ function checkPublishScript(source, contract, diagnostics) {
     diagnostics.push(`${path}:${loop.line}: asset verification must follow gh release create`);
   }
 
-  const closeOffset = statements
-    .slice(loop.index + 1)
-    .findIndex(({ text }) => text === "done");
+  const closeOffset = statements.slice(loop.index + 1).findIndex(({ text }) => text === "done");
   if (closeOffset < 0) {
     diagnostics.push(`${path}:${loop.line}: asset verification loop is missing done`);
     return;
@@ -696,8 +688,7 @@ function checkPublishScript(source, contract, diagnostics) {
     verifierIndex >= 0
       ? loopBody.slice(verifierIndex + 1).findIndex(({ text }) => text === "fi")
       : -1;
-  const verifierEnd =
-    verifierEndOffset >= 0 ? verifierIndex + 1 + verifierEndOffset : -1;
+  const verifierEnd = verifierEndOffset >= 0 ? verifierIndex + 1 + verifierEndOffset : -1;
   const exitIndexes =
     verifierEnd >= 0
       ? loopBody
@@ -710,9 +701,7 @@ function checkPublishScript(source, contract, diagnostics) {
     verifierIndexes.length !== 1 ||
     exitIndexes[0] <= verifierIndexes[0]
   ) {
-    diagnostics.push(
-      `${path}:${loop.line}: a missing uploaded asset must exit unsuccessfully`,
-    );
+    diagnostics.push(`${path}:${loop.line}: a missing uploaded asset must exit unsuccessfully`);
   }
 
   const releaseEdits = directCommands(statements, ["gh", "release", "edit"]);
