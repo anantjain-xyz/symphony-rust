@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { checkMarkdownFiles } from "./check-markdown-links-lib.mjs";
+import { checkMarkdownFiles, isMarkdownFile } from "./check-markdown-links-lib.mjs";
 import { refuseSymlink, repositoryFiles } from "./hygiene-files.mjs";
 import { projectRoot } from "./hygiene-tools-lib.mjs";
 
 try {
-  const files = repositoryFiles(projectRoot).filter((file) => /\.md$/i.test(file));
+  const files = repositoryFiles(projectRoot).filter(isMarkdownFile);
   if (files.length === 0) throw new Error("repository:1: no Markdown files found");
   await Promise.all(files.map((file) => refuseSymlink(projectRoot, file)));
   const problems = await checkMarkdownFiles(projectRoot, files);

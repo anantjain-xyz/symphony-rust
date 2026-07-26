@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { checkMarkdownFiles, githubHeadingSlug } from "./check-markdown-links-lib.mjs";
+import {
+  checkMarkdownFiles,
+  githubHeadingSlug,
+  isMarkdownFile,
+} from "./check-markdown-links-lib.mjs";
 
 const fixtureRoot = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +91,28 @@ test("heading code spans preserve underscores in GitHub anchors", async (context
   assert.deepEqual(problems, []);
 });
 
+test("literal heading underscores remain in GitHub anchors", async (context) => {
+  assert.equal(githubHeadingSlug("foo_bar"), "foo_bar");
+  assert.equal(githubHeadingSlug("foo\\_bar"), "foo_bar");
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-underscore-heading-",
+    ["# foo_bar", "", "[Jump](#foo_bar)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("headings inside list items contribute GitHub anchors", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-list-heading-",
+    ["- # Setup", "", "[Jump](#setup)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
 test("reference definitions may wrap before their destination", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-wrapped-ref-"));
   context.after(() => fs.rm(root, { force: true, recursive: true }));
@@ -122,6 +148,16 @@ test("code spans crossing line boundaries do not contribute link targets", async
   assert.deepEqual(problems, []);
 });
 
+test("escaped backticks do not mask rendered links", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-escaped-backticks-",
+    "\\`[Guide](missing.md)\\`\n",
+  );
+
+  assert.deepEqual(problems, ['root.md:1:3: missing local target "missing.md"']);
+});
+
 test("raw HTML block bodies do not contribute Markdown targets", async (context) => {
   const problems = await checkSource(
     context,
@@ -140,6 +176,16 @@ test("inline links require an adjacent opening parenthesis", async (context) => 
   );
 
   assert.deepEqual(problems, []);
+});
+
+test("inline link destinations may begin on the following line", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-multiline-link-",
+    ["[Guide](", "missing.md)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:1:1: missing local target "missing.md"']);
 });
 
 test("unterminated inline links do not contribute targets", async (context) => {
@@ -211,6 +257,29 @@ test("percent-encoded URI delimiters remain filename characters", async (context
 
   const problems = await checkMarkdownFiles(root, ["guide#one.md", "guide?two.md", "root.md"]);
   assert.deepEqual(problems, []);
+});
+
+test("links to the current directory resolve to the repository root", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-current-directory-",
+    "[Home](./)\n",
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("standard .markdown files are discovered and checked", async (context) => {
+  assert.equal(isMarkdownFile("README.markdown"), true);
+  assert.equal(isMarkdownFile("README.md"), true);
+  assert.equal(isMarkdownFile("README.markdown.txt"), false);
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-extension-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await fs.writeFile(path.join(root, "root.markdown"), "[Missing](missing.md)\n");
+
+  const problems = await checkMarkdownFiles(root, ["root.markdown"]);
+  assert.deepEqual(problems, ['root.markdown:1:1: missing local target "missing.md"']);
 });
 
 test("HTML metadata attributes are not treated as href or src targets", async (context) => {
