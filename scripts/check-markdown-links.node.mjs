@@ -112,6 +112,26 @@ test("indented code blocks do not contribute link targets", async (context) => {
   assert.deepEqual(problems, []);
 });
 
+test("code spans crossing line boundaries do not contribute link targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-multiline-code-",
+    ["`code", "[example][missing]`"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("raw HTML block bodies do not contribute Markdown targets", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-html-block-",
+    ["<pre>", "[example](not-a-link.md)", "<img src=missing.png>", "</pre>"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:3:6: missing local target "missing.png"']);
+});
+
 test("inline links require an adjacent opening parenthesis", async (context) => {
   const problems = await checkSource(
     context,
@@ -130,6 +150,18 @@ test("unterminated inline links do not contribute targets", async (context) => {
   );
 
   assert.deepEqual(problems, []);
+});
+
+test("linked images validate both the image and outer destination", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-linked-image-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(path.join(root, "root.md"), "[![Logo](missing.png)](guide.md)\n"),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, ['root.md:1:2: missing local target "missing.png"']);
 });
 
 test("escaped reference openers remain literal text", async (context) => {

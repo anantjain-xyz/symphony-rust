@@ -29,9 +29,16 @@ function baselineIntroduction(projectRoot) {
 }
 
 export function loadTrustedBiomeBaseline(projectRoot, environment = process.env) {
+  const configuredBase = environment.BIOME_FORMAT_BASE_REF?.trim();
+  const mainPush =
+    environment.GITHUB_EVENT_NAME === "push" && environment.GITHUB_REF === "refs/heads/main";
   const baseReference =
-    environment.BIOME_FORMAT_BASE_REF ??
-    (environment.GITHUB_BASE_REF ? `origin/${environment.GITHUB_BASE_REF}` : "origin/main");
+    configuredBase ||
+    (environment.GITHUB_BASE_REF
+      ? `origin/${environment.GITHUB_BASE_REF}`
+      : mainPush
+        ? "HEAD^"
+        : "origin/main");
   const baseRevision = mergeBase(projectRoot, baseReference);
   if (baseRevision) {
     const baseline = readBaselineAtRevision(projectRoot, baseRevision);

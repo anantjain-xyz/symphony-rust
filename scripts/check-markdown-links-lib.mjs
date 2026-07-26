@@ -11,9 +11,17 @@ const REFERENCE_DEFINITION_CONTINUATION =
   /^\s{0,3}(?:<([^>]+)>|(\S+))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 const REFERENCE_USE = /(!?)\[([^\]]*)\]\s*\[([^\]]*)\]/g;
 const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-+)\s*$/;
+const HTML_BLOCK_TAG =
+  /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
 
 function maskRange(value, start, end) {
   return `${value.slice(0, start)}${" ".repeat(end - start)}${value.slice(end)}`;
+}
+
+function maskRangePreservingLines(value, start, end) {
+  return `${value.slice(0, start)}${value
+    .slice(start, end)
+    .replace(/[^\n]/g, " ")}${value.slice(end)}`;
 }
 
 function blockQuoteLine(line) {
@@ -35,6 +43,71 @@ function lineKeepsParagraphOpen(content) {
     !REFERENCE_DEFINITION.test(content) &&
     !REFERENCE_DEFINITION_START.test(content)
   );
+}
+
+function maskCodeSpans(source) {
+  let masked = source;
+  for (let cursor = 0; cursor < masked.length; ) {
+    if (masked[cursor] !== "`") {
+      cursor += 1;
+      continue;
+    }
+    let openingEnd = cursor;
+    while (masked[openingEnd] === "`") openingEnd += 1;
+    const delimiterLength = openingEnd - cursor;
+    let closing = openingEnd;
+    while (closing < masked.length) {
+      if (masked[closing] !== "`") {
+        closing += 1;
+        continue;
+      }
+      let closingEnd = closing;
+      while (masked[closingEnd] === "`") closingEnd += 1;
+      if (closingEnd - closing === delimiterLength) {
+        masked = maskRangePreservingLines(masked, cursor, closingEnd);
+        cursor = closingEnd;
+        break;
+      }
+      closing = closingEnd;
+    }
+    if (closing >= masked.length) cursor = openingEnd;
+  }
+  return masked;
+}
+
+function maskRawHtmlBlocks(source) {
+  const lines = source.split("\n");
+  let block = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const quote = blockQuoteLine(lines[index]);
+    if (block && block.depth !== quote.depth) block = null;
+    if (block) {
+      if (block.untilBlank && !/\S/.test(quote.content)) {
+        block = null;
+        continue;
+      }
+      const closes = block.closingTag?.test(quote.content) ?? false;
+      lines[index] = " ".repeat(lines[index].length);
+      if (closes) block = null;
+      continue;
+    }
+
+    const typeOne = quote.content.match(/^\s{0,3}<(script|pre|style|textarea)(?:\s|>|$)/i);
+    if (typeOne) {
+      const closingTag = new RegExp(`</${typeOne[1]}\\s*>`, "i");
+      const closes = closingTag.test(quote.content.slice(typeOne[0].length));
+      lines[index] = " ".repeat(lines[index].length);
+      if (!closes) block = { closingTag, depth: quote.depth };
+      continue;
+    }
+
+    const typeSix = quote.content.match(/^\s{0,3}<\/?([a-z][a-z0-9-]*)(?:\s|\/?>|$)/i);
+    if (typeSix && HTML_BLOCK_TAG.test(typeSix[1])) {
+      lines[index] = " ".repeat(lines[index].length);
+      block = { depth: quote.depth, untilBlank: true };
+    }
+  }
+  return lines.join("\n");
 }
 
 function maskIgnoredMarkdown(source) {
@@ -76,28 +149,17 @@ function maskIgnoredMarkdown(source) {
     }
     indentedCode = false;
 
-    let masked = line;
-    for (let cursor = 0; cursor < masked.length; ) {
-      if (masked[cursor] !== "`") {
-        cursor += 1;
-        continue;
-      }
-      let delimiterEnd = cursor;
-      while (masked[delimiterEnd] === "`") delimiterEnd += 1;
-      const delimiter = masked.slice(cursor, delimiterEnd);
-      const closing = masked.indexOf(delimiter, delimiterEnd);
-      if (closing === -1) {
-        cursor = delimiterEnd;
-        continue;
-      }
-      masked = maskRange(masked, cursor, closing + delimiter.length);
-      cursor = closing + delimiter.length;
-    }
-    lines[index] = masked;
+    lines[index] = line;
     paragraphOpen = lineKeepsParagraphOpen(content);
     paragraphQuoteDepth = blockQuote.depth;
   }
-  return lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
+  const html = maskCodeSpans(
+    lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " ")),
+  );
+  return {
+    html,
+    markdown: maskRawHtmlBlocks(html),
+  };
 }
 
 const entityDecoder = new JSDOM("").window.document.createElement("textarea");
@@ -218,7 +280,8 @@ export function githubHeadingSlug(value) {
 }
 
 function markdownAnchors(source) {
-  const masked = maskIgnoredMarkdown(source);
+  const maskedSources = maskIgnoredMarkdown(source);
+  const masked = maskedSources.markdown;
   const originalLines = source.split("\n");
   const maskedLines = masked.split("\n");
   const headingLines = maskedLines.map(blockQuoteLine);
@@ -266,7 +329,7 @@ function markdownAnchors(source) {
       );
     }
   }
-  for (const attribute of htmlAttributes(masked)) {
+  for (const attribute of htmlAttributes(maskedSources.html)) {
     if (attribute.tag === "a" && ["id", "name"].includes(attribute.name)) {
       anchors.add(unescapeMarkdown(attribute.value));
     }
@@ -364,7 +427,8 @@ function inlineDestination(line, open) {
 function inlineLinks(line) {
   const links = [];
   for (let cursor = 0; cursor < line.length; cursor += 1) {
-    const labelStart = line[cursor] === "!" && line[cursor + 1] === "[" ? cursor + 1 : cursor;
+    const image = line[cursor] === "!" && line[cursor + 1] === "[";
+    const labelStart = image ? cursor + 1 : cursor;
     if (line[labelStart] !== "[" || isEscaped(line, labelStart)) continue;
     const labelEnd = findClosingBracket(line, labelStart + 1);
     if (labelEnd === -1) continue;
@@ -373,9 +437,22 @@ function inlineLinks(line) {
     const destination = inlineDestination(line, open);
     if (!destination) continue;
 
+    if (!image) {
+      const labelOffset = labelStart + 1;
+      for (const nested of inlineLinks(line.slice(labelOffset, labelEnd))) {
+        if (!nested.image) continue;
+        links.push({
+          ...nested,
+          column: nested.column + labelOffset,
+          end: nested.end + labelOffset,
+          start: nested.start + labelOffset,
+        });
+      }
+    }
     links.push({
       column: cursor + 1,
       end: destination.closing + 1,
+      image,
       start: cursor,
       target: destination.target,
     });
@@ -389,7 +466,8 @@ function normalizeReference(value) {
 }
 
 function extractTargets(source) {
-  const masked = maskIgnoredMarkdown(source);
+  const maskedSources = maskIgnoredMarkdown(source);
+  const masked = maskedSources.markdown;
   const maskedLines = masked.split("\n");
   const targets = [];
   const definitions = new Map();
@@ -435,7 +513,7 @@ function extractTargets(source) {
       });
     }
   }
-  for (const attribute of htmlAttributes(masked)) {
+  for (const attribute of htmlAttributes(maskedSources.html)) {
     if (!["href", "src"].includes(attribute.name)) continue;
     targets.push({
       column: attribute.column,

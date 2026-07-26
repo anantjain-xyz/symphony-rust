@@ -37,6 +37,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm install:hygiene-tools
       - run: pnpm check:hygiene
+        env:
+          # On main pushes, compare baseline exceptions with the pre-push SHA.
+          BIOME_FORMAT_BASE_REF: ${{ github.event.before }}
       - run: pnpm test:hygiene
 
       # Rust: pure crates only. Excluding symphony-desktop (the Tauri shell) avoids
