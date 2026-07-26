@@ -15,7 +15,10 @@ generated types, and event mappings are all synchronized.
 
 | Layer | Current source of truth | Consumer |
 | --- | --- | --- |
-| Command implementation and serde wire shape | `#[tauri::command]` functions and Rust request/response types in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | Tauri runtime |
+| Command implementation and command-local DTOs | `#[tauri::command]` functions and local request/response types in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs), with settings and retro DTOs in [`src-tauri/src/settings.rs`](../src-tauri/src/settings.rs) and [`src-tauri/src/retro.rs`](../src-tauri/src/retro.rs) | Tauri runtime |
+| Core and configuration DTOs | [`crates/symphony-core/src/types.rs`](../crates/symphony-core/src/types.rs) | Tauri commands, worker, and binding exporter |
+| Persistence and event DTOs | [`crates/symphony-storage/src/repo.rs`](../crates/symphony-storage/src/repo.rs) and [`crates/symphony-storage/src/lib.rs`](../crates/symphony-storage/src/lib.rs) | Tauri commands, event forwarder, and React |
+| Worker and workflow DTOs | [`crates/symphony-worker/src/manager.rs`](../crates/symphony-worker/src/manager.rs), [`crates/symphony-worker/src/skills.rs`](../crates/symphony-worker/src/skills.rs), and [`crates/symphony-worker/src/repo_workflow.rs`](../crates/symphony-worker/src/repo_workflow.rs) | Tauri commands and React |
 | Command reachability | `tauri::generate_handler![...]` in [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) | Tauri runtime |
 | Shared data type declarations | Rust types deriving `specta::Type`, explicitly listed by `export_bindings()` | [`src/bindings.ts`](../src/bindings.ts) |
 | Frontend command call | String literal and argument object passed to `invoke<T>()` | React code |
@@ -76,18 +79,24 @@ No such complete verifier is present today.
 
 ### Current behavior
 
-`export_bindings()` is called during Tauri setup. Its body is compiled only in
-debug builds, so starting a debug desktop app rewrites
+`export_bindings()` is called during Tauri setup and its body is compiled only
+in debug builds. The current path calculation walks up two directories from
+the `src-tauri` manifest directory before appending `src/bindings.ts`. In a
+normal checkout, debug startup therefore attempts to write
+`<checkout-parent>/src/bindings.ts`, not the checked-in
 [`src/bindings.ts`](../src/bindings.ts). It:
 
 - uses Specta's TypeScript exporter;
 - exports big integers as TypeScript `number`;
 - exports an explicit, manually maintained list of Rust types;
 - concatenates successful exports;
-- writes the result to `src/bindings.ts`.
+- attempts to write the result to that checkout-parent path.
 
-Export errors are filtered out and the write result is ignored. The checked-in
-bindings can also be maintained manually without starting the desktop app.
+Export errors are filtered out and the file-write result is ignored. A missing
+checkout-parent `src` directory therefore makes generation fail silently; if
+that directory exists, debug startup may modify a file outside the checkout.
+The checked-in bindings are not updated by this path and are maintained
+manually today.
 Current CI type-checks the checked-in TypeScript but excludes the
 `symphony-desktop` Rust crate, so CI does not regenerate the file or prove it is
 fresh.

@@ -185,17 +185,22 @@ Listener registration itself is asynchronous. Cleanup:
 
 1. marks the effect cancelled;
 2. clears the coalescing timer;
-3. waits for pending registration promises;
-4. calls every returned unlisten function.
+3. waits for the aggregate registration promise;
+4. calls every unlisten function only when all three registrations succeeded.
 
-This covers React Strict Mode remounts and registration that completes after
-unmount.
+When all registrations succeed, this covers React Strict Mode remounts and
+registration that completes after unmount. There is a partial-registration gap:
+`Promise.all(...).catch(() => [])` is fail-fast, so one rejected registration
+discards the unlisten functions from sibling registrations that already
+succeeded or succeed later. Those listeners are not removed by the current
+cleanup.
 
 ### Proposed invariant
 
 Every listener effect must handle all three phases: registration pending,
 listener active, and cleanup requested. Cleanup must be idempotent and must
-remove listeners that finish registering late.
+remove every successfully registered listener, including listeners that finish
+registering late and listeners whose sibling registration rejects.
 
 Typed events may update the UI optimistically only when they are deduplicated
 and paired with durable invalidation. Coalescing may reduce duplicate fetches,
