@@ -172,9 +172,101 @@ test("detects multiline forbidden paths reached through use aliases", async (t) 
   ]);
 });
 
-test("scans custom Cargo target source paths outside conventional roots", async (t) => {
+test("keeps aliases lexical across sibling modules and local item shadowing", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod forbidden {",
+      "    use symphony_storage::StorageError as E;",
+      "    fn wrong() { let _ = E::Sqlx(problem); }",
+      "}",
+      "mod sibling {",
+      "    enum E { Sqlx }",
+      "    fn allowed() { let _ = E::Sqlx; }",
+      "}",
+      "use symphony_storage::StorageError as OuterError;",
+      "fn locally_shadowed() {",
+      "    enum OuterError { Sqlx }",
+      "    let _ = OuterError::Sqlx;",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("resolves complete import paths and independent block aliases", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod mocks { pub mod sqlx { pub fn query() {} } }",
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "use crate::mocks::sqlx as database;",
+      "use crate::errors::StorageError as OtherError;",
+      "use crate::errors::StorageError;",
+      "use crate::mocks::{sqlx::query as mock_query};",
+      "use crate::errors::{StorageError::Sqlx as OtherSqlx};",
+      "fn allowed() {",
+      "    database::query();",
+      "    let _ = OtherError::Sqlx;",
+      "    let _ = StorageError::Sqlx;",
+      "    mock_query();",
+      "    let _ = OtherSqlx;",
+      "}",
+      "fn scoped() {",
+      "    {",
+      "        use sqlx as database;",
+      '        let _ = database::query("select 1");',
+      "    }",
+      "    {",
+      "        use crate::mocks::sqlx as database;",
+      "        database::query();",
+      "    }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:18: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("detects extern-crate and use aliases written as raw identifiers", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "extern crate sqlx as r#database;",
+      "use symphony_storage::StorageError as r#Error;",
+      "fn wrong() {",
+      '    let _ = r#database::query("select 1");',
+      "    let _ = r#Error::Sqlx(problem);",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:4: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("recursively scans modules belonging to custom Cargo targets", async (t) => {
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "hidden"), {
+    recursive: true,
+  });
   await fs.writeFile(
     path.join(root, "worker", "Cargo.toml"),
     [
@@ -183,23 +275,53 @@ test("scans custom Cargo target source paths outside conventional roots", async 
       "",
       "[[bin]]",
       'name = "tool"',
-      'path = "tool.rs"',
+      'path = "generated/lib.rs"',
       "",
     ].join("\n"),
   );
   await fs.writeFile(
-    path.join(root, "worker", "tool.rs"),
-    ["fn main() {", '    let _ = sqlx::query("select 1");', "}", ""].join("\n"),
+    path.join(root, "worker", "generated", "lib.rs"),
+    ["mod hidden;", "fn main() {}", ""].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "hidden.rs"),
+    ["mod deeper;", "pub fn hidden() {}", ""].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "hidden", "deeper.rs"),
+    ["pub fn wrong() {", '    let _ = sqlx::query("select 1");', "}", ""].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "unused.rs"),
+    'pub fn not_compiled() { let _ = sqlx::query("select 1"); }\n',
   );
 
   const errors = await scanRestrictedSources(
-    metadata(root, {}, { worker: ["src/lib.rs", "tool.rs"] }),
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
     policy(),
   );
 
   assert.deepEqual(errors, [
-    "worker/tool.rs:2: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+    "worker/generated/hidden/deeper.rs:2: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
+});
+
+test("fails closed when a custom target module cannot be resolved", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated"), { recursive: true });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    "mod missing;\n",
+  );
+
+  await assert.rejects(
+    scanRestrictedSources(
+      metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+      policy(),
+    ),
+    /cannot resolve Rust module missing/,
+  );
 });
 
 test("fails closed for an invalid or cyclic policy", () => {

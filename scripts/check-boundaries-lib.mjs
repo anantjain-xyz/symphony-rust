@@ -199,6 +199,149 @@ async function addRustFile(files, file, { optional = false } = {}) {
   files.add(absolute);
 }
 
+async function existingModuleFile(candidates) {
+  const matches = [];
+  for (const candidate of candidates) {
+    const absolute = path.resolve(candidate);
+    let stat;
+    try {
+      stat = await fs.lstat(absolute);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw new Error(`cannot inspect Rust module ${absolute}: ${error.message}`);
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(`boundary scan refuses symbolic link ${absolute}`);
+    }
+    if (!stat.isFile()) {
+      throw new Error(`Rust module source is not a file: ${absolute}`);
+    }
+    matches.push(absolute);
+  }
+  if (matches.length > 1) {
+    throw new Error(`Rust module resolves to multiple files: ${matches.join(", ")}`);
+  }
+  return matches[0] ?? null;
+}
+
+function literalPath(token) {
+  if (typeof token?.literal !== "string" || token.literal.length === 0) {
+    throw new Error("#[path] must contain a non-empty plain string literal");
+  }
+  if (
+    token.literal.includes("\\") ||
+    token.literal.includes("\n") ||
+    token.literal.includes("\r") ||
+    path.isAbsolute(token.literal)
+  ) {
+    throw new Error(`boundary scan cannot safely resolve #[path = ${JSON.stringify(token.literal)}]`);
+  }
+  return token.literal;
+}
+
+function modulePathAttribute(tokens, modIndex) {
+  let boundary = modIndex - 1;
+  while (
+    boundary >= 0 &&
+    ![";", "{", "}"].includes(tokens[boundary].value)
+  ) {
+    boundary -= 1;
+  }
+  let result = null;
+  for (let index = boundary + 1; index + 4 < modIndex; index += 1) {
+    if (
+      tokens[index].value === "#" &&
+      tokens[index + 1]?.value === "[" &&
+      tokens[index + 2]?.value === "path" &&
+      tokens[index + 3]?.value === "=" &&
+      tokens[index + 4]?.value === "LITERAL" &&
+      tokens[index + 5]?.value === "]"
+    ) {
+      if (result !== null) {
+        throw new Error("Rust module declares more than one #[path] attribute");
+      }
+      result = literalPath(tokens[index + 4]);
+    }
+  }
+  return result;
+}
+
+function matchingBrace(tokens, opening) {
+  let depth = 0;
+  for (let index = opening; index < tokens.length; index += 1) {
+    if (tokens[index].value === "{") depth += 1;
+    if (tokens[index].value === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  throw new Error(`unclosed Rust block starting on line ${tokens[opening].line}`);
+}
+
+async function collectTargetModules(files, entryFile) {
+  const visited = new Set();
+
+  async function visit(file, moduleDirectory) {
+    const absolute = path.resolve(file);
+    if (visited.has(absolute)) return;
+    visited.add(absolute);
+    await addRustFile(files, absolute);
+
+    let source;
+    try {
+      source = await fs.readFile(absolute, "utf8");
+    } catch (error) {
+      throw new Error(`cannot read Rust module ${absolute}: ${error.message}`);
+    }
+    const tokens = lexRust(source);
+
+    async function scan(start, end, directory) {
+      for (let index = start; index < end; index += 1) {
+        if (
+          tokens[index].value !== "mod" ||
+          !tokens[index + 1]?.identifier
+        ) {
+          continue;
+        }
+        const name = tokens[index + 1].value;
+        const terminator = tokens[index + 2]?.value;
+        if (terminator === "{") {
+          const closing = matchingBrace(tokens, index + 2);
+          await scan(index + 3, closing, path.join(directory, name));
+          index = closing;
+          continue;
+        }
+        if (terminator !== ";") continue;
+
+        const explicitPath = modulePathAttribute(tokens, index);
+        const moduleFile = explicitPath === null
+          ? await existingModuleFile([
+              path.join(directory, `${name}.rs`),
+              path.join(directory, name, "mod.rs"),
+            ])
+          : await existingModuleFile([path.join(directory, explicitPath)]);
+        if (moduleFile === null) {
+          throw new Error(
+            `cannot resolve Rust module ${name} declared at ${absolute}:${tokens[index].line}`,
+          );
+        }
+        const childDirectory = path.basename(moduleFile) === "mod.rs"
+          ? path.dirname(moduleFile)
+          : path.join(
+              path.dirname(moduleFile),
+              path.basename(moduleFile, path.extname(moduleFile)),
+            );
+        await visit(moduleFile, childDirectory);
+      }
+    }
+
+    await scan(0, tokens.length, moduleDirectory);
+  }
+
+  const absoluteEntry = path.resolve(entryFile);
+  await visit(absoluteEntry, path.dirname(absoluteEntry));
+}
+
 async function packageRustFiles(pkg) {
   const manifestDir = path.dirname(pkg.manifest_path);
   const roots = ["src", "tests", "examples", "benches"].map((name) =>
@@ -217,7 +360,7 @@ async function packageRustFiles(pkg) {
     if (!target || typeof target.src_path !== "string" || target.src_path.length === 0) {
       throw new Error(`cargo metadata target for ${pkg.name} is missing src_path`);
     }
-    await addRustFile(files, path.resolve(manifestDir, target.src_path));
+    await collectTargetModules(files, path.resolve(manifestDir, target.src_path));
   }
 
   return [...files].sort();
@@ -323,6 +466,7 @@ function lexRust(source) {
     const rawString = rawStringOpening(source, index);
     if (rawString) {
       const openingLine = line;
+      const literalStart = rawString.contentStart;
       index = rawString.contentStart;
       while (index < source.length && !source.startsWith(rawString.closing, index)) {
         if (source[index] === "\n") line += 1;
@@ -331,8 +475,9 @@ function lexRust(source) {
       if (index >= source.length) {
         throw new Error(`unterminated raw string starting on line ${openingLine}`);
       }
+      const literal = source.slice(literalStart, index);
       index += rawString.closing.length;
-      tokens.push({ value: "LITERAL", line: openingLine });
+      tokens.push({ value: "LITERAL", line: openingLine, literal });
       continue;
     }
 
@@ -347,14 +492,17 @@ function lexRust(source) {
     }
     if (quoteIndex !== null) {
       const openingLine = line;
+      const literalStart = quoteIndex + 1;
       index = quoteIndex + 1;
       let closed = false;
+      let literalEnd = null;
       while (index < source.length) {
         if (source[index] === "\\") {
           index += 1;
           if (source[index] === "\n") line += 1;
           if (index < source.length) index += 1;
         } else if (source[index] === '"') {
+          literalEnd = index;
           index += 1;
           closed = true;
           break;
@@ -366,7 +514,11 @@ function lexRust(source) {
       if (!closed) {
         throw new Error(`unterminated string starting on line ${openingLine}`);
       }
-      tokens.push({ value: "LITERAL", line: openingLine });
+      tokens.push({
+        value: "LITERAL",
+        line: openingLine,
+        literal: source.slice(literalStart, literalEnd),
+      });
       continue;
     }
 
@@ -383,13 +535,21 @@ function lexRust(source) {
       continue;
     }
 
-    if (isIdentifierStart(character)) {
-      const start = index;
+    const rawIdentifier =
+      source.startsWith("r#", index) && isIdentifierStart(source[index + 2]);
+    if (rawIdentifier || isIdentifierStart(character)) {
+      const start = rawIdentifier ? index + 2 : index;
+      index = start;
       index += 1;
       while (index < source.length && isIdentifierContinue(source[index])) {
         index += 1;
       }
-      tokens.push({ value: source.slice(start, index), line });
+      tokens.push({
+        value: source.slice(start, index),
+        line,
+        identifier: true,
+        raw: rawIdentifier,
+      });
       continue;
     }
 
@@ -406,67 +566,304 @@ function lexRust(source) {
   return tokens;
 }
 
-function relevantUseAliases(tokens) {
-  const aliases = new Map();
+function importStatements(tokens) {
+  const statements = [];
+  const groupBraces = new Set();
 
   for (let index = 0; index < tokens.length; index += 1) {
-    let statementStart = null;
-    if (tokens[index].value === "use") {
-      statementStart = index + 1;
+    let kind = null;
+    let start = null;
+    if (tokens[index].value === "use" && !tokens[index].raw) {
+      kind = "use";
+      start = index + 1;
     } else if (
       tokens[index].value === "extern" &&
-      tokens[index + 1]?.value === "crate"
+      !tokens[index].raw &&
+      tokens[index + 1]?.value === "crate" &&
+      !tokens[index + 1]?.raw
     ) {
-      statementStart = index + 2;
+      kind = "extern";
+      start = index + 2;
     }
-    if (statementStart === null) continue;
+    if (kind === null) continue;
 
-    let statementEnd = statementStart;
-    while (statementEnd < tokens.length && tokens[statementEnd].value !== ";") {
-      statementEnd += 1;
-    }
-    const root = tokens
-      .slice(statementStart, statementEnd)
-      .find((token) => isIdentifierStart(token.value[0]))?.value;
-
-    for (let cursor = statementStart; cursor < statementEnd; cursor += 1) {
-      if (tokens[cursor].value !== "as") continue;
-      const alias = tokens[cursor + 1]?.value;
-      if (!alias || alias === "_" || !isIdentifierStart(alias[0])) continue;
-
-      let previous = cursor - 1;
-      while (
-        previous >= statementStart &&
-        !isIdentifierStart(tokens[previous].value[0])
-      ) {
-        previous -= 1;
+    let end = start;
+    while (end < tokens.length && tokens[end].value !== ";") {
+      if (kind === "use" && ["{", "}"].includes(tokens[end].value)) {
+        groupBraces.add(end);
       }
-      const imported = tokens[previous]?.value;
-      if (root === "sqlx" || imported === "sqlx") {
-        aliases.set(alias, "sqlx");
-      } else if (
-        imported === "StorageError" ||
-        (imported === "self" && root === "StorageError")
-      ) {
-        aliases.set(alias, "StorageError");
-      }
+      end += 1;
     }
-
-    index = statementEnd;
+    if (end >= tokens.length) {
+      throw new Error(`${kind} declaration on line ${tokens[index].line} has no semicolon`);
+    }
+    statements.push({ kind, tokenIndex: index, start, end });
+    index = end;
   }
 
-  return aliases;
+  return { statements, groupBraces };
+}
+
+function lexicalScopes(tokens, groupBraces) {
+  const root = { parent: null, bindings: new Map(), line: 1 };
+  const scopeAt = [];
+  const stack = [root];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    scopeAt[index] = stack.at(-1);
+    if (groupBraces.has(index)) continue;
+    if (tokens[index].value === "{") {
+      const child = {
+        parent: stack.at(-1),
+        bindings: new Map(),
+        line: tokens[index].line,
+      };
+      stack.push(child);
+    } else if (tokens[index].value === "}") {
+      if (stack.length === 1) {
+        throw new Error(`unmatched closing brace on line ${tokens[index].line}`);
+      }
+      stack.pop();
+    }
+  }
+  if (stack.length !== 1) {
+    throw new Error(`unclosed Rust scope starting on line ${stack.at(-1).line}`);
+  }
+  return { root, scopeAt };
+}
+
+function parseUseBindings(tokens, start, end) {
+  const bindings = [];
+  const pathPrefixes = new Map();
+
+  function parseTree(index, prefix = [], inheritedAbsolute = false) {
+    let absolute = inheritedAbsolute;
+    if (tokens[index]?.value === "::") {
+      absolute = true;
+      index += 1;
+    }
+
+    if (tokens[index]?.value === "{") {
+      index += 1;
+      while (index < end && tokens[index].value !== "}") {
+        index = parseTree(index, prefix, absolute);
+        if (tokens[index]?.value === ",") index += 1;
+      }
+      if (tokens[index]?.value !== "}") {
+        throw new Error("unclosed use group");
+      }
+      return index + 1;
+    }
+
+    if (tokens[index]?.value === "*") return index + 1;
+    if (!tokens[index]?.identifier) {
+      throw new Error(`unsupported use tree token ${tokens[index]?.value ?? "<end>"}`);
+    }
+
+    const segmentIndex = index;
+    const segment = tokens[index].value;
+    if (prefix.length > 0 || absolute) {
+      pathPrefixes.set(segmentIndex, { prefix: [...prefix], absolute });
+    }
+    const importedPath =
+      segment === "self" && prefix.length > 0 ? [...prefix] : [...prefix, segment];
+    index += 1;
+
+    if (tokens[index]?.value === "::") {
+      return parseTree(index + 1, importedPath, absolute);
+    }
+
+    let name =
+      segment === "self" && prefix.length > 0 ? prefix.at(-1) : segment;
+    if (tokens[index]?.value === "as") {
+      if (!tokens[index + 1]?.identifier) {
+        throw new Error("use alias must be an identifier");
+      }
+      name = tokens[index + 1].value;
+      index += 2;
+    }
+    if (name !== "_") {
+      bindings.push({ name, path: importedPath, absolute });
+    }
+    return index;
+  }
+
+  let index = parseTree(start);
+  if (tokens[index]?.value === ",") index += 1;
+  if (index !== end) {
+    throw new Error(`unsupported trailing tokens in use declaration`);
+  }
+  return { bindings, pathPrefixes };
+}
+
+function declareBinding(scope, name, binding) {
+  if (scope.bindings.has(name)) {
+    throw new Error(`ambiguous Rust declarations bind ${name} more than once in one scope`);
+  }
+  scope.bindings.set(name, { ...binding, scope });
+}
+
+function collectLocalItems(tokens, scopeAt) {
+  const itemKeywords = new Set([
+    "enum",
+    "mod",
+    "struct",
+    "trait",
+    "type",
+    "union",
+  ]);
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (
+      tokens[index].raw ||
+      !itemKeywords.has(tokens[index].value) ||
+      !tokens[index + 1].identifier
+    ) {
+      continue;
+    }
+    declareBinding(scopeAt[index], tokens[index + 1].value, {
+      path: ["LOCAL_ITEM", tokens[index + 1].value],
+      absolute: true,
+    });
+  }
+}
+
+function collectBindings(tokens, statements, scopeAt) {
+  const importPathPrefixes = new Map();
+  for (const statement of statements) {
+    const scope = scopeAt[statement.tokenIndex];
+    if (statement.kind === "extern") {
+      if (!tokens[statement.start]?.identifier) {
+        throw new Error("extern crate name must be an identifier");
+      }
+      const imported = tokens[statement.start].value;
+      let name = imported;
+      let cursor = statement.start + 1;
+      if (tokens[cursor]?.value === "as") {
+        if (!tokens[cursor + 1]?.identifier) {
+          throw new Error("extern crate alias must be an identifier");
+        }
+        name = tokens[cursor + 1].value;
+        cursor += 2;
+      }
+      if (cursor !== statement.end) {
+        throw new Error("unsupported extern crate declaration");
+      }
+      if (name !== "_") {
+        declareBinding(scope, name, {
+          path: [imported],
+          absolute: true,
+        });
+      }
+      continue;
+    }
+
+    const parsed = parseUseBindings(
+      tokens,
+      statement.start,
+      statement.end,
+    );
+    for (const binding of parsed.bindings) {
+      declareBinding(scope, binding.name, binding);
+    }
+    for (const [tokenIndex, context] of parsed.pathPrefixes) {
+      importPathPrefixes.set(tokenIndex, context);
+    }
+  }
+  return importPathPrefixes;
+}
+
+function findBinding(scope, name) {
+  for (let current = scope; current !== null; current = current.parent) {
+    const binding = current.bindings.get(name);
+    if (binding) return binding;
+  }
+  return null;
+}
+
+function resolveBinding(binding, seen = new Set()) {
+  if (seen.has(binding)) {
+    throw new Error(`cyclic Rust import alias involving ${binding.path.join("::")}`);
+  }
+  if (binding.absolute || binding.path.length === 0) return [...binding.path];
+
+  const importedRoot = findBinding(binding.scope, binding.path[0]);
+  if (importedRoot === null || importedRoot === binding) return [...binding.path];
+  seen.add(binding);
+  const resolved = resolveBinding(importedRoot, seen);
+  seen.delete(binding);
+  return [...resolved, ...binding.path.slice(1)];
 }
 
 function normalizedTokenStream(tokens) {
-  const aliases = relevantUseAliases(tokens);
+  const { statements, groupBraces } = importStatements(tokens);
+  const { scopeAt } = lexicalScopes(tokens, groupBraces);
+  collectLocalItems(tokens, scopeAt);
+  const importPathPrefixes = collectBindings(tokens, statements, scopeAt);
+  const values = tokens.map((token) => token.value);
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!tokens[index].identifier) continue;
+    const previousIsSegment =
+      tokens[index - 1]?.value === "::" && tokens[index - 2]?.identifier;
+    if (previousIsSegment) continue;
+
+    const segmentIndices = [index];
+    let cursor = index;
+    while (
+      tokens[cursor + 1]?.value === "::" &&
+      tokens[cursor + 2]?.identifier
+    ) {
+      segmentIndices.push(cursor + 2);
+      cursor += 2;
+    }
+    const segments = segmentIndices.map((tokenIndex) => tokens[tokenIndex].value);
+    const leadingAbsolute =
+      tokens[index - 1]?.value === "::" && !tokens[index - 2]?.identifier;
+    const importContext = importPathPrefixes.get(index);
+    const sourcePath = importContext === undefined
+      ? segments
+      : [...importContext.prefix, ...segments];
+    const absolute = leadingAbsolute || importContext?.absolute === true;
+    const binding = absolute
+      ? null
+      : findBinding(scopeAt[index], sourcePath[0]);
+    const importedPath = binding === null ? null : resolveBinding(binding);
+    const expanded = importedPath === null
+      ? sourcePath
+      : [...importedPath, ...sourcePath.slice(1)];
+
+    if (expanded[0] === "sqlx") {
+      values[index] = "sqlx";
+    } else if (
+      expanded[0] === "StorageError" ||
+      (expanded[0] === "symphony_storage" &&
+        expanded[1] === "StorageError")
+    ) {
+      if (
+        importedPath !== null &&
+        (importedPath[0] === "StorageError" ||
+          (importedPath[0] === "symphony_storage" &&
+            importedPath[1] === "StorageError"))
+      ) {
+        values[index] = "StorageError";
+      }
+    } else {
+      for (const tokenIndex of segmentIndices) {
+        if (["sqlx", "StorageError"].includes(values[tokenIndex])) {
+          values[tokenIndex] = "UNRELATED_RESTRICTED_NAME";
+        }
+      }
+    }
+    index = cursor;
+  }
+
   let source = "";
   const locations = [];
 
-  for (const token of tokens) {
+  for (const [index, token] of tokens.entries()) {
     if (source.length > 0) source += " ";
     const start = source.length;
-    const value = aliases.get(token.value) ?? token.value;
+    const value = values[index];
     source += value;
     locations.push({ start, end: source.length, line: token.line });
   }
