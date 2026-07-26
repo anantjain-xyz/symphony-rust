@@ -73,7 +73,7 @@ function validationFixture(t) {
     },
     profiles: {
       fast: ["contract", "harness", "checker-tests"],
-      full: ["contract", "harness", "checker-tests", "browser"],
+      full: ["contract", "harness", "checker-tests", "browser-install", "browser"],
     },
     commands: {
       contract: {
@@ -90,6 +90,11 @@ function validationFixture(t) {
         label: "checker tests",
         argv: ["pnpm", "test:validation"],
         packageScript: "test:validation",
+      },
+      "browser-install": {
+        label: "browser install",
+        argv: ["pnpm", "exec", "playwright", "install", "chromium"],
+        installsBrowser: true,
       },
       browser: {
         label: "browser",
@@ -237,4 +242,38 @@ test("rejects recursive scripts and unsupported shell syntax descriptively", (t)
   const errors = validateValidationContract(root).join("\n");
   assert.match(errors, /package scripts contain a cycle: check:cycle -> check:cycle/);
   assert.match(errors, /package script test:unsafe uses unsupported shell syntax/);
+});
+
+test("binds canonical entrypoints to matching profiles", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.entrypoints.full.profile = "fast";
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["verify:full"] = "node scripts/run-validation.mjs fast";
+  writeJson(root, "validation/contract.json", contract);
+  writeJson(root, "package.json", packageJson);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /entrypoint full must target profile full, received "fast"/,
+  );
+});
+
+test("requires browser installation before browser validation", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(
+    readFileSync(join(root, "validation/contract.json"), "utf8"),
+  );
+  contract.profiles.full = contract.profiles.full.filter(
+    (command) => command !== "browser-install",
+  );
+  delete contract.commands["browser-install"];
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /browser command browser must follow a command with installsBrowser in the full profile/,
+  );
 });

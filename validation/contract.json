@@ -37,6 +37,7 @@
       "frontend-build",
       "bundle-budget",
       "bundle-tests",
+      "browser-install",
       "browser-e2e"
     ]
   },
@@ -137,6 +138,17 @@
         "test:bundle"
       ],
       "packageScript": "test:bundle"
+    },
+    "browser-install": {
+      "label": "Playwright Chromium installation",
+      "argv": [
+        "pnpm",
+        "exec",
+        "playwright",
+        "install",
+        "chromium"
+      ],
+      "installsBrowser": true
     },
     "browser-e2e": {
       "label": "Playwright end-to-end tests",

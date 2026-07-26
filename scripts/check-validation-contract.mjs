@@ -389,6 +389,11 @@ export function validateValidationContract(
         `fast validation profile must not require a browser (${commandId})`,
       );
     }
+    if (commands[commandId]?.installsBrowser) {
+      errors.push(
+        `fast validation profile must not install a browser (${commandId})`,
+      );
+    }
   }
   for (const commandId of commandIds) {
     if (!full.has(commandId)) {
@@ -415,8 +420,21 @@ export function validateValidationContract(
       }
     }
   }
-  if (![...full].some((id) => commands[id]?.requiresBrowser)) {
+  const fullIds = Array.isArray(profiles.full) ? profiles.full : [];
+  if (!fullIds.some((id) => commands[id]?.requiresBrowser)) {
     errors.push("full validation profile must include a browser command");
+  }
+  for (const [index, commandId] of fullIds.entries()) {
+    if (
+      commands[commandId]?.requiresBrowser &&
+      !fullIds
+        .slice(0, index)
+        .some((candidate) => commands[candidate]?.installsBrowser)
+    ) {
+      errors.push(
+        `browser command ${commandId} must follow a command with installsBrowser in the full profile`,
+      );
+    }
   }
 
   const runnerAbsolute = resolveInside(
@@ -441,6 +459,13 @@ export function validateValidationContract(
         )}`,
       );
       continue;
+    }
+    if (profile !== entrypointName) {
+      errors.push(
+        `entrypoint ${entrypointName} must target profile ${entrypointName}, received ${JSON.stringify(
+          profile,
+        )}`,
+      );
     }
     const expected = `node ${RUNNER_SCRIPT} ${profile}`;
     const actual = packageJson.scripts?.[packageScript];

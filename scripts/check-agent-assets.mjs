@@ -62,17 +62,18 @@ function walkFiles(path) {
 }
 
 function parseFrontmatter(content, path, errors) {
-  if (!content.startsWith("---\n")) {
+  const normalized = content.replace(/\r\n?/g, "\n");
+  if (!normalized.startsWith("---\n")) {
     errors.push(`${path} must start with YAML frontmatter`);
     return null;
   }
-  const end = content.indexOf("\n---\n", 4);
+  const end = normalized.indexOf("\n---\n", 4);
   if (end === -1) {
     errors.push(`${path} has unterminated YAML frontmatter`);
     return null;
   }
   const values = {};
-  for (const [index, line] of content.slice(4, end).split("\n").entries()) {
+  for (const [index, line] of normalized.slice(4, end).split("\n").entries()) {
     if (line.trim() === "") continue;
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.+)$/);
     if (!match) {

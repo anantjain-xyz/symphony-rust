@@ -203,6 +203,21 @@ test("discovers the default prompt owner instead of pinning its Rust path", (t) 
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
+test("accepts CRLF skill frontmatter on Windows-style checkouts", (t) => {
+  const root = harnessFixture(t);
+  for (const path of [
+    "src-tauri/assets/skills/commit/SKILL.md",
+    "src-tauri/assets/skills/pull/SKILL.md",
+    ".agents/skills/symphony-commit/SKILL.md",
+    ".agents/skills/symphony-pull/SKILL.md",
+  ]) {
+    const absolute = join(root, path);
+    writeFileSync(absolute, readFileSync(absolute, "utf8").replaceAll("\n", "\r\n"));
+  }
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
 test("rejects hard-coded MCP namespaces in the default prompt", (t) => {
   const root = harnessFixture(t);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");

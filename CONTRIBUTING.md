@@ -22,11 +22,10 @@ Run the browser-free validation profile during development:
 pnpm verify:fast
 ```
 
-Before opening a pull request, install Chromium once and run the same canonical
-full gate as CI:
+Before opening a pull request, run the same canonical full gate as CI. The
+profile installs its pinned Playwright Chromium build before running E2E tests:
 
 ```sh
-pnpm exec playwright install chromium
 pnpm verify:full
 ```
 
