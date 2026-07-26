@@ -1,6 +1,6 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 export const GENERATED_OR_VENDOR_ROOTS = [
   ".cache",
@@ -17,6 +17,10 @@ export function isGeneratedOrVendor(file) {
   return GENERATED_OR_VENDOR_ROOTS.some(
     (root) => normalized === root || normalized.startsWith(`${root}/`),
   );
+}
+
+export function isShellShebang(firstLine) {
+  return /^#!.*(?:\/|[ \t])(?:ash|bash|dash|ksh|sh|zsh)(?:\s|$)/.test(firstLine);
 }
 
 export function repositoryFiles(root) {

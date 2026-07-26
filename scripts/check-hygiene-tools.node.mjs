@@ -9,7 +9,7 @@ import {
   biomeBaselinePolicyProblems,
   loadTrustedBiomeBaseline,
 } from "./check-biome-format-lib.mjs";
-import { repositoryFiles } from "./hygiene-files.mjs";
+import { isShellShebang, repositoryFiles } from "./hygiene-files.mjs";
 import {
   download,
   extractArchiveBinary,
@@ -59,6 +59,15 @@ test("ShellCheck policy selects the published tar.xz assets", async () => {
   for (const asset of Object.values(policy.shellcheck.assets)) {
     assert.match(asset.archive, /\.tar\.xz$/);
   }
+});
+
+test("shell hygiene recognizes supported extensionless sh-family interpreters", () => {
+  for (const shell of ["ash", "bash", "dash", "ksh", "sh", "zsh"]) {
+    assert.equal(isShellShebang(`#!/bin/${shell}`), true, shell);
+    assert.equal(isShellShebang(`#!/usr/bin/env ${shell}`), true, `env ${shell}`);
+  }
+  assert.equal(isShellShebang("#!/usr/bin/fish"), false);
+  assert.equal(isShellShebang("#!/usr/bin/my-sh"), false);
 });
 
 test("repository files omit tracked paths deleted from the worktree", async (context) => {

@@ -108,11 +108,12 @@ test("heading code spans preserve underscores in GitHub anchors", async (context
 
 test("literal heading underscores remain in GitHub anchors", async (context) => {
   assert.equal(githubHeadingSlug("foo_bar"), "foo_bar");
+  assert.equal(githubHeadingSlug("foo_bar_"), "foo_bar_");
   assert.equal(githubHeadingSlug("foo\\_bar"), "foo_bar");
   const problems = await checkSource(
     context,
     "symphony-markdown-underscore-heading-",
-    ["# foo_bar", "", "[Jump](#foo_bar)"].join("\n"),
+    ["# foo_bar_", "", "[Jump](#foo_bar_)"].join("\n"),
   );
 
   assert.deepEqual(problems, []);
@@ -240,6 +241,53 @@ test("continued reference-definition titles do not contribute Markdown targets",
   assert.deepEqual(problems, []);
 });
 
+test("continued reference-definition titles remain in their list container", async (context) => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "symphony-markdown-reference-title-container-"),
+  );
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["- [docs]: guide.md", '"title [Guide](missing.md)"'].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, ['root.md:2:8: missing local target "missing.md"']);
+});
+
+test("reference definitions begin after a list container ends", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-after-list-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["- ordinary text", "[docs]: guide.md", "", "[Guide][docs]"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("reference definitions are not Setext heading text", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-setext-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[docs]: guide.md", "---", "", "[Jump](#docs-guidemd)"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, ['root.md:4:1: missing heading "#docs-guidemd" in root.md']);
+});
+
 test("reference definitions require balanced bare destination parentheses", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-reference-parentheses-"));
   context.after(() => fs.rm(root, { force: true, recursive: true }));
@@ -310,6 +358,26 @@ test("code spans crossing line boundaries do not contribute link targets", async
   assert.deepEqual(problems, []);
 });
 
+test("code spans cannot cross blank paragraph boundaries", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-code-paragraph-",
+    ["`code", "", "[Guide](missing.md)", "", "code`"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:3:1: missing local target "missing.md"']);
+});
+
+test("backslashes inside code spans do not escape closing backticks", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-code-backslash-",
+    "`code\\` [Guide](missing.md) `",
+  );
+
+  assert.deepEqual(problems, ['root.md:1:9: missing local target "missing.md"']);
+});
+
 test("fence-like lines with trailing content do not close fenced code blocks", async (context) => {
   const problems = await checkSource(
     context,
@@ -328,6 +396,16 @@ test("backtick fence info strings cannot contain backticks", async (context) => 
   );
 
   assert.deepEqual(problems, ['root.md:2:1: missing local target "missing.md"']);
+});
+
+test("fenced code blocks end when their block quote container closes", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-fence-container-",
+    ["> ```", "> sample", "[Guide](missing.md)"].join("\n"),
+  );
+
+  assert.deepEqual(problems, ['root.md:3:1: missing local target "missing.md"']);
 });
 
 test("escaped backticks do not mask rendered links", async (context) => {

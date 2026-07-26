@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { repositoryFiles } from "./hygiene-files.mjs";
+import { isShellShebang, repositoryFiles } from "./hygiene-files.mjs";
 import { projectRoot, resolveTool } from "./hygiene-tools-lib.mjs";
-
-const SHELL_SHEBANG = /^#!.*(?:\/|\b)(?:ba|da|k|z)?sh(?:\s|$)/;
 
 try {
   const files = repositoryFiles(projectRoot);
@@ -31,7 +29,7 @@ try {
       const buffer = Buffer.alloc(256);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       const firstLine = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/, 1)[0];
-      if (SHELL_SHEBANG.test(firstLine)) shellFiles.push(file);
+      if (isShellShebang(firstLine)) shellFiles.push(file);
     } finally {
       await handle.close();
     }

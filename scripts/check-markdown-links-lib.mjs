@@ -55,18 +55,16 @@ function maskCodeSpans(source) {
     let openingEnd = cursor;
     while (masked[openingEnd] === "`") openingEnd += 1;
     const delimiterLength = openingEnd - cursor;
+    const blankLine = masked.slice(openingEnd).match(/\r?\n[ \t]*\r?\n/);
+    const closingLimit = blankLine ? openingEnd + blankLine.index : masked.length;
     let closing = openingEnd;
-    while (closing < masked.length) {
+    while (closing < closingLimit) {
       if (masked[closing] !== "`") {
         closing += 1;
         continue;
       }
       let closingEnd = closing;
       while (masked[closingEnd] === "`") closingEnd += 1;
-      if (isEscaped(masked, closing)) {
-        closing = closingEnd;
-        continue;
-      }
       if (closingEnd - closing === delimiterLength) {
         masked = maskRangePreservingLines(masked, cursor, closingEnd);
         cursor = closingEnd;
@@ -74,7 +72,7 @@ function maskCodeSpans(source) {
       }
       closing = closingEnd;
     }
-    if (closing >= masked.length) cursor = openingEnd;
+    if (closing >= closingLimit) cursor = openingEnd;
   }
   return masked;
 }
@@ -84,10 +82,10 @@ function maskRawHtmlBlocks(source) {
   const containers = markdownContainerLines(lines);
   let block = null;
   let paragraphOpen = false;
-  let paragraphDepth = 0;
+  let paragraphContainer = "";
   for (let index = 0; index < lines.length; index += 1) {
     const quote = containers[index];
-    if (block && block.depth !== quote.depth) block = null;
+    if (block && block.container !== quote.container) block = null;
     if (block) {
       if (block.untilBlank && !/\S/.test(quote.content)) {
         block = null;
@@ -104,14 +102,14 @@ function maskRawHtmlBlocks(source) {
       paragraphOpen = false;
       continue;
     }
-    const continuesParagraph = paragraphOpen && paragraphDepth === quote.depth;
+    const continuesParagraph = paragraphOpen && paragraphContainer === quote.container;
 
     const rawBlock = RAW_HTML_BLOCKS.find(({ opening }) => opening.test(quote.content));
     if (rawBlock) {
       const opening = quote.content.match(rawBlock.opening);
       const closes = rawBlock.closing.test(quote.content.slice(opening?.[0].length ?? 0));
       lines[index] = " ".repeat(lines[index].length);
-      if (!closes) block = { closingTag: rawBlock.closing, depth: quote.depth };
+      if (!closes) block = { closingTag: rawBlock.closing, container: quote.container };
       paragraphOpen = false;
       continue;
     }
@@ -121,7 +119,7 @@ function maskRawHtmlBlocks(source) {
       const closingTag = new RegExp(`</${typeOne[1]}\\s*>`, "i");
       const closes = closingTag.test(quote.content.slice(typeOne[0].length));
       lines[index] = " ".repeat(lines[index].length);
-      if (!closes) block = { closingTag, depth: quote.depth };
+      if (!closes) block = { closingTag, container: quote.container };
       paragraphOpen = false;
       continue;
     }
@@ -129,7 +127,7 @@ function maskRawHtmlBlocks(source) {
     const typeSix = quote.content.match(/^\s{0,3}<\/?([a-z][a-z0-9-]*)(?:\s|\/?>|$)/i);
     if (typeSix && HTML_BLOCK_TAG.test(typeSix[1])) {
       lines[index] = " ".repeat(lines[index].length);
-      block = { depth: quote.depth, untilBlank: true };
+      block = { container: quote.container, untilBlank: true };
       paragraphOpen = false;
       continue;
     }
@@ -137,12 +135,12 @@ function maskRawHtmlBlocks(source) {
     const typeSeven = quote.content.match(/^\s{0,3}(<[^\n]*>)\s*$/);
     if (!continuesParagraph && typeSeven && INLINE_HTML_TAG.test(typeSeven[1])) {
       lines[index] = " ".repeat(lines[index].length);
-      block = { depth: quote.depth, untilBlank: true };
+      block = { container: quote.container, untilBlank: true };
       paragraphOpen = false;
       continue;
     }
     paragraphOpen = lineKeepsParagraphOpen(quote.content, continuesParagraph);
-    paragraphDepth = quote.depth;
+    paragraphContainer = quote.container;
   }
   return lines.join("\n");
 }
@@ -153,12 +151,13 @@ function maskIgnoredMarkdown(source) {
   let fence = null;
   let indentedCode = false;
   let paragraphOpen = false;
-  let paragraphQuoteDepth = 0;
+  let paragraphContainer = "";
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     const blockQuote = containers[index];
     const content = blockQuote.content;
     const marker = content.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence && fence.container !== blockQuote.container) fence = null;
     if (fence) {
       lines[index] = " ".repeat(line.length);
       paragraphOpen = false;
@@ -173,7 +172,11 @@ function maskIgnoredMarkdown(source) {
       continue;
     }
     if (marker && (marker[1][0] === "~" || !marker[2].includes("`"))) {
-      fence = { character: marker[1][0], length: marker[1].length };
+      fence = {
+        character: marker[1][0],
+        container: blockQuote.container,
+        length: marker[1].length,
+      };
       lines[index] = " ".repeat(line.length);
       indentedCode = false;
       paragraphOpen = false;
@@ -184,7 +187,7 @@ function maskIgnoredMarkdown(source) {
       continue;
     }
     const continuesParagraph =
-      paragraphOpen && paragraphQuoteDepth === blockQuote.depth && !blockQuote.startsListItem;
+      paragraphOpen && paragraphContainer === blockQuote.container && !blockQuote.startsListItem;
     if (/^(?: {4}| {0,3}\t)/.test(content) && (indentedCode || !continuesParagraph)) {
       lines[index] = " ".repeat(line.length);
       indentedCode = true;
@@ -195,7 +198,7 @@ function maskIgnoredMarkdown(source) {
 
     lines[index] = line;
     paragraphOpen = lineKeepsParagraphOpen(content, continuesParagraph);
-    paragraphQuoteDepth = blockQuote.depth;
+    paragraphContainer = blockQuote.container;
   }
   const html = maskCodeSpans(
     lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " ")),
@@ -281,19 +284,16 @@ function referenceLabels(value) {
 }
 
 function inlineHeadingText(value) {
+  const delimiterSource = maskCodeSpans(value);
+  const matchedUnderscores = matchedEmphasisDelimiters(delimiterSource, "_");
   let result = "";
   for (let cursor = 0; cursor < value.length; ) {
     if (value[cursor] !== "`") {
       if (value[cursor] === "_") {
         let runEnd = cursor;
         while (value[runEnd] === "_") runEnd += 1;
-        const previous = value[cursor - 1] ?? "";
-        const next = value[runEnd] ?? "";
-        if (
-          isEscaped(value, cursor) ||
-          (/[\p{L}\p{N}]/u.test(previous) && /[\p{L}\p{N}]/u.test(next))
-        ) {
-          result += value.slice(cursor, runEnd);
+        for (let index = cursor; index < runEnd; index += 1) {
+          if (!matchedUnderscores.has(index)) result += "_";
         }
         cursor = runEnd;
         continue;
@@ -328,6 +328,73 @@ function inlineHeadingText(value) {
     cursor = closing + delimiterLength;
   }
   return result;
+}
+
+function matchedEmphasisDelimiters(value, character) {
+  const runs = [];
+  const isWhitespace = (candidate) => candidate === "" || /\s/u.test(candidate);
+  const isPunctuation = (candidate) => /[\p{P}\p{S}]/u.test(candidate);
+  for (let cursor = 0; cursor < value.length; ) {
+    if (value[cursor] !== character || isEscaped(value, cursor)) {
+      cursor += 1;
+      continue;
+    }
+    let end = cursor;
+    while (value[end] === character) end += 1;
+    const before = value[cursor - 1] ?? "";
+    const after = value[end] ?? "";
+    const leftFlanking =
+      !isWhitespace(after) &&
+      (!isPunctuation(after) || isWhitespace(before) || isPunctuation(before));
+    const rightFlanking =
+      !isWhitespace(before) &&
+      (!isPunctuation(before) || isWhitespace(after) || isPunctuation(after));
+    const canOpen = leftFlanking && (character !== "_" || !rightFlanking || isPunctuation(before));
+    const canClose = rightFlanking && (character !== "_" || !leftFlanking || isPunctuation(after));
+    runs.push({
+      canClose,
+      canOpen,
+      end,
+      remaining: end - cursor,
+      start: cursor,
+      usedFromEnd: 0,
+      usedFromStart: 0,
+    });
+    cursor = end;
+  }
+
+  const matched = new Set();
+  for (let closerIndex = 0; closerIndex < runs.length; closerIndex += 1) {
+    const closer = runs[closerIndex];
+    while (closer.canClose && closer.remaining > 0) {
+      let opener = null;
+      for (let openerIndex = closerIndex - 1; openerIndex >= 0; openerIndex -= 1) {
+        const candidate = runs[openerIndex];
+        if (!candidate.canOpen || candidate.remaining === 0) continue;
+        const blockedByRuleOfThree =
+          (candidate.canClose || closer.canOpen) &&
+          (candidate.remaining + closer.remaining) % 3 === 0 &&
+          candidate.remaining % 3 !== 0 &&
+          closer.remaining % 3 !== 0;
+        if (!blockedByRuleOfThree) {
+          opener = candidate;
+          break;
+        }
+      }
+      if (!opener) break;
+
+      const used = opener.remaining >= 2 && closer.remaining >= 2 ? 2 : 1;
+      for (let offset = 0; offset < used; offset += 1) {
+        matched.add(opener.end - opener.usedFromEnd - offset - 1);
+        matched.add(closer.start + closer.usedFromStart + offset);
+      }
+      opener.remaining -= used;
+      opener.usedFromEnd += used;
+      closer.remaining -= used;
+      closer.usedFromStart += used;
+    }
+  }
+  return matched;
 }
 
 function inlineLinkLabels(value) {
@@ -378,6 +445,7 @@ function listStrippedLine(line) {
 
 function markdownContainerLines(lines) {
   let list = null;
+  let nextListItem = 0;
   return lines.map((line) => {
     const quoted = blockQuoteLine(line);
     if (list?.depth !== quoted.depth) list = null;
@@ -386,6 +454,7 @@ function markdownContainerLines(lines) {
     let offset = quoted.offset;
     if (!/\S/.test(content)) {
       return {
+        container: `${quoted.depth}:${list?.items.join("/") ?? ""}`,
         content,
         depth: quoted.depth,
         offset,
@@ -402,6 +471,7 @@ function markdownContainerLines(lines) {
       } else {
         continuationIndent = list.indents[indentIndex];
         list.indents.length = indentIndex + 1;
+        list.items.length = indentIndex + 1;
         content = content.slice(continuationIndent);
         offset += continuationIndent;
       }
@@ -412,14 +482,23 @@ function markdownContainerLines(lines) {
     offset += listed.offset;
     if (listed.startsListItem) {
       const contentIndent = offset - quoted.offset;
+      nextListItem += 1;
       if (!list || continuationIndent === 0) {
-        list = { depth: quoted.depth, indents: [contentIndent] };
+        list = {
+          depth: quoted.depth,
+          indents: [contentIndent],
+          items: [nextListItem],
+        };
       } else if (list.indents.at(-1) !== contentIndent) {
         list.indents.push(contentIndent);
+        list.items.push(nextListItem);
+      } else {
+        list.items[list.items.length - 1] = nextListItem;
       }
     }
 
     return {
+      container: `${quoted.depth}:${list?.items.join("/") ?? ""}`,
       content,
       depth: quoted.depth,
       offset,
@@ -470,13 +549,14 @@ function markdownAnchors(source) {
     } else if (
       index + 1 < headingLines.length &&
       /\S/.test(line) &&
-      headingLines[index + 1].depth === headingLines[index].depth &&
+      !startsMarkdownBlock(line) &&
+      headingLines[index + 1].container === headingLines[index].container &&
       SETEXT_UNDERLINE.test(headingLines[index + 1].content)
     ) {
       let firstLine = index;
       while (
         firstLine > 0 &&
-        headingLines[firstLine - 1].depth === headingLines[index].depth &&
+        headingLines[firstLine - 1].container === headingLines[index].container &&
         /\S/.test(headingLines[firstLine - 1].content) &&
         !startsMarkdownBlock(headingLines[firstLine - 1].content)
       ) {
@@ -788,13 +868,13 @@ function extractTargets(source) {
   const targets = [];
   const definitions = new Map();
   const definitionLines = new Set();
-  let paragraphDepth = 0;
+  let paragraphContainer = "";
   let paragraphOpen = false;
-  const continuedTitleAt = (index, depth) => {
+  const continuedTitleAt = (index, container) => {
     const title = containerLines[index];
     return Boolean(
       title &&
-        title.depth === depth &&
+        title.container === container &&
         !title.startsListItem &&
         isContinuedDefinitionTitle(title.content),
     );
@@ -807,7 +887,7 @@ function extractTargets(source) {
       continue;
     }
     const continuesParagraph =
-      paragraphOpen && paragraphDepth === line.depth && !line.startsListItem;
+      paragraphOpen && paragraphContainer === line.container && !line.startsListItem;
     const definition = continuesParagraph ? null : parseReferenceDefinition(line.content);
     if (definition && !definition.startOnly) {
       const label = normalizeReference(definition.label);
@@ -820,17 +900,17 @@ function extractTargets(source) {
         });
       }
       definitionLines.add(index);
-      if (!definition.hasTitle && continuedTitleAt(index + 1, line.depth)) {
+      if (!definition.hasTitle && continuedTitleAt(index + 1, line.container)) {
         definitionLines.add(index + 1);
         index += 1;
       }
       paragraphOpen = false;
-      paragraphDepth = line.depth;
+      paragraphContainer = line.container;
       continue;
     }
     const nextLine = containerLines[index + 1];
     const continuation =
-      nextLine?.depth === line.depth && !nextLine.startsListItem
+      nextLine?.container === line.container && !nextLine.startsListItem
         ? parseReferenceContinuation(nextLine.content)
         : null;
     if (definition?.startOnly && continuation) {
@@ -846,17 +926,19 @@ function extractTargets(source) {
       definitionLines.add(index);
       definitionLines.add(index + 1);
       const lastDefinitionLine =
-        !continuation.hasTitle && continuedTitleAt(index + 2, line.depth) ? index + 2 : index + 1;
+        !continuation.hasTitle && continuedTitleAt(index + 2, line.container)
+          ? index + 2
+          : index + 1;
       definitionLines.add(lastDefinitionLine);
       paragraphOpen = false;
-      paragraphDepth = line.depth;
+      paragraphContainer = line.container;
       index = lastDefinitionLine;
       continue;
     }
     paragraphOpen = definition?.startOnly
       ? true
       : lineKeepsParagraphOpen(line.content, continuesParagraph);
-    paragraphDepth = line.depth;
+    paragraphContainer = line.container;
   }
   const inlineSource = maskedLines
     .map((line, index) => (definitionLines.has(index) ? " ".repeat(line.length) : line))
