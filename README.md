@@ -167,7 +167,7 @@ The first release containing the updater must still be installed manually by use
 
 The script refuses to run unless you're on a clean `main` checkout matching `origin/main`, and it needs an authenticated [GitHub CLI](https://cli.github.com) (`gh`) with push access.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including TypeScript bindings regeneration.
+See the [documentation index](docs/README.md) for the repository map and development guide, and [CONTRIBUTING.md](CONTRIBUTING.md) for the pull-request and packaging guide.
 
 ## License
 
