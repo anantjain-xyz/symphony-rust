@@ -261,6 +261,105 @@ test("detects extern-crate and use aliases written as raw identifiers", async (t
   ]);
 });
 
+test("detects StorageError variants imported through scoped glob uses", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "mod direct {",
+      "    use symphony_storage::StorageError::*;",
+      "    fn wrong() { let _ = Sqlx(problem); }",
+      "    fn allowed() { let _ = crate::errors::StorageError::Sqlx; }",
+      "}",
+      "mod grouped {",
+      "    use symphony_storage::StorageError::{*};",
+      "    fn wrong() { let _ = Sqlx(problem); }",
+      "}",
+      "mod unrelated {",
+      "    use crate::errors::StorageError::*;",
+      "    fn allowed() { let _ = Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:9: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("skips import syntax inside macro definitions", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "macro_rules! scoped_import {",
+      "    ($p:path) => {{ use $p; include!($p); }};",
+      "}",
+      "fn wrong() {",
+      '    let _ = sqlx::query("select 1");',
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:5: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("resolves simple and chained Rust type aliases", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "type E = symphony_storage::StorageError;",
+      "type Chained = E;",
+      "fn direct() { let _ = E::Sqlx(problem); }",
+      "fn chained() { let _ = Chained::Sqlx(problem); }",
+      "mod unrelated {",
+      "    type E = crate::errors::StorageError;",
+      "    fn allowed() { let _ = E::Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("detects qualified StorageError variant paths", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "use symphony_storage::StorageError as E;",
+      "fn direct() { let _ = <symphony_storage::StorageError>::Sqlx(problem); }",
+      "fn absolute() { let _ = <::symphony_storage::StorageError>::Sqlx(problem); }",
+      "fn aliased() { let _ = <E>::Sqlx(problem); }",
+      "fn allowed() { let _ = <crate::errors::StorageError>::Sqlx; }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("recursively scans modules belonging to custom Cargo targets", async (t) => {
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -306,6 +405,39 @@ test("recursively scans modules belonging to custom Cargo targets", async (t) =>
   ]);
 });
 
+test("recursively scans literal include! sources belonging to Cargo targets", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "nested"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    ['include!("generated.inc");', "fn main() {}", ""].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "generated.inc"),
+    'include!["nested/deeper.inc"];\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "nested", "deeper.inc"),
+    ["pub fn wrong() {", '    let _ = sqlx::query("select 1");', "}", ""].join("\n"),
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "unused.inc"),
+    'pub fn not_compiled() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+    policy(),
+  );
+
+  assert.deepEqual(errors, [
+    "worker/generated/nested/deeper.inc:2: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
 test("fails closed when a custom target module cannot be resolved", async (t) => {
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -321,6 +453,18 @@ test("fails closed when a custom target module cannot be resolved", async (t) =>
       policy(),
     ),
     /cannot resolve Rust module missing/,
+  );
+});
+
+test("fails closed when a literal include! source cannot be resolved", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: 'include!("missing.inc");\n',
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    scanRestrictedSources(metadata(root), policy()),
+    /cannot resolve include! missing\.inc/,
   );
 });
 

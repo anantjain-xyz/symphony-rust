@@ -224,9 +224,9 @@ async function existingModuleFile(candidates) {
   return matches[0] ?? null;
 }
 
-function literalPath(token) {
+function literalPath(token, context = "#[path]") {
   if (typeof token?.literal !== "string" || token.literal.length === 0) {
-    throw new Error("#[path] must contain a non-empty plain string literal");
+    throw new Error(`${context} must contain a non-empty plain string literal`);
   }
   if (
     token.literal.includes("\\") ||
@@ -234,7 +234,9 @@ function literalPath(token) {
     token.literal.includes("\r") ||
     path.isAbsolute(token.literal)
   ) {
-    throw new Error(`boundary scan cannot safely resolve #[path = ${JSON.stringify(token.literal)}]`);
+    throw new Error(
+      `boundary scan cannot safely resolve ${context} ${JSON.stringify(token.literal)}`,
+    );
   }
   return token.literal;
 }
@@ -266,16 +268,58 @@ function modulePathAttribute(tokens, modIndex) {
   return result;
 }
 
-function matchingBrace(tokens, opening) {
-  let depth = 0;
+const closingDelimiter = new Map([
+  ["(", ")"],
+  ["[", "]"],
+  ["{", "}"],
+]);
+
+function matchingDelimiter(tokens, opening) {
+  const expected = closingDelimiter.get(tokens[opening]?.value);
+  if (expected === undefined) {
+    throw new Error(`token on line ${tokens[opening]?.line ?? 1} is not an opening delimiter`);
+  }
+  const stack = [];
   for (let index = opening; index < tokens.length; index += 1) {
-    if (tokens[index].value === "{") depth += 1;
-    if (tokens[index].value === "}") {
-      depth -= 1;
-      if (depth === 0) return index;
+    const value = tokens[index].value;
+    if (closingDelimiter.has(value)) {
+      stack.push(closingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (stack.at(-1) !== value) {
+        throw new Error(`mismatched Rust delimiter on line ${tokens[index].line}`);
+      }
+      stack.pop();
+      if (stack.length === 0) return index;
     }
   }
-  throw new Error(`unclosed Rust block starting on line ${tokens[opening].line}`);
+  throw new Error(`unclosed Rust delimiter starting on line ${tokens[opening].line}`);
+}
+
+function matchingBrace(tokens, opening) {
+  if (tokens[opening]?.value !== "{") {
+    throw new Error(`token on line ${tokens[opening]?.line ?? 1} is not an opening brace`);
+  }
+  return matchingDelimiter(tokens, opening);
+}
+
+function macroDefinitionTokens(tokens) {
+  const ignored = new Set();
+  for (let index = 0; index + 3 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "macro_rules" ||
+      tokens[index].raw ||
+      tokens[index + 1]?.value !== "!" ||
+      !tokens[index + 2]?.identifier ||
+      !closingDelimiter.has(tokens[index + 3]?.value)
+    ) {
+      continue;
+    }
+    const closing = matchingDelimiter(tokens, index + 3);
+    const end = tokens[closing + 1]?.value === ";" ? closing + 1 : closing;
+    for (let cursor = index; cursor <= end; cursor += 1) ignored.add(cursor);
+    index = end;
+  }
+  return ignored;
 }
 
 async function collectTargetModules(files, entryFile) {
@@ -283,8 +327,9 @@ async function collectTargetModules(files, entryFile) {
 
   async function visit(file, moduleDirectory) {
     const absolute = path.resolve(file);
-    if (visited.has(absolute)) return;
-    visited.add(absolute);
+    const visitKey = `${absolute}\0${path.resolve(moduleDirectory)}`;
+    if (visited.has(visitKey)) return;
+    visited.add(visitKey);
     await addRustFile(files, absolute);
 
     let source;
@@ -294,9 +339,43 @@ async function collectTargetModules(files, entryFile) {
       throw new Error(`cannot read Rust module ${absolute}: ${error.message}`);
     }
     const tokens = lexRust(source);
+    const macroTokens = macroDefinitionTokens(tokens);
 
     async function scan(start, end, directory) {
       for (let index = start; index < end; index += 1) {
+        if (macroTokens.has(index)) continue;
+        if (
+          tokens[index].value === "include" &&
+          !tokens[index].raw &&
+          tokens[index + 1]?.value === "!" &&
+          closingDelimiter.has(tokens[index + 2]?.value)
+        ) {
+          const closing = matchingDelimiter(tokens, index + 2);
+          const argumentTokens = tokens.slice(index + 3, closing);
+          if (
+            argumentTokens[0]?.value !== "LITERAL" ||
+            !(
+              argumentTokens.length === 1 ||
+              (argumentTokens.length === 2 && argumentTokens[1].value === ",")
+            )
+          ) {
+            throw new Error(
+              `cannot resolve non-literal include! declared at ${absolute}:${tokens[index].line}`,
+            );
+          }
+          const includedPath = literalPath(argumentTokens[0], "include!");
+          const includedFile = await existingModuleFile([
+            path.join(path.dirname(absolute), includedPath),
+          ]);
+          if (includedFile === null) {
+            throw new Error(
+              `cannot resolve include! ${includedPath} declared at ${absolute}:${tokens[index].line}`,
+            );
+          }
+          await visit(includedFile, directory);
+          index = closing;
+          continue;
+        }
         if (
           tokens[index].value !== "mod" ||
           !tokens[index + 1]?.identifier
@@ -566,11 +645,12 @@ function lexRust(source) {
   return tokens;
 }
 
-function importStatements(tokens) {
+function importStatements(tokens, ignoredTokens) {
   const statements = [];
   const groupBraces = new Set();
 
   for (let index = 0; index < tokens.length; index += 1) {
+    if (ignoredTokens.has(index)) continue;
     let kind = null;
     let start = null;
     if (tokens[index].value === "use" && !tokens[index].raw) {
@@ -605,7 +685,7 @@ function importStatements(tokens) {
 }
 
 function lexicalScopes(tokens, groupBraces) {
-  const root = { parent: null, bindings: new Map(), line: 1 };
+  const root = { parent: null, bindings: new Map(), globs: [], line: 1 };
   const scopeAt = [];
   const stack = [root];
 
@@ -616,6 +696,7 @@ function lexicalScopes(tokens, groupBraces) {
       const child = {
         parent: stack.at(-1),
         bindings: new Map(),
+        globs: [],
         line: tokens[index].line,
       };
       stack.push(child);
@@ -634,6 +715,7 @@ function lexicalScopes(tokens, groupBraces) {
 
 function parseUseBindings(tokens, start, end) {
   const bindings = [];
+  const globs = [];
   const pathPrefixes = new Map();
 
   function parseTree(index, prefix = [], inheritedAbsolute = false) {
@@ -655,7 +737,10 @@ function parseUseBindings(tokens, start, end) {
       return index + 1;
     }
 
-    if (tokens[index]?.value === "*") return index + 1;
+    if (tokens[index]?.value === "*") {
+      globs.push({ path: [...prefix], absolute });
+      return index + 1;
+    }
     if (!tokens[index]?.identifier) {
       throw new Error(`unsupported use tree token ${tokens[index]?.value ?? "<end>"}`);
     }
@@ -693,7 +778,7 @@ function parseUseBindings(tokens, start, end) {
   if (index !== end) {
     throw new Error(`unsupported trailing tokens in use declaration`);
   }
-  return { bindings, pathPrefixes };
+  return { bindings, globs, pathPrefixes };
 }
 
 function declareBinding(scope, name, binding) {
@@ -703,16 +788,59 @@ function declareBinding(scope, name, binding) {
   scope.bindings.set(name, { ...binding, scope });
 }
 
-function collectLocalItems(tokens, scopeAt) {
+function simplePath(tokens, start, end) {
+  let index = start;
+  let absolute = false;
+  if (tokens[index]?.value === "::") {
+    absolute = true;
+    index += 1;
+  }
+  if (!tokens[index]?.identifier) return null;
+  const pathSegments = [tokens[index].value];
+  index += 1;
+  while (index < end) {
+    if (
+      tokens[index]?.value !== "::" ||
+      !tokens[index + 1]?.identifier
+    ) {
+      return null;
+    }
+    pathSegments.push(tokens[index + 1].value);
+    index += 2;
+  }
+  return { path: pathSegments, absolute };
+}
+
+function collectLocalItems(tokens, scopeAt, ignoredTokens) {
   const itemKeywords = new Set([
     "enum",
     "mod",
     "struct",
     "trait",
-    "type",
     "union",
   ]);
   for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (ignoredTokens.has(index)) continue;
+    if (
+      tokens[index].value === "type" &&
+      !tokens[index].raw &&
+      tokens[index + 1].identifier
+    ) {
+      const name = tokens[index + 1].value;
+      let binding = {
+        path: ["LOCAL_ITEM", name],
+        absolute: true,
+      };
+      if (tokens[index + 2]?.value === "=") {
+        let end = index + 3;
+        while (end < tokens.length && tokens[end].value !== ";") end += 1;
+        if (end < tokens.length) {
+          binding = simplePath(tokens, index + 3, end) ?? binding;
+        }
+      }
+      declareBinding(scopeAt[index], name, binding);
+      continue;
+    }
     if (
       tokens[index].raw ||
       !itemKeywords.has(tokens[index].value) ||
@@ -765,6 +893,9 @@ function collectBindings(tokens, statements, scopeAt) {
     for (const binding of parsed.bindings) {
       declareBinding(scope, binding.name, binding);
     }
+    for (const glob of parsed.globs) {
+      scope.globs.push({ ...glob, scope });
+    }
     for (const [tokenIndex, context] of parsed.pathPrefixes) {
       importPathPrefixes.set(tokenIndex, context);
     }
@@ -794,17 +925,57 @@ function resolveBinding(binding, seen = new Set()) {
   return [...resolved, ...binding.path.slice(1)];
 }
 
+function resolvePath(scope, pathSegments, absolute) {
+  if (absolute || pathSegments.length === 0) return [...pathSegments];
+  const binding = findBinding(scope, pathSegments[0]);
+  if (binding === null) return [...pathSegments];
+  return [...resolveBinding(binding), ...pathSegments.slice(1)];
+}
+
+function isStorageErrorPath(pathSegments) {
+  return (
+    (pathSegments.length === 1 && pathSegments[0] === "StorageError") ||
+    (pathSegments.length === 2 &&
+      pathSegments[0] === "symphony_storage" &&
+      pathSegments[1] === "StorageError")
+  );
+}
+
+function hasStorageErrorGlob(scope, name) {
+  for (let current = scope; current !== null; current = current.parent) {
+    if (current.bindings.has(name)) return false;
+    if (
+      current.globs.some((glob) =>
+        isStorageErrorPath(resolvePath(glob.scope, glob.path, glob.absolute)),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function normalizedTokenStream(tokens) {
-  const { statements, groupBraces } = importStatements(tokens);
+  const ignoredTokens = macroDefinitionTokens(tokens);
+  const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
   const { scopeAt } = lexicalScopes(tokens, groupBraces);
-  collectLocalItems(tokens, scopeAt);
+  collectLocalItems(tokens, scopeAt, ignoredTokens);
   const importPathPrefixes = collectBindings(tokens, statements, scopeAt);
   const values = tokens.map((token) => token.value);
 
   for (let index = 0; index < tokens.length; index += 1) {
     if (!tokens[index].identifier) continue;
+    const previousIsSeparator = tokens[index - 1]?.value === "::";
+    if (
+      tokens[index].value === "Sqlx" &&
+      !previousIsSeparator &&
+      hasStorageErrorGlob(scopeAt[index], "Sqlx")
+    ) {
+      values[index] = "StorageError :: Sqlx";
+      continue;
+    }
     const previousIsSegment =
-      tokens[index - 1]?.value === "::" && tokens[index - 2]?.identifier;
+      previousIsSeparator && tokens[index - 2]?.identifier;
     if (previousIsSegment) continue;
 
     const segmentIndices = [index];
@@ -839,13 +1010,22 @@ function normalizedTokenStream(tokens) {
       (expanded[0] === "symphony_storage" &&
         expanded[1] === "StorageError")
     ) {
+      if (importedPath !== null && isStorageErrorPath(importedPath)) {
+        values[index] = "StorageError";
+      }
+      const startsQualifiedType =
+        tokens[index - 1]?.value === "<" ||
+        (leadingAbsolute && tokens[index - 2]?.value === "<");
       if (
-        importedPath !== null &&
-        (importedPath[0] === "StorageError" ||
-          (importedPath[0] === "symphony_storage" &&
-            importedPath[1] === "StorageError"))
+        startsQualifiedType &&
+        tokens[cursor + 1]?.value === ">" &&
+        tokens[cursor + 2]?.value === "::" &&
+        tokens[cursor + 3]?.value === "Sqlx"
       ) {
         values[index] = "StorageError";
+        for (let tokenIndex = index + 1; tokenIndex <= cursor + 1; tokenIndex += 1) {
+          values[tokenIndex] = "";
+        }
       }
     } else {
       for (const tokenIndex of segmentIndices) {
