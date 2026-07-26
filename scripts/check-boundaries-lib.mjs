@@ -268,6 +268,26 @@ function modulePathAttribute(tokens, modIndex) {
   return result;
 }
 
+function hasCfgAttribute(tokens, declarationIndex) {
+  let boundary = declarationIndex - 1;
+  while (
+    boundary >= 0 &&
+    ![";", "{", "}"].includes(tokens[boundary].value)
+  ) {
+    boundary -= 1;
+  }
+  for (let index = boundary + 1; index + 2 < declarationIndex; index += 1) {
+    if (
+      tokens[index].value === "#" &&
+      tokens[index + 1]?.value === "[" &&
+      tokens[index + 2]?.value === "cfg"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const closingDelimiter = new Map([
   ["(", ")"],
   ["[", "]"],
@@ -365,6 +385,15 @@ async function resolveIncludedFile(sourceFile, includedPath, line) {
   return includedFile;
 }
 
+function moduleChildDirectory(moduleFile, explicitPath) {
+  return explicitPath !== null || path.basename(moduleFile) === "mod.rs"
+    ? path.dirname(moduleFile)
+    : path.join(
+        path.dirname(moduleFile),
+        path.basename(moduleFile, path.extname(moduleFile)),
+      );
+}
+
 async function collectTargetModules(files, entryFile) {
   const visited = new Set();
 
@@ -426,12 +455,7 @@ async function collectTargetModules(files, entryFile) {
             `cannot resolve Rust module ${name} declared at ${absolute}:${tokens[index].line}`,
           );
         }
-        const childDirectory = path.basename(moduleFile) === "mod.rs"
-          ? path.dirname(moduleFile)
-          : path.join(
-              path.dirname(moduleFile),
-              path.basename(moduleFile, path.extname(moduleFile)),
-            );
+        const childDirectory = moduleChildDirectory(moduleFile, explicitPath);
         await visit(moduleFile, childDirectory);
       }
     }
@@ -443,14 +467,25 @@ async function collectTargetModules(files, entryFile) {
   await visit(absoluteEntry, path.dirname(absoluteEntry));
 }
 
-async function expandedRustTokens(file, cache, trail = []) {
+async function expandedRustTokens(
+  file,
+  moduleDirectory,
+  expandModules,
+  cache,
+  trail = [],
+) {
   const absolute = path.resolve(file);
   if (trail.includes(absolute)) {
     throw new Error(
-      `literal include! cycle: ${[...trail, absolute].join(" -> ")}`,
+      `Rust source expansion cycle: ${[...trail, absolute].join(" -> ")}`,
     );
   }
-  const cached = cache.get(absolute);
+  const cacheKey = [
+    absolute,
+    path.resolve(moduleDirectory),
+    expandModules ? "modules" : "includes",
+  ].join("\0");
+  const cached = cache.get(cacheKey);
   if (cached !== undefined) return cached;
 
   let source;
@@ -461,29 +496,102 @@ async function expandedRustTokens(file, cache, trail = []) {
   }
   const tokens = lexRust(source).map((token) => ({ ...token, file: absolute }));
   const macroTokens = macroDefinitionTokens(tokens);
-  const expanded = [];
   const nextTrail = [...trail, absolute];
 
-  for (let index = 0; index < tokens.length; index += 1) {
-    if (macroTokens.has(index)) {
-      expanded.push(tokens[index]);
-      continue;
+  async function expandRange(start, end, directory) {
+    const expanded = [];
+    for (let index = start; index < end; index += 1) {
+      if (macroTokens.has(index)) {
+        expanded.push(tokens[index]);
+        continue;
+      }
+      const included = literalInclude(tokens, index, absolute);
+      if (included !== null) {
+        const includedFile = await resolveIncludedFile(
+          absolute,
+          included.includedPath,
+          included.line,
+        );
+        expanded.push(
+          ...(await expandedRustTokens(
+            includedFile,
+            path.dirname(includedFile),
+            expandModules,
+            cache,
+            nextTrail,
+          )),
+        );
+        index = included.closing;
+        continue;
+      }
+
+      if (
+        !expandModules ||
+        tokens[index].value !== "mod" ||
+        !tokens[index + 1]?.identifier
+      ) {
+        expanded.push(tokens[index]);
+        continue;
+      }
+
+      const name = tokens[index + 1].value;
+      const terminator = tokens[index + 2]?.value;
+      if (terminator === "{") {
+        const closing = matchingBrace(tokens, index + 2);
+        expanded.push(
+          tokens[index],
+          tokens[index + 1],
+          tokens[index + 2],
+          ...(await expandRange(
+            index + 3,
+            closing,
+            path.join(directory, name),
+          )),
+          tokens[closing],
+        );
+        index = closing;
+        continue;
+      }
+      if (terminator !== ";") {
+        expanded.push(tokens[index]);
+        continue;
+      }
+
+      const explicitPath = modulePathAttribute(tokens, index);
+      const moduleFile = explicitPath === null
+        ? await existingModuleFile([
+            path.join(directory, `${name}.rs`),
+            path.join(directory, name, "mod.rs"),
+          ])
+        : await existingModuleFile([path.join(directory, explicitPath)]);
+      if (moduleFile === null) {
+        throw new Error(
+          `cannot resolve Rust module ${name} declared at ${absolute}:${tokens[index].line}`,
+        );
+      }
+      const childDirectory = moduleChildDirectory(moduleFile, explicitPath);
+      const opening = { ...tokens[index + 2], value: "{" };
+      const closing = { ...tokens[index + 2], value: "}" };
+      expanded.push(
+        tokens[index],
+        tokens[index + 1],
+        opening,
+        ...(await expandedRustTokens(
+          moduleFile,
+          childDirectory,
+          true,
+          cache,
+          nextTrail,
+        )),
+        closing,
+      );
+      index += 2;
     }
-    const included = literalInclude(tokens, index, absolute);
-    if (included === null) {
-      expanded.push(tokens[index]);
-      continue;
-    }
-    const includedFile = await resolveIncludedFile(
-      absolute,
-      included.includedPath,
-      included.line,
-    );
-    expanded.push(...(await expandedRustTokens(includedFile, cache, nextTrail)));
-    index = included.closing;
+    return expanded;
   }
 
-  cache.set(absolute, expanded);
+  const expanded = await expandRange(0, tokens.length, moduleDirectory);
+  cache.set(cacheKey, expanded);
   return expanded;
 }
 
@@ -716,7 +824,7 @@ function importStatements(tokens, ignoredTokens) {
   const groupBraces = new Set();
 
   for (let index = 0; index < tokens.length; index += 1) {
-    if (ignoredTokens.has(index)) continue;
+    const insideMacroDefinition = ignoredTokens.has(index);
     let kind = null;
     let start = null;
     if (tokens[index].value === "use" && !tokens[index].raw) {
@@ -743,7 +851,20 @@ function importStatements(tokens, ignoredTokens) {
     if (end >= tokens.length) {
       throw new Error(`${kind} declaration on line ${tokens[index].line} has no semicolon`);
     }
-    statements.push({ kind, tokenIndex: index, start, end });
+    if (
+      insideMacroDefinition &&
+      tokens.slice(start, end).some((token) => token.value === "$")
+    ) {
+      index = end;
+      continue;
+    }
+    statements.push({
+      kind,
+      tokenIndex: index,
+      start,
+      end,
+      conditional: hasCfgAttribute(tokens, index),
+    });
     index = end;
   }
 
@@ -752,6 +873,10 @@ function importStatements(tokens, ignoredTokens) {
 
 function lexicalScopes(tokens, groupBraces) {
   const root = { parent: null, bindings: new Map(), globs: [], line: 1 };
+  root.crateScope = root;
+  root.moduleParent = null;
+  root.moduleScope = root;
+  const moduleScopes = new Map();
   const scopeAt = [];
   const stack = [root];
 
@@ -759,12 +884,26 @@ function lexicalScopes(tokens, groupBraces) {
     scopeAt[index] = stack.at(-1);
     if (groupBraces.has(index)) continue;
     if (tokens[index].value === "{") {
+      const parent = stack.at(-1);
+      const opensModule =
+        tokens[index - 2]?.value === "mod" &&
+        !tokens[index - 2]?.raw &&
+        tokens[index - 1]?.identifier;
       const child = {
-        parent: stack.at(-1),
+        parent,
         bindings: new Map(),
+        crateScope: root,
         globs: [],
         line: tokens[index].line,
       };
+      if (opensModule) {
+        child.moduleParent = parent.moduleScope;
+        child.moduleScope = child;
+        moduleScopes.set(index - 2, child);
+      } else {
+        child.moduleParent = parent.moduleParent;
+        child.moduleScope = parent.moduleScope;
+      }
       stack.push(child);
     } else if (tokens[index].value === "}") {
       if (stack.length === 1) {
@@ -776,7 +915,7 @@ function lexicalScopes(tokens, groupBraces) {
   if (stack.length !== 1) {
     throw new Error(`unclosed Rust scope starting on line ${stack.at(-1).line}`);
   }
-  return { root, scopeAt };
+  return { moduleScopes, root, scopeAt };
 }
 
 function parseUseBindings(tokens, start, end) {
@@ -848,10 +987,25 @@ function parseUseBindings(tokens, start, end) {
 }
 
 function declareBinding(scope, name, binding) {
-  if (scope.bindings.has(name)) {
+  const declared = { ...binding, name, scope };
+  const existing = scope.bindings.get(name);
+  if (existing === undefined) {
+    scope.bindings.set(name, declared);
+    return;
+  }
+  if (!existing.conditional || !declared.conditional) {
     throw new Error(`ambiguous Rust declarations bind ${name} more than once in one scope`);
   }
-  scope.bindings.set(name, { ...binding, scope });
+  if (existing.alternatives) {
+    existing.alternatives.push(declared);
+  } else {
+    scope.bindings.set(name, {
+      alternatives: [existing, declared],
+      conditional: true,
+      name,
+      scope,
+    });
+  }
 }
 
 function simplePath(tokens, start, end) {
@@ -885,7 +1039,7 @@ function simplePath(tokens, start, end) {
   return { path: pathSegments, absolute };
 }
 
-function collectLocalItems(tokens, scopeAt, ignoredTokens) {
+function collectLocalItems(tokens, scopeAt, moduleScopes) {
   const itemKeywords = new Set([
     "enum",
     "mod",
@@ -894,7 +1048,6 @@ function collectLocalItems(tokens, scopeAt, ignoredTokens) {
     "union",
   ]);
   for (let index = 0; index + 1 < tokens.length; index += 1) {
-    if (ignoredTokens.has(index)) continue;
     if (
       tokens[index].value === "type" &&
       !tokens[index].raw &&
@@ -912,7 +1065,10 @@ function collectLocalItems(tokens, scopeAt, ignoredTokens) {
           binding = simplePath(tokens, index + 3, end) ?? binding;
         }
       }
-      declareBinding(scopeAt[index], name, binding);
+      declareBinding(scopeAt[index], name, {
+        ...binding,
+        conditional: hasCfgAttribute(tokens, index),
+      });
       continue;
     }
     if (
@@ -922,10 +1078,15 @@ function collectLocalItems(tokens, scopeAt, ignoredTokens) {
     ) {
       continue;
     }
-    declareBinding(scopeAt[index], tokens[index + 1].value, {
+    const binding = {
       path: ["LOCAL_ITEM", tokens[index + 1].value],
       absolute: true,
-    });
+      conditional: hasCfgAttribute(tokens, index),
+    };
+    if (tokens[index].value === "mod" && moduleScopes.has(index)) {
+      binding.moduleScope = moduleScopes.get(index);
+    }
+    declareBinding(scopeAt[index], tokens[index + 1].value, binding);
   }
 }
 
@@ -954,6 +1115,7 @@ function collectBindings(tokens, statements, scopeAt) {
         declareBinding(scope, name, {
           path: [imported],
           absolute: true,
+          conditional: statement.conditional,
         });
       }
       continue;
@@ -965,7 +1127,10 @@ function collectBindings(tokens, statements, scopeAt) {
       statement.end,
     );
     for (const binding of parsed.bindings) {
-      declareBinding(scope, binding.name, binding);
+      declareBinding(scope, binding.name, {
+        ...binding,
+        conditional: statement.conditional,
+      });
     }
     for (const glob of parsed.globs) {
       scope.globs.push({ ...glob, scope });
@@ -978,7 +1143,9 @@ function collectBindings(tokens, statements, scopeAt) {
 }
 
 function findBinding(scope, name) {
+  const moduleScope = scope.moduleScope;
   for (let current = scope; current !== null; current = current.parent) {
+    if (current.moduleScope !== moduleScope) break;
     const binding = current.bindings.get(name);
     if (binding) return binding;
   }
@@ -987,23 +1154,95 @@ function findBinding(scope, name) {
 
 function resolveBinding(binding, seen = new Set()) {
   if (seen.has(binding)) {
-    throw new Error(`cyclic Rust import alias involving ${binding.path.join("::")}`);
+    throw new Error(
+      `cyclic Rust import alias involving ${
+        binding.path?.join("::") ?? binding.name ?? "cfg-conditioned binding"
+      }`,
+    );
+  }
+  if (binding.alternatives) {
+    seen.add(binding);
+    const alternatives = binding.alternatives.map((alternative) =>
+      resolveBinding(alternative, seen),
+    );
+    seen.delete(binding);
+    const restricted = alternatives.find((candidate) =>
+      candidate[0] === "sqlx" ||
+      isStorageErrorPath(candidate) ||
+      isStorageErrorVariantPath(candidate, "Sqlx"),
+    );
+    if (restricted) return restricted;
+    const [first] = alternatives;
+    if (
+      alternatives.every(
+        (candidate) => JSON.stringify(candidate) === JSON.stringify(first),
+      )
+    ) {
+      return first;
+    }
+    return ["CFG_DEPENDENT_BINDING", binding.name];
   }
   if (binding.absolute || binding.path.length === 0) return [...binding.path];
 
-  const importedRoot = findBinding(binding.scope, binding.path[0]);
-  if (importedRoot === null || importedRoot === binding) return [...binding.path];
   seen.add(binding);
-  const resolved = resolveBinding(importedRoot, seen);
+  const resolved = resolvePath(
+    binding.scope,
+    binding.path,
+    false,
+    seen,
+    binding,
+  );
   seen.delete(binding);
-  return [...resolved, ...binding.path.slice(1)];
+  return resolved;
 }
 
-function resolvePath(scope, pathSegments, absolute) {
+function resolveBoundPath(binding, remaining, seen) {
+  if (binding.moduleScope && remaining.length > 0) {
+    const member = binding.moduleScope.bindings.get(remaining[0]);
+    if (member) {
+      return resolveBoundPath(member, remaining.slice(1), seen);
+    }
+  }
+  return [...resolveBinding(binding, seen), ...remaining];
+}
+
+function resolvePath(
+  scope,
+  pathSegments,
+  absolute,
+  seen = new Set(),
+  sourceBinding = null,
+) {
   if (absolute || pathSegments.length === 0) return [...pathSegments];
-  const binding = findBinding(scope, pathSegments[0]);
-  if (binding === null) return [...pathSegments];
-  return [...resolveBinding(binding), ...pathSegments.slice(1)];
+
+  let binding;
+  let remaining;
+  if (["crate", "self", "super"].includes(pathSegments[0])) {
+    let moduleScope = scope.moduleScope;
+    let index = 0;
+    if (pathSegments[index] === "crate") {
+      moduleScope = scope.crateScope;
+      index += 1;
+    } else if (pathSegments[index] === "self") {
+      index += 1;
+    } else {
+      while (pathSegments[index] === "super") {
+        moduleScope = moduleScope?.moduleParent ?? null;
+        index += 1;
+      }
+    }
+    if (moduleScope === null || index >= pathSegments.length) {
+      return [...pathSegments];
+    }
+    binding = moduleScope.bindings.get(pathSegments[index]) ?? null;
+    remaining = pathSegments.slice(index + 1);
+  } else {
+    binding = findBinding(scope, pathSegments[0]);
+    remaining = pathSegments.slice(1);
+  }
+
+  if (binding === null || binding === sourceBinding) return [...pathSegments];
+  return resolveBoundPath(binding, remaining, seen);
 }
 
 function isStorageErrorPath(pathSegments) {
@@ -1015,8 +1254,17 @@ function isStorageErrorPath(pathSegments) {
   );
 }
 
+function isStorageErrorVariantPath(pathSegments, variant) {
+  return (
+    pathSegments.at(-1) === variant &&
+    isStorageErrorPath(pathSegments.slice(0, -1))
+  );
+}
+
 function hasStorageErrorGlob(scope, name) {
+  const moduleScope = scope.moduleScope;
   for (let current = scope; current !== null; current = current.parent) {
+    if (current.moduleScope !== moduleScope) break;
     if (current.bindings.has(name)) return false;
     if (
       current.globs.some((glob) =>
@@ -1054,9 +1302,19 @@ function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant
 function normalizedTokenStream(tokens) {
   const ignoredTokens = macroDefinitionTokens(tokens);
   const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
-  const { scopeAt } = lexicalScopes(tokens, groupBraces);
-  collectLocalItems(tokens, scopeAt, ignoredTokens);
+  const { moduleScopes, scopeAt } = lexicalScopes(tokens, groupBraces);
+  collectLocalItems(tokens, scopeAt, moduleScopes);
   const importPathPrefixes = collectBindings(tokens, statements, scopeAt);
+  const importStatementTokens = new Set();
+  for (const statement of statements) {
+    for (
+      let tokenIndex = statement.tokenIndex;
+      tokenIndex <= statement.end;
+      tokenIndex += 1
+    ) {
+      importStatementTokens.add(tokenIndex);
+    }
+  }
   const values = tokens.map((token) => token.value);
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1108,6 +1366,13 @@ function normalizedTokenStream(tokens) {
     ) {
       if (importedPath !== null && isStorageErrorPath(importedPath)) {
         values[index] = "StorageError";
+      }
+      if (
+        importedPath !== null &&
+        !importStatementTokens.has(index) &&
+        isStorageErrorVariantPath(importedPath, "Sqlx")
+      ) {
+        values[index] = "StorageError :: Sqlx";
       }
       const qualifiedClosing = qualifiedVariantClosing(
         tokens,
@@ -1186,12 +1451,17 @@ export async function scanRestrictedSources(metadata, policy) {
     if (rules.length === 0) continue;
 
     const expandedTokenCache = new Map();
-    for (const file of await packageRustFiles(pkg)) {
+    async function scanExpandedSource(file, moduleDirectory, expandModules) {
       const relative = path.relative(metadata.workspace_root, file);
       let tokenStream;
       try {
         tokenStream = normalizedTokenStream(
-          await expandedRustTokens(file, expandedTokenCache),
+          await expandedRustTokens(
+            file,
+            moduleDirectory,
+            expandModules,
+            expandedTokenCache,
+          ),
         );
       } catch (error) {
         throw new Error(`cannot lex ${relative}: ${error.message}`);
@@ -1217,6 +1487,18 @@ export async function scanRestrictedSources(metadata, policy) {
           if (match[0].length === 0) rule.regex.lastIndex += 1;
         }
       }
+    }
+
+    for (const file of await packageRustFiles(pkg)) {
+      await scanExpandedSource(file, path.dirname(file), false);
+    }
+    const manifestDirectory = path.dirname(pkg.manifest_path);
+    const targets = [...(pkg.targets ?? [])].sort((a, b) =>
+      String(a.src_path).localeCompare(String(b.src_path)),
+    );
+    for (const target of targets) {
+      const entryFile = path.resolve(manifestDirectory, target.src_path);
+      await scanExpandedSource(entryFile, path.dirname(entryFile), true);
     }
   }
 

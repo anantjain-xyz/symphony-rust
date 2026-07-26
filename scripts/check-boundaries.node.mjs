@@ -200,6 +200,73 @@ test("keeps aliases lexical across sibling modules and local item shadowing", as
   ]);
 });
 
+test("resolves self, super, and crate import roots by module", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "use symphony_storage::StorageError;",
+      "mod outer {",
+      "    use super::StorageError as FromSuper;",
+      "    use crate::StorageError as FromCrate;",
+      "    use self::FromSuper as FromSelf;",
+      "    fn from_super() { let _ = FromSuper::Sqlx(problem); }",
+      "    fn from_crate() { let _ = FromCrate::Sqlx(problem); }",
+      "    fn from_self() { let _ = FromSelf::Sqlx(problem); }",
+      "    mod nested {",
+      "        use super::FromSuper as FromTwoLevels;",
+      "        fn wrong() { let _ = FromTwoLevels::Sqlx(problem); }",
+      "    }",
+      "}",
+      "mod unrelated {",
+      "    use crate::errors::StorageError as E;",
+      "    fn allowed() { let _ = E::Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:12: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:7: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:8: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:9: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("resolves relative imports across module source files", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "use symphony_storage::StorageError;",
+      "mod child;",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "worker", "src", "child.rs"),
+    [
+      "use super::StorageError as FromSuper;",
+      "use crate::StorageError as FromCrate;",
+      "use self::FromSuper as FromSelf;",
+      "fn from_super() { let _ = FromSuper::Sqlx(problem); }",
+      "fn from_crate() { let _ = FromCrate::Sqlx(problem); }",
+      "fn from_self() { let _ = FromSelf::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/child.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/child.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/child.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("resolves complete import paths and independent block aliases", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -291,6 +358,28 @@ test("detects StorageError variants imported through scoped glob uses", async (t
   ]);
 });
 
+test("detects grouped StorageError variant imports", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "use symphony_storage::StorageError::{Sqlx as DbFailure};",
+      "fn wrong() { let _ = DbFailure(problem); }",
+      "mod unrelated {",
+      "    use crate::errors::StorageError::{Sqlx as DbFailure};",
+      "    fn allowed() { let _ = DbFailure; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("skips import syntax inside macro definitions", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -309,6 +398,35 @@ test("skips import syntax inside macro definitions", async (t) => {
 
   assert.deepEqual(errors, [
     "worker/src/lib.rs:5: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("resolves fixed imports inside macro definitions", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "macro_rules! fixed_import {",
+      "    () => {{",
+      "        use symphony_storage::StorageError as E;",
+      "        E::Sqlx(problem)",
+      "    }};",
+      "}",
+      "macro_rules! unrelated_import {",
+      "    () => {{",
+      "        use crate::errors::StorageError as E;",
+      "        E::Sqlx",
+      "    }};",
+      "}",
+      "fn invoke() { let _ = (fixed_import!(), unrelated_import!()); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -339,6 +457,34 @@ test("resolves simple and chained Rust type aliases", async (t) => {
     "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
     "worker/src/lib.rs:7: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("retains cfg-conditioned import alternatives", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod errors { pub enum StorageError { Sqlx } }",
+      "#[cfg(unix)]",
+      "use unix::Backend;",
+      "#[cfg(not(unix))]",
+      "use portable::Backend;",
+      "fn allowed() { Backend::connect(); }",
+      "mod mixed {",
+      "    #[cfg(unix)]",
+      "    use symphony_storage::StorageError as E;",
+      "    #[cfg(not(unix))]",
+      "    use crate::errors::StorageError as E;",
+      "    fn wrong() { let _ = E::Sqlx(problem); }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:12: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -514,6 +660,35 @@ test("resolves modules from the included fragment's directory", async (t) => {
 
   assert.deepEqual(errors, [
     "worker/generated/nested/child.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("resolves child modules relative to explicit #[path] files", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "alt"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    '#[path = "alt/bar.rs"] mod foo;\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "alt", "bar.rs"),
+    "mod child;\n",
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "alt", "child.rs"),
+    'fn wrong() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+    policy(),
+  );
+
+  assert.deepEqual(errors, [
+    "worker/generated/alt/child.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
 });
 
