@@ -49,6 +49,28 @@
   opacity: 0.55;
 }
 
+.update-button-icon-slot {
+  display: contents;
+}
+
+.update-button.available {
+  justify-content: flex-start;
+}
+
+.update-button.available .update-button-icon-slot {
+  align-items: center;
+  display: flex;
+  flex: 0 0 16px;
+  height: 16px;
+  justify-content: center;
+  transition: flex-basis 180ms ease;
+}
+
+.update-button.available:hover:not(:disabled) .update-button-icon-slot,
+.update-button.available:focus-visible:not(:disabled) .update-button-icon-slot {
+  flex-basis: 24px;
+}
+
 .update-button-icon {
   display: block;
   flex: 0 0 10px;
