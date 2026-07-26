@@ -135,16 +135,25 @@ launch, `ensure_workspace_skills()` checks the committed `HEAD` tree:
   fallback is therefore refreshed on each dispatch.
 - Injected manifests are explicitly unstaged and added to the worktree's
   Git exclude file.
-- Existing tracked Claude discovery paths win. Missing untracked discovery
-  links or entries are created and excluded.
+- A tracked non-directory `.claude` parent, an expected tracked
+  `.claude/skills` link, and tracked per-skill Claude entries win. Missing
+  untracked discovery links or entries are created and excluded.
+- A tracked `.claude/skills` regular file or unexpected symlink does not win:
+  it is removed and replaced with Symphony discovery. Because tracked paths
+  are deliberately not unstaged or hidden by Git exclude, that deletion or
+  type change remains visible in the issue worktree and can be staged
+  accidentally. Preserving or rejecting this conflict is an open safety gap.
 - Unsafe or unexpected symlinks are replaced before the worker writes
   fallback content, so a repository path cannot redirect writes outside the
   workspace.
 
 Fallbacks make the procedures available before an install PR is accepted.
 They are runtime support files, not evidence that the target repository has
-adopted the bundle. Agents must ignore them in `git status` and must not stage
-them unless the issue explicitly asks to install or change Symphony skills.
+adopted the bundle. Agents may ignore the intended untracked/excluded fallback
+files and must not stage them unless the issue explicitly asks to install or
+change Symphony skills. A visible modification to a tracked Claude discovery
+path is instead evidence of the replacement gap above: treat it as an
+unintended repository change and never stage it as ordinary issue work.
 
 ## Prompt precedence
 
@@ -154,8 +163,14 @@ The effective prompt for an issue run is selected in this order:
    default prompt.
 2. A valid `SYMPHONY-WORKFLOW.md` on the target repository's default branch,
    if present.
-3. The last-known-good cached default-branch workflow when a refresh fails.
-4. The Settings prompt when no valid repository workflow is available.
+3. When refresh fails, the last successfully fetched default-branch snapshot,
+   or the clone's cached default-branch ref when no private snapshot exists.
+   Each snapshot is resolved again at dispatch time; it is not a
+   last-known-valid workflow cache. If the latest successful fetch replaced a
+   formerly valid workflow with a missing or invalid file, later refresh
+   failures use the Settings prompt rather than the older valid workflow.
+4. The Settings prompt when the selected fresh or cached snapshot has no valid
+   repository workflow.
 5. A retry-context trailer for attempts after the first.
 
 The issue branch does not override the workflow. Resolution reads a fetched or
@@ -213,12 +228,16 @@ token is supplied, the adapter removes inherited GitHub token variants before
 applying the request environment, preventing a stale inherited credential
 from taking precedence.
 
-Detection can use authenticated `gh` or a supported API token. Clone and push
-still require Git transport credentials. In the API-fallback path, a failed
-Git preflight converts the result to `unavailable` after content detection;
-it does not leave the state as `missing`. Report those cases separately:
-"repository inaccessible," "API fallback read succeeded," and "Git
-transport credentials missing" lead to different recovery actions.
+Detection requires the `gh` binary even when a supported API token is
+configured: `check_skills()` runs `gh auth status` first and returns
+`unavailable` on a missing CLI before attempting token-backed GraphQL.
+Authenticated `gh` is not required when a token is available, but installed
+`gh` currently is. Clone and push still require Git transport credentials. In
+the API-fallback path, a failed Git preflight converts the result to
+`unavailable` after content detection; it does not leave the state as
+`missing`. Report those cases separately: "GitHub CLI missing," "repository
+inaccessible," "API fallback read succeeded," and "Git transport credentials
+missing" lead to different recovery actions.
 
 ## Change checklist
 

@@ -84,6 +84,7 @@ The current worker writes the following transitions:
 | no row | `pending` | `try_reserve_run()` reserves an issue/run number and workspace path |
 | `pending` | `running` | workspace setup, `after_create`, fallback skill injection, and the ready sentinel complete |
 | `pending` | `cancelled` | worker or user cancellation wins at a checkpoint |
+| `pending` | `failure` with class `after_create_failed` | a fresh workspace's `after_create` hook returns nonzero before promotion |
 | `pending` | `failure` | setup escapes through the dispatch safety net or restart recovery finds the reservation |
 | `pending` | `cancelled` with class `reconciled` | the database rejects promotion because another run for the issue is already running |
 | `running` | `success` | the adapter reports success and post-run cancellation has not won |

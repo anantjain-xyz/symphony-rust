@@ -87,7 +87,7 @@ I/O, JSON parsing, and missing-result failures are also `AgentError` variants.
 | --- | --- | --- | --- | --- |
 | Codex | `exec --json` | `turn.completed` or `turn.failed` selects a result; stdout EOF and process exit complete the run | Symphony fallback IDs; provider thread ID is surfaced in status | Normalized Codex thread/turn sandbox |
 | Claude Code | print mode with `stream-json --verbose` | `result` selects a result; stdout EOF and process exit complete the run | Preallocated session ID | Claude permission mode plus allowed/disallowed tools and additional directories |
-| Cursor | print mode with `stream-json` | `result` completes the run and triggers process-group cleanup; process exit is the fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
+| Cursor | print mode with `stream-json` | `result` completes the run and triggers process-group cleanup; stdout EOF enters an unbounded process-exit fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
 | OpenCode | `run --format json` | Process exit; error events record failure | Event `sessionID` or Symphony fallback | `--dangerously-skip-permissions` and optional agent/model |
 
 Codex and Claude protocol result records are not early process-termination
@@ -222,7 +222,13 @@ returns the parsed result. This prevents a completed turn from being
 misclassified as a timeout.
 
 If stdout closes without a result, the process exit status is the fallback.
-Malformed JSON is an adapter protocol error.
+The current implementation leaves the timeout/cancellation `select!` as soon
+as stdout closes and then awaits `child.wait()` outside that arbitration. A
+wrapper that closes stdout but keeps the shell alive can therefore hold the
+run and its concurrency slot indefinitely; turn timeout and later Stop
+requests do not interrupt this wait. Keeping the exit fallback inside the
+same timeout/cancellation arbitration is an intended invariant, not current
+behavior. Malformed JSON is an adapter protocol error.
 
 ## OpenCode
 
