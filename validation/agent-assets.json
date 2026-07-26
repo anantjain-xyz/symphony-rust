@@ -10,6 +10,7 @@
     "inventoryFunction": "bundled_skills",
     "projectionRoot": ".agents/skills",
     "projectionPrefix": "symphony-",
+    "portableOwnerForbiddenPattern": "\\bpnpm\\b",
     "discoveryProjection": {
       "path": ".claude/skills",
       "target": "../.agents/skills"
@@ -34,6 +35,7 @@
   },
   "defaultPrompt": {
     "path": "src-tauri/assets/default-prompt.md",
+    "returnFunction": "default_prompt_template",
     "forbiddenNamespacePattern": "mcp__[A-Za-z0-9_-]+__"
   },
   "pnpmBuiltins": [
@@ -44,14 +46,5 @@
     "remove",
     "run"
   ],
-  "forbiddenText": [
-    {
-      "paths": [
-        "src-tauri/assets/skills",
-        "crates/symphony-worker/src/skills.rs"
-      ],
-      "pattern": "pnpm (?:format:check|lint)",
-      "message": "portable bundled skills must not assume repository-specific pnpm scripts"
-    }
-  ]
+  "forbiddenText": []
 }

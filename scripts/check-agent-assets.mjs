@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
+const DEFAULT_PROMPT_RETURN_FUNCTION = "default_prompt_template";
+const FORBIDDEN_PORTABLE_OWNER_PATTERN = "\\bpnpm\\b";
 const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
   [
     "pull",
@@ -151,6 +153,12 @@ function parseFrontmatter(content, path, errors) {
     if (!values[required]) {
       errors.push(`${path} frontmatter is missing required ${required}`);
     }
+  }
+  const body = normalized.slice(end + "\n---\n".length);
+  if (stripMarkdownHtmlComments(body).trim() === "") {
+    errors.push(
+      `${path} must contain a non-empty Markdown instructional body after YAML frontmatter`,
+    );
   }
   return values;
 }
@@ -498,6 +506,32 @@ function namedFunctionBody(tokens, functionName, inventoryFile, errors) {
     return null;
   }
   return matches[0];
+}
+
+function namedFunctionBodies(tokens, functionName) {
+  const matches = [];
+  for (let index = 0; index + 2 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "fn" ||
+      tokens[index + 1]?.type !== "ident" ||
+      tokens[index + 1].value !== functionName
+    ) {
+      continue;
+    }
+    let opening = index + 2;
+    while (
+      opening < tokens.length &&
+      !["{", ";"].includes(tokens[opening].value)
+    ) {
+      opening += 1;
+    }
+    if (tokens[opening]?.value !== "{") continue;
+    const closing = matchingRustDelimiter(tokens, opening);
+    if (closing === null) continue;
+    matches.push({ start: opening + 1, end: closing });
+    index = closing;
+  }
+  return matches;
 }
 
 function tailVectorInvocation(tokens, body, functionName, inventoryFile, errors) {
@@ -973,6 +1007,75 @@ function checkRustIncludes(
   return references;
 }
 
+function defaultPromptReturnReference(
+  root,
+  sourceRoots,
+  expectedPrompt,
+  errors,
+) {
+  const definitions = [];
+  for (const sourceRoot of sourceRoots ?? []) {
+    const absoluteRoot = resolveInside(
+      root,
+      sourceRoot,
+      errors,
+      "default prompt Rust source root",
+    );
+    if (!absoluteRoot || !existsSync(absoluteRoot)) continue;
+    for (const file of walkFiles(absoluteRoot).filter(
+      (candidate) => extname(candidate) === ".rs",
+    )) {
+      const tokens = rustTokens(readFileSync(file, "utf8"));
+      for (const body of namedFunctionBodies(
+        tokens,
+        DEFAULT_PROMPT_RETURN_FUNCTION,
+      )) {
+        definitions.push({ body, file, tokens });
+      }
+    }
+  }
+
+  if (definitions.length !== 1) {
+    errors.push(
+      `Rust source roots must define exactly one ${DEFAULT_PROMPT_RETURN_FUNCTION} function; found ${definitions.length}`,
+    );
+    return null;
+  }
+
+  const { body, file, tokens } = definitions[0];
+  let expression = tokens.slice(body.start, body.end);
+  if (expression[0]?.value === "return") expression = expression.slice(1);
+  if (expression.at(-1)?.value === ";") expression = expression.slice(0, -1);
+  const include = macroInvocation(expression, 0, "include_str");
+  const suffix = include?.arguments
+    ? expression.slice(include.end).map((token) => token.value)
+    : [];
+  const literal = include?.arguments
+    ? singleStringArgument(include.arguments)
+    : null;
+  if (
+    literal === null ||
+    JSON.stringify(suffix) !==
+      JSON.stringify([".", "to_string", "(", ")"])
+  ) {
+    errors.push(
+      `${relativePath(root, file)} ${DEFAULT_PROMPT_RETURN_FUNCTION} must directly return include_str!("...").to_string()`,
+    );
+    return null;
+  }
+
+  const target = resolve(dirname(file), literal);
+  if (target !== expectedPrompt) {
+    errors.push(
+      `${relativePath(root, file)} ${DEFAULT_PROMPT_RETURN_FUNCTION} returns ${relativePath(
+        root,
+        target,
+      )}; expected ${relativePath(root, expectedPrompt)}`,
+    );
+  }
+  return { source: file, target };
+}
+
 function lineNumber(content, index) {
   return content.slice(0, index).split("\n").length;
 }
@@ -1077,6 +1180,30 @@ export function validateAgentAssets(
     "skill owner root",
     true,
   );
+  if (
+    skillConfig.portableOwnerForbiddenPattern !==
+    FORBIDDEN_PORTABLE_OWNER_PATTERN
+  ) {
+    errors.push(
+      `portableOwnerForbiddenPattern must be ${JSON.stringify(
+        FORBIDDEN_PORTABLE_OWNER_PATTERN,
+      )}, received ${JSON.stringify(
+        skillConfig.portableOwnerForbiddenPattern,
+      )}`,
+    );
+  }
+  const portableOwnerPattern = new RegExp(FORBIDDEN_PORTABLE_OWNER_PATTERN);
+  for (const owner of owners.values()) {
+    const match = portableOwnerPattern.exec(owner.content);
+    if (match) {
+      errors.push(
+        `${owner.manifestPath}:${lineNumber(
+          owner.content,
+          match.index,
+        )} portable bundled skill owners must not reference pnpm: ${match[0]}`,
+      );
+    }
+  }
   const bundled = inventoryFromRust(
     root,
     skillConfig.inventoryFile,
@@ -1258,6 +1385,13 @@ export function validateAgentAssets(
   const promptConfig = contract.defaultPrompt;
   let promptFile = null;
   if (promptConfig) {
+    if (promptConfig.returnFunction !== DEFAULT_PROMPT_RETURN_FUNCTION) {
+      errors.push(
+        `defaultPrompt returnFunction must be ${DEFAULT_PROMPT_RETURN_FUNCTION}, received ${JSON.stringify(
+          promptConfig.returnFunction,
+        )}`,
+      );
+    }
     if (
       promptConfig.forbiddenNamespacePattern !==
       FORBIDDEN_MCP_NAMESPACE_PATTERN
@@ -1280,6 +1414,12 @@ export function validateAgentAssets(
       errors.push(`default prompt is missing at ${promptConfig.path}`);
     }
     if (promptFile) {
+      defaultPromptReturnReference(
+        root,
+        contract.rustSourceRoots,
+        promptFile,
+        errors,
+      );
       const promptIncludes = includeReferences.filter(
         (reference) => reference.target === promptFile,
       );

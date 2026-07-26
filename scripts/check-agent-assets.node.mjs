@@ -82,7 +82,10 @@ fn bundled_skills() {
   write(
     root,
     "src-tauri/src/settings.rs",
-    'const PROMPT: &str = include_str!("../assets/default-prompt.md");\n',
+    `pub fn default_prompt_template() -> String {
+  include_str!("../assets/default-prompt.md").to_string()
+}
+`,
   );
   write(
     root,
@@ -102,6 +105,7 @@ fn bundled_skills() {
       inventoryFunction: "bundled_skills",
       projectionRoot: ".agents/skills",
       projectionPrefix: "symphony-",
+      portableOwnerForbiddenPattern: "\\bpnpm\\b",
       discoveryProjection: {
         path: ".claude/skills",
         target: "../.agents/skills",
@@ -113,16 +117,11 @@ fn bundled_skills() {
     },
     defaultPrompt: {
       path: "src-tauri/assets/default-prompt.md",
+      returnFunction: "default_prompt_template",
       forbiddenNamespacePattern: "mcp__[A-Za-z0-9_-]+__",
     },
     pnpmBuiltins: ["install", "exec"],
-    forbiddenText: [
-      {
-        paths: ["src-tauri/assets/skills"],
-        pattern: "pnpm (?:format:check|lint)",
-        message: "portable assets must not assume pnpm scripts",
-      },
-    ],
+    forbiddenText: [],
   });
   return root;
 }
@@ -427,10 +426,32 @@ test("discovers the default prompt owner instead of pinning its Rust path", (t) 
   write(
     root,
     "src-tauri/src/prompt.rs",
-    'const PROMPT: &str = include_str!("../assets/default-prompt.md");\n',
+    `pub fn default_prompt_template() -> String {
+  include_str!("../assets/default-prompt.md").to_string()
+}
+`,
   );
 
   assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test("ties the default prompt include to its runtime return expression", (t) => {
+  const root = harnessFixture(t);
+  write(
+    root,
+    "src-tauri/src/settings.rs",
+    `pub fn default_prompt_template() -> String {
+  let _decoy = include_str!("../assets/default-prompt.md");
+  String::new()
+}
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /settings\.rs default_prompt_template must directly return include_str!\("\.\.\."\)\.to_string\(\)/,
+  );
 });
 
 test("accepts CRLF skill frontmatter on Windows-style checkouts", (t) => {
@@ -485,6 +506,85 @@ test("rejects malformed YAML string scalars in skill frontmatter", (t) => {
   assert.match(
     errors,
     /symphony-pull\/SKILL\.md frontmatter line 3 description must be a valid string scalar/,
+  );
+});
+
+test("requires an instructional body in every discovered skill manifest", (t) => {
+  const root = harnessFixture(t);
+  const emptyBundled = `---
+name: symphony-commit
+description: empty bundled fixture
+---
+
+`;
+  write(root, "src-tauri/assets/skills/commit/SKILL.md", emptyBundled);
+  write(root, ".agents/skills/symphony-commit/SKILL.md", emptyBundled);
+
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.standaloneRoots = [".codex/skills"];
+  writeJson(root, "validation/agent-assets.json", contract);
+  write(
+    root,
+    ".codex/skills/local/SKILL.md",
+    `---
+name: local
+description: empty standalone fixture
+---
+
+<!-- A comment is not an instructional body. -->
+`,
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /src-tauri\/assets\/skills\/commit\/SKILL\.md must contain a non-empty Markdown instructional body/,
+  );
+  assert.match(
+    errors,
+    /\.agents\/skills\/symphony-commit\/SKILL\.md must contain a non-empty Markdown instructional body/,
+  );
+  assert.match(
+    errors,
+    /\.codex\/skills\/local\/SKILL\.md must contain a non-empty Markdown instructional body/,
+  );
+});
+
+test("forbids every pnpm reference in portable owner manifests only", (t) => {
+  const root = harnessFixture(t);
+  for (const path of [
+    "src-tauri/assets/skills/commit/SKILL.md",
+    ".agents/skills/symphony-commit/SKILL.md",
+  ]) {
+    const absolute = join(root, path);
+    writeFileSync(
+      absolute,
+      `${readFileSync(absolute, "utf8")}Run \`pnpm install\`.\n`,
+    );
+  }
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /src-tauri\/assets\/skills\/commit\/SKILL\.md:\d+ portable bundled skill owners must not reference pnpm/,
+  );
+  assert.doesNotMatch(
+    errors,
+    /\.agents\/skills\/symphony-commit\/SKILL\.md:\d+ portable bundled skill owners must not reference pnpm/,
+  );
+});
+
+test("pins the portable owner pnpm policy", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  delete contract.skills.portableOwnerForbiddenPattern;
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /portableOwnerForbiddenPattern must be "\\\\bpnpm\\\\b", received undefined/,
   );
 });
 

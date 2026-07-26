@@ -477,6 +477,14 @@ function yamlIndent(line) {
   return line.match(/^ */)[0].length;
 }
 
+function yamlFieldName(line) {
+  const match =
+    /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_-]*))\s*:/.exec(
+      line.trim(),
+    );
+  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+}
+
 function previousYamlParent(lines, index, childIndent) {
   for (let candidate = index - 1; candidate >= 0; candidate -= 1) {
     const line = lines[candidate];
@@ -531,17 +539,22 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       }
     }
     for (let index = lineIndex + 1; index < stepEnd; index += 1) {
+      const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === stepIndent + 2 &&
-        /^(?:if|continue-on-error)\s*:/.test(lines[index].trim())
+        ["if", "continue-on-error", "shell", "working-directory"].includes(
+          field,
+        )
       ) {
-        errors.push(
-          `CI workflow ${workflowPath} canonical entrypoint step must be unconditional and failure-gating; remove ${lines[
-            index
-          ]
-            .trim()
-            .split(":")[0]}`,
-        );
+        if (field === "shell" || field === "working-directory") {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint step must use the default shell from the repository root; remove ${field}`,
+          );
+        } else {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint step must be unconditional and failure-gating; remove ${field}`,
+          );
+        }
       }
     }
 
@@ -554,15 +567,32 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       }
     }
     for (let index = job.index + 1; index < jobEnd; index += 1) {
+      const field = yamlFieldName(lines[index]);
       if (
         yamlIndent(lines[index]) === steps.indent &&
-        /^(?:if|continue-on-error)\s*:/.test(lines[index].trim())
+        ["if", "continue-on-error", "defaults"].includes(field)
       ) {
-        const field = lines[index].trim().split(":")[0];
-        errors.push(
-          `CI workflow ${workflowPath} canonical entrypoint job must be unconditional and failure-gating; remove ${field}`,
-        );
+        if (field === "defaults") {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint job must not override run defaults; remove defaults`,
+          );
+        } else {
+          errors.push(
+            `CI workflow ${workflowPath} canonical entrypoint job must be unconditional and failure-gating; remove ${field}`,
+          );
+        }
       }
+    }
+    if (
+      lines.some(
+        (candidate) =>
+          yamlIndent(candidate) === 0 &&
+          yamlFieldName(candidate) === "defaults",
+      )
+    ) {
+      errors.push(
+        `CI workflow ${workflowPath} must not override workflow run defaults`,
+      );
     }
   }
 }

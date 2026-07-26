@@ -431,14 +431,21 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
   write(
     root,
     ".github/workflows/ci.yml",
-    `jobs:
+    `defaults:
+  run:
+    shell: true {0}
+jobs:
   validate:
     if: \${{ false }}
     continue-on-error: true
+    defaults:
+      run:
+        shell: true {0}
     steps:
       - run: pnpm verify:full
         if: \${{ false }}
         continue-on-error: true
+        shell: true {0}
 `,
   );
 
@@ -458,6 +465,18 @@ test("requires the canonical CI step and its job to be failure-gating", (t) => {
   assert.match(
     errors,
     /canonical entrypoint job must be unconditional and failure-gating; remove continue-on-error/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint step must use the default shell from the repository root; remove shell/,
+  );
+  assert.match(
+    errors,
+    /canonical entrypoint job must not override run defaults; remove defaults/,
+  );
+  assert.match(
+    errors,
+    /must not override workflow run defaults/,
   );
 });
 
