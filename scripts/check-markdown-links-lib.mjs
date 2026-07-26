@@ -4,9 +4,9 @@ import { JSDOM } from "jsdom";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
-const HTML_ATTRIBUTE = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+const HTML_ATTRIBUTE = /(?<!\S)(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const REFERENCE_DEFINITION =
-  /^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
+  /^\s{0,3}\[(?!\^)([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
 const REFERENCE_USE = /(!?)\[([^\]]*)\]\s*\[([^\]]*)\]/g;
 
 function maskRange(value, start, end) {
@@ -71,6 +71,7 @@ function unescapeMarkdown(value) {
 
 function headingText(value) {
   return value
+    .replace(REFERENCE_USE, (_match, _image, label) => label)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/<[^>]*>/g, "")
