@@ -485,6 +485,26 @@ function macroDefinitionTokens(tokens) {
   return ignored;
 }
 
+function macroInvocationTokens(tokens, definitionTokens) {
+  const invocations = new Set();
+  for (let index = 1; index + 1 < tokens.length; index += 1) {
+    if (
+      tokens[index].value !== "!" ||
+      definitionTokens.has(index) ||
+      !tokens[index - 1]?.identifier ||
+      !closingDelimiter.has(tokens[index + 1]?.value)
+    ) {
+      continue;
+    }
+    const closing = matchingDelimiter(tokens, index + 1);
+    for (let cursor = index - 1; cursor <= closing; cursor += 1) {
+      invocations.add(cursor);
+    }
+    index = closing;
+  }
+  return invocations;
+}
+
 function literalInclude(tokens, index, sourceFile) {
   if (
     tokens[index].value !== "include" ||
@@ -1036,12 +1056,13 @@ function lexRust(source) {
   return tokens;
 }
 
-function importStatements(tokens, ignoredTokens) {
+function importStatements(tokens, ignoredTokens, invocationTokens) {
   const statements = [];
   const groupBraces = new Set();
 
   for (let index = 0; index < tokens.length; index += 1) {
     const insideMacroDefinition = ignoredTokens.has(index);
+    const insideMacroInvocation = invocationTokens.has(index);
     let kind = null;
     let start = null;
     if (tokens[index].value === "use" && !tokens[index].raw) {
@@ -1067,6 +1088,10 @@ function importStatements(tokens, ignoredTokens) {
     }
     if (end >= tokens.length) {
       throw new Error(`${kind} declaration on line ${tokens[index].line} has no semicolon`);
+    }
+    if (insideMacroInvocation) {
+      index = end;
+      continue;
     }
     if (
       insideMacroDefinition &&
@@ -1312,6 +1337,183 @@ function collectLocalItems(tokens, scopeAt, moduleScopes) {
   }
 }
 
+function matchingAngle(tokens, opening) {
+  if (tokens[opening]?.value !== "<") return null;
+  let depth = 0;
+  for (let index = opening; index < tokens.length; index += 1) {
+    if (tokens[index].value === "<") {
+      depth += 1;
+    } else if (
+      tokens[index].value === ">" &&
+      tokens[index - 1]?.value !== "-"
+    ) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return null;
+}
+
+function itemBodyOpening(tokens, start) {
+  for (let index = start; index < tokens.length; index += 1) {
+    if (["(", "["].includes(tokens[index].value)) {
+      index = matchingDelimiter(tokens, index);
+      continue;
+    }
+    if (tokens[index].value === "<") {
+      const closing = matchingAngle(tokens, index);
+      if (closing !== null) {
+        index = closing;
+        continue;
+      }
+    }
+    if (tokens[index].value === "{") return index;
+    if (tokens[index].value === ";") return null;
+  }
+  return null;
+}
+
+function genericParameterNames(tokens, start, end) {
+  const parameters = [];
+  let parameterStart = start;
+  const delimiters = [];
+  let angleDepth = 0;
+
+  function addParameter(parameterEnd) {
+    const parameter = tokens.slice(parameterStart, parameterEnd);
+    if (parameter.length === 0 || parameter[0].value === "'") return;
+    if (
+      parameter[0].value === "const" &&
+      !parameter[0].raw &&
+      parameter[1]?.identifier
+    ) {
+      parameters.push(parameter[1].value);
+    } else if (parameter[0].identifier) {
+      parameters.push(parameter[0].value);
+    }
+  }
+
+  for (let index = start; index <= end; index += 1) {
+    if (index === end) {
+      addParameter(index);
+      break;
+    }
+    const value = tokens[index].value;
+    if (closingDelimiter.has(value)) {
+      delimiters.push(closingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (delimiters.at(-1) === value) delimiters.pop();
+    } else if (value === "<") {
+      angleDepth += 1;
+    } else if (value === ">" && tokens[index - 1]?.value !== "-") {
+      angleDepth -= 1;
+    } else if (
+      value === "," &&
+      delimiters.length === 0 &&
+      angleDepth === 0
+    ) {
+      addParameter(index);
+      parameterStart = index + 1;
+    }
+  }
+  return parameters;
+}
+
+function collectGenericParameters(tokens, scopeAt) {
+  const namedGenericItems = new Set([
+    "enum",
+    "fn",
+    "struct",
+    "trait",
+    "type",
+    "union",
+  ]);
+  for (let index = 0; index < tokens.length; index += 1) {
+    let genericOpening = null;
+    if (
+      !tokens[index].raw &&
+      namedGenericItems.has(tokens[index].value) &&
+      tokens[index + 1]?.identifier &&
+      tokens[index + 2]?.value === "<"
+    ) {
+      genericOpening = index + 2;
+    } else if (
+      tokens[index].value === "impl" &&
+      !tokens[index].raw &&
+      tokens[index + 1]?.value === "<"
+    ) {
+      genericOpening = index + 1;
+    }
+    if (genericOpening === null) continue;
+
+    const genericClosing = matchingAngle(tokens, genericOpening);
+    if (genericClosing === null) {
+      throw new Error(
+        `unclosed Rust generic parameter list on line ${tokens[index].line}`,
+      );
+    }
+    const bodyOpening = itemBodyOpening(tokens, genericClosing + 1);
+    if (bodyOpening === null) continue;
+    const bodyScope = scopeAt[bodyOpening + 1];
+    for (const name of genericParameterNames(
+      tokens,
+      genericOpening + 1,
+      genericClosing,
+    )) {
+      declareBinding(bodyScope, name, {
+        absolute: true,
+        path: ["LOCAL_ITEM", name],
+      });
+    }
+  }
+}
+
+function collectImplSelfBindings(tokens, scopeAt) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value !== "impl" || tokens[index].raw) continue;
+    let headerStart = index + 1;
+    if (tokens[headerStart]?.value === "<") {
+      const genericClosing = matchingAngle(tokens, headerStart);
+      if (genericClosing === null) {
+        throw new Error(
+          `unclosed impl generic parameter list on line ${tokens[index].line}`,
+        );
+      }
+      headerStart = genericClosing + 1;
+    }
+    const bodyOpening = itemBodyOpening(tokens, headerStart);
+    if (bodyOpening === null) continue;
+
+    let forIndex = null;
+    let whereIndex = null;
+    for (let cursor = headerStart; cursor < bodyOpening; cursor += 1) {
+      if (["(", "["].includes(tokens[cursor].value)) {
+        cursor = matchingDelimiter(tokens, cursor);
+        continue;
+      }
+      if (tokens[cursor].value === "<") {
+        const closing = matchingAngle(tokens, cursor);
+        if (closing !== null) {
+          cursor = closing;
+          continue;
+        }
+      }
+      if (tokens[cursor].value === "where" && !tokens[cursor].raw) {
+        whereIndex = cursor;
+        break;
+      }
+      if (tokens[cursor].value === "for" && !tokens[cursor].raw) {
+        forIndex = cursor;
+      }
+    }
+    const targetStart = forIndex === null ? headerStart : forIndex + 1;
+    const targetEnd = whereIndex ?? bodyOpening;
+    const target = simplePath(tokens, targetStart, targetEnd);
+    if (target === null) continue;
+    declareBinding(scopeAt[bodyOpening + 1], "Self", target);
+  }
+}
+
 function collectBindings(tokens, statements, scopeAt) {
   const importPathPrefixes = new Map();
   for (const statement of statements) {
@@ -1522,6 +1724,41 @@ function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant
   return null;
 }
 
+function followsMatchGuard(tokens, index) {
+  const openingForClosing = new Map([
+    [")", "("],
+    ["]", "["],
+    ["}", "{"],
+  ]);
+  const delimiters = [];
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const value = tokens[cursor].value;
+    if (openingForClosing.has(value)) {
+      delimiters.push(openingForClosing.get(value));
+      continue;
+    }
+    if (closingDelimiter.has(value)) {
+      if (delimiters.length === 0) {
+        if (value === "{") return false;
+        continue;
+      }
+      if (delimiters.at(-1) !== value) return false;
+      delimiters.pop();
+      continue;
+    }
+    if (delimiters.length > 0) continue;
+    if (value === "if" && !tokens[cursor].raw) return true;
+    if ([",", "{", "}", ";"].includes(value)) return false;
+    if (
+      value === ">" &&
+      tokens[cursor - 1]?.value === "="
+    ) {
+      return false;
+    }
+  }
+  return false;
+}
+
 function followedByMatchArm(tokens, index) {
   const delimiters = [];
   for (let cursor = index; cursor < tokens.length; cursor += 1) {
@@ -1537,7 +1774,9 @@ function followedByMatchArm(tokens, index) {
       continue;
     }
     if (delimiters.length > 0) continue;
-    if (value === "=" && tokens[cursor + 1]?.value === ">") return true;
+    if (value === "=" && tokens[cursor + 1]?.value === ">") {
+      return !followsMatchGuard(tokens, index);
+    }
     if ([",", ";"].includes(value)) return false;
   }
   return false;
@@ -1741,9 +1980,16 @@ function expandSimpleMacroInvocations(tokens) {
 function normalizedTokenStream(tokens, crateAliases = new Map()) {
   tokens = expandSimpleMacroInvocations(tokens);
   const ignoredTokens = macroDefinitionTokens(tokens);
-  const { statements, groupBraces } = importStatements(tokens, ignoredTokens);
+  const invocationTokens = macroInvocationTokens(tokens, ignoredTokens);
+  const { statements, groupBraces } = importStatements(
+    tokens,
+    ignoredTokens,
+    invocationTokens,
+  );
   const { moduleScopes, root, scopeAt } = lexicalScopes(tokens, groupBraces);
   collectLocalItems(tokens, scopeAt, moduleScopes);
+  collectGenericParameters(tokens, scopeAt);
+  collectImplSelfBindings(tokens, scopeAt);
   for (const scope of [root, ...moduleScopes.values()]) {
     for (const [alias, canonical] of crateAliases) {
       declareBinding(scope, alias, {

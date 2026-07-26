@@ -449,6 +449,24 @@ test("skips import syntax inside macro definitions", async (t) => {
   ]);
 });
 
+test("skips import syntax passed to opaque macro invocations", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "macro_rules! consume { ($($tt:tt)*) => {} }",
+      "fn allowed() { consume!(use $path;); }",
+      "fn wrong() { let _ = StorageError::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("resolves fixed imports inside macro definitions", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -603,6 +621,73 @@ test("distinguishes matching StorageError variants from constructing them", asyn
 
   assert.deepEqual(errors, [
     "worker/src/lib.rs:10: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("distinguishes match guard expressions from arm patterns", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "use symphony_storage::StorageError;",
+      "fn inspect(error: StorageError) {",
+      "    match error {",
+      "        StorageError::Sqlx(inner) if keep(inner) => {}",
+      "        _ if StorageError::Sqlx(problem).is_transient() => {}",
+      "        _ if check(StorageError::Sqlx(problem)) => {}",
+      "        _ => {}",
+      "    }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:5: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+    "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("tracks generic parameters that shadow restricted type names", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "trait Build { fn Sqlx(value: Problem) -> Self; }",
+      "fn allowed<StorageError: Build>() { let _ = StorageError::Sqlx(problem); }",
+      "fn allowed_const<const StorageError: usize>() { let _ = StorageError; }",
+      "fn wrong() { let _ = StorageError::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("resolves Self against enclosing impl targets", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "trait Construct { fn construct(); }",
+      "enum LocalError { Sqlx }",
+      "impl Construct for symphony_storage::StorageError {",
+      "    fn construct() { let _ = Self::Sqlx(problem); }",
+      "}",
+      "impl Construct for LocalError {",
+      "    fn construct() { let _ = Self::Sqlx; }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:4: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
