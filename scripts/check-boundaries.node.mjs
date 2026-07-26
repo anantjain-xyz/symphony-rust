@@ -362,6 +362,27 @@ test("resolves extern-crate self aliases through crate-root reexports", async (t
   ]);
 });
 
+test("allows imports that share a spelling across disjoint Rust namespaces", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "mod types { pub type Backend = (); }",
+      "#[allow(non_snake_case)] mod values { pub fn Backend() {} }",
+      "use crate::types::Backend;",
+      "use crate::values::Backend;",
+      "fn allowed(value: Backend) { let _: Backend = value; Backend(); }",
+      "fn wrong() { let _ = StorageError::Sqlx(problem); }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:6: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("tokenizes Unicode Rust identifiers in imports", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -902,6 +923,21 @@ test("recursively scans modules belonging to custom Cargo targets", async (t) =>
   assert.deepEqual(errors, [
     "worker/generated/hidden/deeper.rs:2: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
+});
+
+test("preserves parent scope for external child modules", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: ["enum StorageError { Sqlx(i32) }", "mod child;", ""].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "worker", "src", "child.rs"),
+    ["use super::*;", "fn allowed() { let _ = StorageError::Sqlx(1); }", ""].join("\n"),
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, []);
 });
 
 test("recursively scans literal include! sources belonging to Cargo targets", async (t) => {

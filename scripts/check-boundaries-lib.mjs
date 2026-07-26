@@ -930,8 +930,7 @@ async function packageRustFiles(pkg, cfgContext) {
   return [...files]
     .filter(
       (file) =>
-        (!includedFiles.has(file) || activeModuleFiles.has(file)) &&
-        (!inactiveFiles.has(file) || activeModuleFiles.has(file)),
+        !activeModuleFiles.has(file) && !includedFiles.has(file) && !inactiveFiles.has(file),
     )
     .sort();
 }
@@ -1335,34 +1334,85 @@ function parseUseBindings(tokens, start, end) {
   return { bindings, globs, pathPrefixes };
 }
 
+const allRustNamespaces = new Set(["macro", "type", "value"]);
+
+function bindingNamespaces(binding) {
+  if (binding.namespaceBindings) {
+    return new Set(binding.namespaceBindings.keys());
+  }
+  return binding.namespaces ?? allRustNamespaces;
+}
+
+function mergeOverlappingBinding(existing, declared, name, scope) {
+  if (existing.implicit && !declared.implicit) {
+    return declared;
+  }
+  if (declared.implicit) return existing;
+  if (!existing.conditional || !declared.conditional) {
+    throw new Error(`ambiguous Rust declarations bind ${name} more than once in one scope`);
+  }
+  if (existing.alternatives) {
+    return {
+      ...existing,
+      alternatives: [...existing.alternatives, declared],
+      conditional: true,
+      descendantVisible: existing.descendantVisible === true && declared.descendantVisible === true,
+      name,
+      scope,
+    };
+  }
+  return {
+    alternatives: [existing, declared],
+    conditional: true,
+    descendantVisible: existing.descendantVisible === true && declared.descendantVisible === true,
+    name,
+    scope,
+  };
+}
+
+function combinedNamespaceBinding(namespaceBindings, name, scope) {
+  const namespaceAlternatives = [...new Set(namespaceBindings.values())];
+  if (namespaceAlternatives.length === 1) return namespaceAlternatives[0];
+  return {
+    descendantVisible: namespaceAlternatives.every((binding) => binding.descendantVisible === true),
+    name,
+    namespaceAlternatives,
+    namespaceBindings,
+    scope,
+  };
+}
+
 function declareBinding(scope, name, binding) {
-  const declared = { ...binding, name, scope };
+  const declared = {
+    ...binding,
+    name,
+    namespaces: new Set(binding.namespaces ?? allRustNamespaces),
+    scope,
+  };
   const existing = scope.bindings.get(name);
   if (existing === undefined) {
     scope.bindings.set(name, declared);
     return;
   }
-  if (existing.implicit && !declared.implicit) {
-    scope.bindings.set(name, declared);
-    return;
+
+  const namespaceBindings = existing.namespaceBindings
+    ? new Map(existing.namespaceBindings)
+    : new Map([...bindingNamespaces(existing)].map((namespace) => [namespace, existing]));
+  const mergedByExisting = new Map();
+  for (const namespace of declared.namespaces) {
+    const current = namespaceBindings.get(namespace);
+    if (current === undefined) {
+      namespaceBindings.set(namespace, declared);
+      continue;
+    }
+    let merged = mergedByExisting.get(current);
+    if (merged === undefined) {
+      merged = mergeOverlappingBinding(current, declared, name, scope);
+      mergedByExisting.set(current, merged);
+    }
+    namespaceBindings.set(namespace, merged);
   }
-  if (declared.implicit) return;
-  if (!existing.conditional || !declared.conditional) {
-    throw new Error(`ambiguous Rust declarations bind ${name} more than once in one scope`);
-  }
-  if (existing.alternatives) {
-    existing.alternatives.push(declared);
-    existing.descendantVisible =
-      existing.descendantVisible === true && declared.descendantVisible === true;
-  } else {
-    scope.bindings.set(name, {
-      alternatives: [existing, declared],
-      conditional: true,
-      descendantVisible: existing.descendantVisible === true && declared.descendantVisible === true,
-      name,
-      scope,
-    });
-  }
+  scope.bindings.set(name, combinedNamespaceBinding(namespaceBindings, name, scope));
 }
 
 function simplePath(tokens, start, end) {
@@ -1393,6 +1443,16 @@ function simplePath(tokens, start, end) {
 function collectLocalItems(tokens, scopeAt, moduleScopes) {
   const itemKeywords = new Set(["enum", "mod", "struct", "trait", "union"]);
   for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (tokens[index].value === "fn" && !tokens[index].raw && tokens[index + 1].identifier) {
+      const name = tokens[index + 1].value;
+      declareBinding(scopeAt[index], name, {
+        absolute: true,
+        conditional: hasCfgAttribute(tokens, index),
+        namespaces: new Set(["value"]),
+        path: ["LOCAL_VALUE", name],
+      });
+      continue;
+    }
     if (tokens[index].value === "type" && !tokens[index].raw && tokens[index + 1].identifier) {
       const name = tokens[index + 1].value;
       let binding = {
@@ -1409,6 +1469,7 @@ function collectLocalItems(tokens, scopeAt, moduleScopes) {
       declareBinding(scopeAt[index], name, {
         ...binding,
         conditional: hasCfgAttribute(tokens, index),
+        namespaces: new Set(["type"]),
       });
       continue;
     }
@@ -1423,6 +1484,7 @@ function collectLocalItems(tokens, scopeAt, moduleScopes) {
       path: ["LOCAL_ITEM", tokens[index + 1].value],
       absolute: true,
       conditional: hasCfgAttribute(tokens, index),
+      namespaces: tokens[index].value === "struct" ? new Set(["type", "value"]) : new Set(["type"]),
     };
     if (tokens[index].value === "mod" && moduleScopes.has(index)) {
       binding.moduleScope = moduleScopes.get(index);
@@ -1532,6 +1594,7 @@ function collectGenericParameters(tokens, scopeAt) {
     for (const name of genericParameterNames(tokens, genericOpening + 1, genericClosing)) {
       declareBinding(bodyScope, name, {
         absolute: true,
+        namespaces: new Set(["type"]),
         path: ["LOCAL_ITEM", name],
       });
     }
@@ -1578,7 +1641,10 @@ function collectImplSelfBindings(tokens, scopeAt) {
     const targetEnd = whereIndex ?? bodyOpening;
     const target = simplePath(tokens, targetStart, targetEnd);
     if (target === null) continue;
-    declareBinding(scopeAt[bodyOpening + 1], "Self", target);
+    declareBinding(scopeAt[bodyOpening + 1], "Self", {
+      ...target,
+      namespaces: new Set(["type"]),
+    });
   }
 }
 
@@ -1610,6 +1676,7 @@ function collectBindings(tokens, statements, scopeAt) {
           moduleScope: imported === "self" ? scope.crateScope : undefined,
           conditional: statement.conditional,
           descendantVisible: true,
+          namespaces: new Set(["type"]),
         });
       }
       continue;
@@ -1617,9 +1684,11 @@ function collectBindings(tokens, statements, scopeAt) {
 
     const parsed = parseUseBindings(tokens, statement.start, statement.end);
     for (const binding of parsed.bindings) {
+      const target = resolvePathBinding(scope, binding.path, binding.absolute);
       declareBinding(scope, binding.name, {
         ...binding,
         conditional: statement.conditional,
+        namespaces: target === null ? allRustNamespaces : bindingNamespaces(target),
       });
     }
     for (const glob of parsed.globs) {
@@ -1643,6 +1712,10 @@ function findBinding(scope, name) {
   return null;
 }
 
+function bindingResolutionAlternatives(binding) {
+  return binding.alternatives ?? binding.namespaceAlternatives ?? null;
+}
+
 function resolveBinding(binding, seen = new Set()) {
   if (seen.has(binding)) {
     throw new Error(
@@ -1651,9 +1724,10 @@ function resolveBinding(binding, seen = new Set()) {
       }`,
     );
   }
-  if (binding.alternatives) {
+  const bindingAlternatives = bindingResolutionAlternatives(binding);
+  if (bindingAlternatives) {
     seen.add(binding);
-    const alternatives = binding.alternatives.map((alternative) =>
+    const alternatives = bindingAlternatives.map((alternative) =>
       resolveBinding(alternative, seen),
     );
     seen.delete(binding);
@@ -1668,7 +1742,10 @@ function resolveBinding(binding, seen = new Set()) {
     if (alternatives.every((candidate) => JSON.stringify(candidate) === JSON.stringify(first))) {
       return first;
     }
-    return ["CFG_DEPENDENT_BINDING", binding.name];
+    return [
+      binding.namespaceAlternatives ? "NAMESPACE_DEPENDENT_BINDING" : "CFG_DEPENDENT_BINDING",
+      binding.name,
+    ];
   }
   if (binding.absolute || binding.path.length === 0) return [...binding.path];
 
@@ -1681,8 +1758,9 @@ function resolveBinding(binding, seen = new Set()) {
 function resolveBindingModuleScope(binding, seen = new Set()) {
   if (binding.moduleScope) return binding.moduleScope;
   if (seen.has(binding)) return null;
-  if (binding.alternatives) {
-    const scopes = binding.alternatives.map((alternative) =>
+  const bindingAlternatives = bindingResolutionAlternatives(binding);
+  if (bindingAlternatives) {
+    const scopes = bindingAlternatives.map((alternative) =>
       resolveBindingModuleScope(alternative, new Set(seen)),
     );
     const [first] = scopes;
@@ -1735,6 +1813,40 @@ function resolvePathModuleScope(scope, pathSegments, absolute, seen, sourceBindi
 
   if (binding === null || binding === sourceBinding) return null;
   return resolveBoundModuleScope(binding, remaining, seen);
+}
+
+function resolvePathBinding(scope, pathSegments, absolute) {
+  if (absolute || pathSegments.length === 0) return null;
+
+  let binding;
+  let index = 0;
+  if (["crate", "self", "super"].includes(pathSegments[0])) {
+    let moduleScope = scope.moduleScope;
+    if (pathSegments[index] === "crate") {
+      moduleScope = scope.crateScope;
+      index += 1;
+    } else if (pathSegments[index] === "self") {
+      index += 1;
+    } else {
+      while (pathSegments[index] === "super") {
+        moduleScope = moduleScope?.moduleParent ?? null;
+        index += 1;
+      }
+    }
+    if (moduleScope === null || index >= pathSegments.length) return null;
+    binding = moduleScope.bindings.get(pathSegments[index]) ?? null;
+    index += 1;
+  } else {
+    binding = findBinding(scope, pathSegments[index]);
+    index += 1;
+  }
+
+  while (binding !== null && index < pathSegments.length) {
+    const moduleScope = resolveBindingModuleScope(binding);
+    binding = moduleScope?.bindings.get(pathSegments[index]) ?? null;
+    index += 1;
+  }
+  return binding;
 }
 
 function resolveBoundPath(binding, remaining, seen) {
@@ -2297,6 +2409,7 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
       declareBinding(scope, alias, {
         absolute: true,
         implicit: true,
+        namespaces: new Set(["type"]),
         path: [canonical],
       });
     }
