@@ -61,17 +61,14 @@ async function fixtureWorkspace(sources = {}) {
   for (const name of ["core", "storage", "worker"]) {
     await fs.mkdir(path.join(root, name, "src"), { recursive: true });
     await fs.writeFile(path.join(root, name, "Cargo.toml"), `[package]\nname = "${name}"\n`);
-    await fs.writeFile(
-      path.join(root, name, "src", "lib.rs"),
-      sources[name] ?? "pub fn ok() {}\n",
-    );
+    await fs.writeFile(path.join(root, name, "src", "lib.rs"), sources[name] ?? "pub fn ok() {}\n");
   }
   return root;
 }
 
 test("accepts the declared internal DAG and storage ownership", async (t) => {
   const root = await fixtureWorkspace({
-    storage: "pub fn query() { let _ = sqlx::query(\"select 1\"); }\n",
+    storage: 'pub fn query() { let _ = sqlx::query("select 1"); }\n',
   });
   t.after(() => fs.rm(root, { recursive: true, force: true }));
 
@@ -102,14 +99,16 @@ test("rejects unknown packages, forbidden internal edges, and restricted depende
 
   assert(errors.some((error) => error.includes("new-layer is missing")));
   assert(errors.some((error) => error.includes("core may not depend on internal crate worker")));
-  assert(errors.some((error) => error.includes("worker may not declare restricted dependency sqlx")));
+  assert(
+    errors.some((error) => error.includes("worker may not declare restricted dependency sqlx")),
+  );
 });
 
 test("reports forbidden source tokens with deterministic file and line diagnostics", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
       "fn workspace_error() {",
-      "    let _ = StorageError::Sqlx(sqlx::Error::Protocol(\"wrong layer\".into()));",
+      '    let _ = StorageError::Sqlx(sqlx::Error::Protocol("wrong layer".into()));',
       "}",
       "",
     ].join("\n"),
@@ -238,11 +237,7 @@ test("resolves self, super, and crate import roots by module", async (t) => {
 
 test("resolves relative imports across module source files", async (t) => {
   const root = await fixtureWorkspace({
-    worker: [
-      "use symphony_storage::StorageError;",
-      "mod child;",
-      "",
-    ].join("\n"),
+    worker: ["use symphony_storage::StorageError;", "mod child;", ""].join("\n"),
   });
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.writeFile(
@@ -1048,11 +1043,7 @@ test("preserves bindings across recursively included Rust fragments", async (t) 
 
 test("does not scan included Rust fragments as standalone roots", async (t) => {
   const root = await fixtureWorkspace({
-    worker: [
-      "enum StorageError { Sqlx }",
-      'include!("fragment.rs");',
-      "",
-    ].join("\n"),
+    worker: ["enum StorageError { Sqlx }", 'include!("fragment.rs");', ""].join("\n"),
   });
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.writeFile(
@@ -1094,10 +1085,7 @@ test("resolves modules from the included fragment's directory", async (t) => {
     path.join(root, "worker", "generated", "lib.rs"),
     'include!("nested/items.inc");\n',
   );
-  await fs.writeFile(
-    path.join(root, "worker", "generated", "nested", "items.inc"),
-    "mod child;\n",
-  );
+  await fs.writeFile(path.join(root, "worker", "generated", "nested", "items.inc"), "mod child;\n");
   await fs.writeFile(
     path.join(root, "worker", "generated", "nested", "child.rs"),
     'fn wrong() { let _ = sqlx::query("select 1"); }\n',
@@ -1123,10 +1111,7 @@ test("resolves child modules relative to explicit #[path] files", async (t) => {
     path.join(root, "worker", "generated", "lib.rs"),
     '#[path = "alt/bar.rs"] mod foo;\n',
   );
-  await fs.writeFile(
-    path.join(root, "worker", "generated", "alt", "bar.rs"),
-    "mod child;\n",
-  );
+  await fs.writeFile(path.join(root, "worker", "generated", "alt", "bar.rs"), "mod child;\n");
   await fs.writeFile(
     path.join(root, "worker", "generated", "alt", "child.rs"),
     'fn wrong() { let _ = sqlx::query("select 1"); }\n',
@@ -1170,15 +1155,11 @@ test("resolves active cfg_attr module paths", async (t) => {
 
 test("resolves cfg_attr module paths selected by Cargo features", async (t) => {
   const root = await fixtureWorkspace({
-    worker:
-      '#[cfg_attr(feature = "generated", path = "../generated/feature.rs")] mod imp;\n',
+    worker: '#[cfg_attr(feature = "generated", path = "../generated/feature.rs")] mod imp;\n',
   });
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, "worker", "generated"), { recursive: true });
-  await fs.writeFile(
-    path.join(root, "worker", "src", "imp.rs"),
-    "fn allowed() {}\n",
-  );
+  await fs.writeFile(path.join(root, "worker", "src", "imp.rs"), "fn allowed() {}\n");
   await fs.writeFile(
     path.join(root, "worker", "generated", "feature.rs"),
     'fn wrong() { let _ = sqlx::query("select 1"); }\n',
@@ -1254,10 +1235,7 @@ test("fails closed when a custom target module cannot be resolved", async (t) =>
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, "worker", "generated"), { recursive: true });
-  await fs.writeFile(
-    path.join(root, "worker", "generated", "lib.rs"),
-    "mod missing;\n",
-  );
+  await fs.writeFile(path.join(root, "worker", "generated", "lib.rs"), "mod missing;\n");
 
   await assert.rejects(
     scanRestrictedSources(
@@ -1290,8 +1268,5 @@ test("fails closed for an invalid or cyclic policy", () => {
     },
   });
 
-  assert.throws(
-    () => verifyCargoMetadata(metadata(root), cyclic),
-    /contains a cycle/,
-  );
+  assert.throws(() => verifyCargoMetadata(metadata(root), cyclic), /contains a cycle/);
 });

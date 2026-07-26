@@ -5,19 +5,13 @@
       "allowedInternalDependencies": []
     },
     "symphony-agents": {
-      "allowedInternalDependencies": [
-        "symphony-core"
-      ]
+      "allowedInternalDependencies": ["symphony-core"]
     },
     "symphony-storage": {
-      "allowedInternalDependencies": [
-        "symphony-core"
-      ]
+      "allowedInternalDependencies": ["symphony-core"]
     },
     "symphony-tracker": {
-      "allowedInternalDependencies": [
-        "symphony-core"
-      ]
+      "allowedInternalDependencies": ["symphony-core"]
     },
     "symphony-worker": {
       "allowedInternalDependencies": [
@@ -38,25 +32,19 @@
     }
   },
   "restrictedDependencies": {
-    "sqlx": [
-      "symphony-storage"
-    ]
+    "sqlx": ["symphony-storage"]
   },
   "sourceRules": [
     {
       "id": "direct-sqlx",
       "pattern": "\\bsqlx\\s*::",
-      "allowedPackages": [
-        "symphony-storage"
-      ],
+      "allowedPackages": ["symphony-storage"],
       "message": "direct sqlx use belongs in symphony-storage"
     },
     {
       "id": "storage-sqlx-construction",
       "pattern": "\\bStorageError\\s*::\\s*Sqlx\\b",
-      "allowedPackages": [
-        "symphony-storage"
-      ],
+      "allowedPackages": ["symphony-storage"],
       "message": "constructing StorageError::Sqlx outside symphony-storage disguises a non-storage failure"
     }
   ]

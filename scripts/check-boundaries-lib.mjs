@@ -6,7 +6,11 @@ function diagnostic(file, line, message) {
 }
 
 function workspacePackages(metadata) {
-  if (!metadata || !Array.isArray(metadata.packages) || !Array.isArray(metadata.workspace_members)) {
+  if (
+    !metadata ||
+    !Array.isArray(metadata.packages) ||
+    !Array.isArray(metadata.workspace_members)
+  ) {
     throw new Error("cargo metadata is missing packages or workspace_members");
   }
   const memberIds = new Set(metadata.workspace_members);
@@ -77,7 +81,9 @@ function validatePolicy(policy) {
   const visited = new Set();
   function visit(name, trail) {
     if (visiting.has(name)) {
-      throw new Error(`allowed internal dependency graph contains a cycle: ${[...trail, name].join(" -> ")}`);
+      throw new Error(
+        `allowed internal dependency graph contains a cycle: ${[...trail, name].join(" -> ")}`,
+      );
     }
     if (visited.has(name)) return;
     visiting.add(name);
@@ -106,7 +112,9 @@ export function verifyCargoMetadata(metadata, policy) {
   const policyNames = new Set(Object.keys(policy.packages));
   for (const name of actualByName.keys()) {
     if (!policyNames.has(name)) {
-      errors.push(`Cargo.toml:1: workspace package ${name} is missing from architecture/boundaries.json`);
+      errors.push(
+        `Cargo.toml:1: workspace package ${name} is missing from architecture/boundaries.json`,
+      );
     }
   }
   for (const name of policyNames) {
@@ -122,11 +130,7 @@ export function verifyCargoMetadata(metadata, policy) {
       if (internalNames.has(dependency.name) && !allowed.has(dependency.name)) {
         const manifest = path.relative(metadata.workspace_root, pkg.manifest_path);
         errors.push(
-          diagnostic(
-            manifest,
-            1,
-            `${name} may not depend on internal crate ${dependency.name}`,
-          ),
+          diagnostic(manifest, 1, `${name} may not depend on internal crate ${dependency.name}`),
         );
       }
     }
@@ -258,10 +262,7 @@ function firstTopLevelComma(tokens, start, end) {
 
 function modulePathAttribute(tokens, modIndex, cfgContext) {
   let boundary = modIndex - 1;
-  while (
-    boundary >= 0 &&
-    ![";", "{", "}"].includes(tokens[boundary].value)
-  ) {
+  while (boundary >= 0 && ![";", "{", "}"].includes(tokens[boundary].value)) {
     boundary -= 1;
   }
   let result = null;
@@ -294,9 +295,7 @@ function modulePathAttribute(tokens, modIndex, cfgContext) {
       if (comma === null) {
         throw new Error("cfg_attr must contain a predicate and attribute");
       }
-      if (
-        evaluateCfgPredicate(tokens, index + 4, comma, cfgContext) === true
-      ) {
+      if (evaluateCfgPredicate(tokens, index + 4, comma, cfgContext) === true) {
         for (let cursor = comma + 1; cursor + 2 < closing; cursor += 1) {
           if (
             tokens[cursor].value === "path" &&
@@ -318,10 +317,7 @@ function modulePathAttribute(tokens, modIndex, cfgContext) {
 
 function hasCfgAttribute(tokens, declarationIndex) {
   let boundary = declarationIndex - 1;
-  while (
-    boundary >= 0 &&
-    ![";", "{", "}"].includes(tokens[boundary].value)
-  ) {
+  while (boundary >= 0 && ![";", "{", "}"].includes(tokens[boundary].value)) {
     boundary -= 1;
   }
   for (let index = boundary + 1; index + 2 < declarationIndex; index += 1) {
@@ -397,9 +393,7 @@ function packageCfgContext(metadata, pkg, activeCfg = []) {
 function evaluateCfgPredicate(tokens, start, end, context) {
   function parse(index) {
     if (!tokens[index]?.identifier) {
-      throw new Error(
-        `unsupported cfg predicate token ${tokens[index]?.value ?? "<end>"}`,
-      );
+      throw new Error(`unsupported cfg predicate token ${tokens[index]?.value ?? "<end>"}`);
     }
     const name = tokens[index].value;
     index += 1;
@@ -411,10 +405,7 @@ function evaluateCfgPredicate(tokens, start, end, context) {
       const configured = context.values.get(name);
       return {
         index: index + 2,
-        value:
-          configured === undefined
-            ? null
-            : configured.has(tokens[index + 1].literal),
+        value: configured === undefined ? null : configured.has(tokens[index + 1].literal),
       };
     }
 
@@ -427,12 +418,7 @@ function evaluateCfgPredicate(tokens, start, end, context) {
       ]);
       return {
         index,
-        value:
-          context.flags.has(name)
-            ? true
-            : knownBooleanFlags.has(name)
-              ? false
-              : null,
+        value: context.flags.has(name) ? true : knownBooleanFlags.has(name) ? false : null,
       };
     }
 
@@ -508,14 +494,8 @@ function cfgMetaDisables(tokens, start, end, context) {
 
   let attributeStart = comma + 1;
   while (attributeStart < closing) {
-    const attributeComma =
-      firstTopLevelComma(tokens, attributeStart, closing) ?? closing;
-    if (cfgMetaDisables(
-      tokens,
-      attributeStart,
-      attributeComma,
-      context,
-    )) {
+    const attributeComma = firstTopLevelComma(tokens, attributeStart, closing) ?? closing;
+    if (cfgMetaDisables(tokens, attributeStart, attributeComma, context)) {
       return true;
     }
     attributeStart = attributeComma + 1;
@@ -525,17 +505,11 @@ function cfgMetaDisables(tokens, start, end, context) {
 
 function cfgDeclarationEnabled(tokens, declarationIndex, context) {
   let boundary = declarationIndex - 1;
-  while (
-    boundary >= 0 &&
-    ![";", "{", "}"].includes(tokens[boundary].value)
-  ) {
+  while (boundary >= 0 && ![";", "{", "}"].includes(tokens[boundary].value)) {
     boundary -= 1;
   }
   for (let index = boundary + 1; index + 2 < declarationIndex; index += 1) {
-    if (
-      tokens[index].value !== "#" ||
-      tokens[index + 1]?.value !== "["
-    ) {
+    if (tokens[index].value !== "#" || tokens[index + 1]?.value !== "[") {
       continue;
     }
     const closing = matchingDelimiter(tokens, index + 1);
@@ -658,9 +632,7 @@ async function resolveIncludedFile(sourceFile, includedPath, line) {
     path.join(path.dirname(sourceFile), includedPath),
   ]);
   if (includedFile === null) {
-    throw new Error(
-      `cannot resolve include! ${includedPath} declared at ${sourceFile}:${line}`,
-    );
+    throw new Error(`cannot resolve include! ${includedPath} declared at ${sourceFile}:${line}`);
   }
   return includedFile;
 }
@@ -668,18 +640,12 @@ async function resolveIncludedFile(sourceFile, includedPath, line) {
 function moduleChildDirectory(moduleFile, explicitPath) {
   return explicitPath !== null || path.basename(moduleFile) === "mod.rs"
     ? path.dirname(moduleFile)
-    : path.join(
-        path.dirname(moduleFile),
-        path.basename(moduleFile, path.extname(moduleFile)),
-      );
+    : path.join(path.dirname(moduleFile), path.basename(moduleFile, path.extname(moduleFile)));
 }
 
 function moduleFileCandidates(directory, name, explicitPath) {
   return explicitPath === null
-    ? [
-        path.join(directory, `${name}.rs`),
-        path.join(directory, name, "mod.rs"),
-      ]
+    ? [path.join(directory, `${name}.rs`), path.join(directory, name, "mod.rs")]
     : [path.join(directory, explicitPath)];
 }
 
@@ -725,14 +691,10 @@ async function collectTargetModules(
           const argument = tokens[index + 3];
           if (
             argument?.value === "LITERAL" &&
-            (index + 4 === closing ||
-              (tokens[index + 4]?.value === "," && index + 5 === closing))
+            (index + 4 === closing || (tokens[index + 4]?.value === "," && index + 5 === closing))
           ) {
             inactiveFiles.add(
-              path.resolve(
-                path.dirname(absolute),
-                literalPath(argument, "include!"),
-              ),
+              path.resolve(path.dirname(absolute), literalPath(argument, "include!")),
             );
           }
           index = closing;
@@ -749,10 +711,7 @@ async function collectTargetModules(
           index = included.closing;
           continue;
         }
-        if (
-          tokens[index].value !== "mod" ||
-          !tokens[index + 1]?.identifier
-        ) {
+        if (tokens[index].value !== "mod" || !tokens[index + 1]?.identifier) {
           continue;
         }
         const name = tokens[index + 1].value;
@@ -804,9 +763,7 @@ async function expandedRustTokens(
 ) {
   const absolute = path.resolve(file);
   if (trail.includes(absolute)) {
-    throw new Error(
-      `Rust source expansion cycle: ${[...trail, absolute].join(" -> ")}`,
-    );
+    throw new Error(`Rust source expansion cycle: ${[...trail, absolute].join(" -> ")}`);
   }
   const cacheKey = [
     absolute,
@@ -866,10 +823,7 @@ async function expandedRustTokens(
         continue;
       }
 
-      if (
-        tokens[index].value !== "mod" ||
-        !tokens[index + 1]?.identifier
-      ) {
+      if (tokens[index].value !== "mod" || !tokens[index + 1]?.identifier) {
         expanded.push(tokens[index]);
         continue;
       }
@@ -897,11 +851,7 @@ async function expandedRustTokens(
           tokens[index],
           tokens[index + 1],
           tokens[index + 2],
-          ...(await expandRange(
-            index + 3,
-            closing,
-            path.join(directory, name),
-          )),
+          ...(await expandRange(index + 3, closing, path.join(directory, name))),
           tokens[closing],
         );
         index = closing;
@@ -950,9 +900,7 @@ async function expandedRustTokens(
 
 async function packageRustFiles(pkg, cfgContext) {
   const manifestDir = path.dirname(pkg.manifest_path);
-  const roots = ["src", "tests", "examples", "benches"].map((name) =>
-    path.join(manifestDir, name),
-  );
+  const roots = ["src", "tests", "examples", "benches"].map((name) => path.join(manifestDir, name));
   const files = new Set();
   const includedFiles = new Set();
   const inactiveFiles = new Set();
@@ -1123,10 +1071,7 @@ function lexRust(source) {
     let quoteIndex = null;
     if (character === '"') {
       quoteIndex = index;
-    } else if (
-      (character === "b" || character === "c") &&
-      source[index + 1] === '"'
-    ) {
+    } else if ((character === "b" || character === "c") && source[index + 1] === '"') {
       quoteIndex = index + 1;
     }
     if (quoteIndex !== null) {
@@ -1175,16 +1120,12 @@ function lexRust(source) {
     }
 
     const rawIdentifier =
-      source.startsWith("r#", index) &&
-      isIdentifierStart(sourceCharacter(source, index + 2));
+      source.startsWith("r#", index) && isIdentifierStart(sourceCharacter(source, index + 2));
     if (rawIdentifier || isIdentifierStart(character)) {
       const start = rawIdentifier ? index + 2 : index;
       index = start;
       index += sourceCharacter(source, index).length;
-      while (
-        index < source.length &&
-        isIdentifierContinue(sourceCharacter(source, index))
-      ) {
+      while (index < source.length && isIdentifierContinue(sourceCharacter(source, index))) {
         index += sourceCharacter(source, index).length;
       }
       tokens.push({
@@ -1225,12 +1166,7 @@ function attributeTokens(tokens) {
   return attributes;
 }
 
-function importStatements(
-  tokens,
-  ignoredTokens,
-  invocationTokens,
-  attributes,
-) {
+function importStatements(tokens, ignoredTokens, invocationTokens, attributes) {
   const statements = [];
   const groupBraces = new Set();
 
@@ -1268,10 +1204,7 @@ function importStatements(
       index = end;
       continue;
     }
-    if (
-      insideMacroDefinition &&
-      tokens.slice(start, end).some((token) => token.value === "$")
-    ) {
+    if (insideMacroDefinition && tokens.slice(start, end).some((token) => token.value === "$")) {
       index = end;
       continue;
     }
@@ -1380,8 +1313,7 @@ function parseUseBindings(tokens, start, end) {
       return parseTree(index + 1, importedPath, absolute);
     }
 
-    let name =
-      segment === "self" && prefix.length > 0 ? prefix.at(-1) : segment;
+    let name = segment === "self" && prefix.length > 0 ? prefix.at(-1) : segment;
     if (tokens[index]?.value === "as") {
       if (!tokens[index + 1]?.identifier) {
         throw new Error("use alias must be an identifier");
@@ -1421,15 +1353,12 @@ function declareBinding(scope, name, binding) {
   if (existing.alternatives) {
     existing.alternatives.push(declared);
     existing.descendantVisible =
-      existing.descendantVisible === true &&
-      declared.descendantVisible === true;
+      existing.descendantVisible === true && declared.descendantVisible === true;
   } else {
     scope.bindings.set(name, {
       alternatives: [existing, declared],
       conditional: true,
-      descendantVisible:
-        existing.descendantVisible === true &&
-        declared.descendantVisible === true,
+      descendantVisible: existing.descendantVisible === true && declared.descendantVisible === true,
       name,
       scope,
     });
@@ -1437,10 +1366,7 @@ function declareBinding(scope, name, binding) {
 }
 
 function simplePath(tokens, start, end) {
-  while (
-    tokens[start]?.value === "(" &&
-    matchingDelimiter(tokens, start) === end - 1
-  ) {
+  while (tokens[start]?.value === "(" && matchingDelimiter(tokens, start) === end - 1) {
     start += 1;
     end -= 1;
   }
@@ -1455,10 +1381,7 @@ function simplePath(tokens, start, end) {
   const pathSegments = [tokens[index].value];
   index += 1;
   while (index < end) {
-    if (
-      tokens[index]?.value !== "::" ||
-      !tokens[index + 1]?.identifier
-    ) {
+    if (tokens[index]?.value !== "::" || !tokens[index + 1]?.identifier) {
       return null;
     }
     pathSegments.push(tokens[index + 1].value);
@@ -1468,19 +1391,9 @@ function simplePath(tokens, start, end) {
 }
 
 function collectLocalItems(tokens, scopeAt, moduleScopes) {
-  const itemKeywords = new Set([
-    "enum",
-    "mod",
-    "struct",
-    "trait",
-    "union",
-  ]);
+  const itemKeywords = new Set(["enum", "mod", "struct", "trait", "union"]);
   for (let index = 0; index + 1 < tokens.length; index += 1) {
-    if (
-      tokens[index].value === "type" &&
-      !tokens[index].raw &&
-      tokens[index + 1].identifier
-    ) {
+    if (tokens[index].value === "type" && !tokens[index].raw && tokens[index + 1].identifier) {
       const name = tokens[index + 1].value;
       let binding = {
         path: ["LOCAL_ITEM", name],
@@ -1524,10 +1437,7 @@ function matchingAngle(tokens, opening) {
   for (let index = opening; index < tokens.length; index += 1) {
     if (tokens[index].value === "<") {
       depth += 1;
-    } else if (
-      tokens[index].value === ">" &&
-      tokens[index - 1]?.value !== "-"
-    ) {
+    } else if (tokens[index].value === ">" && tokens[index - 1]?.value !== "-") {
       depth -= 1;
       if (depth === 0) return index;
     }
@@ -1563,11 +1473,7 @@ function genericParameterNames(tokens, start, end) {
   function addParameter(parameterEnd) {
     const parameter = tokens.slice(parameterStart, parameterEnd);
     if (parameter.length === 0 || parameter[0].value === "'") return;
-    if (
-      parameter[0].value === "const" &&
-      !parameter[0].raw &&
-      parameter[1]?.identifier
-    ) {
+    if (parameter[0].value === "const" && !parameter[0].raw && parameter[1]?.identifier) {
       parameters.push(parameter[1].value);
     } else if (parameter[0].identifier) {
       parameters.push(parameter[0].value);
@@ -1588,11 +1494,7 @@ function genericParameterNames(tokens, start, end) {
       angleDepth += 1;
     } else if (value === ">" && tokens[index - 1]?.value !== "-") {
       angleDepth -= 1;
-    } else if (
-      value === "," &&
-      delimiters.length === 0 &&
-      angleDepth === 0
-    ) {
+    } else if (value === "," && delimiters.length === 0 && angleDepth === 0) {
       addParameter(index);
       parameterStart = index + 1;
     }
@@ -1601,14 +1503,7 @@ function genericParameterNames(tokens, start, end) {
 }
 
 function collectGenericParameters(tokens, scopeAt) {
-  const namedGenericItems = new Set([
-    "enum",
-    "fn",
-    "struct",
-    "trait",
-    "type",
-    "union",
-  ]);
+  const namedGenericItems = new Set(["enum", "fn", "struct", "trait", "type", "union"]);
   for (let index = 0; index < tokens.length; index += 1) {
     let genericOpening = null;
     if (
@@ -1629,18 +1524,12 @@ function collectGenericParameters(tokens, scopeAt) {
 
     const genericClosing = matchingAngle(tokens, genericOpening);
     if (genericClosing === null) {
-      throw new Error(
-        `unclosed Rust generic parameter list on line ${tokens[index].line}`,
-      );
+      throw new Error(`unclosed Rust generic parameter list on line ${tokens[index].line}`);
     }
     const bodyOpening = itemBodyOpening(tokens, genericClosing + 1);
     if (bodyOpening === null) continue;
     const bodyScope = scopeAt[bodyOpening + 1];
-    for (const name of genericParameterNames(
-      tokens,
-      genericOpening + 1,
-      genericClosing,
-    )) {
+    for (const name of genericParameterNames(tokens, genericOpening + 1, genericClosing)) {
       declareBinding(bodyScope, name, {
         absolute: true,
         path: ["LOCAL_ITEM", name],
@@ -1656,9 +1545,7 @@ function collectImplSelfBindings(tokens, scopeAt) {
     if (tokens[headerStart]?.value === "<") {
       const genericClosing = matchingAngle(tokens, headerStart);
       if (genericClosing === null) {
-        throw new Error(
-          `unclosed impl generic parameter list on line ${tokens[index].line}`,
-        );
+        throw new Error(`unclosed impl generic parameter list on line ${tokens[index].line}`);
       }
       headerStart = genericClosing + 1;
     }
@@ -1728,11 +1615,7 @@ function collectBindings(tokens, statements, scopeAt) {
       continue;
     }
 
-    const parsed = parseUseBindings(
-      tokens,
-      statement.start,
-      statement.end,
-    );
+    const parsed = parseUseBindings(tokens, statement.start, statement.end);
     for (const binding of parsed.bindings) {
       declareBinding(scope, binding.name, {
         ...binding,
@@ -1753,13 +1636,7 @@ function findBinding(scope, name) {
   const moduleScope = scope.moduleScope;
   for (let current = scope; current !== null; current = current.parent) {
     const binding = current.bindings.get(name);
-    if (
-      binding &&
-      (
-        current.moduleScope === moduleScope ||
-        binding.descendantVisible
-      )
-    ) {
+    if (binding && (current.moduleScope === moduleScope || binding.descendantVisible)) {
       return binding;
     }
   }
@@ -1780,18 +1657,15 @@ function resolveBinding(binding, seen = new Set()) {
       resolveBinding(alternative, seen),
     );
     seen.delete(binding);
-    const restricted = alternatives.find((candidate) =>
-      candidate[0] === "sqlx" ||
-      isStorageErrorPath(candidate) ||
-      isStorageErrorVariantPath(candidate, "Sqlx"),
+    const restricted = alternatives.find(
+      (candidate) =>
+        candidate[0] === "sqlx" ||
+        isStorageErrorPath(candidate) ||
+        isStorageErrorVariantPath(candidate, "Sqlx"),
     );
     if (restricted) return restricted;
     const [first] = alternatives;
-    if (
-      alternatives.every(
-        (candidate) => JSON.stringify(candidate) === JSON.stringify(first),
-      )
-    ) {
+    if (alternatives.every((candidate) => JSON.stringify(candidate) === JSON.stringify(first))) {
       return first;
     }
     return ["CFG_DEPENDENT_BINDING", binding.name];
@@ -1799,13 +1673,7 @@ function resolveBinding(binding, seen = new Set()) {
   if (binding.absolute || binding.path.length === 0) return [...binding.path];
 
   seen.add(binding);
-  const resolved = resolvePath(
-    binding.scope,
-    binding.path,
-    false,
-    seen,
-    binding,
-  );
+  const resolved = resolvePath(binding.scope, binding.path, false, seen, binding);
   seen.delete(binding);
   return resolved;
 }
@@ -1818,20 +1686,12 @@ function resolveBindingModuleScope(binding, seen = new Set()) {
       resolveBindingModuleScope(alternative, new Set(seen)),
     );
     const [first] = scopes;
-    return first !== null && scopes.every((scope) => scope === first)
-      ? first
-      : null;
+    return first !== null && scopes.every((scope) => scope === first) ? first : null;
   }
   if (binding.absolute || binding.path.length === 0) return null;
 
   seen.add(binding);
-  const moduleScope = resolvePathModuleScope(
-    binding.scope,
-    binding.path,
-    false,
-    seen,
-    binding,
-  );
+  const moduleScope = resolvePathModuleScope(binding.scope, binding.path, false, seen, binding);
   seen.delete(binding);
   return moduleScope;
 }
@@ -1844,13 +1704,7 @@ function resolveBoundModuleScope(binding, remaining, seen) {
   return resolveBoundModuleScope(member, remaining.slice(1), seen);
 }
 
-function resolvePathModuleScope(
-  scope,
-  pathSegments,
-  absolute,
-  seen,
-  sourceBinding,
-) {
+function resolvePathModuleScope(scope, pathSegments, absolute, seen, sourceBinding) {
   if (absolute || pathSegments.length === 0) return null;
 
   let binding;
@@ -1894,13 +1748,7 @@ function resolveBoundPath(binding, remaining, seen) {
   return [...resolveBinding(binding, seen), ...remaining];
 }
 
-function resolvePath(
-  scope,
-  pathSegments,
-  absolute,
-  seen = new Set(),
-  sourceBinding = null,
-) {
+function resolvePath(scope, pathSegments, absolute, seen = new Set(), sourceBinding = null) {
   if (absolute || pathSegments.length === 0) return [...pathSegments];
 
   let binding;
@@ -1955,13 +1803,7 @@ function findModuleGlobMember(moduleScope, name, seenScopes = new Set()) {
   seenScopes.add(moduleScope);
   const candidates = [];
   for (const glob of moduleScope.globs) {
-    const target = resolvePathModuleScope(
-      glob.scope,
-      glob.path,
-      glob.absolute,
-      new Set(),
-      null,
-    );
+    const target = resolvePathModuleScope(glob.scope, glob.path, glob.absolute, new Set(), null);
     const candidate = findModuleGlobMember(target, name, seenScopes);
     if (candidate) candidates.push(candidate);
   }
@@ -1976,13 +1818,7 @@ function findGlobbedBinding(scope, name) {
     if (current.bindings.has(name)) return null;
     const candidates = [];
     for (const glob of current.globs) {
-      const target = resolvePathModuleScope(
-        glob.scope,
-        glob.path,
-        glob.absolute,
-        new Set(),
-        null,
-      );
+      const target = resolvePathModuleScope(glob.scope, glob.path, glob.absolute, new Set(), null);
       const candidate = findModuleGlobMember(target, name);
       if (candidate) candidates.push(candidate);
     }
@@ -2002,10 +1838,7 @@ function isStorageErrorPath(pathSegments) {
 }
 
 function isStorageErrorVariantPath(pathSegments, variant) {
-  return (
-    pathSegments.at(-1) === variant &&
-    isStorageErrorPath(pathSegments.slice(0, -1))
-  );
+  return pathSegments.at(-1) === variant && isStorageErrorPath(pathSegments.slice(0, -1));
 }
 
 function hasStorageErrorGlob(scope, name) {
@@ -2047,10 +1880,7 @@ function qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, variant
 }
 
 function turbofishVariantClosing(tokens, cursor, variant) {
-  if (
-    tokens[cursor + 1]?.value !== "::" ||
-    tokens[cursor + 2]?.value !== "<"
-  ) {
+  if (tokens[cursor + 1]?.value !== "::" || tokens[cursor + 2]?.value !== "<") {
     return null;
   }
   const closing = matchingAngle(tokens, cursor + 2);
@@ -2089,10 +1919,7 @@ function followsMatchGuard(tokens, index) {
     if (delimiters.length > 0) continue;
     if (value === "if" && !tokens[cursor].raw) return true;
     if ([",", "{", "}", ";"].includes(value)) return false;
-    if (
-      value === ">" &&
-      tokens[cursor - 1]?.value === "="
-    ) {
+    if (value === ">" && tokens[cursor - 1]?.value === "=") {
       return false;
     }
   }
@@ -2155,11 +1982,7 @@ function isMatchesMacroPattern(tokens, index) {
       } else if (delimiters.length === 0) {
         if (value === "," && !patternStarted) {
           patternStarted = true;
-        } else if (
-          patternStarted &&
-          value === "if" &&
-          !tokens[cursor].raw
-        ) {
+        } else if (patternStarted && value === "if" && !tokens[cursor].raw) {
           return false;
         }
       }
@@ -2258,10 +2081,7 @@ function simpleMacroRules(tokens, definitionTokens) {
         });
         matcherIndex += 1;
       }
-      if (
-        supported &&
-        new Set(captures).size === captures.length
-      ) {
+      if (supported && new Set(captures).size === captures.length) {
         arms.push({
           captures,
           matcherParts,
@@ -2314,35 +2134,21 @@ function validSimpleMacroCapture(fragment, tokens) {
     return tokens.length === 1 && tokens[0].identifier;
   }
   if (fragment === "lifetime") {
-    return (
-      tokens.length === 2 &&
-      tokens[0].value === "'" &&
-      tokens[1].identifier
-    );
+    return tokens.length === 2 && tokens[0].value === "'" && tokens[1].identifier;
   }
   if (fragment === "literal") {
     return (
       (tokens.length === 1 && tokens[0].value === "LITERAL") ||
-      (
-        tokens.length === 2 &&
-        tokens[0].value === "-" &&
-        tokens[1].value === "LITERAL"
-      )
+      (tokens.length === 2 && tokens[0].value === "-" && tokens[1].value === "LITERAL")
     );
   }
   if (fragment === "block") {
-    return (
-      tokens[0].value === "{" &&
-      matchingDelimiter(tokens, 0) === tokens.length - 1
-    );
+    return tokens[0].value === "{" && matchingDelimiter(tokens, 0) === tokens.length - 1;
   }
   if (fragment === "tt") {
     return (
       tokens.length === 1 ||
-      (
-        closingDelimiter.has(tokens[0].value) &&
-        matchingDelimiter(tokens, 0) === tokens.length - 1
-      )
+      (closingDelimiter.has(tokens[0].value) && matchingDelimiter(tokens, 0) === tokens.length - 1)
     );
   }
   return true;
@@ -2361,9 +2167,7 @@ function matchSimpleMacroArguments(arm, arguments_) {
       return match(partIndex + 1, argumentIndex + 1, replacements);
     }
 
-    const firstEnd = part.fragment === "vis"
-      ? argumentIndex
-      : argumentIndex + 1;
+    const firstEnd = part.fragment === "vis" ? argumentIndex : argumentIndex + 1;
     for (let end = firstEnd; end <= arguments_.length; end += 1) {
       const captured = arguments_.slice(argumentIndex, end);
       if (!validSimpleMacroCapture(part.fragment, captured)) continue;
@@ -2379,10 +2183,7 @@ function matchSimpleMacroArguments(arm, arguments_) {
 }
 
 function substituteSimpleMacroArm(arm, arguments_, invocation) {
-  const replacements = matchSimpleMacroArguments(
-    arm,
-    arguments_,
-  );
+  const replacements = matchSimpleMacroArguments(arm, arguments_);
   if (replacements === null) return null;
   const expanded = [];
   for (let index = 0; index < arm.expansion.length; index += 1) {
@@ -2433,9 +2234,7 @@ function expandSimpleMacroInvocationsOnce(tokens) {
       const definition = [...(definitions.get(token.value) ?? [])]
         .reverse()
         .find(
-          (candidate) =>
-            candidate.index < index &&
-            scopeContains(candidate.scope, scopeAt[index]),
+          (candidate) => candidate.index < index && scopeContains(candidate.scope, scopeAt[index]),
         );
       if (definition !== undefined) {
         const arguments_ = tokens.slice(index + 3, closing);
@@ -2457,11 +2256,7 @@ function expandSimpleMacroInvocationsOnce(tokens) {
 
 function simpleMacroExpansionFingerprint(tokens) {
   return JSON.stringify(
-    tokens.map((token) => [
-      token.value,
-      token.literal ?? null,
-      token.raw ?? null,
-    ]),
+    tokens.map((token) => [token.value, token.literal ?? null, token.raw ?? null]),
   );
 }
 
@@ -2479,9 +2274,7 @@ function expandSimpleMacroInvocations(tokens) {
     if (expanded.expansionCount === 0) return tokens;
     tokens = expanded.tokens;
   }
-  throw new Error(
-    `simple local macro expansion exceeds ${maximumPasses} passes`,
-  );
+  throw new Error(`simple local macro expansion exceeds ${maximumPasses} passes`);
 }
 
 function normalizedTokenStream(tokens, crateAliases = new Map()) {
@@ -2511,11 +2304,7 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
   const importPathPrefixes = collectBindings(tokens, statements, scopeAt);
   const importStatementTokens = new Set();
   for (const statement of statements) {
-    for (
-      let tokenIndex = statement.tokenIndex;
-      tokenIndex <= statement.end;
-      tokenIndex += 1
-    ) {
+    for (let tokenIndex = statement.tokenIndex; tokenIndex <= statement.end; tokenIndex += 1) {
       importStatementTokens.add(tokenIndex);
     }
   }
@@ -2534,42 +2323,32 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
         : "StorageError :: Sqlx";
       continue;
     }
-    const previousIsSegment =
-      previousIsSeparator && tokens[index - 2]?.identifier;
+    const previousIsSegment = previousIsSeparator && tokens[index - 2]?.identifier;
     if (previousIsSegment) continue;
 
     const segmentIndices = [index];
     let cursor = index;
-    while (
-      tokens[cursor + 1]?.value === "::" &&
-      tokens[cursor + 2]?.identifier
-    ) {
+    while (tokens[cursor + 1]?.value === "::" && tokens[cursor + 2]?.identifier) {
       segmentIndices.push(cursor + 2);
       cursor += 2;
     }
     const segments = segmentIndices.map((tokenIndex) => tokens[tokenIndex].value);
-    const leadingAbsolute =
-      tokens[index - 1]?.value === "::" && !tokens[index - 2]?.identifier;
+    const leadingAbsolute = tokens[index - 1]?.value === "::" && !tokens[index - 2]?.identifier;
     const importContext = importPathPrefixes.get(index);
-    const sourcePath = importContext === undefined
-      ? segments
-      : [...importContext.prefix, ...segments];
+    const sourcePath =
+      importContext === undefined ? segments : [...importContext.prefix, ...segments];
     const absolute = leadingAbsolute || importContext?.absolute === true;
     const binding = absolute
       ? null
-      : (
-          findBinding(scopeAt[index], sourcePath[0]) ??
-          findGlobbedBinding(scopeAt[index], sourcePath[0])
-        );
+      : (findBinding(scopeAt[index], sourcePath[0]) ??
+        findGlobbedBinding(scopeAt[index], sourcePath[0]));
     const importedPath = binding === null ? null : resolveBinding(binding);
-    const expanded = importedPath === null
-      ? sourcePath
-      : resolveBoundPath(binding, sourcePath.slice(1), new Set());
+    const expanded =
+      importedPath === null
+        ? sourcePath
+        : resolveBoundPath(binding, sourcePath.slice(1), new Set());
 
-    if (
-      importStatementTokens.has(index) &&
-      isStorageErrorVariantPath(expanded, "Sqlx")
-    ) {
+    if (importStatementTokens.has(index) && isStorageErrorVariantPath(expanded, "Sqlx")) {
       for (const tokenIndex of segmentIndices) {
         values[tokenIndex] = "IMPORTED_STORAGE_VARIANT";
       }
@@ -2577,27 +2356,14 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
       values[index] = "sqlx";
     } else if (
       expanded[0] === "StorageError" ||
-      (expanded[0] === "symphony_storage" &&
-        expanded[1] === "StorageError")
+      (expanded[0] === "symphony_storage" && expanded[1] === "StorageError")
     ) {
       const qualifiedClosing =
-        qualifiedVariantClosing(
-          tokens,
-          index,
-          cursor,
-          leadingAbsolute,
-          "Sqlx",
-        ) ??
+        qualifiedVariantClosing(tokens, index, cursor, leadingAbsolute, "Sqlx") ??
         turbofishVariantClosing(tokens, cursor, "Sqlx");
       if (
-        (
-          isStorageErrorVariantPath(expanded, "Sqlx") ||
-          qualifiedClosing !== null
-        ) &&
-        isRustPattern(
-          tokens,
-          qualifiedClosing === null ? cursor : qualifiedClosing + 2,
-        )
+        (isStorageErrorVariantPath(expanded, "Sqlx") || qualifiedClosing !== null) &&
+        isRustPattern(tokens, qualifiedClosing === null ? cursor : qualifiedClosing + 2)
       ) {
         for (const tokenIndex of segmentIndices) {
           values[tokenIndex] = "MATCHED_STORAGE_VARIANT";
@@ -2617,11 +2383,7 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
       }
       if (qualifiedClosing !== null) {
         values[index] = "StorageError";
-        for (
-          let tokenIndex = index + 1;
-          tokenIndex <= qualifiedClosing;
-          tokenIndex += 1
-        ) {
+        for (let tokenIndex = index + 1; tokenIndex <= qualifiedClosing; tokenIndex += 1) {
           values[tokenIndex] = "";
         }
       }
@@ -2667,10 +2429,12 @@ function locationForMatch(locations, index) {
       return locations[middle];
     }
   }
-  return locations[Math.min(low, locations.length - 1)] ?? {
-    file: undefined,
-    line: 1,
-  };
+  return (
+    locations[Math.min(low, locations.length - 1)] ?? {
+      file: undefined,
+      line: 1,
+    }
+  );
 }
 
 export async function scanRestrictedSources(metadata, policy, options = {}) {
@@ -2706,23 +2470,18 @@ export async function scanRestrictedSources(metadata, policy, options = {}) {
       }
       for (const rule of rules) {
         rule.regex.lastIndex = 0;
-        let match;
-        while ((match = rule.regex.exec(tokenStream.source)) !== null) {
-          const location = locationForMatch(
-            tokenStream.locations,
-            match.index,
-          );
+        let match = rule.regex.exec(tokenStream.source);
+        while (match !== null) {
+          const location = locationForMatch(tokenStream.locations, match.index);
           errors.add(
             diagnostic(
-              path.relative(
-                metadata.workspace_root,
-                location.file ?? file,
-              ),
+              path.relative(metadata.workspace_root, location.file ?? file),
               location.line,
               `[${rule.id}] ${rule.message} (package ${pkg.name})`,
             ),
           );
           if (match[0].length === 0) rule.regex.lastIndex += 1;
+          match = rule.regex.exec(tokenStream.source);
         }
       }
     }
