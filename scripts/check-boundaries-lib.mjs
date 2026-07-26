@@ -241,7 +241,22 @@ function literalPath(token, context = "#[path]") {
   return token.literal;
 }
 
-function modulePathAttribute(tokens, modIndex) {
+function firstTopLevelComma(tokens, start, end) {
+  const delimiters = [];
+  for (let index = start; index < end; index += 1) {
+    const value = tokens[index].value;
+    if (closingDelimiter.has(value)) {
+      delimiters.push(closingDelimiter.get(value));
+    } else if ([")", "]", "}"].includes(value)) {
+      if (delimiters.at(-1) === value) delimiters.pop();
+    } else if (value === "," && delimiters.length === 0) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function modulePathAttribute(tokens, modIndex, cfgContext) {
   let boundary = modIndex - 1;
   while (
     boundary >= 0 &&
@@ -263,6 +278,39 @@ function modulePathAttribute(tokens, modIndex) {
         throw new Error("Rust module declares more than one #[path] attribute");
       }
       result = literalPath(tokens[index + 4]);
+      continue;
+    }
+    if (
+      tokens[index].value === "#" &&
+      tokens[index + 1]?.value === "[" &&
+      tokens[index + 2]?.value === "cfg_attr" &&
+      tokens[index + 3]?.value === "("
+    ) {
+      const closing = matchingDelimiter(tokens, index + 3);
+      if (tokens[closing + 1]?.value !== "]" || closing + 1 >= modIndex) {
+        throw new Error("malformed cfg_attr attribute");
+      }
+      const comma = firstTopLevelComma(tokens, index + 4, closing);
+      if (comma === null) {
+        throw new Error("cfg_attr must contain a predicate and attribute");
+      }
+      if (
+        evaluateCfgPredicate(tokens, index + 4, comma, cfgContext) === true
+      ) {
+        for (let cursor = comma + 1; cursor + 2 < closing; cursor += 1) {
+          if (
+            tokens[cursor].value === "path" &&
+            tokens[cursor + 1]?.value === "=" &&
+            tokens[cursor + 2]?.value === "LITERAL"
+          ) {
+            if (result !== null) {
+              throw new Error("Rust module declares more than one active #[path]");
+            }
+            result = literalPath(tokens[cursor + 2], "cfg_attr path");
+          }
+        }
+      }
+      index = closing + 1;
     }
   }
   return result;
@@ -597,6 +645,30 @@ async function collectTargetModules(
     async function scan(start, end, directory) {
       for (let index = start; index < end; index += 1) {
         if (macroTokens.has(index)) continue;
+        if (
+          tokens[index].value === "include" &&
+          !tokens[index].raw &&
+          tokens[index + 1]?.value === "!" &&
+          closingDelimiter.has(tokens[index + 2]?.value) &&
+          !cfgDeclarationEnabled(tokens, index, cfgContext)
+        ) {
+          const closing = matchingDelimiter(tokens, index + 2);
+          const argument = tokens[index + 3];
+          if (
+            argument?.value === "LITERAL" &&
+            (index + 4 === closing ||
+              (tokens[index + 4]?.value === "," && index + 5 === closing))
+          ) {
+            inactiveFiles.add(
+              path.resolve(
+                path.dirname(absolute),
+                literalPath(argument, "include!"),
+              ),
+            );
+          }
+          index = closing;
+          continue;
+        }
         const included = literalInclude(tokens, index, absolute);
         if (included !== null) {
           const includedFile = await resolveIncludedFile(
@@ -627,7 +699,7 @@ async function collectTargetModules(
         }
         if (terminator !== ";") continue;
 
-        const explicitPath = modulePathAttribute(tokens, index);
+        const explicitPath = modulePathAttribute(tokens, index, cfgContext);
         const candidates = moduleFileCandidates(directory, name, explicitPath);
         if (!enabled) {
           for (const candidate of candidates) {
@@ -690,6 +762,16 @@ async function expandedRustTokens(
     for (let index = start; index < end; index += 1) {
       if (macroTokens.has(index)) {
         expanded.push(tokens[index]);
+        continue;
+      }
+      if (
+        tokens[index].value === "include" &&
+        !tokens[index].raw &&
+        tokens[index + 1]?.value === "!" &&
+        closingDelimiter.has(tokens[index + 2]?.value) &&
+        !cfgDeclarationEnabled(tokens, index, cfgContext)
+      ) {
+        index = matchingDelimiter(tokens, index + 2);
         continue;
       }
       const included = literalInclude(tokens, index, absolute);
@@ -759,7 +841,7 @@ async function expandedRustTokens(
         continue;
       }
 
-      const explicitPath = modulePathAttribute(tokens, index);
+      const explicitPath = modulePathAttribute(tokens, index, cfgContext);
       const moduleFile = await existingModuleFile(
         moduleFileCandidates(directory, name, explicitPath),
       );
@@ -1245,10 +1327,16 @@ function declareBinding(scope, name, binding) {
   }
   if (existing.alternatives) {
     existing.alternatives.push(declared);
+    existing.descendantVisible =
+      existing.descendantVisible === true &&
+      declared.descendantVisible === true;
   } else {
     scope.bindings.set(name, {
       alternatives: [existing, declared],
       conditional: true,
+      descendantVisible:
+        existing.descendantVisible === true &&
+        declared.descendantVisible === true,
       name,
       scope,
     });
@@ -1540,6 +1628,7 @@ function collectBindings(tokens, statements, scopeAt) {
           path: [imported],
           absolute: true,
           conditional: statement.conditional,
+          descendantVisible: true,
         });
       }
       continue;
@@ -1569,9 +1658,16 @@ function collectBindings(tokens, statements, scopeAt) {
 function findBinding(scope, name) {
   const moduleScope = scope.moduleScope;
   for (let current = scope; current !== null; current = current.parent) {
-    if (current.moduleScope !== moduleScope) break;
     const binding = current.bindings.get(name);
-    if (binding) return binding;
+    if (
+      binding &&
+      (
+        current.moduleScope === moduleScope ||
+        binding.descendantVisible
+      )
+    ) {
+      return binding;
+    }
   }
   return null;
 }
@@ -2054,7 +2150,14 @@ function normalizedTokenStream(tokens, crateAliases = new Map()) {
       ? sourcePath
       : [...importedPath, ...sourcePath.slice(1)];
 
-    if (expanded[0] === "sqlx") {
+    if (
+      importStatementTokens.has(index) &&
+      isStorageErrorVariantPath(expanded, "Sqlx")
+    ) {
+      for (const tokenIndex of segmentIndices) {
+        values[tokenIndex] = "IMPORTED_STORAGE_VARIANT";
+      }
+    } else if (expanded[0] === "sqlx") {
       values[index] = "sqlx";
     } else if (
       expanded[0] === "StorageError" ||

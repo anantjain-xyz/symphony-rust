@@ -328,6 +328,25 @@ test("detects extern-crate and use aliases written as raw identifiers", async (t
   ]);
 });
 
+test("propagates extern-crate aliases into descendant modules", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "extern crate symphony_storage as store;",
+      "mod child {",
+      "    fn wrong() { let _ = store::StorageError::Sqlx(problem); }",
+      "}",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
 test("tokenizes Unicode Rust identifiers in imports", async (t) => {
   const root = await fixtureWorkspace({
     worker: [
@@ -425,6 +444,24 @@ test("detects grouped StorageError variant imports", async (t) => {
 
   assert.deepEqual(errors, [
     "worker/src/lib.rs:3: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
+  ]);
+});
+
+test("does not classify variant imports as constructions", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      "use symphony_storage::StorageError::Sqlx;",
+      "fn wrong() { let _ = Sqlx(problem); }",
+      "mod unused { use symphony_storage::StorageError::Sqlx; }",
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, [
+    "worker/src/lib.rs:2: [storage-sqlx-construction] do not disguise non-storage failures (package worker)",
   ]);
 });
 
@@ -830,6 +867,25 @@ test("does not scan included Rust fragments as standalone roots", async (t) => {
   assert.deepEqual(errors, []);
 });
 
+test("skips cfg-disabled include invocations and their source roots", async (t) => {
+  const root = await fixtureWorkspace({
+    worker: [
+      '#[cfg(any())] include!("missing.rs");',
+      '#[cfg(any())] include!("disabled.rs");',
+      "",
+    ].join("\n"),
+  });
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, "worker", "src", "disabled.rs"),
+    'fn disabled() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(metadata(root), policy());
+
+  assert.deepEqual(errors, []);
+});
+
 test("resolves modules from the included fragment's directory", async (t) => {
   const root = await fixtureWorkspace();
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -885,6 +941,32 @@ test("resolves child modules relative to explicit #[path] files", async (t) => {
 
   assert.deepEqual(errors, [
     "worker/generated/alt/child.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
+  ]);
+});
+
+test("resolves active cfg_attr module paths", async (t) => {
+  const root = await fixtureWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "worker", "generated", "unix"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "lib.rs"),
+    '#[cfg_attr(unix, path = "unix/platform.rs")] mod imp;\n',
+  );
+  await fs.writeFile(
+    path.join(root, "worker", "generated", "unix", "platform.rs"),
+    'fn wrong() { let _ = sqlx::query("select 1"); }\n',
+  );
+
+  const errors = await scanRestrictedSources(
+    metadata(root, {}, { worker: ["src/lib.rs", "generated/lib.rs"] }),
+    policy(),
+    { activeCfg: ["unix"] },
+  );
+
+  assert.deepEqual(errors, [
+    "worker/generated/unix/platform.rs:1: [direct-sqlx] direct sqlx use belongs in storage (package worker)",
   ]);
 });
 
