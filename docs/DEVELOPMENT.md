@@ -129,9 +129,9 @@ After changing an exported Rust type:
 
 `pnpm check:bindings` runs the headless exporter into a temporary file and
 byte-compares it with the checked-in output. `pnpm check:ipc` verifies command
-definitions, handler registration, frontend command/argument literals, and the
-bounded backend-only allowlist. Both are included by `pnpm check:static`; do not
-hand-edit `src/bindings.ts`.
+definitions, handler registration, frontend command/argument literals, their
+serialized argument value types, and the bounded backend-only allowlist. Both
+are included by `pnpm check:static`; do not hand-edit `src/bindings.ts`.
 
 ## Playwright
 

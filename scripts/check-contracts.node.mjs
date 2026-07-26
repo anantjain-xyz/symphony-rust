@@ -225,6 +225,98 @@ test("IPC checker rejects frontend argument-name drift", () => {
   );
 });
 
+test("IPC checker rejects serialized argument value-type drift", () => {
+  const diagnostics = checkIpcContract({
+    ...importedWrapperIpcFixture,
+    rustSources: importedWrapperIpcFixture.rustSources.map((source) => ({
+      ...source,
+      source: source.source.replace("issue_id: String", "issue_id: u64"),
+    })),
+  });
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("IPC argument value type for frontend.issueId") &&
+        message.includes("Rust number") &&
+        message.includes("frontend string"),
+    ),
+  );
+});
+
+const compositeIpcFixture = {
+  rustSources: [
+    {
+      path: "src-tauri/src/commands.rs",
+      source: `
+        type Label = String;
+        struct Payload {
+          enabled: bool,
+        }
+
+        #[tauri::command]
+        fn serialized(
+          maybe: Option<Label>,
+          names: Vec<String>,
+          env: BTreeMap<String, String>,
+          pair: (String, u32),
+          payload: Payload,
+        ) {}
+      `,
+    },
+    {
+      path: "src-tauri/src/lib.rs",
+      source: `tauri::generate_handler![commands::serialized];`,
+    },
+  ],
+  frontendSources: [
+    {
+      path: "src/calls.ts",
+      source: `
+        import { invoke as callDesktop } from "@tauri-apps/api/core";
+
+        type OptionalLabel = string | null;
+        type Payload = { enabled: boolean };
+
+        export function sendSerialized(
+          maybe: OptionalLabel,
+          names: string[],
+          env: Record<string, string>,
+          pair: [string, number],
+          payload: Payload,
+        ) {
+          return callDesktop("serialized", { maybe, names, env, pair, payload });
+        }
+      `,
+    },
+  ],
+  backendOnly: [],
+};
+
+test("IPC checker normalizes aliases, options, arrays, maps, tuples, and named objects", () => {
+  assert.deepEqual(checkIpcContract(compositeIpcFixture), []);
+});
+
+test("IPC checker rejects a nested serialized container type mismatch", () => {
+  const diagnostics = checkIpcContract({
+    ...compositeIpcFixture,
+    frontendSources: compositeIpcFixture.frontendSources.map((source) => ({
+      ...source,
+      source: source.source.replace(
+        "env: Record<string, string>",
+        "env: Record<string, number>",
+      ),
+    })),
+  });
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("IPC argument value type for serialized.env") &&
+        message.includes("Record<string, string>") &&
+        message.includes("Record<string, number>"),
+    ),
+  );
+});
+
 test("IPC checker rejects opaque frontend argument objects", () => {
   const diagnostics = checkIpcContract({
     ...importedWrapperIpcFixture,

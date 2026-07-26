@@ -73,8 +73,10 @@ the Rust wire shape unchanged.
 
 It scans all desktop Rust modules and frontend TypeScript modules, follows
 imported invoke wrappers, and compares JavaScript-facing argument-object keys
-with Rust command parameters. `pnpm test:static` exercises positive and
-negative fixtures for these rules.
+and serialized value types with Rust command parameters. The type comparison
+normalizes aliases, nullable options, arrays, maps, tuples, and named generated
+DTOs. `pnpm test:static` exercises positive and negative fixtures for these
+rules.
 
 ## Specta bindings
 
