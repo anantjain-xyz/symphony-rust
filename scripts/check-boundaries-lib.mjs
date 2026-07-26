@@ -361,6 +361,39 @@ function rustcCfgContext(activeCfg = []) {
   return { flags, values };
 }
 
+function defaultPackageFeatures(pkg) {
+  const declared = pkg.features ?? {};
+  const active = new Set();
+  const pending = Object.hasOwn(declared, "default") ? ["default"] : [];
+  while (pending.length > 0) {
+    const feature = pending.pop();
+    if (active.has(feature)) continue;
+    active.add(feature);
+    for (const member of declared[feature] ?? []) {
+      if (
+        typeof member === "string" &&
+        !member.startsWith("dep:") &&
+        !member.includes("/") &&
+        Object.hasOwn(declared, member)
+      ) {
+        pending.push(member);
+      }
+    }
+  }
+  return active;
+}
+
+function packageCfgContext(metadata, pkg, activeCfg = []) {
+  const resolved = metadata.resolve?.nodes?.find((node) => node.id === pkg.id);
+  const features = Array.isArray(resolved?.features)
+    ? new Set(resolved.features)
+    : defaultPackageFeatures(pkg);
+  return rustcCfgContext([
+    ...activeCfg,
+    ...[...features].map((feature) => `feature=${JSON.stringify(feature)}`),
+  ]);
+}
+
 function evaluateCfgPredicate(tokens, start, end, context) {
   function parse(index) {
     if (!tokens[index]?.identifier) {
@@ -448,6 +481,48 @@ function evaluateCfgPredicate(tokens, start, end, context) {
   return result.value;
 }
 
+function cfgMetaDisables(tokens, start, end, context) {
+  if (
+    tokens[start]?.value === "cfg" &&
+    tokens[start + 1]?.value === "(" &&
+    matchingDelimiter(tokens, start + 1) === end - 1
+  ) {
+    return evaluateCfgPredicate(tokens, start + 2, end - 1, context) === false;
+  }
+  if (
+    tokens[start]?.value !== "cfg_attr" ||
+    tokens[start + 1]?.value !== "(" ||
+    matchingDelimiter(tokens, start + 1) !== end - 1
+  ) {
+    return false;
+  }
+
+  const closing = end - 1;
+  const comma = firstTopLevelComma(tokens, start + 2, closing);
+  if (comma === null) {
+    throw new Error("cfg_attr must contain a predicate and attribute");
+  }
+  if (evaluateCfgPredicate(tokens, start + 2, comma, context) !== true) {
+    return false;
+  }
+
+  let attributeStart = comma + 1;
+  while (attributeStart < closing) {
+    const attributeComma =
+      firstTopLevelComma(tokens, attributeStart, closing) ?? closing;
+    if (cfgMetaDisables(
+      tokens,
+      attributeStart,
+      attributeComma,
+      context,
+    )) {
+      return true;
+    }
+    attributeStart = attributeComma + 1;
+  }
+  return false;
+}
+
 function cfgDeclarationEnabled(tokens, declarationIndex, context) {
   let boundary = declarationIndex - 1;
   while (
@@ -456,25 +531,19 @@ function cfgDeclarationEnabled(tokens, declarationIndex, context) {
   ) {
     boundary -= 1;
   }
-  for (let index = boundary + 1; index + 3 < declarationIndex; index += 1) {
+  for (let index = boundary + 1; index + 2 < declarationIndex; index += 1) {
     if (
       tokens[index].value !== "#" ||
-      tokens[index + 1]?.value !== "[" ||
-      tokens[index + 2]?.value !== "cfg" ||
-      tokens[index + 3]?.value !== "("
+      tokens[index + 1]?.value !== "["
     ) {
       continue;
     }
-    const closing = matchingDelimiter(tokens, index + 3);
-    if (tokens[closing + 1]?.value !== "]" || closing + 1 >= declarationIndex) {
-      throw new Error("malformed cfg attribute");
+    const closing = matchingDelimiter(tokens, index + 1);
+    if (closing >= declarationIndex) {
+      throw new Error("malformed Rust attribute");
     }
-    if (
-      evaluateCfgPredicate(tokens, index + 4, closing, context) === false
-    ) {
-      return false;
-    }
-    index = closing + 1;
+    if (cfgMetaDisables(tokens, index + 2, closing, context)) return false;
+    index = closing;
   }
   return true;
 }
@@ -639,7 +708,7 @@ async function collectTargetModules(
     } catch (error) {
       throw new Error(`cannot read Rust module ${absolute}: ${error.message}`);
     }
-    const tokens = lexRust(source);
+    const tokens = expandSimpleMacroInvocations(lexRust(source));
     const macroTokens = macroDefinitionTokens(tokens);
 
     async function scan(start, end, directory) {
@@ -753,7 +822,9 @@ async function expandedRustTokens(
   } catch (error) {
     throw new Error(`cannot read ${absolute}: ${error.message}`);
   }
-  const tokens = lexRust(source).map((token) => ({ ...token, file: absolute }));
+  const tokens = expandSimpleMacroInvocations(
+    lexRust(source).map((token) => ({ ...token, file: absolute })),
+  );
   const macroTokens = macroDefinitionTokens(tokens);
   const nextTrail = [...trail, absolute];
 
@@ -2048,6 +2119,7 @@ function simpleMacroRules(tokens, definitionTokens) {
       const expansionClosing = matchingDelimiter(tokens, expansionOpening);
       const matcher = tokens.slice(matcherOpening + 1, matcherClosing);
       const captures = [];
+      let supported = true;
       let matcherIndex = 0;
       while (matcherIndex < matcher.length) {
         if (
@@ -2056,20 +2128,20 @@ function simpleMacroRules(tokens, definitionTokens) {
           matcher[matcherIndex + 2]?.value !== ":" ||
           !matcher[matcherIndex + 3]?.identifier
         ) {
-          captures.length = 0;
+          supported = false;
           break;
         }
         captures.push(matcher[matcherIndex + 1].value);
         matcherIndex += 4;
         if (matcherIndex === matcher.length) break;
         if (matcher[matcherIndex].value !== ",") {
-          captures.length = 0;
+          supported = false;
           break;
         }
         matcherIndex += 1;
       }
       if (
-        captures.length > 0 &&
+        supported &&
         new Set(captures).size === captures.length
       ) {
         arms.push({
@@ -2096,6 +2168,7 @@ function scopeContains(ancestor, scope) {
 }
 
 function splitSimpleMacroArguments(arguments_, count) {
+  if (count === 0) return arguments_.length === 0 ? [] : null;
   if (count === 1) return arguments_.length === 0 ? null : [arguments_];
 
   const values = [];
@@ -2381,9 +2454,9 @@ export async function scanRestrictedSources(metadata, policy, options = {}) {
   validatePolicy(policy);
   const packages = workspacePackages(metadata);
   const errors = new Set();
-  const cfgContext = rustcCfgContext(options.activeCfg);
 
   for (const pkg of packages.sort((a, b) => a.name.localeCompare(b.name))) {
+    const cfgContext = packageCfgContext(metadata, pkg, options.activeCfg);
     const rules = policy.sourceRules
       .filter((rule) => !rule.allowedPackages.includes(pkg.name))
       .map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, "g") }));

@@ -18,8 +18,12 @@ try {
 
 const cargo = spawnSync(
   "cargo",
-  ["metadata", "--locked", "--no-deps", "--format-version", "1"],
-  { cwd: projectRoot, encoding: "utf8" },
+  ["metadata", "--locked", "--format-version", "1"],
+  {
+    cwd: projectRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  },
 );
 if (cargo.error || cargo.status !== 0) {
   const detail = cargo.error?.message ?? cargo.stderr.trim() ?? `exit ${cargo.status}`;
