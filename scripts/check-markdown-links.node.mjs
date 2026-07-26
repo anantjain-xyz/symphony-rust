@@ -140,6 +140,43 @@ test("reference definitions may wrap before their destination", async (context) 
   assert.deepEqual(problems, []);
 });
 
+test("reference definitions inside list containers resolve", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-list-ref-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(path.join(root, "root.md"), ["- [docs]: guide.md", "  [Guide][docs]"].join("\n")),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("escaped brackets are supported in reference labels", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-markdown-escaped-label-"));
+  context.after(() => fs.rm(root, { force: true, recursive: true }));
+  await Promise.all([
+    fs.writeFile(
+      path.join(root, "root.md"),
+      ["[Guide][docs\\]]", "", "[docs\\]]: guide.md"].join("\n"),
+    ),
+    fs.writeFile(path.join(root, "guide.md"), "# Guide\n"),
+  ]);
+
+  const problems = await checkMarkdownFiles(root, ["guide.md", "root.md"]);
+  assert.deepEqual(problems, []);
+});
+
+test("empty angle-bracket reference destinations target the current document", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-empty-reference-target-",
+    ["[Guide][docs]", "", "[docs]: <>"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
 test("reference definitions inside block quotes resolve with source locations", async (context) => {
   const problems = await checkSource(
     context,
@@ -165,6 +202,16 @@ test("code spans crossing line boundaries do not contribute link targets", async
     context,
     "symphony-markdown-multiline-code-",
     ["`code", "[example][missing]`"].join("\n"),
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("fence-like lines with trailing content do not close fenced code blocks", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-fence-closer-",
+    ["```", "```js", "[ignored](missing.md)", "```"].join("\n"),
   );
 
   assert.deepEqual(problems, []);
@@ -300,6 +347,16 @@ test("escaped reference openers remain literal text", async (context) => {
     context,
     "symphony-markdown-escaped-reference-",
     "\\[label][unknown]\n",
+  );
+
+  assert.deepEqual(problems, []);
+});
+
+test("reference links cannot cross paragraph boundaries", async (context) => {
+  const problems = await checkSource(
+    context,
+    "symphony-markdown-reference-paragraph-",
+    ["[foo]", "", "[bar]"].join("\n"),
   );
 
   assert.deepEqual(problems, []);

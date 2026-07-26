@@ -4,12 +4,6 @@ import { JSDOM } from "jsdom";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
-const REFERENCE_DEFINITION =
-  /^\s{0,3}\[(?!\^)([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$/;
-const REFERENCE_DEFINITION_START = /^\s{0,3}\[(?!\^)([^\]]+)\]:[ \t]*$/;
-const REFERENCE_DEFINITION_CONTINUATION =
-  /^\s{0,3}(?:<([^>]+)>|(\S+))(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
-const REFERENCE_USE = /(!?)\[([^\]]*)\]\s*\[([^\]]*)\]/g;
 const SETEXT_UNDERLINE = /^\s{0,3}(?:=+|-+)\s*$/;
 const HTML_BLOCK_TAG =
   /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i;
@@ -41,8 +35,7 @@ function lineKeepsParagraphOpen(content) {
   return (
     !/^\s{0,3}#{1,6}(?:\s|$)/.test(content) &&
     !SETEXT_UNDERLINE.test(content) &&
-    !REFERENCE_DEFINITION.test(content) &&
-    !REFERENCE_DEFINITION_START.test(content)
+    !parseReferenceDefinition(content)
   );
 }
 
@@ -147,11 +140,16 @@ function maskIgnoredMarkdown(source) {
     const line = lines[index];
     const blockQuote = blockQuoteLine(line);
     const content = blockQuote.content;
-    const marker = content.match(/^\s{0,3}(`{3,}|~{3,})/);
+    const marker = content.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       lines[index] = " ".repeat(line.length);
       paragraphOpen = false;
-      if (marker && marker[1][0] === fence.character && marker[1].length >= fence.length) {
+      if (
+        marker &&
+        marker[1][0] === fence.character &&
+        marker[1].length >= fence.length &&
+        /^[ \t]*$/.test(marker[2])
+      ) {
         fence = null;
       }
       continue;
@@ -254,9 +252,13 @@ function isEscaped(value, index) {
 }
 
 function referenceLabels(value) {
-  return value.replace(REFERENCE_USE, (match, image, label, _reference, offset, source) =>
-    isEscaped(source, offset + image.length) ? match : label,
-  );
+  let rendered = value;
+  for (const reference of [...referenceUses(value)].reverse()) {
+    rendered = `${rendered.slice(0, reference.start)}${reference.label}${rendered.slice(
+      reference.end,
+    )}`;
+  }
+  return rendered;
 }
 
 function inlineHeadingText(value) {
@@ -324,19 +326,24 @@ function startsMarkdownBlock(line) {
   return (
     /^\s{0,3}(?:#{1,6}(?:\s|$)|>|(?:[*+-]|\d{1,9}[.)])\s+)/.test(line) ||
     /^\s{4}/.test(line) ||
-    REFERENCE_DEFINITION.test(line) ||
-    REFERENCE_DEFINITION_START.test(line) ||
+    Boolean(parseReferenceDefinition(line)) ||
     SETEXT_UNDERLINE.test(line)
   );
 }
 
-function stripListPrefixes(line) {
+function listStrippedLine(line) {
   let content = line;
+  let offset = 0;
   while (true) {
     const marker = content.match(/^\s{0,3}(?:[*+-]|\d{1,9}[.)])[ \t]+/);
-    if (!marker) return content;
+    if (!marker) return { content, offset };
     content = content.slice(marker[0].length);
+    offset += marker[0].length;
   }
+}
+
+function stripListPrefixes(line) {
+  return listStrippedLine(line).content;
 }
 
 export function isMarkdownFile(file) {
@@ -424,6 +431,63 @@ function findClosingBracket(line, start) {
   return -1;
 }
 
+function definitionDestination(line, start) {
+  let cursor = start;
+  let targetStart = cursor;
+  let targetEnd = cursor;
+  if (line[cursor] === "<") {
+    cursor += 1;
+    targetStart = cursor;
+    while (cursor < line.length && line[cursor] !== ">") {
+      if (line[cursor] === "<") return null;
+      if (line[cursor] === "\\") cursor += 1;
+      cursor += 1;
+    }
+    if (line[cursor] !== ">") return null;
+    targetEnd = cursor;
+    cursor += 1;
+  } else {
+    while (cursor < line.length && !/[ \t]/.test(line[cursor])) cursor += 1;
+    if (cursor === start) return null;
+    targetEnd = cursor;
+  }
+  if (!/^(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/.test(line.slice(cursor))) {
+    return null;
+  }
+  return {
+    target: line.slice(targetStart, targetEnd),
+    targetStart,
+  };
+}
+
+function parseReferenceDefinition(line) {
+  const indent = line.match(/^[ \t]{0,3}/)?.[0].length ?? 0;
+  if (line[indent] !== "[" || line[indent + 1] === "^") return null;
+  const labelEnd = findClosingBracket(line, indent + 1);
+  if (labelEnd === -1 || labelEnd === indent + 1 || line[labelEnd + 1] !== ":") return null;
+  let cursor = labelEnd + 2;
+  while (line[cursor] === " " || line[cursor] === "\t") cursor += 1;
+  const label = line.slice(indent + 1, labelEnd);
+  if (cursor === line.length) return { label, startOnly: true };
+  const destination = definitionDestination(line, cursor);
+  return destination ? { ...destination, label, startOnly: false } : null;
+}
+
+function parseReferenceContinuation(line) {
+  const indent = line.match(/^[ \t]{0,3}/)?.[0].length ?? 0;
+  return definitionDestination(line, indent);
+}
+
+function referenceContainerLine(line) {
+  const quoted = blockQuoteLine(line);
+  const listed = listStrippedLine(quoted.content);
+  return {
+    content: listed.content,
+    depth: quoted.depth,
+    offset: quoted.offset + listed.offset,
+  };
+}
+
 function skipInlineWhitespace(value, cursor) {
   let lineEndings = 0;
   while (cursor < value.length) {
@@ -441,6 +505,30 @@ function skipInlineWhitespace(value, cursor) {
     break;
   }
   return cursor;
+}
+
+function referenceUses(value) {
+  const references = [];
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    const image = value[cursor] === "!" && value[cursor + 1] === "[";
+    const labelStart = image ? cursor + 1 : cursor;
+    if (value[labelStart] !== "[" || isEscaped(value, labelStart)) continue;
+    const labelEnd = findClosingBracket(value, labelStart + 1);
+    if (labelEnd === -1) continue;
+    const referenceStart = skipInlineWhitespace(value, labelEnd + 1);
+    if (referenceStart === -1 || value[referenceStart] !== "[") continue;
+    const referenceEnd = findClosingBracket(value, referenceStart + 1);
+    if (referenceEnd === -1) continue;
+    references.push({
+      end: referenceEnd + 1,
+      image,
+      label: value.slice(labelStart + 1, labelEnd),
+      reference: value.slice(referenceStart + 1, referenceEnd),
+      start: cursor,
+    });
+    cursor = referenceEnd;
+  }
+  return references;
 }
 
 function containsBlankLine(value) {
@@ -561,7 +649,7 @@ function inlineLinks(line) {
 }
 
 function normalizeReference(value) {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+  return unescapeMarkdown(value).trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 }
 
 function sourceLocation(source, index) {
@@ -576,40 +664,35 @@ function extractTargets(source) {
   const maskedSources = maskIgnoredMarkdown(source);
   const masked = maskedSources.markdown;
   const maskedLines = masked.split("\n");
-  const quotedLines = maskedLines.map(blockQuoteLine);
+  const containerLines = maskedLines.map(referenceContainerLine);
   const targets = [];
   const definitions = new Map();
   const definitionLines = new Set();
 
   for (let index = 0; index < maskedLines.length; index += 1) {
-    const line = quotedLines[index];
-    const definition = line.content.match(REFERENCE_DEFINITION);
-    if (definition) {
-      const target = definition[2] ?? definition[3];
-      const label = normalizeReference(definition[1]);
-      definitions.set(label, { line: index + 1, target });
+    const line = containerLines[index];
+    const definition = parseReferenceDefinition(line.content);
+    if (definition && !definition.startOnly) {
+      const label = normalizeReference(definition.label);
+      definitions.set(label, { line: index + 1, target: definition.target });
       targets.push({
-        column: line.offset + line.content.indexOf(target) + 1,
+        column: line.offset + definition.targetStart + 1,
         line: index + 1,
-        target,
+        target: definition.target,
       });
       definitionLines.add(index);
       continue;
     }
-    const definitionStart = line.content.match(REFERENCE_DEFINITION_START);
-    const nextLine = quotedLines[index + 1];
+    const nextLine = containerLines[index + 1];
     const continuation =
-      nextLine?.depth === line.depth
-        ? nextLine.content.match(REFERENCE_DEFINITION_CONTINUATION)
-        : null;
-    if (definitionStart && continuation) {
-      const target = continuation[1] ?? continuation[2];
-      const label = normalizeReference(definitionStart[1]);
-      definitions.set(label, { line: index + 1, target });
+      nextLine?.depth === line.depth ? parseReferenceContinuation(nextLine.content) : null;
+    if (definition?.startOnly && continuation) {
+      const label = normalizeReference(definition.label);
+      definitions.set(label, { line: index + 1, target: continuation.target });
       targets.push({
-        column: nextLine.offset + nextLine.content.indexOf(target) + 1,
+        column: nextLine.offset + continuation.targetStart + 1,
         line: index + 2,
-        target,
+        target: continuation.target,
       });
       definitionLines.add(index);
       definitionLines.add(index + 1);
@@ -630,13 +713,10 @@ function extractTargets(source) {
   for (const link of [...inline].reverse()) {
     referenceSource = maskRangePreservingLines(referenceSource, link.start, link.end);
   }
-  for (const match of referenceSource.matchAll(REFERENCE_USE)) {
-    const start = match.index ?? 0;
-    const opener = start + match[1].length;
-    if (isEscaped(referenceSource, opener)) continue;
-    const label = normalizeReference(match[3] || match[2]);
+  for (const reference of referenceUses(referenceSource)) {
+    const label = normalizeReference(reference.reference || reference.label);
     targets.push({
-      ...sourceLocation(referenceSource, start),
+      ...sourceLocation(referenceSource, reference.start),
       reference: label,
     });
   }
