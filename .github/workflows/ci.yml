@@ -39,6 +39,11 @@ jobs:
       - run: cargo clippy --workspace --exclude symphony-desktop --all-targets -- -D warnings
       - run: cargo test --workspace --exclude symphony-desktop
 
+      # Cross-language and generated projections. The binding exporter lives in
+      # a pure Rust crate, so this Ubuntu job proves it stays desktop-independent.
+      - run: pnpm check:static
+      - run: pnpm test:static
+
       # Frontend
       - run: pnpm typecheck
       - run: pnpm test

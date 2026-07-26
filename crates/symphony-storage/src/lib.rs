@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod migration_contract_tests;
 mod repo;
 
 use serde::{Deserialize, Serialize};

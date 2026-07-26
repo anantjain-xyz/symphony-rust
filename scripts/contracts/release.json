@@ -1,0 +1,10 @@
+{
+  "repository": "anantjain-xyz/symphony-rust",
+  "productName": "Symphony",
+  "updaterTarget": "darwin-aarch64",
+  "versionedDmg": "Symphony_<version>_aarch64.dmg",
+  "stableDmg": "Symphony.dmg",
+  "updaterBundle": "Symphony.app.tar.gz",
+  "updaterSignature": "Symphony.app.tar.gz.sig",
+  "updaterFeed": "latest.json"
+}

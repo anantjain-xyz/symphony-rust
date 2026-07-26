@@ -36,6 +36,7 @@ sha2.workspace = true
 similar.workspace = true
 specta.workspace = true
 symphony-agents = { path = "../crates/symphony-agents" }
+symphony-contracts = { path = "../crates/symphony-contracts" }
 symphony-core = { path = "../crates/symphony-core" }
 symphony-storage = { path = "../crates/symphony-storage" }
 symphony-tracker = { path = "../crates/symphony-tracker" }
