@@ -26,6 +26,58 @@ function skill(name, body) {
   return `---\nname: symphony-${name}\ndescription: ${name} fixture\n---\n\n# ${name}\n\n${body}\n`;
 }
 
+function runtimeConsumerSource() {
+  return `fn worker_start_config() {
+  WorkerStartConfig { skills: bundled_skills() }
+}
+
+async fn start_retro() {
+  let proposal_config = RetroProposalConfig {
+    skills: bundled_skills().into_iter().map(transform_skill).collect(),
+  };
+  state
+    .retro
+    .start(state.repo.clone(), tracker, proposal_config);
+}
+
+async fn get_skills_status(repo_url: String, session_env: SessionEnv) {
+  let names: Vec<String> = bundled_skills()
+    .into_iter()
+    .map(skill_name)
+    .collect();
+  check_skills(&repo_url, &names, &session_env);
+}
+
+async fn install_skills() {
+  installer.start(SkillsInstallConfig { skills: bundled_skills() });
+}
+
+fn get_default_prompt() -> String {
+  default_prompt_template()
+}
+`;
+}
+
+function defaultPromptSettingsConsumers() {
+  return `struct AppSettings {
+  #[serde(default = "default_prompt_template")]
+  pub prompt_template: String,
+}
+
+impl Default for AppSettings {
+  fn default() -> Self {
+    Self {
+      prompt_template: default_prompt_template(),
+    }
+  }
+}
+
+pub fn parse_settings() {
+  let prompt_template = None::<String>.unwrap_or_else(default_prompt_template);
+}
+`;
+}
+
 function harnessFixture(t) {
   const root = mkdtempSync(join(tmpdir(), "symphony-agent-assets-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -83,7 +135,9 @@ function harnessFixture(t) {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+    `use settings::{default_prompt_template};
+
+const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
 
 fn bundled_skills() {
   macro_rules! skill {
@@ -96,12 +150,16 @@ fn bundled_skills() {
   }
   vec![skill!("commit"), skill!("pull"), skill!("push")]
 }
+
+${runtimeConsumerSource()}
 `,
   );
   write(
     root,
     "src-tauri/src/settings.rs",
-    `pub fn default_prompt_template() -> String {
+    `${defaultPromptSettingsConsumers()}
+
+pub fn default_prompt_template() -> String {
   include_str!("../assets/default-prompt.md").to_string()
 }
 `,
@@ -314,7 +372,9 @@ test("requires every bundled skill owner to have one Rust include", (t) => {
   write(
     root,
     "src-tauri/src/lib.rs",
-    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+    `use settings::{default_prompt_template};
+
+const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
 
 fn bundled_skills() {
   macro_rules! skill {
@@ -346,7 +406,9 @@ test("ignores commented skill macros and accepts multiline inventory entries", (
   write(
     root,
     "src-tauri/src/lib.rs",
-    `const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
+    `use settings::{default_prompt_template};
+
+const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
 
 fn bundled_skills() {
   macro_rules! skill {
@@ -371,6 +433,8 @@ fn bundled_skills() {
     ),
   ]
 }
+
+${runtimeConsumerSource()}
 `,
   );
 
@@ -418,6 +482,81 @@ test("pins inventory discovery to bundled_skills", (t) => {
   assert.match(
     validateAgentAssets(root).join("\n"),
     /skill inventoryFunction must be bundled_skills, received "decoy_inventory"/,
+  );
+});
+
+test("ties the validated skill inventory to every runtime consumer", (t) => {
+  const root = harnessFixture(t);
+  const source = join(root, "src-tauri/src/lib.rs");
+  const original = readFileSync(source, "utf8");
+  writeFileSync(
+    source,
+    original
+      .replace(
+        `fn worker_start_config() {
+  WorkerStartConfig { skills: bundled_skills() }
+}`,
+        `fn worker_start_config() {
+  let _decoy = WorkerStartConfig { skills: bundled_skills() };
+  WorkerStartConfig { skills: empty_skills() }
+}`,
+      )
+      .replace(
+        `async fn start_retro() {
+  let proposal_config = RetroProposalConfig {
+    skills: bundled_skills().into_iter().map(transform_skill).collect(),
+  };`,
+        `async fn start_retro() {
+  let _decoy = RetroProposalConfig {
+    skills: bundled_skills().into_iter().map(transform_skill).collect(),
+  };
+  let proposal_config = RetroProposalConfig {
+    skills: empty_skills().into_iter().map(transform_skill).collect(),
+  };`,
+      )
+      .replace(
+        `  let names: Vec<String> = bundled_skills()
+    .into_iter()
+    .map(skill_name)
+    .collect();
+  check_skills(&repo_url, &names, &session_env);`,
+        `  let names: Vec<String> = bundled_skills()
+    .into_iter()
+    .map(skill_name)
+    .collect();
+  let names: Vec<String> = empty_skills()
+    .into_iter()
+    .map(skill_name)
+    .collect();
+  check_skills(&repo_url, &names, &session_env);`,
+      )
+      .replace(
+        `async fn install_skills() {
+  installer.start(SkillsInstallConfig { skills: bundled_skills() });
+}`,
+        `async fn install_skills() {
+  let _decoy = SkillsInstallConfig { skills: bundled_skills() };
+  installer.start(SkillsInstallConfig { skills: empty_skills() });
+}`,
+      ),
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /runtime consumer worker_start_config must set skills from bundled_skills \( \)/,
+  );
+  assert.match(
+    errors,
+    /runtime consumer start_retro must set skills from bundled_skills \( \) as its expression prefix/,
+  );
+  assert.match(
+    errors,
+    /get_skills_status must derive its single names binding from bundled_skills\(\)/,
+  );
+  assert.match(
+    errors,
+    /runtime consumer install_skills must set skills from bundled_skills \( \)/,
   );
 });
 
@@ -515,7 +654,14 @@ test("pins the runtime skill-name prefix to the projection prefix", (t) => {
 
 test("discovers the default prompt owner instead of pinning its Rust path", (t) => {
   const root = harnessFixture(t);
-  write(root, "src-tauri/src/settings.rs", "const SETTINGS: &str = \"settings\";\n");
+  write(
+    root,
+    "src-tauri/src/settings.rs",
+    `${defaultPromptSettingsConsumers()}
+
+pub use crate::prompt::default_prompt_template;
+`,
+  );
   write(
     root,
     "src-tauri/src/prompt.rs",
@@ -544,6 +690,83 @@ test("ties the default prompt include to its runtime return expression", (t) => 
   assert.match(
     errors,
     /settings\.rs default_prompt_template must directly return include_str!\("\.\.\."\)\.to_string\(\)/,
+  );
+});
+
+test("ties the validated default prompt to settings and IPC consumers", (t) => {
+  const root = harnessFixture(t);
+  const settings = join(root, "src-tauri/src/settings.rs");
+  writeFileSync(
+    settings,
+    readFileSync(settings, "utf8")
+      .replace(
+        '#[serde(default = "default_prompt_template")]',
+        '#[serde(default = "empty_prompt")]',
+      )
+      .replace(
+        `fn default() -> Self {
+    Self {
+      prompt_template: default_prompt_template(),
+    }
+  }`,
+        `fn default() -> Self {
+    let _decoy = Self {
+      prompt_template: default_prompt_template(),
+    };
+    Self {
+      prompt_template: empty_prompt(),
+    }
+  }`,
+      )
+      .replace(
+        `pub fn parse_settings() {
+  let prompt_template = None::<String>.unwrap_or_else(default_prompt_template);
+}`,
+        `pub fn parse_settings() {
+  let _decoy = None::<String>.unwrap_or_else(default_prompt_template);
+  let prompt_template = None::<String>.unwrap_or_else(empty_prompt);
+}
+
+struct DecoySettings {
+  #[serde(default = "default_prompt_template")]
+  pub prompt_template: String,
+}`,
+      ),
+  );
+  const desktop = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    desktop,
+    readFileSync(desktop, "utf8")
+      .replace(
+        "use settings::{default_prompt_template};",
+        "use settings::{empty_prompt};",
+      )
+      .replace(
+        "fn get_default_prompt() -> String {\n  default_prompt_template()\n}",
+        "fn get_default_prompt() -> String {\n  empty_prompt()\n}",
+      ),
+  );
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(
+    errors,
+    /runtime consumer default must set prompt_template from default_prompt_template \( \)/,
+  );
+  assert.match(
+    errors,
+    /parse_settings must derive its single prompt_template binding with default_prompt_template/,
+  );
+  assert.match(
+    errors,
+    /AppSettings\.prompt_template must use serde default_prompt_template exactly once; found 0/,
+  );
+  assert.match(
+    errors,
+    /must import default_prompt_template from settings exactly once; found 0/,
+  );
+  assert.match(
+    errors,
+    /get_default_prompt must directly return default_prompt_template\(\)/,
   );
 });
 

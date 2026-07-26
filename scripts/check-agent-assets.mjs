@@ -22,6 +22,52 @@ const REQUIRED_SKILL_TOPOLOGY = {
   projectionPrefix: "symphony-",
 };
 const REQUIRED_DEFAULT_PROMPT_PATH = "src-tauri/assets/default-prompt.md";
+const REQUIRED_SETTINGS_SOURCE = "src-tauri/src/settings.rs";
+const REQUIRED_SKILL_RUNTIME_CONSUMERS = [
+  {
+    functionName: "worker_start_config",
+    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
+  },
+  {
+    functionName: "start_retro",
+    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
+  },
+  {
+    functionName: "get_skills_status",
+    sequences: [
+      [
+        "let",
+        "names",
+        ":",
+        "Vec",
+        "<",
+        "String",
+        ">",
+        "=",
+        "bundled_skills",
+        "(",
+        ")",
+      ],
+      [
+        "check_skills",
+        "(",
+        "&",
+        "repo_url",
+        ",",
+        "&",
+        "names",
+        ",",
+        "&",
+        "session_env",
+        ")",
+      ],
+    ],
+  },
+  {
+    functionName: "install_skills",
+    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
+  },
+];
 const REQUIRED_DISCOVERY_PROJECTION = {
   path: ".claude/skills",
   target: "../.agents/skills",
@@ -554,6 +600,435 @@ function namedFunctionBodies(tokens, functionName) {
     index = closing;
   }
   return matches;
+}
+
+function countTokenSequence(tokens, sequence, start = 0, end = tokens.length) {
+  let count = 0;
+  for (let index = start; index + sequence.length <= end; index += 1) {
+    if (
+      sequence.every(
+        (expected, offset) => tokens[index + offset]?.value === expected,
+      )
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function rustStructExpressions(tokens, start, end, structName) {
+  const matches = [];
+  for (let index = start; index + 1 < end; index += 1) {
+    if (
+      tokens[index]?.type !== "ident" ||
+      tokens[index].value !== structName ||
+      tokens[index + 1]?.value !== "{"
+    ) {
+      continue;
+    }
+    const closing = matchingRustDelimiter(tokens, index + 1);
+    if (closing === null || closing >= end) continue;
+    const fields = splitTopLevel(tokens.slice(index + 2, closing), ",");
+    if (fields !== null) {
+      matches.push({ start: index, end: closing + 1, fields });
+    }
+  }
+  return matches;
+}
+
+function rustStructFieldExpressions(struct, fieldName) {
+  return struct.fields
+    .filter(
+      (field) =>
+        field[0]?.type === "ident" &&
+        field[0].value === fieldName &&
+        field[1]?.value === ":",
+    )
+    .map((field) => field.slice(2));
+}
+
+function requireStructField(
+  struct,
+  fieldName,
+  expected,
+  sourcePath,
+  consumerName,
+  errors,
+  exact = true,
+) {
+  const fields = rustStructFieldExpressions(struct, fieldName);
+  const matches = fields.filter((expression) => {
+    const values = expression.map((token) => token.value);
+    if (exact) return JSON.stringify(values) === JSON.stringify(expected);
+    return expected.every((value, index) => values[index] === value);
+  });
+  if (fields.length !== 1 || matches.length !== 1) {
+    errors.push(
+      `${sourcePath} runtime consumer ${consumerName} must set ${fieldName} from ${expected.join(
+        " ",
+      )}${exact ? "" : " as its expression prefix"}`,
+    );
+  }
+}
+
+function requireFunctionSequences(
+  tokens,
+  functionName,
+  sequences,
+  sourcePath,
+  errors,
+) {
+  const bodies = namedFunctionBodies(tokens, functionName);
+  if (bodies.length !== 1) {
+    errors.push(
+      `${sourcePath} must define exactly one runtime consumer ${functionName}; found ${bodies.length}`,
+    );
+    return null;
+  }
+  const body = bodies[0];
+  for (const sequence of sequences) {
+    const count = countTokenSequence(tokens, sequence, body.start, body.end);
+    if (count !== 1) {
+      errors.push(
+        `${sourcePath} runtime consumer ${functionName} must use ${sequence.join(
+          " ",
+        )} exactly once; found ${count}`,
+      );
+    }
+  }
+  return body;
+}
+
+function requireModuleImport(tokens, moduleName, symbol, sourcePath, errors) {
+  let count = 0;
+  for (let index = 0; index + 4 < tokens.length; index += 1) {
+    if (
+      tokens[index]?.value !== "use" ||
+      tokens[index + 1]?.value !== moduleName ||
+      tokens[index + 2]?.value !== ":" ||
+      tokens[index + 3]?.value !== ":" ||
+      tokens[index + 4]?.value !== "{"
+    ) {
+      continue;
+    }
+    const closing = matchingRustDelimiter(tokens, index + 4);
+    if (
+      closing !== null &&
+      tokens
+        .slice(index + 5, closing)
+        .some((token) => token.type === "ident" && token.value === symbol)
+    ) {
+      count += 1;
+    }
+  }
+  if (count !== 1) {
+    errors.push(
+      `${sourcePath} must import ${symbol} from ${moduleName} exactly once; found ${count}`,
+    );
+  }
+}
+
+function validateSkillRuntimeConsumers(root, sourcePath, errors) {
+  const absolute = resolveInside(
+    root,
+    sourcePath,
+    errors,
+    "bundled skill runtime source",
+  );
+  if (!absolute || !existsSync(absolute)) return;
+  const tokens = rustTokens(readFileSync(absolute, "utf8"));
+  const bodies = new Map();
+  for (const { functionName, sequences } of REQUIRED_SKILL_RUNTIME_CONSUMERS) {
+    const body = requireFunctionSequences(
+      tokens,
+      functionName,
+      sequences,
+      sourcePath,
+      errors,
+    );
+    if (body) bodies.set(functionName, body);
+  }
+
+  const workerBody = bodies.get("worker_start_config");
+  if (workerBody) {
+    const returned = rustStructExpressions(
+      tokens,
+      workerBody.start,
+      workerBody.end,
+      "WorkerStartConfig",
+    ).filter((struct) => struct.end === workerBody.end);
+    if (returned.length !== 1) {
+      errors.push(
+        `${sourcePath} worker_start_config must directly return one WorkerStartConfig`,
+      );
+    } else {
+      requireStructField(
+        returned[0],
+        "skills",
+        ["bundled_skills", "(", ")"],
+        sourcePath,
+        "worker_start_config",
+        errors,
+      );
+    }
+  }
+
+  const retroBody = bodies.get("start_retro");
+  if (retroBody) {
+    const proposals = rustStructExpressions(
+      tokens,
+      retroBody.start,
+      retroBody.end,
+      "RetroProposalConfig",
+    ).filter(
+      (struct) =>
+        JSON.stringify(
+          tokens
+            .slice(struct.start - 3, struct.start)
+            .map((token) => token.value),
+        ) === JSON.stringify(["let", "proposal_config", "="]),
+    );
+    if (proposals.length !== 1) {
+      errors.push(
+        `${sourcePath} start_retro must construct exactly one proposal_config from RetroProposalConfig`,
+      );
+    } else {
+      requireStructField(
+        proposals[0],
+        "skills",
+        ["bundled_skills", "(", ")"],
+        sourcePath,
+        "start_retro",
+        errors,
+        false,
+      );
+    }
+    const startSequence = [
+      "start",
+      "(",
+      "state",
+      ".",
+      "repo",
+      ".",
+      "clone",
+      "(",
+      ")",
+      ",",
+      "tracker",
+      ",",
+      "proposal_config",
+      ")",
+    ];
+    if (
+      countTokenSequence(tokens, startSequence, retroBody.start, retroBody.end) !==
+      1
+    ) {
+      errors.push(
+        `${sourcePath} start_retro must pass the validated proposal_config to the retro manager exactly once`,
+      );
+    }
+  }
+
+  const statusBody = bodies.get("get_skills_status");
+  if (statusBody) {
+    if (
+      countTokenSequence(
+        tokens,
+        ["let", "names"],
+        statusBody.start,
+        statusBody.end,
+      ) !== 1
+    ) {
+      errors.push(
+        `${sourcePath} get_skills_status must derive its single names binding from bundled_skills()`,
+      );
+    }
+  }
+
+  const installBody = bodies.get("install_skills");
+  if (installBody) {
+    const starts = countTokenSequence(
+      tokens,
+      ["start", "("],
+      installBody.start,
+      installBody.end,
+    );
+    const installs = rustStructExpressions(
+      tokens,
+      installBody.start,
+      installBody.end,
+      "SkillsInstallConfig",
+    ).filter(
+      (struct) =>
+        tokens[struct.start - 2]?.value === "start" &&
+        tokens[struct.start - 1]?.value === "(",
+    );
+    if (starts !== 1 || installs.length !== 1) {
+      errors.push(
+        `${sourcePath} install_skills must pass exactly one SkillsInstallConfig directly to the installer`,
+      );
+    } else {
+      requireStructField(
+        installs[0],
+        "skills",
+        ["bundled_skills", "(", ")"],
+        sourcePath,
+        "install_skills",
+        errors,
+      );
+    }
+  }
+}
+
+function validateDefaultPromptRuntimeConsumers(root, errors) {
+  const settingsAbsolute = resolveInside(
+    root,
+    REQUIRED_SETTINGS_SOURCE,
+    errors,
+    "default prompt settings source",
+  );
+  const desktopAbsolute = resolveInside(
+    root,
+    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
+    errors,
+    "default prompt desktop source",
+  );
+  if (
+    !settingsAbsolute ||
+    !desktopAbsolute ||
+    !existsSync(settingsAbsolute) ||
+    !existsSync(desktopAbsolute)
+  ) {
+    return;
+  }
+
+  const settingsTokens = rustTokens(readFileSync(settingsAbsolute, "utf8"));
+  const defaultBody = requireFunctionSequences(
+    settingsTokens,
+    "default",
+    [["prompt_template", ":", "default_prompt_template", "(", ")"]],
+    REQUIRED_SETTINGS_SOURCE,
+    errors,
+  );
+  if (defaultBody) {
+    const returned = rustStructExpressions(
+      settingsTokens,
+      defaultBody.start,
+      defaultBody.end,
+      "Self",
+    ).filter((struct) => struct.end === defaultBody.end);
+    if (returned.length !== 1) {
+      errors.push(
+        `${REQUIRED_SETTINGS_SOURCE} AppSettings::default must directly return one Self value`,
+      );
+    } else {
+      requireStructField(
+        returned[0],
+        "prompt_template",
+        ["default_prompt_template", "(", ")"],
+        REQUIRED_SETTINGS_SOURCE,
+        "default",
+        errors,
+      );
+    }
+  }
+  const parseBody = requireFunctionSequences(
+    settingsTokens,
+    "parse_settings",
+    [["unwrap_or_else", "(", "default_prompt_template", ")"]],
+    REQUIRED_SETTINGS_SOURCE,
+    errors,
+  );
+  if (parseBody) {
+    const statements =
+      splitTopLevel(settingsTokens.slice(parseBody.start, parseBody.end), ";") ??
+      [];
+    const promptStatements = statements.filter(
+      (statement) =>
+        statement[0]?.value === "let" &&
+        statement[1]?.value === "prompt_template" &&
+        statement[2]?.value === "=",
+    );
+    if (
+      promptStatements.length !== 1 ||
+      countTokenSequence(promptStatements[0], [
+        "unwrap_or_else",
+        "(",
+        "default_prompt_template",
+        ")",
+      ]) !== 1
+    ) {
+      errors.push(
+        `${REQUIRED_SETTINGS_SOURCE} parse_settings must derive its single prompt_template binding with default_prompt_template`,
+      );
+    }
+  }
+  const serdeDefault = [
+    "#",
+    "[",
+    "serde",
+    "(",
+    "default",
+    "=",
+    "default_prompt_template",
+    ")",
+    "]",
+    "pub",
+    "prompt_template",
+    ":",
+  ];
+  const appSettings = rustStructExpressions(
+    settingsTokens,
+    0,
+    settingsTokens.length,
+    "AppSettings",
+  ).filter((struct) => settingsTokens[struct.start - 1]?.value === "struct");
+  const serdeCount =
+    appSettings.length === 1
+      ? countTokenSequence(
+          settingsTokens,
+          serdeDefault,
+          appSettings[0].start,
+          appSettings[0].end,
+        )
+      : 0;
+  if (appSettings.length !== 1) {
+    errors.push(
+      `${REQUIRED_SETTINGS_SOURCE} must define exactly one AppSettings struct; found ${appSettings.length}`,
+    );
+  }
+  if (serdeCount !== 1) {
+    errors.push(
+      `${REQUIRED_SETTINGS_SOURCE} AppSettings.prompt_template must use serde default_prompt_template exactly once; found ${serdeCount}`,
+    );
+  }
+
+  const desktopTokens = rustTokens(readFileSync(desktopAbsolute, "utf8"));
+  requireModuleImport(
+    desktopTokens,
+    "settings",
+    DEFAULT_PROMPT_RETURN_FUNCTION,
+    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
+    errors,
+  );
+  const bodies = namedFunctionBodies(desktopTokens, "get_default_prompt");
+  if (bodies.length !== 1) {
+    errors.push(
+      `${REQUIRED_SKILL_TOPOLOGY.inventoryFile} must define exactly one get_default_prompt runtime consumer; found ${bodies.length}`,
+    );
+    return;
+  }
+  let expression = desktopTokens.slice(bodies[0].start, bodies[0].end);
+  if (expression[0]?.value === "return") expression = expression.slice(1);
+  if (expression.at(-1)?.value === ";") expression = expression.slice(0, -1);
+  if (
+    JSON.stringify(expression.map((token) => token.value)) !==
+    JSON.stringify([DEFAULT_PROMPT_RETURN_FUNCTION, "(", ")"])
+  ) {
+    errors.push(
+      `${REQUIRED_SKILL_TOPOLOGY.inventoryFile} get_default_prompt must directly return ${DEFAULT_PROMPT_RETURN_FUNCTION}()`,
+    );
+  }
 }
 
 function tailVectorInvocation(tokens, body, functionName, inventoryFile, errors) {
@@ -1257,6 +1732,11 @@ export function validateAgentAssets(
     prefix,
     errors,
   );
+  validateSkillRuntimeConsumers(
+    root,
+    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
+    errors,
+  );
   const inventory = bundled.ids;
   const projectionsByDirectory = discoverSkills(
     root,
@@ -1452,6 +1932,7 @@ export function validateAgentAssets(
 
   const promptConfig = contract.defaultPrompt;
   let promptFile = null;
+  validateDefaultPromptRuntimeConsumers(root, errors);
   if (promptConfig) {
     if (promptConfig.path !== REQUIRED_DEFAULT_PROMPT_PATH) {
       errors.push(
