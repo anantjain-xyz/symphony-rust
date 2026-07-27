@@ -21,7 +21,14 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  // TanStack Virtual's fallback scroll-end observer debounces its final
+  // notification for 150 ms without exposing a cancellation hook. Let that
+  // callback settle while jsdom's window still exists so it cannot escape the
+  // test environment after a mocked scroll.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+});
 
 function event(id: number, message = `event ${id}`): AgentEventRow {
   return {
@@ -130,7 +137,13 @@ describe("EventStream virtualization", () => {
     onRowRender.mockClear();
 
     const appended = Array.from({ length: 100 }, (_, index) => event(index + 101));
-    rerender(<EventStream events={[...initial.map((row) => ({ ...row })), ...appended]} live onRowRender={onRowRender} />);
+    rerender(
+      <EventStream
+        events={[...initial.map((row) => ({ ...row })), ...appended]}
+        live
+        onRowRender={onRowRender}
+      />,
+    );
     expect(onRowRender).not.toHaveBeenCalled();
   });
 
@@ -151,9 +164,7 @@ describe("EventStream virtualization", () => {
 
   it("reopens a collapsed payload before navigating its only match", async () => {
     const payload = JSON.stringify({ message: "ordinary", detail: "payload-only-match" });
-    const { container } = render(
-      <EventStream events={[{ ...event(1), payload }]} live={false} />,
-    );
+    const { container } = render(<EventStream events={[{ ...event(1), payload }]} live={false} />);
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
     fireEvent.change(screen.getByLabelText("Search run log"), {
       target: { value: "payload-only-match" },

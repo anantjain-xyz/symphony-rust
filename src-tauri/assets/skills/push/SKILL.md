@@ -12,7 +12,7 @@ description: Push the current branch to origin and ensure a PR exists for it (cr
   (`gh auth setup-git --hostname <host>` for a non-default host). `GITHUB_TOKEN`/`GH_TOKEN`
   alone can authenticate `gh pr ...` commands but is not enough for `git push -u origin HEAD`.
 - Working tree is committed (use the `symphony-commit` skill first).
-- Validation gate has been run for the latest commit (`pnpm format:check && pnpm lint && pnpm typecheck && pnpm test`).
+- The target repository's documented validation gate has been run for the latest commit.
 
 ## Steps
 

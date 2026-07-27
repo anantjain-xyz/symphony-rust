@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "rustSourceRoots": ["crates", "src-tauri"],
+  "skills": {
+    "ownerRoot": "src-tauri/assets/skills",
+    "inventoryFile": "src-tauri/src/lib.rs",
+    "inventoryFunction": "bundled_skills",
+    "projectionRoot": ".agents/skills",
+    "projectionPrefix": "symphony-",
+    "portableOwnerForbiddenPattern": "\\bpnpm\\b",
+    "discoveryProjection": {
+      "path": ".claude/skills",
+      "target": "../.agents/skills"
+    },
+    "standaloneRoots": [".codex/skills"],
+    "allowedAdaptations": {
+      "pull": [
+        {
+          "match": "7. Re-run the target repository's documented validation gate before pushing.",
+          "replacement": "7. Re-run validation (`pnpm verify:full`) before pushing."
+        }
+      ],
+      "push": [
+        {
+          "match": "- The target repository's documented validation gate has been run for the latest commit.",
+          "replacement": "- Validation gate has been run for the latest commit (`pnpm verify:full`)."
+        }
+      ]
+    }
+  },
+  "defaultPrompt": {
+    "path": "src-tauri/assets/default-prompt.md",
+    "returnFunction": "default_prompt_template",
+    "forbiddenNamespacePattern": "mcp__[A-Za-z0-9_-]+__"
+  },
+  "pnpmBuiltins": ["add", "dlx", "exec", "install", "remove", "run"],
+  "forbiddenText": []
+}

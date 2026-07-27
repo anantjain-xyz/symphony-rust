@@ -57,7 +57,8 @@ const SYMPHONY_SKILL_PREFIX: &str = "symphony-";
 
 /// The agent skills shipped with the app, copied into issue workspaces when
 /// missing and used by the optional install-PR flow under
-/// `.agents/skills/symphony-<name>/SKILL.md`. Source of truth: symphony-ts.
+/// `.agents/skills/symphony-<name>/SKILL.md`. The bundled assets are the
+/// portable owners; repository copies may contain only declared adaptations.
 fn bundled_skills() -> Vec<SkillFile> {
     macro_rules! skill {
         ($name:literal) => {

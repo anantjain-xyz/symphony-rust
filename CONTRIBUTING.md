@@ -17,19 +17,25 @@ pnpm install:hygiene-tools  # pinned actionlint + ShellCheck binaries
 pnpm tauri dev        # run the desktop app with hot reload
 ```
 
-Useful checks (CI runs all of these):
+Run the browser-free validation profile during development:
 
 ```sh
-cargo check --workspace   # Rust workspace
-cargo test --workspace    # Rust tests
-pnpm typecheck            # TypeScript
-pnpm test                 # frontend unit tests (vitest)
-pnpm check:hygiene        # formatting, lint, workflows, shell, and Markdown links
-pnpm test:hygiene         # focused tests for the hygiene tooling
+pnpm verify:fast
 ```
 
-The external hygiene tools are installed in `.cache/hygiene-tools` from exact,
-checksum-verified GitHub release assets for macOS or Linux on arm64/x64.
+Before opening a pull request, run the same canonical full gate as CI. The
+profile installs its pinned Playwright Chromium build and required system
+dependencies before running E2E tests:
+
+```sh
+pnpm verify:full
+```
+
+The ordered command lists live in `validation/contract.json`; CI, this guide,
+and the repository-adapted pull/push skills point to the entrypoints instead of
+copying the commands. Both profiles install the external hygiene tools in
+`.cache/hygiene-tools` from exact, checksum-verified GitHub release assets for
+macOS or Linux on arm64/x64.
 
 Biome formatting is adopted incrementally. Existing unformatted files are
 hash-pinned in `scripts/biome-format-baseline.json`; format any file you change
@@ -55,6 +61,6 @@ For signed, notarized release builds (`pnpm release:mac`), see [Building](README
 
 ## Pull requests
 
-- Keep PRs focused; run the checks above before submitting.
+- Keep PRs focused; run `pnpm verify:full` before submitting.
 - For UI changes, include before/after screenshots (light and dark).
 - Significant behavior changes should update the README.

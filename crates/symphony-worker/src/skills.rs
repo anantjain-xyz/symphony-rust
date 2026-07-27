@@ -1433,7 +1433,7 @@ This workspace is a fresh clone of {repo_url}'s default branch, `{default_branch
 
 Do the following, in order:
 
-1. Detect this repo's real toolchain and validation commands (check package.json scripts, Cargo.toml, Makefile, CI workflows). The skill files assume `pnpm format:check && pnpm lint && pnpm typecheck && pnpm test` as the validation gate (referenced in the `symphony-pull` and `symphony-push` skills). Replace that gate with this repo's actual equivalents; if the repo has no such commands, use the closest meaningful subset. Do not change anything else in the skill files — the procedures are canonical.
+1. Detect this repo's real toolchain and canonical validation entrypoint (check package.json scripts, Cargo.toml, Makefile, CI workflows). The `symphony-pull` and `symphony-push` skills deliberately refer to the target repository's documented validation gate without assuming a package manager. Replace only those generic validation-gate sentences with this repo's canonical command; if the repo has no single entrypoint, use the closest meaningful command set. Do not change anything else in the skill files — the procedures are canonical.
 2. Create a branch named `{branch}` from `{default_branch}`, stage only the new skill files and Claude discovery links or entries, and commit with the message "Add Symphony agent skills".
 3. Push the branch to origin and open a pull request titled "Install Symphony agent skills" targeting `{default_branch}`. In the description, briefly explain that these are procedural guides Symphony-dispatched agents follow (committing, syncing, pushing, PR feedback, screenshots, merging, and Linear workpad updates) and list any validation commands you adapted for this repo. If a PR for this branch already exists, update it instead of opening a duplicate.
 
@@ -1820,6 +1820,9 @@ mod tests {
         assert!(prompt.contains(CLAUDE_SKILLS_DIR));
         assert!(prompt.contains("fresh installs link that path"));
         assert!(prompt.contains("per-skill compatibility entries"));
+        assert!(prompt.contains("without assuming a package manager"));
+        let legacy_gate = ["pnpm ", "format:check"].concat();
+        assert!(!prompt.contains(&legacy_gate));
         assert!(prompt.contains("never use --no-verify"));
     }
 

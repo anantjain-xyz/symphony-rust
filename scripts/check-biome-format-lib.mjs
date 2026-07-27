@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 export const baselineRelativePath = "scripts/biome-format-baseline.json";
 
@@ -28,6 +29,22 @@ function baselineIntroduction(projectRoot) {
   return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
 }
 
+function mainPushBase(environment) {
+  const eventPath = environment.GITHUB_EVENT_PATH?.trim();
+  if (eventPath) {
+    try {
+      const before = JSON.parse(readFileSync(eventPath, "utf8")).before;
+      if (typeof before === "string" && /^[a-f0-9]{40}$/i.test(before) && !/^0{40}$/.test(before)) {
+        return before;
+      }
+    } catch {
+      // Fall back to the immediately preceding revision when the event payload
+      // is unavailable or malformed (for example in a local CI reproduction).
+    }
+  }
+  return "HEAD^";
+}
+
 export function loadTrustedBiomeBaseline(projectRoot, environment = process.env) {
   const configuredBase = environment.BIOME_FORMAT_BASE_REF?.trim();
   const mainPush =
@@ -37,7 +54,7 @@ export function loadTrustedBiomeBaseline(projectRoot, environment = process.env)
     (environment.GITHUB_BASE_REF
       ? `origin/${environment.GITHUB_BASE_REF}`
       : mainPush
-        ? "HEAD^"
+        ? mainPushBase(environment)
         : "origin/main");
   const baseRevision = mergeBase(projectRoot, baseReference);
   if (baseRevision) {
