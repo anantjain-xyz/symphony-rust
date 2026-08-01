@@ -105,22 +105,6 @@
   scroll-margin-top: 14px;
 }
 
-.settings-stage-linear {
-  order: 1;
-}
-
-.settings-stage-repositories {
-  order: 2;
-}
-
-.settings-stage-runtime {
-  order: 3;
-}
-
-.settings-stage-workflow {
-  order: 4;
-}
-
 .settings-section {
   align-content: start;
   background: var(--card);

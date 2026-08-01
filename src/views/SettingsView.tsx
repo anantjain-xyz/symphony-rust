@@ -38,6 +38,32 @@ const SETTINGS_SECTIONS = [
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 
+export function settingsSectionForScrollPosition({
+  viewportTop,
+  scrollTop,
+  clientHeight,
+  scrollHeight,
+  sectionTops,
+}: {
+  viewportTop: number;
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  sectionTops: Partial<Record<SettingsSectionId, number>>;
+}): SettingsSectionId {
+  const maxScrollTop = scrollHeight - clientHeight;
+  if (maxScrollTop > 1 && scrollTop >= maxScrollTop - 1) {
+    return SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1].id;
+  }
+  const activationLine = viewportTop + 24;
+  let current: SettingsSectionId = SETTINGS_SECTIONS[0].id;
+  for (const section of SETTINGS_SECTIONS) {
+    const top = sectionTops[section.id];
+    if (top !== undefined && top <= activationLine) current = section.id;
+  }
+  return current;
+}
+
 function formSnapshot(settings: AppSettings) {
   const { linear_api_key_set: _ignored, ...form } = settings;
   return JSON.stringify(form);
@@ -612,18 +638,26 @@ function SettingsView({
     let frame: number | null = null;
     const updateActiveSection = () => {
       frame = null;
-      const activationLine = viewport.getBoundingClientRect().top + 24;
-      let current: SettingsSectionId = SETTINGS_SECTIONS[0].id;
+      const sectionTops: Partial<Record<SettingsSectionId, number>> = {};
       for (const section of SETTINGS_SECTIONS) {
         const element = document.getElementById(`settings-${section.id}`);
-        if (element && element.getBoundingClientRect().top <= activationLine) current = section.id;
+        if (element) sectionTops[section.id] = element.getBoundingClientRect().top;
       }
-      setActiveSection(current);
+      setActiveSection(
+        settingsSectionForScrollPosition({
+          viewportTop: viewport.getBoundingClientRect().top,
+          scrollTop: viewport.scrollTop,
+          clientHeight: viewport.clientHeight,
+          scrollHeight: viewport.scrollHeight,
+          sectionTops,
+        }),
+      );
     };
     const onScroll = () => {
       if (frame === null) frame = window.requestAnimationFrame(updateActiveSection);
     };
     viewport.addEventListener("scroll", onScroll, { passive: true });
+    updateActiveSection();
     return () => {
       viewport.removeEventListener("scroll", onScroll);
       if (frame !== null) window.cancelAnimationFrame(frame);
@@ -776,12 +810,10 @@ function SettingsView({
               className={activeSection === section.id ? "active" : undefined}
               href={`#settings-${section.id}`}
               aria-current={activeSection === section.id ? "location" : undefined}
-              onClick={(event) => {
-                event.preventDefault();
+              onClick={() => {
                 setActiveSection(section.id);
-                document
-                  .getElementById(`settings-${section.id}`)
-                  ?.scrollIntoView({ block: "start", behavior: "smooth" });
+                const target = document.getElementById(`settings-${section.id}`);
+                window.requestAnimationFrame(() => target?.focus({ preventScroll: true }));
               }}
             >
               <span className="settings-step-number" aria-hidden="true">
@@ -796,6 +828,180 @@ function SettingsView({
         </nav>
 
         <div className="settings-panes">
+          <div className="settings-stage settings-stage-linear" id="settings-linear" tabIndex={-1}>
+            <section className="settings-section">
+              <h3>Linear</h3>
+              <label>
+                API key
+                <input
+                  {...literalInputProps}
+                  value={linearKey}
+                  disabled={!runtimeAvailable}
+                  type="password"
+                  onChange={(e) => setLinearKey(e.currentTarget.value)}
+                  placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
+                />
+                <small className="hint">
+                  Create a personal API key under{" "}
+                  <ExternalLink href="https://linear.app/settings/account/security">
+                    Linear security settings
+                  </ExternalLink>
+                  . It is stored in the OS keychain, never on disk.
+                </small>
+              </label>
+              {settings.linear_api_key_set ? (
+                <button
+                  type="button"
+                  className="link-button outlined self-start"
+                  disabled={busy || !runtimeAvailable}
+                  onClick={onRemoveKey}
+                >
+                  Remove saved key
+                </button>
+              ) : null}
+              <label>
+                Workspace
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_workspace ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="acme"
+                />
+                <small className="hint">
+                  Your workspace slug — the first path segment in linear.app URLs. Enables issue
+                  links.
+                </small>
+              </label>
+              <label>
+                Project ID
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_project_id ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      tracker_project_id: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">
+                  Optional. Watch a single project by pasting its Linear URL or project ID.
+                </small>
+              </label>
+              <label>
+                Team prefix
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_prefix ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="ENG"
+                />
+                <small className="hint">
+                  Optional. Watch only issues whose identifier starts with this team key.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.tracker_assigned_to_me}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      tracker_assigned_to_me: e.currentTarget.checked,
+                    })
+                  }
+                />
+                <span>
+                  Only pick issues assigned to me{" "}
+                  {settings.tracker_assigned_to_me ? (
+                    <span className="inline-meta">
+                      {linearViewerLoading
+                        ? "Checking Linear..."
+                        : linearViewer
+                          ? linearViewer.username
+                          : ""}
+                    </span>
+                  ) : null}
+                </span>
+                <small className="hint">
+                  When enabled, Symphony dispatches matching active issues only from the Linear user
+                  tied to the configured API key.
+                </small>
+                {settings.tracker_assigned_to_me && linearViewerError ? (
+                  <small className="test-result err">{linearViewerError}</small>
+                ) : null}
+              </label>
+              <label htmlFor="settings-active-states">
+                Active states
+                <ListInput
+                  id="settings-active-states"
+                  value={settings.active_states}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="Todo, In Progress, Rework, Merging"
+                  onChange={(next) => setSettings({ ...settings, active_states: next })}
+                  aria-invalid={
+                    validationState.status === "invalid" &&
+                    validationFieldId(validationState.result) === "settings-active-states"
+                  }
+                  aria-describedby={
+                    validationState.status === "invalid" &&
+                    validationFieldId(validationState.result) === "settings-active-states"
+                      ? "settings-validation-summary"
+                      : undefined
+                  }
+                />
+                <small className="hint">
+                  Comma-separated Linear states the worker picks issues up from.
+                </small>
+                {activeStatesEmpty ? (
+                  <small className="test-result err">
+                    Required — without at least one state the worker never runs.
+                  </small>
+                ) : null}
+              </label>
+              <label htmlFor="settings-terminal-states">
+                Terminal states
+                <ListInput
+                  id="settings-terminal-states"
+                  value={settings.terminal_states}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="Done, Canceled"
+                  onChange={(next) => setSettings({ ...settings, terminal_states: next })}
+                />
+                <small className="hint">
+                  States that mean an issue is finished; its workspace can be cleaned up.
+                </small>
+              </label>
+              <div className="section-row">
+                <button
+                  type="button"
+                  disabled={busy || !runtimeAvailable}
+                  onClick={onTestConnection}
+                >
+                  Test connection
+                </button>
+                {trackerTest ? (
+                  <small
+                    className={trackerTest.ok ? "test-result ok" : "test-result err"}
+                    role="status"
+                  >
+                    {trackerTest.message}
+                  </small>
+                ) : null}
+              </div>
+            </section>
+          </div>
+
           <div
             className="settings-stage settings-stage-repositories"
             id="settings-repositories"
@@ -1031,180 +1237,6 @@ function SettingsView({
                 under <code>.agents/skills/</code>, with validation commands adapted to that repo's
                 toolchain.
               </small>
-            </section>
-          </div>
-
-          <div className="settings-stage settings-stage-linear" id="settings-linear" tabIndex={-1}>
-            <section className="settings-section">
-              <h3>Linear</h3>
-              <label>
-                API key
-                <input
-                  {...literalInputProps}
-                  value={linearKey}
-                  disabled={!runtimeAvailable}
-                  type="password"
-                  onChange={(e) => setLinearKey(e.currentTarget.value)}
-                  placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
-                />
-                <small className="hint">
-                  Create a personal API key under{" "}
-                  <ExternalLink href="https://linear.app/settings/account/security">
-                    Linear security settings
-                  </ExternalLink>
-                  . It is stored in the OS keychain, never on disk.
-                </small>
-              </label>
-              {settings.linear_api_key_set ? (
-                <button
-                  type="button"
-                  className="link-button outlined self-start"
-                  disabled={busy || !runtimeAvailable}
-                  onClick={onRemoveKey}
-                >
-                  Remove saved key
-                </button>
-              ) : null}
-              <label>
-                Workspace
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_workspace ?? ""}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
-                  }
-                  placeholder="acme"
-                />
-                <small className="hint">
-                  Your workspace slug — the first path segment in linear.app URLs. Enables issue
-                  links.
-                </small>
-              </label>
-              <label>
-                Project ID
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_project_id ?? ""}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      tracker_project_id: nullable(e.currentTarget.value),
-                    })
-                  }
-                />
-                <small className="hint">
-                  Optional. Watch a single project by pasting its Linear URL or project ID.
-                </small>
-              </label>
-              <label>
-                Team prefix
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_prefix ?? ""}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
-                  }
-                  placeholder="ENG"
-                />
-                <small className="hint">
-                  Optional. Watch only issues whose identifier starts with this team key.
-                </small>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.tracker_assigned_to_me}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      tracker_assigned_to_me: e.currentTarget.checked,
-                    })
-                  }
-                />
-                <span>
-                  Only pick issues assigned to me{" "}
-                  {settings.tracker_assigned_to_me ? (
-                    <span className="inline-meta">
-                      {linearViewerLoading
-                        ? "Checking Linear..."
-                        : linearViewer
-                          ? linearViewer.username
-                          : ""}
-                    </span>
-                  ) : null}
-                </span>
-                <small className="hint">
-                  When enabled, Symphony dispatches matching active issues only from the Linear user
-                  tied to the configured API key.
-                </small>
-                {settings.tracker_assigned_to_me && linearViewerError ? (
-                  <small className="test-result err">{linearViewerError}</small>
-                ) : null}
-              </label>
-              <label htmlFor="settings-active-states">
-                Active states
-                <ListInput
-                  id="settings-active-states"
-                  value={settings.active_states}
-                  disabled={!runtimeAvailable}
-                  separator="comma"
-                  placeholder="Todo, In Progress, Rework, Merging"
-                  onChange={(next) => setSettings({ ...settings, active_states: next })}
-                  aria-invalid={
-                    validationState.status === "invalid" &&
-                    validationFieldId(validationState.result) === "settings-active-states"
-                  }
-                  aria-describedby={
-                    validationState.status === "invalid" &&
-                    validationFieldId(validationState.result) === "settings-active-states"
-                      ? "settings-validation-summary"
-                      : undefined
-                  }
-                />
-                <small className="hint">
-                  Comma-separated Linear states the worker picks issues up from.
-                </small>
-                {activeStatesEmpty ? (
-                  <small className="test-result err">
-                    Required — without at least one state the worker never runs.
-                  </small>
-                ) : null}
-              </label>
-              <label htmlFor="settings-terminal-states">
-                Terminal states
-                <ListInput
-                  id="settings-terminal-states"
-                  value={settings.terminal_states}
-                  disabled={!runtimeAvailable}
-                  separator="comma"
-                  placeholder="Done, Canceled"
-                  onChange={(next) => setSettings({ ...settings, terminal_states: next })}
-                />
-                <small className="hint">
-                  States that mean an issue is finished; its workspace can be cleaned up.
-                </small>
-              </label>
-              <div className="section-row">
-                <button
-                  type="button"
-                  disabled={busy || !runtimeAvailable}
-                  onClick={onTestConnection}
-                >
-                  Test connection
-                </button>
-                {trackerTest ? (
-                  <small
-                    className={trackerTest.ok ? "test-result ok" : "test-result err"}
-                    role="status"
-                  >
-                    {trackerTest.message}
-                  </small>
-                ) : null}
-              </div>
             </section>
           </div>
 
