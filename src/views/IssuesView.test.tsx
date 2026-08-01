@@ -51,7 +51,12 @@ beforeEach(() => {
 it("loads on preload, builds only while active, and caches by issues snapshot", async () => {
   const snapshot = [issue("SYM-1")];
   const { rerender } = render(
-    <IssuesView issues={snapshot} linearWorkspace={null} onOpenSettings={() => undefined} />,
+    <IssuesView
+      issues={snapshot}
+      linearWorkspace={null}
+      initialMode="list"
+      onOpenSettings={() => undefined}
+    />,
   );
 
   expect(screen.getByText("Title for SYM-1")).toBeTruthy();
@@ -72,7 +77,12 @@ it("loads on preload, builds only while active, and caches by issues snapshot", 
   expect(screen.queryByLabelText("Mock dependency graph")).toBeNull();
 
   rerender(
-    <IssuesView issues={snapshot} linearWorkspace={null} onOpenSettings={() => undefined} />,
+    <IssuesView
+      issues={snapshot}
+      linearWorkspace={null}
+      initialMode="list"
+      onOpenSettings={() => undefined}
+    />,
   );
   fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
   expect(await screen.findByLabelText("Mock dependency graph")).toBeTruthy();
@@ -81,7 +91,12 @@ it("loads on preload, builds only while active, and caches by issues snapshot", 
   fireEvent.click(screen.getByRole("tab", { name: "List" }));
   const replacement = [...snapshot];
   rerender(
-    <IssuesView issues={replacement} linearWorkspace={null} onOpenSettings={() => undefined} />,
+    <IssuesView
+      issues={replacement}
+      linearWorkspace={null}
+      initialMode="list"
+      onOpenSettings={() => undefined}
+    />,
   );
   expect(graphMocks.builds).toHaveBeenCalledTimes(1);
 

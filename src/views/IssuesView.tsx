@@ -6,7 +6,7 @@ import { priorityLabel, statusSlug } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import "./IssuesView.css";
 
-type IssueViewMode = "list" | "dependencies";
+export type IssueViewMode = "list" | "dependencies";
 type DependencyGraphLoadState = "idle" | "loading" | "ready" | "error";
 
 let dependencyGraphPromise: Promise<typeof import("./DependencyGraphPanel")> | null = null;
@@ -36,14 +36,18 @@ function preloadDependencyGraph() {
 function IssuesView({
   issues,
   linearWorkspace,
+  initialMode = "dependencies",
+  onModeChange,
   onOpenSettings,
 }: {
   issues: IssueRow[];
   linearWorkspace: string | null;
+  initialMode?: IssueViewMode;
+  onModeChange?: (mode: IssueViewMode) => void;
   onOpenSettings: () => void;
 }) {
-  const [selectedMode, setSelectedMode] = useState<IssueViewMode>("list");
-  const [activeMode, setActiveMode] = useState<IssueViewMode>("list");
+  const [selectedMode, setSelectedMode] = useState<IssueViewMode>(initialMode);
+  const [activeMode, setActiveMode] = useState<IssueViewMode>(initialMode);
   const [isModePending, startModeTransition] = useTransition();
   const [dependencyGraphLoadState, setDependencyGraphLoadState] =
     useState<DependencyGraphLoadState>(() => (dependencyGraphReady ? "ready" : "idle"));
@@ -78,6 +82,7 @@ function IssuesView({
   const selectMode = (nextMode: IssueViewMode) => {
     if (nextMode === selectedMode) return;
     setSelectedMode(nextMode);
+    onModeChange?.(nextMode);
     if (nextMode === "dependencies") {
       startModeTransition(() => setActiveMode(nextMode));
     } else {

@@ -1367,6 +1367,7 @@ describe("App settings", () => {
     render(<App />);
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "List" }));
     expect(await screen.findByText("Last good issue")).toBeTruthy();
 
     listeners.get("db_changed")!({
@@ -3376,9 +3377,9 @@ describe("App settings", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
-    expect(await screen.findByText("Build deploy dashboard")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
+    expect(
+      (await screen.findByRole("tab", { name: "Dependencies" })).getAttribute("aria-selected"),
+    ).toBe("true");
 
     expect(
       await screen.findByRole("group", {
@@ -3390,6 +3391,15 @@ describe("App settings", () => {
     expect(screen.getByText("Outside current issue filters")).toBeTruthy();
     expect(screen.getByLabelText("SYM-10 blocks SYM-11")).toBeTruthy();
     expect(screen.getByLabelText("OPS-1 blocks SYM-11")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "List" }));
+    expect(await screen.findByText("Build deploy dashboard")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Overview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Issues" }));
+
+    expect(screen.getByRole("tab", { name: "List" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("Watched issues")).toBeTruthy();
   });
 
   it("validates before saving and shows validation errors in the header status", async () => {

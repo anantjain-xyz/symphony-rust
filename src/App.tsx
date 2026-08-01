@@ -1,5 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject, SetStateAction } from "react";
+import type { IssueViewMode } from "./views/IssuesView";
 import type {
   AgentEventRow,
   AppSettings,
@@ -466,6 +467,7 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const runtimeAvailable = isDesktopRuntime();
   const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
+  const [issuesViewMode, setIssuesViewMode] = useState<IssueViewMode>("dependencies");
   const [viewAttempts, setViewAttempts] = useState<Record<Exclude<View, "overview">, number>>({
     runs: 0,
     issues: 0,
@@ -2276,6 +2278,8 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               <IssuesView
                 issues={issues}
                 linearWorkspace={settings?.tracker_workspace ?? null}
+                initialMode={issuesViewMode}
+                onModeChange={setIssuesViewMode}
                 onOpenSettings={() => setView("settings")}
               />
             </Suspense>
