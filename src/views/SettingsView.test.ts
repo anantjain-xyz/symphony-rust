@@ -1,11 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { settingsSectionForScrollPosition } from "./SettingsView";
+import { settingsNavigationOffset, settingsSectionForScrollPosition } from "./SettingsView";
+
+describe("settingsNavigationOffset", () => {
+  it("uses the sticky stepper height and layout gap at compact widths", () => {
+    expect(
+      settingsNavigationOffset({
+        compact: true,
+        viewportPaddingTop: 28,
+        stickyTop: -1,
+        stepperHeight: 49,
+        layoutGap: 16,
+      }),
+    ).toBe(92);
+  });
+
+  it("keeps the desktop activation line compact", () => {
+    expect(
+      settingsNavigationOffset({
+        compact: false,
+        viewportPaddingTop: 28,
+        stickyTop: 0,
+        stepperHeight: 200,
+        layoutGap: 28,
+      }),
+    ).toBe(24);
+  });
+});
 
 describe("settingsSectionForScrollPosition", () => {
   it("selects Workflow when the scroll container reaches its bottom", () => {
     expect(
       settingsSectionForScrollPosition({
         viewportTop: 64,
+        activationOffset: 24,
         scrollTop: 500,
         clientHeight: 500,
         scrollHeight: 1_000,
@@ -23,6 +50,7 @@ describe("settingsSectionForScrollPosition", () => {
     expect(
       settingsSectionForScrollPosition({
         viewportTop: 64,
+        activationOffset: 24,
         scrollTop: 0,
         clientHeight: 1_000,
         scrollHeight: 1_000,
@@ -40,6 +68,7 @@ describe("settingsSectionForScrollPosition", () => {
     expect(
       settingsSectionForScrollPosition({
         viewportTop: 64,
+        activationOffset: 24,
         scrollTop: 420,
         clientHeight: 500,
         scrollHeight: 1_500,
@@ -48,6 +77,24 @@ describe("settingsSectionForScrollPosition", () => {
           repositories: 80,
           runtime: 460,
           workflow: 960,
+        },
+      }),
+    ).toBe("repositories");
+  });
+
+  it("uses the measured responsive navigation offset", () => {
+    expect(
+      settingsSectionForScrollPosition({
+        viewportTop: 64,
+        activationOffset: 92,
+        scrollTop: 320,
+        clientHeight: 500,
+        scrollHeight: 1_500,
+        sectionTops: {
+          linear: -240,
+          repositories: 156.4,
+          runtime: 560,
+          workflow: 1_020,
         },
       }),
     ).toBe("repositories");

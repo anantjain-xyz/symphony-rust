@@ -38,14 +38,32 @@ const SETTINGS_SECTIONS = [
 
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
 
+export function settingsNavigationOffset({
+  compact,
+  viewportPaddingTop,
+  stickyTop,
+  stepperHeight,
+  layoutGap,
+}: {
+  compact: boolean;
+  viewportPaddingTop: number;
+  stickyTop: number;
+  stepperHeight: number;
+  layoutGap: number;
+}): number {
+  return compact ? Math.max(24, viewportPaddingTop + stickyTop + stepperHeight + layoutGap) : 24;
+}
+
 export function settingsSectionForScrollPosition({
   viewportTop,
+  activationOffset,
   scrollTop,
   clientHeight,
   scrollHeight,
   sectionTops,
 }: {
   viewportTop: number;
+  activationOffset: number;
   scrollTop: number;
   clientHeight: number;
   scrollHeight: number;
@@ -55,11 +73,11 @@ export function settingsSectionForScrollPosition({
   if (maxScrollTop > 1 && scrollTop >= maxScrollTop - 1) {
     return SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1].id;
   }
-  const activationLine = viewportTop + 24;
+  const activationLine = viewportTop + activationOffset;
   let current: SettingsSectionId = SETTINGS_SECTIONS[0].id;
   for (const section of SETTINGS_SECTIONS) {
     const top = sectionTops[section.id];
-    if (top !== undefined && top <= activationLine) current = section.id;
+    if (top !== undefined && top <= activationLine + 1) current = section.id;
   }
   return current;
 }
@@ -635,7 +653,27 @@ function SettingsView({
   useEffect(() => {
     const viewport = document.querySelector<HTMLElement>(".content");
     if (!viewport) return;
+    const layout = viewport.querySelector<HTMLElement>(".settings-layout");
+    const stepper = layout?.querySelector<HTMLElement>(".settings-sidebar");
     let frame: number | null = null;
+    const updateNavigationOffset = () => {
+      const parsedViewportPadding = Number.parseFloat(window.getComputedStyle(viewport).paddingTop);
+      const parsedStickyTop = stepper
+        ? Number.parseFloat(window.getComputedStyle(stepper).top)
+        : Number.NaN;
+      const parsedGap = layout
+        ? Number.parseFloat(window.getComputedStyle(layout).rowGap)
+        : Number.NaN;
+      const offset = settingsNavigationOffset({
+        compact: window.innerWidth <= 900,
+        viewportPaddingTop: Number.isFinite(parsedViewportPadding) ? parsedViewportPadding : 0,
+        stickyTop: Number.isFinite(parsedStickyTop) ? parsedStickyTop : 0,
+        stepperHeight: stepper?.offsetHeight ?? 0,
+        layoutGap: Number.isFinite(parsedGap) ? parsedGap : 0,
+      });
+      layout?.style.setProperty("--settings-navigation-offset", `${offset}px`);
+      return offset;
+    };
     const updateActiveSection = () => {
       frame = null;
       const sectionTops: Partial<Record<SettingsSectionId, number>> = {};
@@ -646,6 +684,7 @@ function SettingsView({
       setActiveSection(
         settingsSectionForScrollPosition({
           viewportTop: viewport.getBoundingClientRect().top,
+          activationOffset: updateNavigationOffset(),
           scrollTop: viewport.scrollTop,
           clientHeight: viewport.clientHeight,
           scrollHeight: viewport.scrollHeight,
@@ -657,9 +696,16 @@ function SettingsView({
       if (frame === null) frame = window.requestAnimationFrame(updateActiveSection);
     };
     viewport.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" || !stepper ? null : new ResizeObserver(onScroll);
+    if (stepper) resizeObserver?.observe(stepper);
     updateActiveSection();
     return () => {
       viewport.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      resizeObserver?.disconnect();
+      layout?.style.removeProperty("--settings-navigation-offset");
       if (frame !== null) window.cancelAnimationFrame(frame);
     };
   }, []);

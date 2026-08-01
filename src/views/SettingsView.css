@@ -679,8 +679,10 @@ textarea.mono-input {
     width: 22px;
   }
 
-  .settings-stage {
-    scroll-margin-top: 58px;
+  .settings-stage,
+  #settings-active-states,
+  #settings-prompt-template {
+    scroll-margin-top: var(--settings-navigation-offset, 58px);
   }
 
   .settings-form > .settings-footer,
@@ -699,8 +701,10 @@ textarea.mono-input {
     min-height: 34px;
   }
 
-  .settings-stage {
-    scroll-margin-top: 96px;
+  .settings-stage,
+  #settings-active-states,
+  #settings-prompt-template {
+    scroll-margin-top: var(--settings-navigation-offset, 96px);
   }
 
   .prompt-editor {
