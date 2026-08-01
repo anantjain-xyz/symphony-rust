@@ -196,7 +196,9 @@ function useTheme(): [Theme, () => void] {
 const emptyOverview: Overview = {
   active_runs: [],
   retry_queue: [],
+  retry_count: 0,
   recent_failures: [],
+  failure_count: 0,
   live_sessions: [],
   worker_heartbeat: null,
   rate_limits: [],
@@ -2575,12 +2577,12 @@ function OverviewView({
         <div className="kpis">
           <Kpi label="Active" value={overview.active_runs.length} />
           <Kpi
-            label={overview.retry_queue.length === 1 ? "Retry" : "Retries"}
-            value={overview.retry_queue.length}
+            label={overview.retry_count === 1 ? "Retry" : "Retries"}
+            value={overview.retry_count}
           />
           <Kpi
-            label={overview.recent_failures.length === 1 ? "Failure" : "Failures"}
-            value={overview.recent_failures.length}
+            label={overview.failure_count === 1 ? "Failure" : "Failures"}
+            value={overview.failure_count}
           />
         </div>
       </header>

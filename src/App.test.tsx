@@ -149,7 +149,9 @@ function settingsInvoke({
         return {
           active_runs: [],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -217,7 +219,9 @@ function dashboardInvoke({
   overview = {
     active_runs: [],
     retry_queue: [],
+    retry_count: 0,
     recent_failures: [],
+    failure_count: 0,
     live_sessions: [],
     worker_heartbeat: null,
     rate_limits: [],
@@ -392,8 +396,7 @@ function runRow(overrides: Partial<RunWithIssueRow> = {}): RunWithIssueRow {
 }
 
 function commandCount(command: string) {
-  return tauriMocks.invoke.mock.calls.filter(([calledCommand]) => calledCommand === command)
-    .length;
+  return tauriMocks.invoke.mock.calls.filter(([calledCommand]) => calledCommand === command).length;
 }
 
 async function flushPromises() {
@@ -454,9 +457,7 @@ describe("App settings", () => {
       configurable: true,
       value: {
         getItem: vi.fn((key: string) => localStorageItems.get(key) ?? null),
-        setItem: vi.fn((key: string, value: string) =>
-          localStorageItems.set(key, value),
-        ),
+        setItem: vi.fn((key: string, value: string) => localStorageItems.set(key, value)),
         removeItem: vi.fn((key: string) => localStorageItems.delete(key)),
         clear: vi.fn(() => localStorageItems.clear()),
       },
@@ -570,15 +571,13 @@ describe("App settings", () => {
       target: { value: "Cannot validate this draft" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(screen.getByText("Validation unavailable")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText("Validation unavailable")).toBeTruthy());
     expect(screen.getByText("validation backend down")).toBeTruthy();
     expect(screen.queryByText(/browser preview/)).toBeNull();
     expect(screen.queryByText(/Try saving again/)).toBeNull();
-    expect(
-      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
-    ).toBe(false);
+    expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+      false,
+    );
     expect(document.getElementById("settings-validation-summary")?.hidden).toBe(false);
   });
 
@@ -610,9 +609,9 @@ describe("App settings", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(
-      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
-    ).toBe(false);
+    expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+      false,
+    );
   });
 
   it("submits Settings through app validation instead of native form validation", async () => {
@@ -622,14 +621,12 @@ describe("App settings", () => {
 
     render(<App />);
     await openSettings();
-    fireEvent.change(
-      screen.getByLabelText(/^Turn timeout/, { selector: "input" }),
-      { target: { value: "" } },
-    );
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=from-session" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Turn timeout/, { selector: "input" }), {
+      target: { value: "" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=from-session" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(commandCount("save_settings")).toBe(1));
@@ -662,8 +659,8 @@ describe("App settings", () => {
 
     await waitFor(() => expect(commandCount("save_settings")).toBe(1));
     expect(
-      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings")?.[1]
-        .request.settings.prompt_template,
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings")?.[1].request
+        .settings.prompt_template,
     ).toBe("Save across navigation");
   });
 
@@ -726,9 +723,7 @@ describe("App settings", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const prompt = container.querySelector(
-      ".prompt-editor textarea",
-    ) as HTMLTextAreaElement;
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull(),
     );
@@ -799,9 +794,9 @@ describe("App settings", () => {
     fireEvent.change(prompt, { target: { value: "Revision being saved" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(
-        tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
-      ).toBe(true),
+      expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+        true,
+      ),
     );
 
     fireEvent.change(prompt, { target: { value: "Newer unsaved revision" } });
@@ -854,9 +849,9 @@ describe("App settings", () => {
       await Promise.resolve();
     });
 
-    expect(
-      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
-    ).toBe(false);
+    expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+      false,
+    );
   });
 
   it("keeps browser preview deterministic without invoking Tauri commands", async () => {
@@ -910,7 +905,10 @@ describe("App settings", () => {
 
   it("cancels a queued updater import when its owner unmounts", () => {
     const cancelIdleCallback = vi.fn();
-    vi.stubGlobal("requestIdleCallback", vi.fn(() => 73));
+    vi.stubGlobal(
+      "requestIdleCallback",
+      vi.fn(() => 73),
+    );
     vi.stubGlobal("cancelIdleCallback", cancelIdleCallback);
     const loader = vi.fn();
     const hook = renderHook(() => useDeferredUpdater(true, loader));
@@ -951,9 +949,7 @@ describe("App settings", () => {
     expect(commandCount("start_worker")).toBe(0);
     expect(screen.getByRole("status").textContent).toBe("Connecting to local worker…");
     expect(document.querySelector(".content")?.getAttribute("aria-busy")).toBe("true");
-    expect(document.querySelector(".boot-skeleton")?.getAttribute("aria-hidden")).toBe(
-      "true",
-    );
+    expect(document.querySelector(".boot-skeleton")?.getAttribute("aria-hidden")).toBe("true");
     expect(document.querySelector(".worker-toggle")).toBeNull();
     expect(screen.queryByText("No active runs")).toBeNull();
     expect(screen.queryByText("0")).toBeNull();
@@ -971,7 +967,9 @@ describe("App settings", () => {
     overviewRead.resolve({
       active_runs: [],
       retry_queue: [],
+      retry_count: 0,
       recent_failures: [],
+      failure_count: 0,
       live_sessions: [],
       worker_heartbeat: null,
       rate_limits: [],
@@ -997,13 +995,15 @@ describe("App settings", () => {
       }),
     );
 
-    render(strict ? (
-      <StrictMode>
+    render(
+      strict ? (
+        <StrictMode>
+          <App />
+        </StrictMode>
+      ) : (
         <App />
-      </StrictMode>
-    ) : (
-      <App />
-    ));
+      ),
+    );
 
     await waitFor(() => expect(commandCount("start_worker")).toBe(1));
     expect(commandCount("load_settings")).toBe(1);
@@ -1034,9 +1034,7 @@ describe("App settings", () => {
 
     autoStart.resolve({ state: "running", started_at: null, last_error: null });
     const stopButton = await screen.findByRole("button", { name: "Stop worker" });
-    await waitFor(() =>
-      expect((stopButton as HTMLButtonElement).disabled).toBe(false),
-    );
+    await waitFor(() => expect((stopButton as HTMLButtonElement).disabled).toBe(false));
     expect(commandCount("start_worker")).toBe(1);
     expect(commandCount("get_worker_status")).toBe(1);
   });
@@ -1054,7 +1052,9 @@ describe("App settings", () => {
         return {
           active_runs: overviewReads === 1 ? [] : [runRow()],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -1069,9 +1069,7 @@ describe("App settings", () => {
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
-    )?.[1] as (event: {
-      payload: { type: "db_changed"; table: string; op: string };
-    }) => void;
+    )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
     onDatabaseChanged({
       payload: { type: "db_changed", table: "runs", op: "insert" },
     });
@@ -1082,9 +1080,7 @@ describe("App settings", () => {
 
     settingsRead.resolve(settings);
     await waitFor(() =>
-      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
-        false,
-      ),
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
     expect(await screen.findByText("Build widgets")).toBeTruthy();
     expect(overviewReads).toBe(2);
@@ -1108,7 +1104,9 @@ describe("App settings", () => {
         return {
           active_runs: [runRow()],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -1123,9 +1121,7 @@ describe("App settings", () => {
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
-    )?.[1] as (event: {
-      payload: { type: "db_changed"; table: string; op: string };
-    }) => void;
+    )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
     onDatabaseChanged({
       payload: { type: "db_changed", table: "runs", op: "insert" },
     });
@@ -1150,7 +1146,9 @@ describe("App settings", () => {
     retryOverview.resolve({
       active_runs: [runRow()],
       retry_queue: [],
+      retry_count: 0,
       recent_failures: [],
+      failure_count: 0,
       live_sessions: [],
       worker_heartbeat: null,
       rate_limits: [],
@@ -1194,9 +1192,7 @@ describe("App settings", () => {
     const rendered = render(<App />);
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
-      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
-        false,
-      ),
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
     const beforeRate = new Map(
       tauriMocks.invoke.mock.calls.map(([command]) => [command, commandCount(command)]),
@@ -1208,9 +1204,7 @@ describe("App settings", () => {
     }
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     await waitFor(() =>
-      expect(commandCount("get_overview")).toBe(
-        (beforeRate.get("get_overview") ?? 0) + 1,
-      ),
+      expect(commandCount("get_overview")).toBe((beforeRate.get("get_overview") ?? 0) + 1),
     );
     for (const command of [
       "list_runs",
@@ -1279,9 +1273,7 @@ describe("App settings", () => {
     });
     render(<App />);
     await waitFor(() =>
-      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
-        false,
-      ),
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
     expect(commandCount("get_retro_detail")).toBe(0);
     fireEvent.click(screen.getByRole("button", { name: "Retro" }));
@@ -1308,9 +1300,7 @@ describe("App settings", () => {
     const rendered = render(<App />);
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
-      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
-        false,
-      ),
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
 
     listeners.get("db_changed")!({
@@ -1341,7 +1331,9 @@ describe("App settings", () => {
     const freshOverview = {
       active_runs: [runRow({ issue_title: "Fresh overview result" })],
       retry_queue: [],
+      retry_count: 0,
       recent_failures: [],
+      failure_count: 0,
       live_sessions: [],
       worker_heartbeat: null,
       rate_limits: [],
@@ -1382,23 +1374,20 @@ describe("App settings", () => {
     });
     await waitFor(() => expect(issueReads).toBe(2));
     overviewRefresh.resolve(freshOverview);
-    issuesFailure.reject(
-      new Error("Authorization: Bearer secret-token LINEAR_API_KEY=abc123"),
-    );
+    issuesFailure.reject(new Error("Authorization: Bearer secret-token LINEAR_API_KEY=abc123"));
 
     expect(await screen.findByText("Last good issue")).toBeTruthy();
     expect(await screen.findByText("Stale")).toBeTruthy();
-    const lastSuccess = screen.getByText(/Showing the last successful data/)
-      .querySelector("time");
+    const lastSuccess = screen.getByText(/Showing the last successful data/).querySelector("time");
     expect(lastSuccess?.getAttribute("datetime")).toBeTruthy();
     expect(lastSuccess?.getAttribute("aria-label")).toContain(
       lastSuccess?.getAttribute("title") ?? "missing",
     );
     expect(document.body.textContent).not.toContain("secret-token");
     expect(document.body.textContent).not.toContain("abc123");
-    expect(
-      document.querySelector('.screen-reader-only[role="status"]')?.textContent,
-    ).toBe("Issues could not be refreshed.");
+    expect(document.querySelector('.screen-reader-only[role="status"]')?.textContent).toBe(
+      "Issues could not be refreshed.",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     expect(await screen.findByText("Fresh overview result")).toBeTruthy();
@@ -1415,9 +1404,7 @@ describe("App settings", () => {
     await waitFor(() => expect(issueReads).toBe(4));
     retryRecovery.resolve([recoveredIssue]);
     expect(await screen.findByText("Recovered issue data")).toBeTruthy();
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Retry Issues" })).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry Issues" })).toBeNull());
     expect(document.querySelector(".resource-stale-badge")).toBeNull();
     expect(overviewReads).toBe(overviewReadsBeforeRetry);
   });
@@ -1442,9 +1429,7 @@ describe("App settings", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     firstDetail.reject(new Error("detail unavailable"));
 
     const alert = await screen.findByRole("alert");
@@ -1500,7 +1485,9 @@ describe("App settings", () => {
       refresh.resolve({
         active_runs: [],
         retry_queue: [],
+        retry_count: 0,
         recent_failures: [],
+        failure_count: 0,
         live_sessions: [],
         worker_heartbeat: null,
         rate_limits: [],
@@ -1533,9 +1520,7 @@ describe("App settings", () => {
     render(<App />);
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
 
     const activeCounts = {
@@ -1600,9 +1585,7 @@ describe("App settings", () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
     const detailReads = commandCount("get_run_detail");
     const event: AgentEventRow = {
@@ -1673,9 +1656,7 @@ describe("App settings", () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(detailCall).toBe(1));
 
     listeners.get("db_changed")!({
@@ -1724,9 +1705,7 @@ describe("App settings", () => {
     render(<App />);
     await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
-      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(
-        false,
-      ),
+      expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
     const baseline = {
       overview: commandCount("get_overview"),
@@ -1776,13 +1755,9 @@ describe("App settings", () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-2 number 2" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-2 number 2" }));
     firstDetail.resolve({ run: firstRun, events: [] });
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(2));
     expect(screen.queryByText("SYM-1 · Run #1")).toBeNull();
@@ -1882,17 +1857,13 @@ describe("App settings", () => {
 
     expect(
       Array.from(
-        screen
-          .getByRole("group", { name: "Filter suggestions" })
-          .querySelectorAll("button"),
+        screen.getByRole("group", { name: "Filter suggestions" }).querySelectorAll("button"),
       ).map((button) => button.textContent),
     ).toEqual(["Pending", "Accepted", "Rejected", "All"]);
-    expect(
-      screen.getByRole("button", { name: "Pending" }).getAttribute("aria-pressed"),
-    ).toBe("true");
-    expect(
-      screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed"),
-    ).toBe("false");
+    expect(screen.getByRole("button", { name: "Pending" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "All" }).getAttribute("aria-pressed")).toBe("false");
     expect(screen.getAllByLabelText("Proposed unified diff")).toHaveLength(4);
     expect(screen.getByText("0 of 4 reviewed")).toBeTruthy();
     const metadata = container.querySelectorAll(".retro-suggestion-badges");
@@ -1932,16 +1903,12 @@ describe("App settings", () => {
     });
     expect(acceptedUndoButtons).toHaveLength(2);
     expect(acceptedUndoButtons[0].textContent).toBe("");
-    expect(
-      screen.getAllByRole("button", { name: "Undo rejected decision" }),
-    ).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Undo rejected decision" })).toHaveLength(2);
     expect(
       screen.getByRole("button", { name: "Apply default workflow (1)" }).getAttribute("disabled"),
     ).not.toBeNull();
     expect(
-      screen
-        .getByRole("button", { name: "Create 1 implementation PR" })
-        .getAttribute("disabled"),
+      screen.getByRole("button", { name: "Create 1 implementation PR" }).getAttribute("disabled"),
     ).not.toBeNull();
 
     fireEvent.click(acceptedUndoButtons[0]);
@@ -1956,9 +1923,7 @@ describe("App settings", () => {
 
     expect(screen.getByText("No accepted suggestions")).toBeTruthy();
     expect(
-      screen.getByText(
-        "Accept a pending suggestion to include it in an implementation batch.",
-      ),
+      screen.getByText("Accept a pending suggestion to include it in an implementation batch."),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Rejected" }));
@@ -1970,20 +1935,14 @@ describe("App settings", () => {
     render(<App />);
 
     await openView("Retro");
-    expect(
-      screen.getAllByRole("button", { name: /Open retro from/ }),
-    ).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /Open retro from/ })).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Delete retro" }));
     expect(screen.getByRole("button", { name: "Confirm delete" })).toBeTruthy();
-    expect(
-      screen.getAllByRole("button", { name: /Open retro from/ }),
-    ).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /Open retro from/ })).toHaveLength(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
-    expect(
-      screen.getAllByRole("button", { name: /Open retro from/ }),
-    ).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /Open retro from/ })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Delete retro" })).toBeTruthy();
   });
 
@@ -2259,7 +2218,9 @@ describe("App settings", () => {
       firstOverview.resolve({
         active_runs: [],
         retry_queue: [],
+        retry_count: 0,
         recent_failures: [],
+        failure_count: 0,
         live_sessions: [],
         worker_heartbeat: null,
         rate_limits: [],
@@ -2456,25 +2417,19 @@ describe("App settings", () => {
     expect(await screen.findByDisplayValue("git@github.com:acme/backend.git")).toBeTruthy();
     expect(screen.queryByDisplayValue("git@github.com:acme/widgets.git")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Edit widgets repository" }).getAttribute(
-        "aria-expanded",
-      ),
+      screen.getByRole("button", { name: "Edit widgets repository" }).getAttribute("aria-expanded"),
     ).toBe("false");
 
     const repoName = screen.getByLabelText(/^Name/, { selector: "input" });
     fireEvent.change(repoName, { target: { value: "api" } });
 
     expect(
-      screen.getByRole("button", { name: "Collapse api repository" }).getAttribute(
-        "aria-expanded",
-      ),
+      screen.getByRole("button", { name: "Collapse api repository" }).getAttribute("aria-expanded"),
     ).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: "Collapse api repository" }));
     expect(
-      screen.getByRole("button", { name: "Edit api repository" }).getAttribute(
-        "aria-expanded",
-      ),
+      screen.getByRole("button", { name: "Edit api repository" }).getAttribute("aria-expanded"),
     ).toBe("false");
     expect(screen.queryByDisplayValue("git@github.com:acme/backend.git")).toBeNull();
   });
@@ -2707,7 +2662,9 @@ describe("App settings", () => {
         overview: {
           active_runs: [runRow()],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -2750,7 +2707,9 @@ describe("App settings", () => {
         overview: {
           active_runs: [runRow()],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -2805,7 +2764,9 @@ describe("App settings", () => {
         overview: {
           active_runs: [runRow()],
           retry_queue: [],
+          retry_count: 0,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -2885,7 +2846,9 @@ describe("App settings", () => {
     fireEvent.change(editor!, { target: { value: "Unsaved workflow" } });
     expect(transfer.getAttribute("disabled")).not.toBeNull();
     expect(
-      screen.getByText("Save Settings before transferring the workflow currently used by the worker."),
+      screen.getByText(
+        "Save Settings before transferring the workflow currently used by the worker.",
+      ),
     ).toBeTruthy();
   });
 
@@ -2940,9 +2903,7 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
 
-    expect(
-      await screen.findByText("Repository does not ship all agent skills."),
-    ).toBeTruthy();
+    expect(await screen.findByText("Repository does not ship all agent skills.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Mark installed" }));
 
     expect(screen.getByText("Agent skills are marked installed.")).toBeTruthy();
@@ -2955,9 +2916,7 @@ describe("App settings", () => {
     const saveCall = () =>
       tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
     await waitFor(() => expect(saveCall()).toBeTruthy());
-    expect(
-      saveCall()?.[1].request.settings.repos[0].skills_marked_installed,
-    ).toBe(true);
+    expect(saveCall()?.[1].request.settings.repos[0].skills_marked_installed).toBe(true);
   });
 
   it("rechecks repo skills when the session environment changes", async () => {
@@ -2976,10 +2935,9 @@ describe("App settings", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=from-session" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=from-session" },
+    });
 
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
@@ -3031,10 +2989,9 @@ describe("App settings", () => {
     render(<App />);
 
     await openSettings();
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=remounted-draft" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=remounted-draft" },
+    });
     await waitFor(() =>
       expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", {
         repoUrl: settings.repos[0].url,
@@ -3059,8 +3016,9 @@ describe("App settings", () => {
     const repoCalls = tauriMocks.invoke.mock.calls.filter(([command]) =>
       ["get_skills_status", "get_repo_workflow_status"].includes(command),
     );
-    expect(repoCalls.every(([, args]) => args.sessionEnv.GITHUB_TOKEN === "remounted-draft"))
-      .toBe(true);
+    expect(repoCalls.every(([, args]) => args.sessionEnv.GITHUB_TOKEN === "remounted-draft")).toBe(
+      true,
+    );
   });
 
   it("automatically checks a newly edited draft repository URL", async () => {
@@ -3108,10 +3066,9 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("save_settings")).toBe(1));
     tauriMocks.invoke.mockClear();
 
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=newer-draft" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=newer-draft" },
+    });
     save.resolve({ ...settings, prompt_template: "Revision being saved" });
 
     await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));
@@ -3138,16 +3095,15 @@ describe("App settings", () => {
     await screen.findByText("Using the saved default workflow.");
     await screen.findByText("Repository does not ship all agent skills.");
 
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=from-draft" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=from-draft" },
+    });
 
     await waitFor(() => {
       expect(
-        Array.from(
-          container.querySelectorAll<HTMLButtonElement>(".workflow-field button"),
-        ).some((button) => button.textContent === "Check again"),
+        Array.from(container.querySelectorAll<HTMLButtonElement>(".workflow-field button")).some(
+          (button) => button.textContent === "Check again",
+        ),
       ).toBe(true);
       expect(
         Array.from(
@@ -3175,10 +3131,7 @@ describe("App settings", () => {
       repoUrl: settings.repos[0].url,
       sessionEnv: { GITHUB_TOKEN: "from-draft" },
     };
-    expect(tauriMocks.invoke).toHaveBeenCalledWith(
-      "get_repo_workflow_status",
-      exactContext,
-    );
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("get_repo_workflow_status", exactContext);
     expect(tauriMocks.invoke).toHaveBeenCalledWith("get_skills_status", exactContext);
   });
 
@@ -3201,10 +3154,9 @@ describe("App settings", () => {
 
     render(<App />);
     await openSettings();
-    fireEvent.change(
-      screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-      { target: { value: "GITHUB_TOKEN=from-draft" } },
-    );
+    fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+      target: { value: "GITHUB_TOKEN=from-draft" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
     fireEvent.click(await screen.findByRole("button", { name: "Create install PR" }));
 
@@ -3247,10 +3199,9 @@ describe("App settings", () => {
       render(<App />);
       await flushPromises();
       fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-      fireEvent.change(
-        screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
-        { target: { value: "GITHUB_TOKEN=install-draft" } },
-      );
+      fireEvent.change(screen.getByLabelText(/^Session environment/, { selector: "textarea" }), {
+        target: { value: "GITHUB_TOKEN=install-draft" },
+      });
       await act(() => vi.advanceTimersByTimeAsync(600));
       fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
       await flushPromises();
@@ -3309,9 +3260,7 @@ describe("App settings", () => {
 
     fireEvent.click(installButton);
 
-    expect(tauriMocks.openUrl).toHaveBeenCalledWith(
-      "https://cursor.com/docs/cli/installation",
-    );
+    expect(tauriMocks.openUrl).toHaveBeenCalledWith("https://cursor.com/docs/cli/installation");
     expect(screen.queryByRole("button", { name: "Install Codex" })).toBeNull();
     expect(screen.queryByText("Claude Code CLI")).toBeNull();
   });
@@ -3432,7 +3381,9 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Dependencies" }));
 
     expect(
-      await screen.findByRole("group", { name: /Dependency graph with 3 nodes and 2 blocking links/ }),
+      await screen.findByRole("group", {
+        name: /Dependency graph with 3 nodes and 2 blocking links/,
+      }),
     ).toBeTruthy();
     expect(screen.getByText("Blocked issues")).toBeTruthy();
     expect(screen.getByLabelText("OPS-1, external blocker")).toBeTruthy();
@@ -3467,18 +3418,14 @@ describe("App settings", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() => expect(screen.getAllByText(validationError).length).toBeGreaterThan(0));
-    await waitFor(() =>
-      expect(document.activeElement?.id).toBe("settings-validation-summary"),
-    );
+    await waitFor(() => expect(document.activeElement?.id).toBe("settings-validation-summary"));
     const activeStates = screen.getByLabelText(/^Active states/, { selector: "input" });
     expect(activeStates.getAttribute("aria-invalid")).toBe("true");
-    expect(activeStates.getAttribute("aria-describedby")).toBe(
-      "settings-validation-summary",
-    );
+    expect(activeStates.getAttribute("aria-describedby")).toBe("settings-validation-summary");
     expect(tauriMocks.invoke).toHaveBeenCalledWith("validate_settings", { settings });
-    expect(
-      tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings"),
-    ).toBe(false);
+    expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+      false,
+    );
     const topbar = container.querySelector(".topbar");
     expect(topbar?.textContent).toContain(validationError);
     expect(topbar?.textContent).not.toContain("Settings valid");
@@ -3564,9 +3511,7 @@ describe("App settings", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
-    expect(
-      await screen.findByText("Repository does not ship all agent skills."),
-    ).toBeTruthy();
+    expect(await screen.findByText("Repository does not ship all agent skills.")).toBeTruthy();
     expect(screen.getByText("1 of 7 bundled skills are missing.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
@@ -3574,6 +3519,34 @@ describe("App settings", () => {
     expect(screen.getByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(screen.queryByText("Welcome to Symphony")).toBeNull();
     expect(screen.queryByText("Install agent skills")).toBeNull();
+  });
+
+  it("shows total retry and failure counts instead of bounded preview lengths", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        overview: {
+          active_runs: [],
+          retry_queue: [],
+          retry_count: 51,
+          recent_failures: [],
+          failure_count: 23,
+          live_sessions: [],
+          worker_heartbeat: null,
+          rate_limits: [],
+          token_usage: [],
+        },
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
+    expect(Array.from(document.querySelectorAll(".kpi"), (element) => element.textContent)).toEqual(
+      ["0Active", "51Retries", "23Failures"],
+    );
   });
 
   it("lets the user trigger a queued retry immediately", async () => {
@@ -3596,7 +3569,9 @@ describe("App settings", () => {
               issue_title: "Retry from the dashboard",
             },
           ],
+          retry_count: 1,
           recent_failures: [],
+          failure_count: 0,
           live_sessions: [],
           worker_heartbeat: null,
           rate_limits: [],
@@ -3645,7 +3620,9 @@ describe("App settings", () => {
       overview: {
         active_runs: [],
         retry_queue: [],
+        retry_count: 0,
         recent_failures: [],
+        failure_count: 0,
         live_sessions: [],
         worker_heartbeat: null,
         rate_limits: [],
@@ -3688,7 +3665,9 @@ describe("App settings", () => {
     const overview = {
       active_runs: [activeRun],
       retry_queue: [],
+      retry_count: 0,
       recent_failures: [],
+      failure_count: 0,
       live_sessions: [],
       worker_heartbeat: null,
       rate_limits: [],
@@ -3718,9 +3697,7 @@ describe("App settings", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open run SYM-1 number 1" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
 
     expect(await screen.findByRole("button", { name: "Stopping..." })).toBeTruthy();

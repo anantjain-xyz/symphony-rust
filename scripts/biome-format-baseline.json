@@ -1,7 +1,6 @@
 {
   "scripts/check-bundle-budget.mjs": "edeb295fb7597ebc6012f3a9d6a080590c28c3a94f9371faa9875526b9e37626",
   "scripts/check-bundle-budget.node.mjs": "a01becc05f3c55c7b96f71c730047d450461ae3f9188c56df66b5b898188bae3",
-  "src/App.test.tsx": "862e1c8587ae06e14d9bdb9bd1b701674d7e57cece22729d09fd18d4dad8433b",
   "src/AppUpdate.test.tsx": "36fd1215215e010aa8763d3b4f605f7e68d9a6ef00e6b93d7e73c755a11940c9",
   "src/ChunkBoundary.test.tsx": "24fdbbb7547d9f1495ad79bf800291a392f2ded4f3d8c0022587af4c67b25ea8",
   "src/MarkdownText.test.tsx": "aa1dbda5ae777ed9429d684e873047c1470e3f50d4a2cb0716ad1fbe6c2203df",
