@@ -29,6 +29,59 @@ const literalInputProps = {
   spellCheck: false,
 } as const;
 
+const SETTINGS_SECTIONS = [
+  { id: "linear", label: "Linear", description: "Connect and choose work" },
+  { id: "repositories", label: "Repositories", description: "Route issues to code" },
+  { id: "runtime", label: "Agent & runtime", description: "Control how work runs" },
+  { id: "workflow", label: "Workflow", description: "Set default instructions" },
+] as const;
+
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]["id"];
+
+export function settingsNavigationOffset({
+  compact,
+  viewportPaddingTop,
+  stickyTop,
+  stepperHeight,
+  layoutGap,
+}: {
+  compact: boolean;
+  viewportPaddingTop: number;
+  stickyTop: number;
+  stepperHeight: number;
+  layoutGap: number;
+}): number {
+  return compact ? Math.max(24, viewportPaddingTop + stickyTop + stepperHeight + layoutGap) : 24;
+}
+
+export function settingsSectionForScrollPosition({
+  viewportTop,
+  activationOffset,
+  scrollTop,
+  clientHeight,
+  scrollHeight,
+  sectionTops,
+}: {
+  viewportTop: number;
+  activationOffset: number;
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  sectionTops: Partial<Record<SettingsSectionId, number>>;
+}): SettingsSectionId {
+  const maxScrollTop = scrollHeight - clientHeight;
+  if (maxScrollTop > 1 && scrollTop >= maxScrollTop - 1) {
+    return SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1].id;
+  }
+  const activationLine = viewportTop + activationOffset;
+  let current: SettingsSectionId = SETTINGS_SECTIONS[0].id;
+  for (const section of SETTINGS_SECTIONS) {
+    const top = sectionTops[section.id];
+    if (top !== undefined && top <= activationLine + 1) current = section.id;
+  }
+  return current;
+}
+
 function formSnapshot(settings: AppSettings) {
   const { linear_api_key_set: _ignored, ...form } = settings;
   return JSON.stringify(form);
@@ -188,6 +241,12 @@ function validationFieldId(result: ValidationResult | null) {
   }
   if (message.includes("repo")) return "settings-repositories";
   return null;
+}
+
+function settingsSectionForField(fieldId: string | null): SettingsSectionId {
+  if (fieldId === "settings-repositories") return "repositories";
+  if (fieldId === "settings-prompt-template") return "workflow";
+  return "linear";
 }
 
 function SettingsFeature({
@@ -567,6 +626,7 @@ function SettingsView({
 }) {
   const activeStatesEmpty = settings.active_states.every((state) => state.trim() === "");
   const [expandedRepoIndex, setExpandedRepoIndex] = useState<number | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("linear");
   const [appVersion, setAppVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -589,6 +649,66 @@ function SettingsView({
       return Math.min(index, settings.repos.length - 1);
     });
   }, [settings.repos.length]);
+
+  useEffect(() => {
+    const viewport = document.querySelector<HTMLElement>(".content");
+    if (!viewport) return;
+    const layout = viewport.querySelector<HTMLElement>(".settings-layout");
+    const stepper = layout?.querySelector<HTMLElement>(".settings-sidebar");
+    let frame: number | null = null;
+    const updateNavigationOffset = () => {
+      const parsedViewportPadding = Number.parseFloat(window.getComputedStyle(viewport).paddingTop);
+      const parsedStickyTop = stepper
+        ? Number.parseFloat(window.getComputedStyle(stepper).top)
+        : Number.NaN;
+      const parsedGap = layout
+        ? Number.parseFloat(window.getComputedStyle(layout).rowGap)
+        : Number.NaN;
+      const offset = settingsNavigationOffset({
+        compact: window.innerWidth <= 900,
+        viewportPaddingTop: Number.isFinite(parsedViewportPadding) ? parsedViewportPadding : 0,
+        stickyTop: Number.isFinite(parsedStickyTop) ? parsedStickyTop : 0,
+        stepperHeight: stepper?.offsetHeight ?? 0,
+        layoutGap: Number.isFinite(parsedGap) ? parsedGap : 0,
+      });
+      layout?.style.setProperty("--settings-navigation-offset", `${offset}px`);
+      return offset;
+    };
+    const updateActiveSection = () => {
+      frame = null;
+      const sectionTops: Partial<Record<SettingsSectionId, number>> = {};
+      for (const section of SETTINGS_SECTIONS) {
+        const element = document.getElementById(`settings-${section.id}`);
+        if (element) sectionTops[section.id] = element.getBoundingClientRect().top;
+      }
+      setActiveSection(
+        settingsSectionForScrollPosition({
+          viewportTop: viewport.getBoundingClientRect().top,
+          activationOffset: updateNavigationOffset(),
+          scrollTop: viewport.scrollTop,
+          clientHeight: viewport.clientHeight,
+          scrollHeight: viewport.scrollHeight,
+          sectionTops,
+        }),
+      );
+    };
+    const onScroll = () => {
+      if (frame === null) frame = window.requestAnimationFrame(updateActiveSection);
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" || !stepper ? null : new ResizeObserver(onScroll);
+    if (stepper) resizeObserver?.observe(stepper);
+    updateActiveSection();
+    return () => {
+      viewport.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      resizeObserver?.disconnect();
+      layout?.style.removeProperty("--settings-navigation-offset");
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, []);
 
   const updateRepo = (index: number, patch: Partial<RepoConfig>) => {
     setExpandedRepoIndex(index);
@@ -651,7 +771,7 @@ function SettingsView({
       <header className="page-header">
         <div>
           <h2>Settings</h2>
-          <p>Linear connection, repository, agent backend, and the prompt that drives runs.</p>
+          <p>Configure how Symphony discovers, routes, and runs work.</p>
         </div>
       </header>
 
@@ -704,9 +824,11 @@ function SettingsView({
             {validationFieldId(validationState.result) ? (
               <a
                 href={`#${validationFieldId(validationState.result)}`}
-                onClick={() =>
-                  document.getElementById(validationFieldId(validationState.result) ?? "")?.focus()
-                }
+                onClick={() => {
+                  const fieldId = validationFieldId(validationState.result);
+                  setActiveSection(settingsSectionForField(fieldId));
+                  document.getElementById(fieldId ?? "")?.focus();
+                }}
               >
                 Go to the first affected field
               </a>
@@ -725,947 +847,1022 @@ function SettingsView({
         ) : null}
       </div>
 
-      <div className="settings-grid">
-        <section className="settings-section" id="settings-repositories" tabIndex={-1}>
-          <h3>Repositories</h3>
-          <small className="hint">
-            Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching bare label
-            in Linear wins, then the repo claiming the issue's project, then its team, then the
-            default. Clear the default to require an explicit route.
-          </small>
-          {settings.repos.map((repo, index) => {
-            const repoTitle = repo.name.trim() || `Repository ${index + 1}`;
-            const repoSummary = repo.url.trim() || "No URL configured";
-            const expanded = expandedRepoIndex === index;
-            const bodyId = `repo-card-body-${index}`;
-            const toggleLabel = `${expanded ? "Collapse" : "Edit"} ${repoTitle} repository`;
-            const workflowStatus = workflowStatuses[repo.url.trim()] ?? null;
-            return (
-              <fieldset
-                className={expanded ? "repo-card expanded" : "repo-card collapsed"}
-                key={
-                  // biome-ignore lint/suspicious/noArrayIndexKey: editable unsaved repositories do not have stable identifiers yet.
-                  index
-                }
-              >
-                <div className="repo-card-head">
-                  <button
-                    type="button"
-                    className="repo-card-toggle"
-                    aria-expanded={expanded}
-                    aria-controls={expanded ? bodyId : undefined}
-                    aria-label={toggleLabel}
-                    title={toggleLabel}
-                    onClick={() =>
-                      setExpandedRepoIndex((current) => (current === index ? null : index))
+      <div className="settings-layout">
+        <nav className="settings-sidebar" aria-label="Settings sections">
+          <span className="settings-sidebar-label">Setup</span>
+          {SETTINGS_SECTIONS.map((section, index) => (
+            <a
+              key={section.id}
+              className={activeSection === section.id ? "active" : undefined}
+              href={`#settings-${section.id}`}
+              aria-current={activeSection === section.id ? "location" : undefined}
+              onClick={() => {
+                setActiveSection(section.id);
+                const target = document.getElementById(`settings-${section.id}`);
+                window.requestAnimationFrame(() => target?.focus({ preventScroll: true }));
+              }}
+            >
+              <span className="settings-step-number" aria-hidden="true">
+                {index + 1}
+              </span>
+              <span className="settings-step-copy">
+                <strong>{section.label}</strong>
+                <small>{section.description}</small>
+              </span>
+            </a>
+          ))}
+        </nav>
+
+        <div className="settings-panes">
+          <div className="settings-stage settings-stage-linear" id="settings-linear" tabIndex={-1}>
+            <section className="settings-section">
+              <h3>Linear</h3>
+              <label>
+                API key
+                <input
+                  {...literalInputProps}
+                  value={linearKey}
+                  disabled={!runtimeAvailable}
+                  type="password"
+                  onChange={(e) => setLinearKey(e.currentTarget.value)}
+                  placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
+                />
+                <small className="hint">
+                  Create a personal API key under{" "}
+                  <ExternalLink href="https://linear.app/settings/account/security">
+                    Linear security settings
+                  </ExternalLink>
+                  . It is stored in the OS keychain, never on disk.
+                </small>
+              </label>
+              {settings.linear_api_key_set ? (
+                <button
+                  type="button"
+                  className="link-button outlined self-start"
+                  disabled={busy || !runtimeAvailable}
+                  onClick={onRemoveKey}
+                >
+                  Remove saved key
+                </button>
+              ) : null}
+              <label>
+                Workspace
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_workspace ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="acme"
+                />
+                <small className="hint">
+                  Your workspace slug — the first path segment in linear.app URLs. Enables issue
+                  links.
+                </small>
+              </label>
+              <label>
+                Project ID
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_project_id ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      tracker_project_id: nullable(e.currentTarget.value),
+                    })
+                  }
+                />
+                <small className="hint">
+                  Optional. Watch a single project by pasting its Linear URL or project ID.
+                </small>
+              </label>
+              <label>
+                Team prefix
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_prefix ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="ENG"
+                />
+                <small className="hint">
+                  Optional. Watch only issues whose identifier starts with this team key.
+                </small>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={settings.tracker_assigned_to_me}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      tracker_assigned_to_me: e.currentTarget.checked,
+                    })
+                  }
+                />
+                <span>
+                  Only pick issues assigned to me{" "}
+                  {settings.tracker_assigned_to_me ? (
+                    <span className="inline-meta">
+                      {linearViewerLoading
+                        ? "Checking Linear..."
+                        : linearViewer
+                          ? linearViewer.username
+                          : ""}
+                    </span>
+                  ) : null}
+                </span>
+                <small className="hint">
+                  When enabled, Symphony dispatches matching active issues only from the Linear user
+                  tied to the configured API key.
+                </small>
+                {settings.tracker_assigned_to_me && linearViewerError ? (
+                  <small className="test-result err">{linearViewerError}</small>
+                ) : null}
+              </label>
+              <label htmlFor="settings-active-states">
+                Active states
+                <ListInput
+                  id="settings-active-states"
+                  value={settings.active_states}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="Todo, In Progress, Rework, Merging"
+                  onChange={(next) => setSettings({ ...settings, active_states: next })}
+                  aria-invalid={
+                    validationState.status === "invalid" &&
+                    validationFieldId(validationState.result) === "settings-active-states"
+                  }
+                  aria-describedby={
+                    validationState.status === "invalid" &&
+                    validationFieldId(validationState.result) === "settings-active-states"
+                      ? "settings-validation-summary"
+                      : undefined
+                  }
+                />
+                <small className="hint">
+                  Comma-separated Linear states the worker picks issues up from.
+                </small>
+                {activeStatesEmpty ? (
+                  <small className="test-result err">
+                    Required — without at least one state the worker never runs.
+                  </small>
+                ) : null}
+              </label>
+              <label htmlFor="settings-terminal-states">
+                Terminal states
+                <ListInput
+                  id="settings-terminal-states"
+                  value={settings.terminal_states}
+                  disabled={!runtimeAvailable}
+                  separator="comma"
+                  placeholder="Done, Canceled"
+                  onChange={(next) => setSettings({ ...settings, terminal_states: next })}
+                />
+                <small className="hint">
+                  States that mean an issue is finished; its workspace can be cleaned up.
+                </small>
+              </label>
+              <div className="section-row">
+                <button
+                  type="button"
+                  disabled={busy || !runtimeAvailable}
+                  onClick={onTestConnection}
+                >
+                  Test connection
+                </button>
+                {trackerTest ? (
+                  <small
+                    className={trackerTest.ok ? "test-result ok" : "test-result err"}
+                    role="status"
+                  >
+                    {trackerTest.message}
+                  </small>
+                ) : null}
+              </div>
+            </section>
+          </div>
+
+          <div
+            className="settings-stage settings-stage-repositories"
+            id="settings-repositories"
+            tabIndex={-1}
+          >
+            <section className="settings-section">
+              <h3>Repositories</h3>
+              <small className="hint">
+                Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching bare
+                label in Linear wins, then the repo claiming the issue's project, then its team,
+                then the default. Clear the default to require an explicit route.
+              </small>
+              {settings.repos.map((repo, index) => {
+                const repoTitle = repo.name.trim() || `Repository ${index + 1}`;
+                const repoSummary = repo.url.trim() || "No URL configured";
+                const expanded = expandedRepoIndex === index;
+                const bodyId = `repo-card-body-${index}`;
+                const toggleLabel = `${expanded ? "Collapse" : "Edit"} ${repoTitle} repository`;
+                const workflowStatus = workflowStatuses[repo.url.trim()] ?? null;
+                return (
+                  <fieldset
+                    className={expanded ? "repo-card expanded" : "repo-card collapsed"}
+                    key={
+                      // biome-ignore lint/suspicious/noArrayIndexKey: editable unsaved repositories do not have stable identifiers yet.
+                      index
                     }
                   >
-                    <svg
-                      className="chevron"
-                      viewBox="0 0 16 16"
-                      width="12"
-                      height="12"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M6 4l4 4-4 4"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                    <span className="repo-card-title">
-                      <strong>{repoTitle}</strong>
-                      <small>{repoSummary}</small>
-                    </span>
-                  </button>
-                  <div className="repo-card-actions">
-                    <label className="repo-default">
-                      <input
-                        type="checkbox"
-                        checked={repo.is_default}
-                        disabled={!runtimeAvailable}
-                        onChange={(event) => setDefaultRepo(index, event.currentTarget.checked)}
-                      />
-                      Default
-                    </label>
-                    <button
-                      type="button"
-                      className="link-button"
-                      disabled={!runtimeAvailable}
-                      onClick={() => removeRepo(index)}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                  <div className="repo-card-body" id={bodyId}>
-                    <label>
-                      Name
-                      <input
-                        {...literalInputProps}
-                        value={repo.name}
-                        disabled={!runtimeAvailable}
-                        onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
-                        placeholder="widgets"
-                      />
-                      <small className="hint">
-                        Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in Linear to
-                        send it here.
-                      </small>
-                    </label>
-                    <label>
-                      Repo URL
-                      <input
-                        {...literalInputProps}
-                        value={repo.url}
-                        disabled={!runtimeAvailable}
-                        onChange={(e) => {
-                          const url = e.currentTarget.value;
-                          updateRepo(index, {
-                            url,
-                            skills_marked_installed:
-                              url.trim() === repo.url.trim() ? repo.skills_marked_installed : false,
-                          });
-                        }}
-                        placeholder="git@github.com:org/repo.git"
-                      />
-                      <small className="hint">
-                        SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
-                      </small>
-                    </label>
-                    <label>
-                      Install command
-                      <input
-                        {...literalInputProps}
-                        value={repo.install_cmd ?? ""}
-                        disabled={!runtimeAvailable}
-                        onChange={(e) =>
-                          updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
+                    <div className="repo-card-head">
+                      <button
+                        type="button"
+                        className="repo-card-toggle"
+                        aria-expanded={expanded}
+                        aria-controls={expanded ? bodyId : undefined}
+                        aria-label={toggleLabel}
+                        title={toggleLabel}
+                        onClick={() =>
+                          setExpandedRepoIndex((current) => (current === index ? null : index))
                         }
-                        placeholder="npm ci"
-                      />
-                      <small className="hint">
-                        Runs in the workspace after cloning. Leave blank for <code>npm ci</code>.
-                      </small>
-                    </label>
-                    <label htmlFor={`repo-${index}-linear-teams`}>
-                      Linear teams
-                      <ListInput
-                        id={`repo-${index}-linear-teams`}
-                        value={repo.team_prefixes}
-                        disabled={!runtimeAvailable}
-                        separator="comma"
-                        placeholder="ENG, WAL"
-                        onChange={(next) => updateRepo(index, { team_prefixes: next })}
-                      />
-                      <small className="hint">
-                        Optional. Issues from these team keys land here unless a label or project
-                        rule says otherwise.
-                      </small>
-                    </label>
-                    <label htmlFor={`repo-${index}-linear-projects`}>
-                      Linear projects
-                      <ListInput
-                        id={`repo-${index}-linear-projects`}
-                        value={repo.project_ids}
-                        disabled={!runtimeAvailable}
-                        separator="comma"
-                        placeholder="Project URLs or IDs"
-                        onChange={(next) => updateRepo(index, { project_ids: next })}
-                      />
-                      <small className="hint">
-                        Optional. Paste Linear project URLs or IDs; beats the team rule.
-                      </small>
-                    </label>
-                    <WorkflowBlock
-                      status={workflowStatus}
-                      checking={workflowChecking[repo.url.trim()] ?? false}
-                      transfer={
-                        workflowTransfer?.repo_url === repo.url.trim() ? workflowTransfer : null
-                      }
-                      transferRunning={workflowTransfer?.state === "running"}
-                      settingsDirty={settingsDirty}
-                      busy={busy}
-                      runtimeAvailable={runtimeAvailable}
-                      repoConfigured={repo.url.trim() !== ""}
-                      onRefresh={() => onRefreshWorkflow(repo.url)}
-                      onTransfer={() => onTransferWorkflow(repo.url)}
-                    />
-                    <SkillsBlock
-                      status={skillsStatuses[repo.url.trim()] ?? null}
-                      checking={skillsChecking[repo.url.trim()] ?? false}
-                      manuallyInstalled={repo.skills_marked_installed}
-                      install={skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null}
-                      installRunning={skillsInstall?.state === "running"}
-                      busy={busy}
-                      runtimeAvailable={runtimeAvailable}
-                      repoConfigured={repo.url.trim() !== ""}
-                      onRefresh={() => onRefreshSkills(repo.url)}
-                      onInstall={() => onInstallSkills(repo.url)}
-                      onMarkInstalled={() => updateRepo(index, { skills_marked_installed: true })}
-                      onUseAutomaticCheck={() => {
-                        updateRepo(index, { skills_marked_installed: false });
-                        onRefreshSkills(repo.url);
-                      }}
-                    />
-                  </div>
-                ) : null}
-              </fieldset>
-            );
-          })}
-          <button
-            type="button"
-            className="self-start"
-            disabled={!runtimeAvailable}
-            onClick={addRepo}
-          >
-            Add repository
-          </button>
-          <label>
-            Workspace root
-            <input
-              {...literalInputProps}
-              value={settings.workspace_root ?? ""}
-              disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({ ...settings, workspace_root: nullable(e.currentTarget.value) })
-              }
-              placeholder="App data directory"
-            />
-            <small className="hint">
-              Where per-run workspaces are created (one folder per repo, then per issue). Leave
-              blank to use the app data directory.
-            </small>
-          </label>
-          <small className="hint">
-            Agent skills are procedural guides (symphony-workpad, symphony-commit, symphony-push, …)
-            that Symphony agents follow. Each run gets bundled fallback copies locally when a repo
-            does not ship them. Each card above shows whether its repo has checked-in skills;
-            installing starts an agent session that opens a PR adding them under{" "}
-            <code>.agents/skills/</code>, with validation commands adapted to that repo's toolchain.
-          </small>
-        </section>
-
-        <section className="settings-section">
-          <h3>Linear</h3>
-          <label>
-            API key
-            <input
-              {...literalInputProps}
-              value={linearKey}
-              disabled={!runtimeAvailable}
-              type="password"
-              onChange={(e) => setLinearKey(e.currentTarget.value)}
-              placeholder={settings.linear_api_key_set ? "Stored in keychain" : "lin_api_..."}
-            />
-            <small className="hint">
-              Create a personal API key under{" "}
-              <ExternalLink href="https://linear.app/settings/account/security">
-                Linear security settings
-              </ExternalLink>
-              . It is stored in the OS keychain, never on disk.
-            </small>
-          </label>
-          {settings.linear_api_key_set ? (
-            <button
-              type="button"
-              className="link-button outlined self-start"
-              disabled={busy || !runtimeAvailable}
-              onClick={onRemoveKey}
-            >
-              Remove saved key
-            </button>
-          ) : null}
-          <label>
-            Workspace
-            <input
-              {...literalInputProps}
-              value={settings.tracker_workspace ?? ""}
-              disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({ ...settings, tracker_workspace: nullable(e.currentTarget.value) })
-              }
-              placeholder="acme"
-            />
-            <small className="hint">
-              Your workspace slug — the first path segment in linear.app URLs. Enables issue links.
-            </small>
-          </label>
-          <label>
-            Project ID
-            <input
-              {...literalInputProps}
-              value={settings.tracker_project_id ?? ""}
-              disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({ ...settings, tracker_project_id: nullable(e.currentTarget.value) })
-              }
-            />
-            <small className="hint">
-              Optional. Watch a single project by pasting its Linear URL or project ID.
-            </small>
-          </label>
-          <label>
-            Team prefix
-            <input
-              {...literalInputProps}
-              value={settings.tracker_prefix ?? ""}
-              disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
-              }
-              placeholder="ENG"
-            />
-            <small className="hint">
-              Optional. Watch only issues whose identifier starts with this team key.
-            </small>
-          </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={settings.tracker_assigned_to_me}
-              disabled={!runtimeAvailable}
-              onChange={(e) =>
-                setSettings({
-                  ...settings,
-                  tracker_assigned_to_me: e.currentTarget.checked,
-                })
-              }
-            />
-            <span>
-              Only pick issues assigned to me{" "}
-              {settings.tracker_assigned_to_me ? (
-                <span className="inline-meta">
-                  {linearViewerLoading
-                    ? "Checking Linear..."
-                    : linearViewer
-                      ? linearViewer.username
-                      : ""}
-                </span>
-              ) : null}
-            </span>
-            <small className="hint">
-              When enabled, Symphony dispatches matching active issues only from the Linear user
-              tied to the configured API key.
-            </small>
-            {settings.tracker_assigned_to_me && linearViewerError ? (
-              <small className="test-result err">{linearViewerError}</small>
-            ) : null}
-          </label>
-          <label htmlFor="settings-active-states">
-            Active states
-            <ListInput
-              id="settings-active-states"
-              value={settings.active_states}
-              disabled={!runtimeAvailable}
-              separator="comma"
-              placeholder="Todo, In Progress, Rework, Merging"
-              onChange={(next) => setSettings({ ...settings, active_states: next })}
-              aria-invalid={
-                validationState.status === "invalid" &&
-                validationFieldId(validationState.result) === "settings-active-states"
-              }
-              aria-describedby={
-                validationState.status === "invalid" &&
-                validationFieldId(validationState.result) === "settings-active-states"
-                  ? "settings-validation-summary"
-                  : undefined
-              }
-            />
-            <small className="hint">
-              Comma-separated Linear states the worker picks issues up from.
-            </small>
-            {activeStatesEmpty ? (
-              <small className="test-result err">
-                Required — without at least one state the worker never runs.
-              </small>
-            ) : null}
-          </label>
-          <label htmlFor="settings-terminal-states">
-            Terminal states
-            <ListInput
-              id="settings-terminal-states"
-              value={settings.terminal_states}
-              disabled={!runtimeAvailable}
-              separator="comma"
-              placeholder="Done, Canceled"
-              onChange={(next) => setSettings({ ...settings, terminal_states: next })}
-            />
-            <small className="hint">
-              States that mean an issue is finished; its workspace can be cleaned up.
-            </small>
-          </label>
-          <div className="section-row">
-            <button type="button" disabled={busy || !runtimeAvailable} onClick={onTestConnection}>
-              Test connection
-            </button>
-            {trackerTest ? (
-              <small
-                className={trackerTest.ok ? "test-result ok" : "test-result err"}
-                role="status"
+                      >
+                        <svg
+                          className="chevron"
+                          viewBox="0 0 16 16"
+                          width="12"
+                          height="12"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M6 4l4 4-4 4"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                        <span className="repo-card-title">
+                          <strong>{repoTitle}</strong>
+                          <small>{repoSummary}</small>
+                        </span>
+                      </button>
+                      <div className="repo-card-actions">
+                        <label className="repo-default">
+                          <input
+                            type="checkbox"
+                            checked={repo.is_default}
+                            disabled={!runtimeAvailable}
+                            onChange={(event) => setDefaultRepo(index, event.currentTarget.checked)}
+                          />
+                          Default
+                        </label>
+                        <button
+                          type="button"
+                          className="link-button"
+                          disabled={!runtimeAvailable}
+                          onClick={() => removeRepo(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                    {expanded ? (
+                      <div className="repo-card-body" id={bodyId}>
+                        <label>
+                          Name
+                          <input
+                            {...literalInputProps}
+                            value={repo.name}
+                            disabled={!runtimeAvailable}
+                            onChange={(e) => updateRepo(index, { name: e.currentTarget.value })}
+                            placeholder="widgets"
+                          />
+                          <small className="hint">
+                            Label an issue <code>repo:{repo.name.trim() || "<name>"}</code> in
+                            Linear to send it here.
+                          </small>
+                        </label>
+                        <label>
+                          Repo URL
+                          <input
+                            {...literalInputProps}
+                            value={repo.url}
+                            disabled={!runtimeAvailable}
+                            onChange={(e) => {
+                              const url = e.currentTarget.value;
+                              updateRepo(index, {
+                                url,
+                                skills_marked_installed:
+                                  url.trim() === repo.url.trim()
+                                    ? repo.skills_marked_installed
+                                    : false,
+                              });
+                            }}
+                            placeholder="git@github.com:org/repo.git"
+                          />
+                          <small className="hint">
+                            SSH or HTTPS Git URL. Each run clones it into a fresh workspace.
+                          </small>
+                        </label>
+                        <label>
+                          Install command
+                          <input
+                            {...literalInputProps}
+                            value={repo.install_cmd ?? ""}
+                            disabled={!runtimeAvailable}
+                            onChange={(e) =>
+                              updateRepo(index, { install_cmd: nullable(e.currentTarget.value) })
+                            }
+                            placeholder="npm ci"
+                          />
+                          <small className="hint">
+                            Runs in the workspace after cloning. Leave blank for <code>npm ci</code>
+                            .
+                          </small>
+                        </label>
+                        <label htmlFor={`repo-${index}-linear-teams`}>
+                          Linear teams
+                          <ListInput
+                            id={`repo-${index}-linear-teams`}
+                            value={repo.team_prefixes}
+                            disabled={!runtimeAvailable}
+                            separator="comma"
+                            placeholder="ENG, WAL"
+                            onChange={(next) => updateRepo(index, { team_prefixes: next })}
+                          />
+                          <small className="hint">
+                            Optional. Issues from these team keys land here unless a label or
+                            project rule says otherwise.
+                          </small>
+                        </label>
+                        <label htmlFor={`repo-${index}-linear-projects`}>
+                          Linear projects
+                          <ListInput
+                            id={`repo-${index}-linear-projects`}
+                            value={repo.project_ids}
+                            disabled={!runtimeAvailable}
+                            separator="comma"
+                            placeholder="Project URLs or IDs"
+                            onChange={(next) => updateRepo(index, { project_ids: next })}
+                          />
+                          <small className="hint">
+                            Optional. Paste Linear project URLs or IDs; beats the team rule.
+                          </small>
+                        </label>
+                        <WorkflowBlock
+                          status={workflowStatus}
+                          checking={workflowChecking[repo.url.trim()] ?? false}
+                          transfer={
+                            workflowTransfer?.repo_url === repo.url.trim() ? workflowTransfer : null
+                          }
+                          transferRunning={workflowTransfer?.state === "running"}
+                          settingsDirty={settingsDirty}
+                          busy={busy}
+                          runtimeAvailable={runtimeAvailable}
+                          repoConfigured={repo.url.trim() !== ""}
+                          onRefresh={() => onRefreshWorkflow(repo.url)}
+                          onTransfer={() => onTransferWorkflow(repo.url)}
+                        />
+                        <SkillsBlock
+                          status={skillsStatuses[repo.url.trim()] ?? null}
+                          checking={skillsChecking[repo.url.trim()] ?? false}
+                          manuallyInstalled={repo.skills_marked_installed}
+                          install={
+                            skillsInstall?.repo_url === repo.url.trim() ? skillsInstall : null
+                          }
+                          installRunning={skillsInstall?.state === "running"}
+                          busy={busy}
+                          runtimeAvailable={runtimeAvailable}
+                          repoConfigured={repo.url.trim() !== ""}
+                          onRefresh={() => onRefreshSkills(repo.url)}
+                          onInstall={() => onInstallSkills(repo.url)}
+                          onMarkInstalled={() =>
+                            updateRepo(index, { skills_marked_installed: true })
+                          }
+                          onUseAutomaticCheck={() => {
+                            updateRepo(index, { skills_marked_installed: false });
+                            onRefreshSkills(repo.url);
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </fieldset>
+                );
+              })}
+              <button
+                type="button"
+                className="self-start"
+                disabled={!runtimeAvailable}
+                onClick={addRepo}
               >
-                {trackerTest.message}
-              </small>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="settings-section">
-          <h3>Agent</h3>
-          {/* Not a <label>: label activation would forward option clicks back
-              to the trigger button and reopen the popup right after selecting. */}
-          <div className="field-group">
-            Backend
-            <BackendSelect
-              value={settings.agent_backend}
-              disabled={!runtimeAvailable}
-              onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
-            />
-            {validation ? (
-              <AgentCliStatus backend={settings.agent_backend} validation={validation} />
-            ) : null}
-          </div>
-          <label>
-            Launch command
-            <input
-              {...literalInputProps}
-              className="mono-input"
-              value={
-                settings.agent_backend === "codex"
-                  ? (settings.codex_command ?? "")
-                  : settings.agent_backend === "claude"
-                    ? (settings.claude_command ?? "")
-                    : settings.agent_backend === "cursor"
-                      ? (settings.cursor_command ?? "")
-                      : (settings.opencode_command ?? "")
-              }
-              disabled={!runtimeAvailable}
-              onChange={(e) => {
-                const value = nullable(e.currentTarget.value);
-                if (settings.agent_backend === "codex") {
-                  setSettings({ ...settings, codex_command: value });
-                } else if (settings.agent_backend === "claude") {
-                  setSettings({ ...settings, claude_command: value });
-                } else if (settings.agent_backend === "cursor") {
-                  setSettings({ ...settings, cursor_command: value });
-                } else {
-                  setSettings({ ...settings, opencode_command: value });
-                }
-              }}
-              placeholder={settings.agent_backend === "cursor" ? "agent" : settings.agent_backend}
-            />
-            <small className="hint">
-              Optional. How the agent is launched — e.g. a wrapper like{" "}
-              <code className="command-example">{`mycode --agent ${settings.agent_backend}`}</code>.
-              Leave blank to run <code>{settings.agent_backend}</code> directly.
-            </small>
-          </label>
-          <label htmlFor="settings-turn-timeout">
-            Turn timeout (seconds)
-            <SettingsNumberInput
-              id="settings-turn-timeout"
-              min={0}
-              minValue={0}
-              step="any"
-              value={settings.turn_timeout_ms / 1000}
-              disabled={!runtimeAvailable}
-              onValidChange={(n) =>
-                setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) })
-              }
-            />
-            <small className="hint">Max time for one agent turn. 3600 = 1 hour.</small>
-          </label>
-          <label htmlFor="settings-session-environment">
-            Session environment
-            <EnvInput
-              id="settings-session-environment"
-              value={settings.session_env}
-              disabled={!runtimeAvailable}
-              onChange={(next) => setSettings({ ...settings, session_env: next })}
-            />
-            <small className="hint">
-              Optional. One <code>KEY=value</code> per line, injected into the agent process (e.g.{" "}
-              <code>CURSOR_API_KEY</code> for Cursor). Values are saved in settings.
-            </small>
-          </label>
-          {settings.agent_backend === "codex" ? (
-            <>
+                Add repository
+              </button>
               <label>
-                Approval policy
-                <select
-                  value={settings.codex_approval_policy}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      codex_approval_policy: e.currentTarget
-                        .value as AppSettings["codex_approval_policy"],
-                    })
-                  }
-                >
-                  <option value="never">Never (unattended)</option>
-                  <option value="on-request">On request</option>
-                  <option value="on-failure">On failure</option>
-                  <option value="always">Always</option>
-                </select>
-                <small className="hint">
-                  When Codex pauses for approval. Runs are unattended — keep <code>Never</code>.
-                </small>
-              </label>
-              <label>
-                Thread sandbox
-                <select
-                  value={settings.codex_thread_sandbox}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      codex_thread_sandbox: e.currentTarget
-                        .value as AppSettings["codex_thread_sandbox"],
-                    })
-                  }
-                >
-                  <option value="workspace-write">Workspace write</option>
-                  <option value="read-only">Read only</option>
-                  <option value="none">None</option>
-                </select>
-              </label>
-              <label>
-                Turn sandbox policy
-                <select
-                  value={settings.codex_turn_sandbox_policy}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      codex_turn_sandbox_policy: e.currentTarget
-                        .value as AppSettings["codex_turn_sandbox_policy"],
-                    })
-                  }
-                >
-                  <option value="inherit">Inherit</option>
-                  <option value="workspace-write">Workspace write</option>
-                  <option value="read-only">Read only</option>
-                  <option value="danger-full-access">Danger: full access</option>
-                </select>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.codex_network_access}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, codex_network_access: e.currentTarget.checked })
-                  }
-                />
-                Network access
-                <small className="hint">
-                  Runs push branches and call GitHub/Linear — keep this on.
-                </small>
-              </label>
-            </>
-          ) : settings.agent_backend === "claude" ? (
-            <>
-              <label>
-                Permission mode
-                <select
-                  value={settings.claude_permission_mode}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      claude_permission_mode: e.currentTarget
-                        .value as AppSettings["claude_permission_mode"],
-                    })
-                  }
-                >
-                  <option value="auto">Auto</option>
-                  <option value="acceptEdits">Accept edits</option>
-                  <option value="default">Default</option>
-                  <option value="dontAsk">Don't ask</option>
-                  <option value="bypassPermissions">Bypass permissions</option>
-                  <option value="plan">Plan</option>
-                </select>
-                <small className="hint">
-                  How Claude Code handles tool permissions during unattended runs.
-                </small>
-              </label>
-              <label htmlFor="settings-claude-allowed-tools">
-                Allowed tools
-                <ListInput
-                  id="settings-claude-allowed-tools"
-                  value={settings.claude_allowed_tools}
-                  disabled={!runtimeAvailable}
-                  separator="newline"
-                  rows={8}
-                  placeholder={"Bash(gh *)\nBash(git status*)"}
-                  onChange={(next) => setSettings({ ...settings, claude_allowed_tools: next })}
-                />
-                <small className="hint">
-                  One rule per line. The target repo's <code>.claude/settings.json</code> can add
-                  repo-specific extras on top.
-                </small>
-              </label>
-              <label htmlFor="settings-claude-disallowed-tools">
-                Disallowed tools
-                <ListInput
-                  id="settings-claude-disallowed-tools"
-                  value={settings.claude_disallowed_tools}
-                  disabled={!runtimeAvailable}
-                  separator="newline"
-                  rows={3}
-                  onChange={(next) => setSettings({ ...settings, claude_disallowed_tools: next })}
-                />
-                <small className="hint">
-                  One rule per line. Takes precedence over allowed tools.
-                </small>
-              </label>
-              <label htmlFor="settings-claude-additional-directories">
-                Additional directories
-                <ListInput
-                  id="settings-claude-additional-directories"
-                  value={settings.claude_add_dirs}
-                  disabled={!runtimeAvailable}
-                  separator="newline"
-                  rows={2}
-                  onChange={(next) => setSettings({ ...settings, claude_add_dirs: next })}
-                />
-                <small className="hint">
-                  One path per line, made available to the agent beyond the workspace.
-                </small>
-              </label>
-            </>
-          ) : settings.agent_backend === "cursor" ? (
-            <>
-              <label>
-                Mode
-                <select
-                  value={settings.cursor_mode}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cursor_mode: e.currentTarget.value as AppSettings["cursor_mode"],
-                    })
-                  }
-                >
-                  <option value="agent">Agent</option>
-                  <option value="plan">Plan (read-only design)</option>
-                  <option value="ask">Ask (read-only exploration)</option>
-                </select>
-                <small className="hint">
-                  Agent mode can edit files. Plan and Ask are read-only — use Agent for issue runs.
-                </small>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.cursor_force}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, cursor_force: e.currentTarget.checked })
-                  }
-                />
-                Force auto-approve
-                <small className="hint">
-                  Maps to <code>--force</code>. Required for unattended runs.
-                </small>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.cursor_trust}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, cursor_trust: e.currentTarget.checked })
-                  }
-                />
-                Trust workspace
-                <small className="hint">
-                  Maps to <code>--trust</code>. Skips workspace trust prompts in headless mode.
-                </small>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.cursor_approve_mcps}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, cursor_approve_mcps: e.currentTarget.checked })
-                  }
-                />
-                Approve MCPs
-                <small className="hint">
-                  Maps to <code>--approve-mcps</code>. Auto-approves MCP servers for this run.
-                </small>
-              </label>
-              <label>
-                Sandbox
-                <select
-                  value={settings.cursor_sandbox}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cursor_sandbox: e.currentTarget.value as AppSettings["cursor_sandbox"],
-                    })
-                  }
-                >
-                  <option value="enabled">Enabled</option>
-                  <option value="disabled">Disabled</option>
-                </select>
-              </label>
-              <label>
-                Model
+                Workspace root
                 <input
                   {...literalInputProps}
-                  value={settings.cursor_model ?? ""}
+                  value={settings.workspace_root ?? ""}
                   disabled={!runtimeAvailable}
-                  placeholder="Optional, e.g. composer-2.5"
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      cursor_model: nullable(e.currentTarget.value),
-                    })
+                    setSettings({ ...settings, workspace_root: nullable(e.currentTarget.value) })
                   }
-                />
-                <small className="hint">Leave blank for the CLI default.</small>
-              </label>
-            </>
-          ) : (
-            <>
-              <label>
-                Model
-                <input
-                  {...literalInputProps}
-                  value={settings.opencode_model ?? ""}
-                  disabled={!runtimeAvailable}
-                  placeholder="Optional, e.g. anthropic/claude-sonnet-4-5"
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      opencode_model: nullable(e.currentTarget.value),
-                    })
-                  }
+                  placeholder="App data directory"
                 />
                 <small className="hint">
-                  <code>provider/model</code> passed to <code>--model</code>. Leave blank for the
-                  CLI default.
+                  Where per-run workspaces are created (one folder per repo, then per issue). Leave
+                  blank to use the app data directory.
                 </small>
               </label>
-              <label>
-                Agent
-                <input
-                  {...literalInputProps}
-                  value={settings.opencode_agent ?? ""}
-                  disabled={!runtimeAvailable}
-                  placeholder="Optional, e.g. build"
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      opencode_agent: nullable(e.currentTarget.value),
-                    })
-                  }
-                />
-                <small className="hint">
-                  Primary agent passed to <code>--agent</code>. Leave blank for the default.
-                </small>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={settings.opencode_skip_permissions}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      opencode_skip_permissions: e.currentTarget.checked,
-                    })
-                  }
-                />
-                Skip permissions
-                <small className="hint">
-                  Maps to <code>--dangerously-skip-permissions</code>. Required for unattended runs
-                  — without it opencode auto-rejects every tool call.
-                </small>
-              </label>
-            </>
-          )}
-        </section>
-
-        <section className="settings-section">
-          <h3>Worker</h3>
-          <label htmlFor="settings-polling-interval">
-            Polling interval (seconds)
-            <SettingsNumberInput
-              id="settings-polling-interval"
-              min={0}
-              minValue={0}
-              step="any"
-              value={settings.polling_interval_ms / 1000}
-              disabled={!runtimeAvailable}
-              onValidChange={(n) =>
-                setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) })
-              }
-            />
-            <small className="hint">
-              How often Linear is polled for issues. Applies after Save; the live worker wakes and
-              uses the new interval on its next loop.
-            </small>
-          </label>
-          <label htmlFor="settings-max-concurrent-agents">
-            Max concurrent agents
-            <SettingsNumberInput
-              id="settings-max-concurrent-agents"
-              min={0}
-              minValue={0}
-              value={settings.max_concurrent_agents}
-              disabled={!runtimeAvailable}
-              onValidChange={(n) =>
-                setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) })
-              }
-            />
-            <small className="hint">
-              Issues worked on in parallel. Applies to future dispatch decisions; already-running
-              agents continue.
-            </small>
-          </label>
-          <label htmlFor="settings-max-retry-backoff">
-            Max retry backoff (seconds)
-            <SettingsNumberInput
-              id="settings-max-retry-backoff"
-              min={0}
-              minValue={0}
-              step="any"
-              value={settings.max_retry_backoff_ms / 1000}
-              disabled={!runtimeAvailable}
-              onValidChange={(n) =>
-                setSettings({ ...settings, max_retry_backoff_ms: Math.round(n * 1000) })
-              }
-            />
-            <small className="hint">
-              Cap on the delay between retries of a failed run. 300 = 5 min.
-            </small>
-          </label>
-          <label htmlFor="settings-hook-timeout">
-            Hook timeout (seconds)
-            <SettingsNumberInput
-              id="settings-hook-timeout"
-              min={0}
-              minValue={0}
-              step="any"
-              value={settings.hook_timeout_ms / 1000}
-              disabled={!runtimeAvailable}
-              onValidChange={(n) =>
-                setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) })
-              }
-            />
-            <small className="hint">
-              Max time for each hook script. Applies to hooks that start after Save; a hook already
-              running keeps its current timeout.
-            </small>
-          </label>
-          <details className="hooks-details">
-            <summary>Hooks (advanced)</summary>
-            <small className="hint">
-              Shell scripts run at workspace lifecycle points. They receive <code>$REPO_URL</code>,{" "}
-              <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>,{" "}
-              <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as <code>$SYMPHONY_HOOK</code>.{" "}
-              <code>after_create</code> only runs for fresh workspaces, so existing ready workspaces
-              are not reinitialized by saving hook changes.
-            </small>
-            <label>
-              After create
-              <textarea
-                {...literalInputProps}
-                className="mono-input"
-                rows={4}
-                value={settings.hook_after_create ?? ""}
-                disabled={!runtimeAvailable}
-                onChange={(e) =>
-                  setSettings({ ...settings, hook_after_create: nullable(e.currentTarget.value) })
-                }
-              />
               <small className="hint">
-                Runs once per fresh workspace — clone, branch, install. Changes affect the next new
-                workspace, not an existing ready workspace.
+                Agent skills are procedural guides (symphony-workpad, symphony-commit,
+                symphony-push, …) that Symphony agents follow. Each run gets bundled fallback copies
+                locally when a repo does not ship them. Each card above shows whether its repo has
+                checked-in skills; installing starts an agent session that opens a PR adding them
+                under <code>.agents/skills/</code>, with validation commands adapted to that repo's
+                toolchain.
               </small>
-            </label>
-            <label>
-              Before run
-              <textarea
-                {...literalInputProps}
-                className="mono-input"
-                rows={2}
-                value={settings.hook_before_run ?? ""}
-                disabled={!runtimeAvailable}
-                onChange={(e) =>
-                  setSettings({ ...settings, hook_before_run: nullable(e.currentTarget.value) })
-                }
-              />
-            </label>
-            <label>
-              After run
-              <textarea
-                {...literalInputProps}
-                className="mono-input"
-                rows={2}
-                value={settings.hook_after_run ?? ""}
-                disabled={!runtimeAvailable}
-                onChange={(e) =>
-                  setSettings({ ...settings, hook_after_run: nullable(e.currentTarget.value) })
-                }
-              />
-            </label>
-            <label>
-              Before remove
-              <textarea
-                {...literalInputProps}
-                className="mono-input"
-                rows={2}
-                value={settings.hook_before_remove ?? ""}
-                disabled={!runtimeAvailable}
-                onChange={(e) =>
-                  setSettings({ ...settings, hook_before_remove: nullable(e.currentTarget.value) })
-                }
-              />
-            </label>
-          </details>
-        </section>
-      </div>
+            </section>
+          </div>
 
-      <Panel title="Default workflow">
-        <PromptEditor
-          id="settings-prompt-template"
-          value={settings.prompt_template}
-          seedRevision={promptSeedRevision}
-          disabled={!runtimeAvailable}
-          onChange={onPromptChange}
-          aria-invalid={
-            validationState.status === "invalid" &&
-            validationFieldId(validationState.result) === "settings-prompt-template"
-          }
-          aria-describedby={
-            validationState.status === "invalid" &&
-            validationFieldId(validationState.result) === "settings-prompt-template"
-              ? "settings-validation-summary"
-              : undefined
-          }
-        />
-        <div className="section-row">
-          <button type="button" disabled={busy || !runtimeAvailable} onClick={onResetPrompt}>
-            Reset to default
-          </button>
-          <small className="hint">
-            Replaces the editor with the bundled default. Repositories with a valid
-            SYMPHONY-WORKFLOW.md override it; nothing changes until you save.
-          </small>
+          <div
+            className="settings-stage settings-stage-runtime"
+            id="settings-runtime"
+            tabIndex={-1}
+          >
+            <section className="settings-section">
+              <h3>Agent</h3>
+              {/* Not a <label>: label activation would forward option clicks back
+              to the trigger button and reopen the popup right after selecting. */}
+              <div className="field-group">
+                Backend
+                <BackendSelect
+                  value={settings.agent_backend}
+                  disabled={!runtimeAvailable}
+                  onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
+                />
+                {validation ? (
+                  <AgentCliStatus backend={settings.agent_backend} validation={validation} />
+                ) : null}
+              </div>
+              <label>
+                Launch command
+                <input
+                  {...literalInputProps}
+                  className="mono-input"
+                  value={
+                    settings.agent_backend === "codex"
+                      ? (settings.codex_command ?? "")
+                      : settings.agent_backend === "claude"
+                        ? (settings.claude_command ?? "")
+                        : settings.agent_backend === "cursor"
+                          ? (settings.cursor_command ?? "")
+                          : (settings.opencode_command ?? "")
+                  }
+                  disabled={!runtimeAvailable}
+                  onChange={(e) => {
+                    const value = nullable(e.currentTarget.value);
+                    if (settings.agent_backend === "codex") {
+                      setSettings({ ...settings, codex_command: value });
+                    } else if (settings.agent_backend === "claude") {
+                      setSettings({ ...settings, claude_command: value });
+                    } else if (settings.agent_backend === "cursor") {
+                      setSettings({ ...settings, cursor_command: value });
+                    } else {
+                      setSettings({ ...settings, opencode_command: value });
+                    }
+                  }}
+                  placeholder={
+                    settings.agent_backend === "cursor" ? "agent" : settings.agent_backend
+                  }
+                />
+                <small className="hint">
+                  Optional. How the agent is launched — e.g. a wrapper like{" "}
+                  <code className="command-example">{`mycode --agent ${settings.agent_backend}`}</code>
+                  . Leave blank to run <code>{settings.agent_backend}</code> directly.
+                </small>
+              </label>
+              <label htmlFor="settings-turn-timeout">
+                Turn timeout (seconds)
+                <SettingsNumberInput
+                  id="settings-turn-timeout"
+                  min={0}
+                  minValue={0}
+                  step="any"
+                  value={settings.turn_timeout_ms / 1000}
+                  disabled={!runtimeAvailable}
+                  onValidChange={(n) =>
+                    setSettings({ ...settings, turn_timeout_ms: Math.round(n * 1000) })
+                  }
+                />
+                <small className="hint">Max time for one agent turn. 3600 = 1 hour.</small>
+              </label>
+              <label htmlFor="settings-session-environment">
+                Session environment
+                <EnvInput
+                  id="settings-session-environment"
+                  value={settings.session_env}
+                  disabled={!runtimeAvailable}
+                  onChange={(next) => setSettings({ ...settings, session_env: next })}
+                />
+                <small className="hint">
+                  Optional. One <code>KEY=value</code> per line, injected into the agent process
+                  (e.g. <code>CURSOR_API_KEY</code> for Cursor). Values are saved in settings.
+                </small>
+              </label>
+              {settings.agent_backend === "codex" ? (
+                <>
+                  <label>
+                    Approval policy
+                    <select
+                      value={settings.codex_approval_policy}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          codex_approval_policy: e.currentTarget
+                            .value as AppSettings["codex_approval_policy"],
+                        })
+                      }
+                    >
+                      <option value="never">Never (unattended)</option>
+                      <option value="on-request">On request</option>
+                      <option value="on-failure">On failure</option>
+                      <option value="always">Always</option>
+                    </select>
+                    <small className="hint">
+                      When Codex pauses for approval. Runs are unattended — keep <code>Never</code>.
+                    </small>
+                  </label>
+                  <label>
+                    Thread sandbox
+                    <select
+                      value={settings.codex_thread_sandbox}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          codex_thread_sandbox: e.currentTarget
+                            .value as AppSettings["codex_thread_sandbox"],
+                        })
+                      }
+                    >
+                      <option value="workspace-write">Workspace write</option>
+                      <option value="read-only">Read only</option>
+                      <option value="none">None</option>
+                    </select>
+                  </label>
+                  <label>
+                    Turn sandbox policy
+                    <select
+                      value={settings.codex_turn_sandbox_policy}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          codex_turn_sandbox_policy: e.currentTarget
+                            .value as AppSettings["codex_turn_sandbox_policy"],
+                        })
+                      }
+                    >
+                      <option value="inherit">Inherit</option>
+                      <option value="workspace-write">Workspace write</option>
+                      <option value="read-only">Read only</option>
+                      <option value="danger-full-access">Danger: full access</option>
+                    </select>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.codex_network_access}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({ ...settings, codex_network_access: e.currentTarget.checked })
+                      }
+                    />
+                    Network access
+                    <small className="hint">
+                      Runs push branches and call GitHub/Linear — keep this on.
+                    </small>
+                  </label>
+                </>
+              ) : settings.agent_backend === "claude" ? (
+                <>
+                  <label>
+                    Permission mode
+                    <select
+                      value={settings.claude_permission_mode}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          claude_permission_mode: e.currentTarget
+                            .value as AppSettings["claude_permission_mode"],
+                        })
+                      }
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="acceptEdits">Accept edits</option>
+                      <option value="default">Default</option>
+                      <option value="dontAsk">Don't ask</option>
+                      <option value="bypassPermissions">Bypass permissions</option>
+                      <option value="plan">Plan</option>
+                    </select>
+                    <small className="hint">
+                      How Claude Code handles tool permissions during unattended runs.
+                    </small>
+                  </label>
+                  <label htmlFor="settings-claude-allowed-tools">
+                    Allowed tools
+                    <ListInput
+                      id="settings-claude-allowed-tools"
+                      value={settings.claude_allowed_tools}
+                      disabled={!runtimeAvailable}
+                      separator="newline"
+                      rows={8}
+                      placeholder={"Bash(gh *)\nBash(git status*)"}
+                      onChange={(next) => setSettings({ ...settings, claude_allowed_tools: next })}
+                    />
+                    <small className="hint">
+                      One rule per line. The target repo's <code>.claude/settings.json</code> can
+                      add repo-specific extras on top.
+                    </small>
+                  </label>
+                  <label htmlFor="settings-claude-disallowed-tools">
+                    Disallowed tools
+                    <ListInput
+                      id="settings-claude-disallowed-tools"
+                      value={settings.claude_disallowed_tools}
+                      disabled={!runtimeAvailable}
+                      separator="newline"
+                      rows={3}
+                      onChange={(next) =>
+                        setSettings({ ...settings, claude_disallowed_tools: next })
+                      }
+                    />
+                    <small className="hint">
+                      One rule per line. Takes precedence over allowed tools.
+                    </small>
+                  </label>
+                  <label htmlFor="settings-claude-additional-directories">
+                    Additional directories
+                    <ListInput
+                      id="settings-claude-additional-directories"
+                      value={settings.claude_add_dirs}
+                      disabled={!runtimeAvailable}
+                      separator="newline"
+                      rows={2}
+                      onChange={(next) => setSettings({ ...settings, claude_add_dirs: next })}
+                    />
+                    <small className="hint">
+                      One path per line, made available to the agent beyond the workspace.
+                    </small>
+                  </label>
+                </>
+              ) : settings.agent_backend === "cursor" ? (
+                <>
+                  <label>
+                    Mode
+                    <select
+                      value={settings.cursor_mode}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          cursor_mode: e.currentTarget.value as AppSettings["cursor_mode"],
+                        })
+                      }
+                    >
+                      <option value="agent">Agent</option>
+                      <option value="plan">Plan (read-only design)</option>
+                      <option value="ask">Ask (read-only exploration)</option>
+                    </select>
+                    <small className="hint">
+                      Agent mode can edit files. Plan and Ask are read-only — use Agent for issue
+                      runs.
+                    </small>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.cursor_force}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({ ...settings, cursor_force: e.currentTarget.checked })
+                      }
+                    />
+                    Force auto-approve
+                    <small className="hint">
+                      Maps to <code>--force</code>. Required for unattended runs.
+                    </small>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.cursor_trust}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({ ...settings, cursor_trust: e.currentTarget.checked })
+                      }
+                    />
+                    Trust workspace
+                    <small className="hint">
+                      Maps to <code>--trust</code>. Skips workspace trust prompts in headless mode.
+                    </small>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.cursor_approve_mcps}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({ ...settings, cursor_approve_mcps: e.currentTarget.checked })
+                      }
+                    />
+                    Approve MCPs
+                    <small className="hint">
+                      Maps to <code>--approve-mcps</code>. Auto-approves MCP servers for this run.
+                    </small>
+                  </label>
+                  <label>
+                    Sandbox
+                    <select
+                      value={settings.cursor_sandbox}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          cursor_sandbox: e.currentTarget.value as AppSettings["cursor_sandbox"],
+                        })
+                      }
+                    >
+                      <option value="enabled">Enabled</option>
+                      <option value="disabled">Disabled</option>
+                    </select>
+                  </label>
+                  <label>
+                    Model
+                    <input
+                      {...literalInputProps}
+                      value={settings.cursor_model ?? ""}
+                      disabled={!runtimeAvailable}
+                      placeholder="Optional, e.g. composer-2.5"
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          cursor_model: nullable(e.currentTarget.value),
+                        })
+                      }
+                    />
+                    <small className="hint">Leave blank for the CLI default.</small>
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label>
+                    Model
+                    <input
+                      {...literalInputProps}
+                      value={settings.opencode_model ?? ""}
+                      disabled={!runtimeAvailable}
+                      placeholder="Optional, e.g. anthropic/claude-sonnet-4-5"
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          opencode_model: nullable(e.currentTarget.value),
+                        })
+                      }
+                    />
+                    <small className="hint">
+                      <code>provider/model</code> passed to <code>--model</code>. Leave blank for
+                      the CLI default.
+                    </small>
+                  </label>
+                  <label>
+                    Agent
+                    <input
+                      {...literalInputProps}
+                      value={settings.opencode_agent ?? ""}
+                      disabled={!runtimeAvailable}
+                      placeholder="Optional, e.g. build"
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          opencode_agent: nullable(e.currentTarget.value),
+                        })
+                      }
+                    />
+                    <small className="hint">
+                      Primary agent passed to <code>--agent</code>. Leave blank for the default.
+                    </small>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={settings.opencode_skip_permissions}
+                      disabled={!runtimeAvailable}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          opencode_skip_permissions: e.currentTarget.checked,
+                        })
+                      }
+                    />
+                    Skip permissions
+                    <small className="hint">
+                      Maps to <code>--dangerously-skip-permissions</code>. Required for unattended
+                      runs — without it opencode auto-rejects every tool call.
+                    </small>
+                  </label>
+                </>
+              )}
+            </section>
+
+            <section className="settings-section">
+              <h3>Worker</h3>
+              <label htmlFor="settings-polling-interval">
+                Polling interval (seconds)
+                <SettingsNumberInput
+                  id="settings-polling-interval"
+                  min={0}
+                  minValue={0}
+                  step="any"
+                  value={settings.polling_interval_ms / 1000}
+                  disabled={!runtimeAvailable}
+                  onValidChange={(n) =>
+                    setSettings({ ...settings, polling_interval_ms: Math.round(n * 1000) })
+                  }
+                />
+                <small className="hint">
+                  How often Linear is polled for issues. Applies after Save; the live worker wakes
+                  and uses the new interval on its next loop.
+                </small>
+              </label>
+              <label htmlFor="settings-max-concurrent-agents">
+                Max concurrent agents
+                <SettingsNumberInput
+                  id="settings-max-concurrent-agents"
+                  min={0}
+                  minValue={0}
+                  value={settings.max_concurrent_agents}
+                  disabled={!runtimeAvailable}
+                  onValidChange={(n) =>
+                    setSettings({ ...settings, max_concurrent_agents: Math.trunc(n) })
+                  }
+                />
+                <small className="hint">
+                  Issues worked on in parallel. Applies to future dispatch decisions;
+                  already-running agents continue.
+                </small>
+              </label>
+              <label htmlFor="settings-max-retry-backoff">
+                Max retry backoff (seconds)
+                <SettingsNumberInput
+                  id="settings-max-retry-backoff"
+                  min={0}
+                  minValue={0}
+                  step="any"
+                  value={settings.max_retry_backoff_ms / 1000}
+                  disabled={!runtimeAvailable}
+                  onValidChange={(n) =>
+                    setSettings({ ...settings, max_retry_backoff_ms: Math.round(n * 1000) })
+                  }
+                />
+                <small className="hint">
+                  Cap on the delay between retries of a failed run. 300 = 5 min.
+                </small>
+              </label>
+              <label htmlFor="settings-hook-timeout">
+                Hook timeout (seconds)
+                <SettingsNumberInput
+                  id="settings-hook-timeout"
+                  min={0}
+                  minValue={0}
+                  step="any"
+                  value={settings.hook_timeout_ms / 1000}
+                  disabled={!runtimeAvailable}
+                  onValidChange={(n) =>
+                    setSettings({ ...settings, hook_timeout_ms: Math.round(n * 1000) })
+                  }
+                />
+                <small className="hint">
+                  Max time for each hook script. Applies to hooks that start after Save; a hook
+                  already running keeps its current timeout.
+                </small>
+              </label>
+              <details className="hooks-details">
+                <summary>Hooks (advanced)</summary>
+                <small className="hint">
+                  Shell scripts run at workspace lifecycle points. They receive{" "}
+                  <code>$REPO_URL</code>, <code>$ISSUE_IDENTIFIER</code>, <code>$ISSUE_BRANCH</code>
+                  , <code>$SYMPHONY_INSTALL_CMD</code>, and the hook name as{" "}
+                  <code>$SYMPHONY_HOOK</code>. <code>after_create</code> only runs for fresh
+                  workspaces, so existing ready workspaces are not reinitialized by saving hook
+                  changes.
+                </small>
+                <label>
+                  After create
+                  <textarea
+                    {...literalInputProps}
+                    className="mono-input"
+                    rows={4}
+                    value={settings.hook_after_create ?? ""}
+                    disabled={!runtimeAvailable}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        hook_after_create: nullable(e.currentTarget.value),
+                      })
+                    }
+                  />
+                  <small className="hint">
+                    Runs once per fresh workspace — clone, branch, install. Changes affect the next
+                    new workspace, not an existing ready workspace.
+                  </small>
+                </label>
+                <label>
+                  Before run
+                  <textarea
+                    {...literalInputProps}
+                    className="mono-input"
+                    rows={2}
+                    value={settings.hook_before_run ?? ""}
+                    disabled={!runtimeAvailable}
+                    onChange={(e) =>
+                      setSettings({ ...settings, hook_before_run: nullable(e.currentTarget.value) })
+                    }
+                  />
+                </label>
+                <label>
+                  After run
+                  <textarea
+                    {...literalInputProps}
+                    className="mono-input"
+                    rows={2}
+                    value={settings.hook_after_run ?? ""}
+                    disabled={!runtimeAvailable}
+                    onChange={(e) =>
+                      setSettings({ ...settings, hook_after_run: nullable(e.currentTarget.value) })
+                    }
+                  />
+                </label>
+                <label>
+                  Before remove
+                  <textarea
+                    {...literalInputProps}
+                    className="mono-input"
+                    rows={2}
+                    value={settings.hook_before_remove ?? ""}
+                    disabled={!runtimeAvailable}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        hook_before_remove: nullable(e.currentTarget.value),
+                      })
+                    }
+                  />
+                </label>
+              </details>
+            </section>
+          </div>
+
+          <div
+            className="settings-stage settings-stage-workflow"
+            id="settings-workflow"
+            tabIndex={-1}
+          >
+            <Panel title="Default workflow">
+              <PromptEditor
+                id="settings-prompt-template"
+                value={settings.prompt_template}
+                seedRevision={promptSeedRevision}
+                disabled={!runtimeAvailable}
+                onChange={onPromptChange}
+                aria-invalid={
+                  validationState.status === "invalid" &&
+                  validationFieldId(validationState.result) === "settings-prompt-template"
+                }
+                aria-describedby={
+                  validationState.status === "invalid" &&
+                  validationFieldId(validationState.result) === "settings-prompt-template"
+                    ? "settings-validation-summary"
+                    : undefined
+                }
+              />
+              <div className="section-row">
+                <button type="button" disabled={busy || !runtimeAvailable} onClick={onResetPrompt}>
+                  Reset to default
+                </button>
+                <small className="hint">
+                  Replaces the editor with the bundled default. Repositories with a valid
+                  SYMPHONY-WORKFLOW.md override it; nothing changes until you save.
+                </small>
+              </div>
+            </Panel>
+          </div>
         </div>
-      </Panel>
+      </div>
 
       {validation && runtimeAvailable ? (
         <div className="settings-footer">
