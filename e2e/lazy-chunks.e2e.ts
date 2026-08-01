@@ -51,43 +51,43 @@ test("walks preview loading and every lazy view", async ({ page }, testInfo) => 
 
   const graphChunkPattern = /\/assets\/DependencyGraphPanel-[^/]+\.js$/;
   let graphRequestCount = 0;
+  let releaseGraph!: () => void;
+  let graphRequested!: () => void;
+  const graphGate = new Promise<void>((resolve) => (releaseGraph = resolve));
+  const graphRequest = new Promise<void>((resolve) => (graphRequested = resolve));
+  await page.route(graphChunkPattern, async (route) => {
+    graphRequested();
+    await graphGate;
+    await route.continue();
+  });
+  page.on("request", (request) => {
+    if (graphChunkPattern.test(request.url())) graphRequestCount += 1;
+  });
   await test.step("preview-route:issues", async () => {
     const issuesButton = page.getByRole("button", { name: "Issues" });
     const issuesResponse = page.waitForResponse(/\/assets\/IssuesView-[^/]+\.js$/);
     await issuesButton.focus();
     await issuesResponse;
-    await page.getByRole("button", { name: "Issues" }).click();
-    await expect(page.getByRole("heading", { name: "Issues", exact: true })).toBeVisible();
-    page.on("request", (request) => {
-      if (graphChunkPattern.test(request.url())) graphRequestCount += 1;
-    });
     expect(graphRequestCount).toBe(0);
+    await page.getByRole("button", { name: "Issues" }).click();
+    await graphRequest;
+    await expect(page.getByRole("heading", { name: "Issues", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Dependencies" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-busy", "true");
+    expect(graphRequestCount).toBe(1);
     await capture(page, testInfo, "05-issues-preloaded-by-focus");
   });
 
   await test.step("preview-route:dependencies", async () => {
-    const dependenciesButton = page.getByRole("tab", { name: "Dependencies" });
-    let releaseGraph!: () => void;
-    let graphRequested!: () => void;
-    const graphGate = new Promise<void>((resolve) => (releaseGraph = resolve));
-    const graphRequest = new Promise<void>((resolve) => (graphRequested = resolve));
-    await page.route(graphChunkPattern, async (route) => {
-      graphRequested();
-      await graphGate;
-      await route.continue();
-    });
-    await dependenciesButton.focus();
-    await graphRequest;
-    await dependenciesButton.hover();
-    expect(graphRequestCount).toBe(1);
+    await page.getByRole("tab", { name: "List" }).click();
+    await expect(page.getByRole("heading", { name: "Watched issues" })).toBeVisible();
     await page.getByRole("tab", { name: "Dependencies" }).click();
     await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-busy", "true");
     await capture(page, testInfo, "06-dependency-graph-loading");
 
-    await page.getByRole("tab", { name: "List" }).click();
-    await expect(page.getByRole("heading", { name: "Watched issues" })).toBeVisible();
-    await dependenciesButton.click();
-    await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-busy", "true");
     releaseGraph();
     await expect(
       page.getByRole("group", { name: /Dependency graph with \d+ nodes/ }),
