@@ -236,7 +236,9 @@ pub struct WorkerHeartbeatRow {
 pub struct Overview {
     pub active_runs: Vec<RunWithIssueRow>,
     pub retry_queue: Vec<RetryWithIssueRow>,
+    pub retry_count: i64,
     pub recent_failures: Vec<RunWithIssueRow>,
+    pub failure_count: i64,
     pub live_sessions: Vec<LiveSessionRow>,
     pub worker_heartbeat: Option<WorkerHeartbeatRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
@@ -1037,6 +1039,15 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
+        let (retry_count, failure_count): (i64, i64) = sqlx::query_as(
+            r#"
+            select
+              (select count(*) from retry_queue),
+              (select count(*) from runs where status in ('failure', 'timeout'))
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
         let recent_failures = self
             .runs_with_issue(
                 "where r.status in ('failure', 'timeout') order by r.ended_at desc",
@@ -1086,7 +1097,9 @@ impl Repository {
         Ok(Overview {
             active_runs,
             retry_queue,
+            retry_count,
             recent_failures,
+            failure_count,
             live_sessions,
             worker_heartbeat,
             rate_limits,
@@ -2232,6 +2245,51 @@ mod tests {
         assert_eq!(overview.active_runs.len(), 1);
         assert_eq!(overview.active_runs[0].id, run.id);
         assert_eq!(overview.active_runs[0].status, "pending");
+    }
+
+    #[tokio::test]
+    async fn overview_counts_all_failures_and_retries_beyond_preview_limits() {
+        let repo = repo().await;
+        let issues = (0..51)
+            .map(|index| Issue {
+                id: format!("lin-{index}"),
+                identifier: format!("SYM-{index}"),
+                ..issue()
+            })
+            .collect::<Vec<_>>();
+        repo.upsert_issues(&issues).await.unwrap();
+
+        for current_issue in &issues {
+            let run = repo
+                .try_reserve_run(&current_issue.id, 1, "/tmp/ws", Some("widgets"))
+                .await
+                .unwrap()
+                .unwrap();
+            repo.finish_run(
+                &run.id,
+                RunStatus::Failure,
+                Some("agent_failure"),
+                Some("failed"),
+            )
+            .await
+            .unwrap();
+            repo.schedule_retry(
+                &current_issue.id,
+                2,
+                "2099-01-01T00:00:00.000Z",
+                Some("agent_failure"),
+                Some("failed"),
+            )
+            .await
+            .unwrap();
+        }
+
+        let overview = repo.overview().await.unwrap();
+
+        assert_eq!(overview.failure_count, 51);
+        assert_eq!(overview.recent_failures.len(), 20);
+        assert_eq!(overview.retry_count, 51);
+        assert_eq!(overview.retry_queue.len(), 50);
     }
 
     #[tokio::test]

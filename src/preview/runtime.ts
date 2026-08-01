@@ -370,7 +370,9 @@ const previewOverview: Overview = {
       issue_title: "Agent skills installation UX",
     },
   ],
+  retry_count: 1,
   recent_failures: [previewFailedRun],
+  failure_count: 1,
   live_sessions: [
     {
       run_id: "preview-run-active",
