@@ -9,6 +9,8 @@
 
 .settings-form {
   display: block;
+  margin-inline: auto;
+  max-width: 1038px;
 }
 
 .settings-sidebar {
