@@ -81,6 +81,7 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             };
         }
     };
+    let process_group_id = child.id();
     let stderr = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             let mut bytes = Vec::new();
@@ -102,6 +103,11 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             HookExit::Cancelled
         }
     };
+    if matches!(&outcome, HookExit::Finished(_)) {
+        if let Some(process_group_id) = process_group_id {
+            cleanup_finished_hook_process_group(process_group_id).await;
+        }
+    }
     let stderr = collect_stderr(stderr).await;
 
     match outcome {
@@ -156,6 +162,34 @@ async fn terminate_hook(child: &mut tokio::process::Child) {
             let _ = child.kill().await;
         }
     }
+}
+
+/// A successful shell can leave background descendants behind (package-manager
+/// daemons and watch processes are common examples). The shell was launched as
+/// its own process group, so clean that group after the leader exits while
+/// preserving the leader's original hook result.
+#[cfg(unix)]
+async fn cleanup_finished_hook_process_group(process_group_id: u32) {
+    if !signal_hook_process_group(process_group_id, "TERM").await {
+        return;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    signal_hook_process_group(process_group_id, "KILL").await;
+}
+
+#[cfg(not(unix))]
+async fn cleanup_finished_hook_process_group(_process_group_id: u32) {}
+
+#[cfg(unix)]
+async fn signal_hook_process_group(process_group_id: u32, signal: &str) -> bool {
+    Command::new("/bin/kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{process_group_id}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(unix)]
@@ -338,5 +372,41 @@ wait
         assert_eq!(result.exit_code, -1);
         assert!(!result.timed_out);
         assert_eq!(result.stderr_tail.as_deref(), Some("hook cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_hook_cleans_up_background_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook_issue = issue();
+        let env = BTreeMap::new();
+        let stop = CancellationToken::new();
+
+        let result = run_hook(HookInvocation {
+            hook: HookName::AfterCreate,
+            script: r#"/bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+printf '%s' "$!" > "$WORKSPACE_PATH/background-pid"
+"#,
+            issue: &hook_issue,
+            workspace_path: temp.path(),
+            run_number: 1,
+            timeout_ms: 10_000,
+            env: &env,
+            cancel: &stop,
+        })
+        .await;
+
+        assert_eq!(result.exit_code, 0);
+        let pid = tokio::fs::read_to_string(temp.path().join("background-pid"))
+            .await
+            .unwrap();
+        let status = Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .unwrap();
+        assert!(!status.success(), "successful hook leaked child {pid}");
     }
 }

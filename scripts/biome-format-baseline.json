@@ -10,7 +10,6 @@
   "src/dashboardRefreshCoordinator.ts": "137e14c4bfd89794d5f07394f56ea0394398fbf9a225661d3dfde793a0e96844",
   "src/dashboardResourceState.test.ts": "9a7bd983caf812cb12341e9c57fc65c978949e42cbfb65982083c93d3851f2f2",
   "src/dashboardResourceState.ts": "109e7817034ce8ee610349944c5c46443c4a0bce23198d98fd415e00bc9c08d3",
-  "src/dashboardResources.test.ts": "9ce5925c79c44d3efffa2eb0b97e1de8e413dcc09e54a8c6562ce965b71e6ac5",
   "src/format.test.ts": "601887b887a72cf4fb65da9f43c9cc84dc86061ed02cad5e6ed6fe7c64eab18e",
   "src/format.ts": "611908f663ce41c8dcde6b558331e7bc05fd1a6bb00a9e81dc602df74e59a766",
   "src/pollController.ts": "01d3c84fe0d6214a9f9cde600619f66f1a222ba3759eed0351d4bf208ea2b15b",

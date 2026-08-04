@@ -200,6 +200,7 @@ const emptyOverview: Overview = {
   retry_count: 0,
   recent_failures: [],
   failure_count: 0,
+  workspace_cleanup_count: 0,
   live_sessions: [],
   worker_heartbeat: null,
   rate_limits: [],
@@ -2494,6 +2495,7 @@ function BootLoading({ preview }: { preview: boolean }) {
           <span />
           <span />
           <span />
+          <span />
         </div>
         <div className="boot-skeleton-panels">
           <span />
@@ -2576,7 +2578,7 @@ function OverviewView({
       <header className="page-header">
         <div>
           <h2>Overview</h2>
-          <p>Local worker state, retries, failures, and provider limits and usage.</p>
+          <p>Local worker state, retries, failures, cleanup, and provider limits and usage.</p>
         </div>
         <div className="kpis">
           <Kpi label="Active" value={overview.active_runs.length} />
@@ -2588,6 +2590,7 @@ function OverviewView({
             label={overview.failure_count === 1 ? "Failure" : "Failures"}
             value={overview.failure_count}
           />
+          <Kpi label="Cleanup" value={overview.workspace_cleanup_count} />
         </div>
       </header>
 

@@ -113,6 +113,10 @@ pub(crate) const MIGRATIONS: &[(&str, &str)] = &[
         "0008_repo_workflow_retro_targets",
         include_str!("migrations/0008_repo_workflow_retro_targets.sql"),
     ),
+    (
+        "0009_workspace_cleanup_queue",
+        include_str!("migrations/0009_workspace_cleanup_queue.sql"),
+    ),
 ];
 
 pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageError> {

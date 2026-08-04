@@ -47,7 +47,7 @@ clear crash-durability rationale.
 
 [`MIGRATIONS`](../crates/symphony-storage/src/lib.rs) is a manually maintained
 ordered slice. It pairs IDs with `include_str!` SQL files. The current sequence
-runs from `0001_init` through `0008_repo_workflow_retro_targets`.
+runs from `0001_init` through `0009_workspace_cleanup_queue`.
 
 Migration state is stored in:
 

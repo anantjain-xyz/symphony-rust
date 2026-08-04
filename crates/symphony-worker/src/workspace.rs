@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use symphony_core::Issue;
 use thiserror::Error;
 
+use crate::{WorkspaceCleanupError, WorkspaceCleanupManager};
+
 pub const WORKSPACE_READY_SENTINEL: &str = ".symphony-workspace-ready";
 
 #[derive(Debug, Error)]
@@ -10,6 +12,8 @@ pub enum WorkspaceError {
     EscapedRoot(String),
     #[error("workspace filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("workspace cleanup error: {0}")]
+    Cleanup(#[from] WorkspaceCleanupError),
 }
 
 #[derive(Debug, Clone)]
@@ -23,26 +27,53 @@ pub struct Workspace {
 #[derive(Debug, Clone)]
 pub struct WorkspaceManager {
     root: PathBuf,
+    repo_name: Option<String>,
+    cleanup: Option<WorkspaceCleanupManager>,
 }
 
 impl WorkspaceManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            repo_name: None,
+            cleanup: None,
+        }
+    }
+
+    pub fn with_cleanup(
+        root: impl Into<PathBuf>,
+        repo_name: impl Into<String>,
+        cleanup: WorkspaceCleanupManager,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            repo_name: Some(repo_name.into()),
+            cleanup: Some(cleanup),
+        }
     }
 
     pub async fn create_or_reuse(&self, issue: &Issue) -> Result<Workspace, WorkspaceError> {
         let key = sanitize_key(&issue.identifier);
         let path = self.assert_safe_path(&key)?;
         let mut created_now = false;
-        if tokio::fs::metadata(&path).await.is_err() {
-            tokio::fs::create_dir_all(&path).await?;
-            created_now = true;
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                self.quarantine_or_remove(&key, &path).await?;
+                tokio::fs::create_dir_all(&path).await?;
+                created_now = true;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir_all(&path).await?;
+                created_now = true;
+            }
+            Err(error) => return Err(error.into()),
         }
 
         let sentinel = path.join(WORKSPACE_READY_SENTINEL);
         let mut needs_init = created_now;
         if !created_now && tokio::fs::metadata(&sentinel).await.is_err() {
-            tokio::fs::remove_dir_all(&path).await.ok();
+            self.quarantine_or_remove(&key, &path).await?;
             tokio::fs::create_dir_all(&path).await?;
             needs_init = true;
         }
@@ -65,7 +96,25 @@ impl WorkspaceManager {
     pub async fn remove(&self, issue: &Issue) -> Result<(), WorkspaceError> {
         let key = sanitize_key(&issue.identifier);
         let path = self.assert_safe_path(&key)?;
-        tokio::fs::remove_dir_all(path).await.ok();
+        self.quarantine_or_remove(&key, &path).await?;
+        Ok(())
+    }
+
+    async fn quarantine_or_remove(&self, key: &str, path: &Path) -> Result<(), WorkspaceError> {
+        if let (Some(cleanup), Some(repo_name)) = (&self.cleanup, &self.repo_name) {
+            cleanup.quarantine(repo_name, key, path).await?;
+        } else {
+            match tokio::fs::symlink_metadata(path).await {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    tokio::fs::remove_dir_all(path).await.ok();
+                }
+                Ok(_) => {
+                    tokio::fs::remove_file(path).await.ok();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
@@ -161,6 +210,23 @@ fn normalize(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn issue(identifier: &str) -> Issue {
+        Issue {
+            id: format!("lin-{identifier}"),
+            identifier: identifier.to_string(),
+            title: "Test".to_string(),
+            description: None,
+            priority: 1,
+            state: "todo".to_string(),
+            branch: None,
+            labels: vec![],
+            blockers: vec![],
+            pr_urls: vec![],
+            project_id: None,
+            project_slug_id: None,
+        }
+    }
+
     #[test]
     fn sanitizes_identifiers() {
         assert_eq!(sanitize_key("SYM-1"), "SYM-1");
@@ -206,5 +272,41 @@ mod tests {
             mgr.assert_safe_path("../../etc"),
             Err(WorkspaceError::EscapedRoot(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_or_reuse_replaces_workspace_symlinks_without_following_targets() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspaces");
+        let target = temp.path().join("operator-owned");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::create_dir_all(&target).await.unwrap();
+        tokio::fs::write(target.join("keep"), "keep").await.unwrap();
+        symlink(&target, root.join("SYM-1")).unwrap();
+        symlink(temp.path().join("missing"), root.join("SYM-2")).unwrap();
+        let manager = WorkspaceManager::new(&root);
+
+        let live = manager.create_or_reuse(&issue("SYM-1")).await.unwrap();
+        let broken = manager.create_or_reuse(&issue("SYM-2")).await.unwrap();
+
+        assert!(live.created_now && live.needs_init);
+        assert!(broken.created_now && broken.needs_init);
+        assert!(tokio::fs::symlink_metadata(&live.path)
+            .await
+            .unwrap()
+            .is_dir());
+        assert!(tokio::fs::symlink_metadata(&broken.path)
+            .await
+            .unwrap()
+            .is_dir());
+        assert_eq!(
+            tokio::fs::read_to_string(target.join("keep"))
+                .await
+                .unwrap(),
+            "keep"
+        );
     }
 }

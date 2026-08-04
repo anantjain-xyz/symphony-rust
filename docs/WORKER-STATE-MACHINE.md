@@ -214,13 +214,18 @@ driver cannot leave any descendant mutating the workspace; satisfying it
 requires explicit cancellation before drop or a process-group guard whose
 drop path kills the group.
 
+Lifecycle hooks are also launched in dedicated process groups. After every
+hook result, including success, Symphony terminates descendants that outlived
+the hook shell (`TERM`, then `KILL` after a short grace period). Hooks must not
+use background children as services for a later lifecycle phase.
+
 Cancellation wins over an adapter result when the worker observes the token
 before committing the terminal result. This avoids recording success after
 the operator has stopped the run.
 
 ## Restart and stranded-run recovery
 
-Startup awaits tracker preflight before calling the local `recover()` sweep.
+Startup awaits tracker preflight before repairing persisted run ownership.
 If tracker preflight fails or startup is cancelled during that wait,
 persisted `pending` and `running` rows remain untouched. Recovery therefore
 does not repair stranded local runs during a tracker outage.
@@ -233,6 +238,22 @@ scheduled.
 Persisted `pending` rows receive the same treatment with a message explaining
 that restart happened before the run was claimed. Orphaned placeholder live
 sessions for already-terminal runs are removed.
+
+After local run recovery, the worker publishes its heartbeat and fetches
+terminal issues. Their workspaces are atomically renamed under the repository
+workspace's `.symphony-trash` directory and entered in
+`workspace_cleanup_queue`; recursive deletion is never awaited by startup.
+The original issue path is therefore immediately reusable if an issue reopens.
+
+One app-owned collector processes cleanup jobs sequentially even when issue
+orchestration is stopped. Before deleting a quarantined tree it terminates
+exact processes whose current working directory is inside that tree. Failures
+retry with exponential backoff capped at five minutes, interrupted `running`
+jobs return to `queued` on app launch, and a missing quarantine path completes
+the job. Workspace symlinks are quarantined and removed as links without
+following or process-scanning their targets. Queue transitions that encounter
+transient database errors are retried until durable. The Overview cleanup count
+includes every row until completion.
 
 Each dispatch also has an in-process safety net. The outer task catches:
 

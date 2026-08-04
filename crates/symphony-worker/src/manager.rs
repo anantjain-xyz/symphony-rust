@@ -4,7 +4,7 @@ use crate::{
         ensure_workspace_skills, github_token_env_has_token_for_repo_url,
         github_token_env_vars_for_repo_url,
     },
-    HookInvocation, SkillFile, WorkspaceManager,
+    HookInvocation, SkillFile, WorkspaceCleanupManager, WorkspaceManager,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -132,10 +132,12 @@ pub struct WorkerManager {
     inner: Arc<Mutex<InnerState>>,
     run_cancellations: RunCancellationRegistry,
     wake: Arc<Notify>,
+    workspace_cleanup: WorkspaceCleanupManager,
 }
 
 impl WorkerManager {
     pub fn new(repo: Repository) -> Self {
+        let workspace_cleanup = WorkspaceCleanupManager::new(repo.clone());
         Self {
             repo,
             inner: Arc::new(Mutex::new(InnerState {
@@ -151,7 +153,12 @@ impl WorkerManager {
             })),
             run_cancellations: RunCancellationRegistry::default(),
             wake: Arc::new(Notify::new()),
+            workspace_cleanup,
         }
+    }
+
+    pub fn start_workspace_cleanup(&self) {
+        self.workspace_cleanup.start();
     }
 
     pub async fn status(&self) -> WorkerStatus {
@@ -159,6 +166,7 @@ impl WorkerManager {
     }
 
     pub async fn start(&self, config: WorkerStartConfig) -> Result<WorkerStatus, WorkerError> {
+        self.start_workspace_cleanup();
         {
             let mut inner = self.inner.lock().await;
             if inner.status.state == WorkerState::Running {
@@ -171,6 +179,7 @@ impl WorkerManager {
                 config,
                 self.run_cancellations.clone(),
                 self.wake.clone(),
+                Some(self.workspace_cleanup.clone()),
             );
             let runtime_config = Arc::new(RwLock::new(runtime));
             let stop_for_task = stop.clone();
@@ -213,8 +222,12 @@ impl WorkerManager {
         F: FnOnce(symphony_core::TrackerConfig) -> Fut,
         Fut: std::future::Future<Output = Result<(), WorkerError>>,
     {
-        let runtime =
-            runtime_config_from_start(config, self.run_cancellations.clone(), self.wake.clone());
+        let runtime = runtime_config_from_start(
+            config,
+            self.run_cancellations.clone(),
+            self.wake.clone(),
+            Some(self.workspace_cleanup.clone()),
+        );
         let (runtime_config, generation) = {
             let mut inner = self.inner.lock().await;
             if inner.status.state != WorkerState::Running {
@@ -312,12 +325,14 @@ struct RuntimeConfig {
     app_data_dir: PathBuf,
     run_cancellations: RunCancellationRegistry,
     wake: Arc<Notify>,
+    workspace_cleanup: Option<WorkspaceCleanupManager>,
 }
 
 fn runtime_config_from_start(
     config: WorkerStartConfig,
     run_cancellations: RunCancellationRegistry,
     wake: Arc<Notify>,
+    workspace_cleanup: Option<WorkspaceCleanupManager>,
 ) -> RuntimeConfig {
     RuntimeConfig {
         workflow: config.workflow,
@@ -328,6 +343,7 @@ fn runtime_config_from_start(
         app_data_dir: config.app_data_dir,
         run_cancellations,
         wake,
+        workspace_cleanup,
     }
 }
 
@@ -371,6 +387,13 @@ async fn run_worker(
         }
     });
 
+    // Terminal workspaces are quarantined after the heartbeat is live. The
+    // rename is fast; recursive deletion belongs to the app-owned collector
+    // and never gates the first active-issue poll.
+    if !recover_terminal_workspaces(&repo, &tracker, &initial_config, &stop).await? {
+        return Ok(());
+    }
+
     run_loop(&repo, &config, &stop, tracker, tracker_config, |cfg| {
         LinearTracker::new(cfg.clone())
     })
@@ -378,9 +401,8 @@ async fn run_worker(
     Ok(())
 }
 
-/// Complete the worker's network-backed startup without making Stop wait for
-/// Linear's request timeout and retry budget. Local orphan recovery remains
-/// ordered and cancellation-safe; only tracker waits are abandoned.
+/// Complete tracker preflight and repair persisted run ownership before the
+/// worker advertises a live heartbeat.
 async fn prepare_worker<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,
@@ -391,7 +413,7 @@ async fn prepare_worker<T: TrackerClient>(
         return Ok(false);
     };
     preflight?;
-    recover(repo, tracker, config, stop).await?;
+    recover_stranded_runs(repo, config).await?;
     Ok(!stop.is_cancelled())
 }
 
@@ -442,11 +464,9 @@ async fn run_loop<T, F>(
     }
 }
 
-async fn recover<T: TrackerClient>(
+async fn recover_stranded_runs(
     repo: &Repository,
-    tracker: &T,
     config: &RuntimeConfig,
-    stop: &CancellationToken,
 ) -> Result<(), WorkerError> {
     for run in repo.list_running().await? {
         warn!(run_id = %run.id, issue_id = %run.issue_id, "orphan run marked crashed");
@@ -499,22 +519,39 @@ async fn recover<T: TrackerClient>(
         }
     }
     repo.delete_orphaned_pending_sessions().await.ok();
+    Ok(())
+}
+
+async fn recover_terminal_workspaces<T: TrackerClient>(
+    repo: &Repository,
+    tracker: &T,
+    config: &RuntimeConfig,
+    stop: &CancellationToken,
+) -> Result<bool, WorkerError> {
     let Some(terminal) = cancellable(stop, tracker.fetch_terminal()).await else {
-        return Ok(());
+        return Ok(false);
     };
     if let Ok(terminal) = terminal {
         for issue in terminal {
             if stop.is_cancelled() {
-                return Ok(());
+                return Ok(false);
             }
             if !repo.has_active_run(&issue.id).await.unwrap_or(true) {
                 if let Some(repo_config) = route_issue(&config.repos, &issue) {
-                    let _ = workspace_manager(config, repo_config).remove(&issue).await;
+                    if let Err(error) = workspace_manager(config, repo_config).remove(&issue).await
+                    {
+                        warn!(
+                            issue = %issue.identifier,
+                            repo = %repo_config.name,
+                            %error,
+                            "could not quarantine terminal issue workspace"
+                        );
+                    }
                 }
             }
         }
     }
-    Ok(())
+    Ok(!stop.is_cancelled())
 }
 
 /// Await `fut`, but bail the moment `stop` is cancelled, returning `None`.
@@ -1480,7 +1517,12 @@ async fn adopt_legacy_workspace(
 /// a clone of a different repository.
 fn workspace_manager(config: &RuntimeConfig, repo: &RepoConfig) -> WorkspaceManager {
     let root = workspace_root(config);
-    WorkspaceManager::new(root.join(sanitize_key(repo.name.trim())))
+    let repo_name = repo.name.trim();
+    let root = root.join(sanitize_key(repo_name));
+    match &config.workspace_cleanup {
+        Some(cleanup) => WorkspaceManager::with_cleanup(root, repo_name, cleanup.clone()),
+        None => WorkspaceManager::new(root),
+    }
 }
 
 fn workspace_root(config: &RuntimeConfig) -> PathBuf {
@@ -1586,6 +1628,7 @@ mod tests {
             app_data_dir: root.to_path_buf(),
             run_cancellations: RunCancellationRegistry::default(),
             wake: Arc::new(Notify::new()),
+            workspace_cleanup: None,
         }
     }
 
@@ -2720,8 +2763,17 @@ printf cloned > hook-ran
 
         let startup_repo = repo.clone();
         let startup_stop = stop.clone();
+        let startup_phase = phase;
         let handle = tokio::spawn(async move {
-            prepare_worker(&startup_repo, &tracker, &config, &startup_stop).await
+            match startup_phase {
+                BlockingStartupPhase::Preflight => {
+                    prepare_worker(&startup_repo, &tracker, &config, &startup_stop).await
+                }
+                BlockingStartupPhase::Recovery => {
+                    recover_terminal_workspaces(&startup_repo, &tracker, &config, &startup_stop)
+                        .await
+                }
+            }
         });
 
         tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
@@ -2745,6 +2797,50 @@ printf cloned > hook-ran
     #[tokio::test]
     async fn worker_startup_stops_promptly_while_recovery_fetch_is_blocked() {
         assert_worker_startup_cancels(BlockingStartupPhase::Recovery).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_quarantines_without_waiting_for_recursive_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        config.workspace_cleanup = Some(WorkspaceCleanupManager::new(repo.clone()));
+        let workspace = temp.path().join("widgets/SYM-1");
+        tokio::fs::create_dir_all(workspace.join("large/tree"))
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("large/tree/marker"), "old")
+            .await
+            .unwrap();
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![issue("done", vec![])],
+        };
+
+        assert!(
+            recover_terminal_workspaces(&repo, &tracker, &config, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+
+        assert!(tokio::fs::metadata(&workspace).await.is_err());
+        assert_eq!(repo.overview().await.unwrap().workspace_cleanup_count, 1);
+        let queued = repo
+            .due_workspace_cleanup("2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(
+                PathBuf::from(queued.quarantine_path).join("large/tree/marker")
+            )
+            .await
+            .unwrap(),
+            "old"
+        );
     }
 
     /// A tracker whose `fetch_active` never resolves, standing in for a Linear
@@ -3353,5 +3449,36 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
 
         assert_eq!(status.state, WorkerState::Stopped);
         assert_eq!(status.started_at, None);
+    }
+
+    #[tokio::test]
+    async fn workspace_cleanup_continues_after_worker_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let manager = WorkerManager::new(repo.clone());
+        manager.start_workspace_cleanup();
+        assert_eq!(manager.stop().await.state, WorkerState::Stopped);
+
+        let source = temp.path().join("widgets/SYM-1");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        tokio::fs::write(source.join("marker"), "old")
+            .await
+            .unwrap();
+        manager
+            .workspace_cleanup
+            .quarantine("widgets", "SYM-1", &source)
+            .await
+            .unwrap();
+
+        for _ in 0..500 {
+            if repo.overview().await.unwrap().workspace_cleanup_count == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("cleanup paused after worker stop");
     }
 }
