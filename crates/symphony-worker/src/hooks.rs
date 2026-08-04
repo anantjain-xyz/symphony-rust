@@ -274,6 +274,41 @@ mod tests {
         panic!("timed out waiting for {}", path.display());
     }
 
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: &str) -> bool {
+        for _ in 0..200 {
+            #[cfg(target_os = "linux")]
+            {
+                let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await;
+                match stat {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+                    Ok(stat)
+                        if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                            rest.split_whitespace().next() == Some("Z")
+                        }) =>
+                    {
+                        return true
+                    }
+                    _ => {}
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let status = Command::new("/bin/kill")
+                    .args(["-0", pid])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                if !status.is_ok_and(|status| status.success()) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     #[tokio::test]
     async fn run_hook_returns_promptly_when_cancelled() {
         let temp = tempfile::tempdir().unwrap();
@@ -400,13 +435,9 @@ printf '%s' "$!" > "$WORKSPACE_PATH/background-pid"
         let pid = tokio::fs::read_to_string(temp.path().join("background-pid"))
             .await
             .unwrap();
-        let status = Command::new("/bin/kill")
-            .args(["-0", pid.trim()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .unwrap();
-        assert!(!status.success(), "successful hook leaked child {pid}");
+        assert!(
+            wait_for_process_exit(pid.trim()).await,
+            "successful hook leaked child {pid}"
+        );
     }
 }
