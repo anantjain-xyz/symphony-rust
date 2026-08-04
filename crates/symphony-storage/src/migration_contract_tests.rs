@@ -39,6 +39,10 @@ const SHIPPED_MIGRATION_SHA256: &[(&str, &str)] = &[
         "0008_repo_workflow_retro_targets",
         "1192b8dceef91542d731af9ff8f73c35644b433bc01790af139bfae74fca8586",
     ),
+    (
+        "0009_workspace_cleanup_queue",
+        "736bf253affecd8b71ca740c6002d29d59deede7a22f6f7d48015f5e316b948a",
+    ),
 ];
 
 #[test]

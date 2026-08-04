@@ -13,6 +13,7 @@ export type DashboardView = "overview" | "runs" | "issues" | "retro" | "settings
 const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   rate_limit_state: ["overview"],
   token_usage: ["overview"],
+  workspace_cleanup_queue: ["overview"],
   // Heartbeats are persisted for diagnostics but are not rendered directly.
   // Keep this explicit so they do not fall through to the broad unknown-table refresh.
   worker_heartbeat: [],

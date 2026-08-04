@@ -232,6 +232,21 @@ pub struct WorkerHeartbeatRow {
     pub worker_pid: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct WorkspaceCleanupRow {
+    pub id: String,
+    pub repo_name: String,
+    pub issue_identifier: String,
+    pub source_path: String,
+    pub quarantine_path: String,
+    pub status: String,
+    pub attempts: i64,
+    pub next_attempt_at: String,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct Overview {
     pub active_runs: Vec<RunWithIssueRow>,
@@ -239,6 +254,7 @@ pub struct Overview {
     pub retry_count: i64,
     pub recent_failures: Vec<RunWithIssueRow>,
     pub failure_count: i64,
+    pub workspace_cleanup_count: i64,
     pub live_sessions: Vec<LiveSessionRow>,
     pub worker_heartbeat: Option<WorkerHeartbeatRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
@@ -616,6 +632,144 @@ impl Repository {
             .execute(&self.pool)
             .await?;
         self.changed("worker_heartbeat", "update");
+        Ok(())
+    }
+
+    pub async fn begin_workspace_cleanup(
+        &self,
+        id: &str,
+        repo_name: &str,
+        issue_identifier: &str,
+        source_path: &str,
+        quarantine_path: &str,
+        now: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            insert into workspace_cleanup_queue (
+              id, repo_name, issue_identifier, source_path, quarantine_path,
+              status, next_attempt_at, updated_at
+            ) values (?1, ?2, ?3, ?4, ?5, 'quarantining', ?6, ?6)
+            "#,
+        )
+        .bind(id)
+        .bind(repo_name)
+        .bind(issue_identifier)
+        .bind(source_path)
+        .bind(quarantine_path)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.changed("workspace_cleanup_queue", "insert");
+        Ok(())
+    }
+
+    pub async fn queue_workspace_cleanup(&self, id: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            update workspace_cleanup_queue
+            set status = 'queued', next_attempt_at = ?1, last_error = null, updated_at = ?1
+            where id = ?2
+            "#,
+        )
+        .bind(now_iso())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.changed("workspace_cleanup_queue", "update");
+        Ok(())
+    }
+
+    pub async fn recover_workspace_cleanup_queue(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            update workspace_cleanup_queue
+            set status = 'queued', next_attempt_at = ?1, updated_at = ?1
+            where status = 'running'
+            "#,
+        )
+        .bind(now_iso())
+        .execute(&self.pool)
+        .await?;
+        self.changed("workspace_cleanup_queue", "update");
+        Ok(())
+    }
+
+    pub async fn quarantining_workspace_cleanups(
+        &self,
+    ) -> Result<Vec<WorkspaceCleanupRow>, StorageError> {
+        Ok(sqlx::query_as::<_, WorkspaceCleanupRow>(
+            "select * from workspace_cleanup_queue where status = 'quarantining' order by created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn due_workspace_cleanup(
+        &self,
+        now: &str,
+    ) -> Result<Option<WorkspaceCleanupRow>, StorageError> {
+        Ok(sqlx::query_as::<_, WorkspaceCleanupRow>(
+            r#"
+            select * from workspace_cleanup_queue
+            where status in ('queued', 'retry_wait') and next_attempt_at <= ?1
+            order by next_attempt_at, created_at
+            limit 1
+            "#,
+        )
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn claim_workspace_cleanup(&self, id: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            update workspace_cleanup_queue
+            set status = 'running', attempts = attempts + 1, updated_at = ?1
+            where id = ?2 and status in ('queued', 'retry_wait')
+            "#,
+        )
+        .bind(now_iso())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            self.changed("workspace_cleanup_queue", "update");
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub async fn retry_workspace_cleanup(
+        &self,
+        id: &str,
+        due_at: &str,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            update workspace_cleanup_queue
+            set status = 'retry_wait', next_attempt_at = ?1, last_error = ?2, updated_at = ?3
+            where id = ?4
+            "#,
+        )
+        .bind(due_at)
+        .bind(error)
+        .bind(now_iso())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        self.changed("workspace_cleanup_queue", "update");
+        Ok(())
+    }
+
+    pub async fn delete_workspace_cleanup(&self, id: &str) -> Result<(), StorageError> {
+        sqlx::query("delete from workspace_cleanup_queue where id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.changed("workspace_cleanup_queue", "delete");
         Ok(())
     }
 
@@ -1039,15 +1193,17 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        let (retry_count, failure_count): (i64, i64) = sqlx::query_as(
-            r#"
+        let (retry_count, failure_count, workspace_cleanup_count): (i64, i64, i64) =
+            sqlx::query_as(
+                r#"
             select
               (select count(*) from retry_queue),
-              (select count(*) from runs where status in ('failure', 'timeout'))
+              (select count(*) from runs where status in ('failure', 'timeout')),
+              (select count(*) from workspace_cleanup_queue)
             "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
+            )
+            .fetch_one(&self.pool)
+            .await?;
         let recent_failures = self
             .runs_with_issue(
                 "where r.status in ('failure', 'timeout') order by r.ended_at desc",
@@ -1100,6 +1256,7 @@ impl Repository {
             retry_count,
             recent_failures,
             failure_count,
+            workspace_cleanup_count,
             live_sessions,
             worker_heartbeat,
             rate_limits,
@@ -2245,6 +2402,58 @@ mod tests {
         assert_eq!(overview.active_runs.len(), 1);
         assert_eq!(overview.active_runs[0].id, run.id);
         assert_eq!(overview.active_runs[0].status, "pending");
+    }
+
+    #[tokio::test]
+    async fn workspace_cleanup_queue_drives_overview_and_recovers_claims() {
+        let repo = repo().await;
+        repo.begin_workspace_cleanup(
+            "cleanup-1",
+            "widgets",
+            "SYM-1",
+            "/tmp/widgets/SYM-1",
+            "/tmp/widgets/.symphony-trash/SYM-1--cleanup-1",
+            "2000-01-01T00:00:00.000Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(repo.overview().await.unwrap().workspace_cleanup_count, 1);
+        assert_eq!(
+            repo.quarantining_workspace_cleanups().await.unwrap().len(),
+            1
+        );
+
+        repo.queue_workspace_cleanup("cleanup-1").await.unwrap();
+        let queued = repo
+            .due_workspace_cleanup("2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.status, "queued");
+        assert!(repo.claim_workspace_cleanup("cleanup-1").await.unwrap());
+        assert!(!repo.claim_workspace_cleanup("cleanup-1").await.unwrap());
+
+        repo.recover_workspace_cleanup_queue().await.unwrap();
+        let recovered = repo
+            .due_workspace_cleanup("2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, "queued");
+        assert_eq!(recovered.attempts, 1);
+
+        repo.retry_workspace_cleanup("cleanup-1", "2099-01-01T00:00:00.000Z", "busy")
+            .await
+            .unwrap();
+        assert!(repo
+            .due_workspace_cleanup("2000-01-01T00:00:00.000Z")
+            .await
+            .unwrap()
+            .is_none());
+
+        repo.delete_workspace_cleanup("cleanup-1").await.unwrap();
+        assert_eq!(repo.overview().await.unwrap().workspace_cleanup_count, 0);
     }
 
     #[tokio::test]

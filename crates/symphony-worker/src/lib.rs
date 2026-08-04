@@ -4,6 +4,7 @@ mod manager;
 mod repo_workflow;
 mod skills;
 mod workspace;
+mod workspace_cleanup;
 
 pub use backoff::backoff_ms;
 pub use hooks::{run_hook, HookInvocation, HookResult};
@@ -22,3 +23,4 @@ pub use workspace::{
     resolve_workspace_root_dir, sanitize_key, Workspace, WorkspaceError, WorkspaceManager,
     WORKSPACE_READY_SENTINEL,
 };
+pub use workspace_cleanup::{WorkspaceCleanupError, WorkspaceCleanupManager};

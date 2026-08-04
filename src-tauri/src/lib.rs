@@ -1185,6 +1185,14 @@ pub fn run() {
                 Ok::<_, symphony_storage::StorageError>((repo, bus))
             })?;
             let worker = WorkerManager::new(repo.clone());
+            // Tauri's setup callback runs on the synchronous event-loop
+            // thread. Enter its Tokio runtime before WorkspaceCleanupManager
+            // calls tokio::spawn, otherwise desktop launch panics with no
+            // reactor running.
+            let cleanup_worker = worker.clone();
+            tauri::async_runtime::spawn(async move {
+                cleanup_worker.start_workspace_cleanup();
+            });
             let state = AppState {
                 repo,
                 worker,

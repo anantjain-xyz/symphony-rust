@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     process::Stdio,
     time::{Duration, Instant},
@@ -7,6 +7,7 @@ use std::{
 use symphony_core::{HookName, Issue};
 use tokio::{io::AsyncReadExt, process::Command, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct HookResult {
@@ -43,6 +44,11 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
         return cancelled_result(start);
     }
     let mut child_env = filter_env(env);
+    let hook_invocation_id = Uuid::new_v4().to_string();
+    child_env.insert(
+        "SYMPHONY_HOOK_INVOCATION_ID".to_string(),
+        hook_invocation_id.clone(),
+    );
     child_env.insert("SYMPHONY_HOOK".to_string(), hook.as_env_value().to_string());
     child_env.insert("ISSUE_ID".to_string(), issue.id.clone());
     child_env.insert("ISSUE_IDENTIFIER".to_string(), issue.identifier.clone());
@@ -81,6 +87,7 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             };
         }
     };
+    let process_group_id = child.id();
     let stderr = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             let mut bytes = Vec::new();
@@ -102,6 +109,13 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             HookExit::Cancelled
         }
     };
+    if let Some(process_group_id) = process_group_id {
+        cleanup_hook_process_group(process_group_id).await;
+    }
+    // Some package-manager daemons create a new session and escape the hook's
+    // process group. The per-invocation environment marker proves ownership
+    // without treating unrelated user processes in the workspace as children.
+    cleanup_hook_invocation_processes(&hook_invocation_id).await;
     let stderr = collect_stderr(stderr).await;
 
     match outcome {
@@ -156,6 +170,128 @@ async fn terminate_hook(child: &mut tokio::process::Child) {
             let _ = child.kill().await;
         }
     }
+}
+
+/// A hook shell can leave background descendants behind (package-manager
+/// daemons and watch processes are common examples). The shell was launched as
+/// its own process group, so clean that group after every outcome while
+/// preserving the hook's original result.
+#[cfg(unix)]
+async fn cleanup_hook_process_group(process_group_id: u32) {
+    if !signal_hook_process_group(process_group_id, "TERM").await {
+        return;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    signal_hook_process_group(process_group_id, "KILL").await;
+}
+
+#[cfg(not(unix))]
+async fn cleanup_hook_process_group(_process_group_id: u32) {}
+
+#[cfg(unix)]
+async fn signal_hook_process_group(process_group_id: u32, signal: &str) -> bool {
+    Command::new("/bin/kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{process_group_id}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+async fn cleanup_hook_invocation_processes(invocation_id: &str) {
+    let Ok(initial) = hook_invocation_process_ids(invocation_id).await else {
+        return;
+    };
+    signal_hook_pids(&initial, "TERM").await;
+    if initial.is_empty() {
+        return;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    if let Ok(stubborn) = hook_invocation_process_ids(invocation_id).await {
+        signal_hook_pids(&stubborn, "KILL").await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn cleanup_hook_invocation_processes(_invocation_id: &str) {}
+
+#[cfg(unix)]
+async fn signal_hook_pids(pids: &BTreeSet<u32>, signal: &str) {
+    for pid in pids {
+        let _ = Command::new("/bin/kill")
+            .arg(format!("-{signal}"))
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn hook_invocation_process_ids(invocation_id: &str) -> Result<BTreeSet<u32>, std::io::Error> {
+    let marker = format!("SYMPHONY_HOOK_INVOCATION_ID={invocation_id}");
+    let mut pids = BTreeSet::new();
+    let mut entries = tokio::fs::read_dir("/proc").await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let Ok(environment) = tokio::fs::read(entry.path().join("environ")).await else {
+            continue;
+        };
+        if environment
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == marker.as_bytes())
+        {
+            pids.insert(pid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(target_os = "macos")]
+async fn hook_invocation_process_ids(invocation_id: &str) -> Result<BTreeSet<u32>, std::io::Error> {
+    let marker = format!("SYMPHONY_HOOK_INVOCATION_ID={invocation_id}");
+    let output = Command::new("/bin/ps")
+        .args(["eww", "-axo", "pid=,command="])
+        .output()
+        .await?;
+    let mut pids = BTreeSet::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.trim_start().splitn(2, char::is_whitespace);
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(command_and_env) = fields.next() else {
+            continue;
+        };
+        if pid != std::process::id()
+            && command_and_env
+                .split_whitespace()
+                .any(|field| field == marker)
+        {
+            pids.insert(pid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+async fn hook_invocation_process_ids(
+    _invocation_id: &str,
+) -> Result<BTreeSet<u32>, std::io::Error> {
+    Ok(BTreeSet::new())
 }
 
 #[cfg(unix)]
@@ -240,6 +376,41 @@ mod tests {
         panic!("timed out waiting for {}", path.display());
     }
 
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: &str) -> bool {
+        for _ in 0..200 {
+            #[cfg(target_os = "linux")]
+            {
+                let stat = tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await;
+                match stat {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+                    Ok(stat)
+                        if stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                            rest.split_whitespace().next() == Some("Z")
+                        }) =>
+                    {
+                        return true
+                    }
+                    _ => {}
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let status = Command::new("/bin/kill")
+                    .args(["-0", pid])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
+                if !status.is_ok_and(|status| status.success()) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     #[tokio::test]
     async fn run_hook_returns_promptly_when_cancelled() {
         let temp = tempfile::tempdir().unwrap();
@@ -314,7 +485,11 @@ while true; do /bin/sleep 0.01; done
             run_hook(HookInvocation {
                 hook: HookName::AfterCreate,
                 script: r#"trap "" TERM
-(trap "" TERM; while true; do echo child-still-running >&2; /bin/sleep 0.01; done) &
+if command -v setsid >/dev/null 2>&1; then
+  setsid /bin/bash -c 'trap "" TERM; while true; do echo child-still-running >&2; /bin/sleep 0.01; done' &
+else
+  (trap "" TERM; while true; do echo child-still-running >&2; /bin/sleep 0.01; done) &
+fi
 printf started > "$WORKSPACE_PATH/stubborn-started"
 wait
 "#,
@@ -338,5 +513,52 @@ wait
         assert_eq!(result.exit_code, -1);
         assert!(!result.timed_out);
         assert_eq!(result.stderr_tail.as_deref(), Some("hook cancelled"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_hook_cleans_up_background_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook_issue = issue();
+        let env = BTreeMap::new();
+        let stop = CancellationToken::new();
+        let mut unrelated = Command::new("/bin/bash")
+            .args(["-c", "while true; do /bin/sleep 1; done"])
+            .current_dir(temp.path())
+            .spawn()
+            .unwrap();
+
+        let result = run_hook(HookInvocation {
+            hook: HookName::AfterCreate,
+            script: r#"if command -v setsid >/dev/null 2>&1; then
+  setsid /bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+else
+  /bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+fi
+printf '%s' "$!" > "$WORKSPACE_PATH/background-pid"
+"#,
+            issue: &hook_issue,
+            workspace_path: temp.path(),
+            run_number: 1,
+            timeout_ms: 10_000,
+            env: &env,
+            cancel: &stop,
+        })
+        .await;
+
+        assert_eq!(result.exit_code, 0);
+        let pid = tokio::fs::read_to_string(temp.path().join("background-pid"))
+            .await
+            .unwrap();
+        assert!(
+            wait_for_process_exit(pid.trim()).await,
+            "successful hook leaked child {pid}"
+        );
+        assert!(
+            unrelated.try_wait().unwrap().is_none(),
+            "hook cleanup terminated an unrelated workspace process"
+        );
+        unrelated.kill().await.unwrap();
+        unrelated.wait().await.unwrap();
     }
 }
