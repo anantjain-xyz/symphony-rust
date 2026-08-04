@@ -101,14 +101,16 @@ impl WorkspaceCleanupManager {
         let destination =
             quarantine_root.join(format!("{}--{id}", crate::sanitize_key(issue_identifier)));
         let timestamp = now_iso();
+        let persisted_source = serialize_path(&source);
+        let persisted_destination = serialize_path(&destination);
         self.inner
             .repo
             .begin_workspace_cleanup(
                 &id,
                 repo_name,
                 issue_identifier,
-                &source.display().to_string(),
-                &destination.display().to_string(),
+                &persisted_source,
+                &persisted_destination,
                 &timestamp,
             )
             .await?;
@@ -175,7 +177,18 @@ impl WorkspaceCleanupManager {
     async fn reconcile_quarantining(&self) -> Result<(), StorageError> {
         let _guard = self.inner.quarantine_gate.lock().await;
         for job in self.inner.repo.quarantining_workspace_cleanups().await? {
-            match tokio::fs::symlink_metadata(&job.quarantine_path).await {
+            let quarantine_path = match deserialize_path(&job.quarantine_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        cleanup_id = %job.id,
+                        %error,
+                        "could not decode quarantining workspace path; reconciliation deferred"
+                    );
+                    continue;
+                }
+            };
+            match tokio::fs::symlink_metadata(&quarantine_path).await {
                 Ok(_) => self.inner.repo.queue_workspace_cleanup(&job.id).await?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     // No rename completed. Leave the source path untouched so
@@ -196,7 +209,17 @@ impl WorkspaceCleanupManager {
 
     async fn process(&self, job: WorkspaceCleanupRow) {
         let started = Instant::now();
-        let path = PathBuf::from(&job.quarantine_path);
+        let path = match deserialize_path(&job.quarantine_path) {
+            Ok(path) => path,
+            Err(error) => {
+                let due = (Utc::now() + ChronoDuration::milliseconds(CLEANUP_RETRY_CAP_MS))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                warn!(cleanup_id = %job.id, %error, "could not decode cleanup path; retry scheduled");
+                self.persist_cleanup_retry(&job.id, &due, &error.to_string())
+                    .await;
+                return;
+            }
+        };
         let mut terminated = 0;
         let result = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -298,12 +321,95 @@ fn absolute_path(path: &Path) -> Result<PathBuf, std::io::Error> {
     }
 }
 
+#[cfg(unix)]
+fn serialize_path(path: &Path) -> String {
+    use std::{fmt::Write, os::unix::ffi::OsStrExt};
+
+    if let Some(path) = path.to_str() {
+        return path.to_string();
+    }
+    let bytes = path.as_os_str().as_bytes();
+    let mut encoded = String::with_capacity("unix-bytes:".len() + bytes.len() * 2);
+    encoded.push_str("unix-bytes:");
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+#[cfg(unix)]
+fn deserialize_path(value: &str) -> Result<PathBuf, std::io::Error> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let Some(encoded) = value.strip_prefix("unix-bytes:") else {
+        return Ok(PathBuf::from(value));
+    };
+    if encoded.len() % 2 != 0 {
+        return Err(invalid_path_encoding());
+    }
+    let bytes = (0..encoded.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid_path_encoding())?;
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
+}
+
+#[cfg(windows)]
+fn serialize_path(path: &Path) -> String {
+    use std::{fmt::Write, os::windows::ffi::OsStrExt};
+
+    if let Some(path) = path.to_str() {
+        return path.to_string();
+    }
+    let mut encoded = String::from("windows-wide:");
+    for word in path.as_os_str().encode_wide() {
+        write!(&mut encoded, "{word:04x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+#[cfg(windows)]
+fn deserialize_path(value: &str) -> Result<PathBuf, std::io::Error> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+    let Some(encoded) = value.strip_prefix("windows-wide:") else {
+        return Ok(PathBuf::from(value));
+    };
+    if encoded.len() % 4 != 0 {
+        return Err(invalid_path_encoding());
+    }
+    let words = (0..encoded.len())
+        .step_by(4)
+        .map(|index| u16::from_str_radix(&encoded[index..index + 4], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid_path_encoding())?;
+    Ok(PathBuf::from(OsString::from_wide(&words)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn serialize_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn deserialize_path(value: &str) -> Result<PathBuf, std::io::Error> {
+    Ok(PathBuf::from(value))
+}
+
+fn invalid_path_encoding() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid persisted workspace path encoding",
+    )
+}
+
 fn cleanup_backoff_ms(attempt: i64) -> i64 {
     let exponent = (attempt.saturating_sub(1)).clamp(0, 20) as u32;
     (1_000_i64.saturating_mul(1_i64 << exponent)).min(CLEANUP_RETRY_CAP_MS)
 }
 
-pub(crate) async fn terminate_workspace_processes(path: &Path) -> Result<usize, std::io::Error> {
+async fn terminate_workspace_processes(path: &Path) -> Result<usize, std::io::Error> {
     let initial = workspace_process_ids(path).await?;
     if initial.is_empty() {
         return Ok(0);
@@ -422,6 +528,18 @@ mod tests {
         let path = absolute_path(Path::new("relative/workspace")).unwrap();
         assert!(path.is_absolute());
         assert!(path.ends_with("relative/workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_paths_preserve_non_utf8_bytes() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let mut path = std::env::temp_dir();
+        path.push(OsString::from_vec(b"workspace-\xff".to_vec()));
+        let encoded = serialize_path(&path);
+        assert!(encoded.starts_with("unix-bytes:"));
+        assert_eq!(deserialize_path(&encoded).unwrap(), path);
     }
 
     #[tokio::test]
