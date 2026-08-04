@@ -103,14 +103,12 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             HookExit::Cancelled
         }
     };
-    if matches!(&outcome, HookExit::Finished(_)) {
-        if let Some(process_group_id) = process_group_id {
-            cleanup_finished_hook_process_group(process_group_id).await;
-        }
+    if let Some(process_group_id) = process_group_id {
+        cleanup_hook_process_group(process_group_id).await;
     }
     // Some package-manager daemons create a new session and escape the hook's
     // process group. Sweep exact processes still rooted in this workspace so
-    // a successful group signal cannot leave those descendants behind.
+    // a group signal cannot leave those descendants behind.
     let _ = crate::workspace_cleanup::terminate_workspace_processes(workspace_path).await;
     let stderr = collect_stderr(stderr).await;
 
@@ -168,12 +166,12 @@ async fn terminate_hook(child: &mut tokio::process::Child) {
     }
 }
 
-/// A successful shell can leave background descendants behind (package-manager
+/// A hook shell can leave background descendants behind (package-manager
 /// daemons and watch processes are common examples). The shell was launched as
-/// its own process group, so clean that group after the leader exits while
-/// preserving the leader's original hook result.
+/// its own process group, so clean that group after every outcome while
+/// preserving the hook's original result.
 #[cfg(unix)]
-async fn cleanup_finished_hook_process_group(process_group_id: u32) {
+async fn cleanup_hook_process_group(process_group_id: u32) {
     if !signal_hook_process_group(process_group_id, "TERM").await {
         return;
     }
@@ -182,7 +180,7 @@ async fn cleanup_finished_hook_process_group(process_group_id: u32) {
 }
 
 #[cfg(not(unix))]
-async fn cleanup_finished_hook_process_group(_process_group_id: u32) {}
+async fn cleanup_hook_process_group(_process_group_id: u32) {}
 
 #[cfg(unix)]
 async fn signal_hook_process_group(process_group_id: u32, signal: &str) -> bool {

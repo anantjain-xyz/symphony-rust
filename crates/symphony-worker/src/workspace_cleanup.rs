@@ -85,7 +85,8 @@ impl WorkspaceCleanupManager {
         // Reconciliation must not inspect a `quarantining` row between its DB
         // insert and the matching filesystem rename.
         let _guard = self.inner.quarantine_gate.lock().await;
-        match tokio::fs::symlink_metadata(source).await {
+        let source = absolute_path(source)?;
+        match tokio::fs::symlink_metadata(&source).await {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
@@ -112,7 +113,7 @@ impl WorkspaceCleanupManager {
             )
             .await?;
 
-        if let Err(error) = tokio::fs::rename(source, &destination).await {
+        if let Err(error) = tokio::fs::rename(&source, &destination).await {
             // A row without a completed rename must never be retried blindly:
             // the issue may have reopened and reclaimed its original path.
             self.inner.repo.delete_workspace_cleanup(&id).await.ok();
@@ -135,8 +136,14 @@ impl WorkspaceCleanupManager {
     }
 
     async fn run(self) {
-        if let Err(error) = self.inner.repo.recover_workspace_cleanup_queue().await {
-            warn!(%error, "could not recover workspace cleanup queue");
+        loop {
+            match self.inner.repo.recover_workspace_cleanup_queue().await {
+                Ok(()) => break,
+                Err(error) => {
+                    warn!(%error, "could not recover workspace cleanup queue; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         }
         loop {
             if let Err(error) = self.reconcile_quarantining().await {
@@ -283,6 +290,14 @@ impl WorkspaceCleanupManager {
     }
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 fn cleanup_backoff_ms(attempt: i64) -> i64 {
     let exponent = (attempt.saturating_sub(1)).clamp(0, 20) as u32;
     (1_000_i64.saturating_mul(1_i64 << exponent)).min(CLEANUP_RETRY_CAP_MS)
@@ -400,6 +415,13 @@ mod tests {
         assert_eq!(cleanup_backoff_ms(1), 1_000);
         assert_eq!(cleanup_backoff_ms(2), 2_000);
         assert_eq!(cleanup_backoff_ms(100), CLEANUP_RETRY_CAP_MS);
+    }
+
+    #[test]
+    fn cleanup_paths_are_persisted_as_absolute() {
+        let path = absolute_path(Path::new("relative/workspace")).unwrap();
+        assert!(path.is_absolute());
+        assert!(path.ends_with("relative/workspace"));
     }
 
     #[tokio::test]
