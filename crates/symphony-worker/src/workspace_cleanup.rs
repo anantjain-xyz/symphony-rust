@@ -288,7 +288,7 @@ fn cleanup_backoff_ms(attempt: i64) -> i64 {
     (1_000_i64.saturating_mul(1_i64 << exponent)).min(CLEANUP_RETRY_CAP_MS)
 }
 
-async fn terminate_workspace_processes(path: &Path) -> Result<usize, std::io::Error> {
+pub(crate) async fn terminate_workspace_processes(path: &Path) -> Result<usize, std::io::Error> {
     let initial = workspace_process_ids(path).await?;
     if initial.is_empty() {
         return Ok(0);

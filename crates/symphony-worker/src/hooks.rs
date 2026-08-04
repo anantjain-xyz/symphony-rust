@@ -108,6 +108,10 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
             cleanup_finished_hook_process_group(process_group_id).await;
         }
     }
+    // Some package-manager daemons create a new session and escape the hook's
+    // process group. Sweep exact processes still rooted in this workspace so
+    // a successful group signal cannot leave those descendants behind.
+    let _ = crate::workspace_cleanup::terminate_workspace_processes(workspace_path).await;
     let stderr = collect_stderr(stderr).await;
 
     match outcome {
@@ -419,7 +423,11 @@ wait
 
         let result = run_hook(HookInvocation {
             hook: HookName::AfterCreate,
-            script: r#"/bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+            script: r#"if command -v setsid >/dev/null 2>&1; then
+  setsid /bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+else
+  /bin/bash -c 'trap "" TERM; while true; do /bin/sleep 1; done' &
+fi
 printf '%s' "$!" > "$WORKSPACE_PATH/background-pid"
 "#,
             issue: &hook_issue,
