@@ -60,7 +60,7 @@ const previewSettings: AppSettings = {
   claude_command: null,
   turn_timeout_ms: 3600000,
   session_env: {},
-  codex_approval_policy: "never",
+  codex_permission_mode: "approve-for-me",
   codex_thread_sandbox: "workspace-write",
   codex_turn_sandbox_policy: "inherit",
   codex_network_access: true,

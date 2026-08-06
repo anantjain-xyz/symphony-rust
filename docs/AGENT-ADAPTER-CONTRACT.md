@@ -112,16 +112,17 @@ when the turn inherits:
 
 - `danger-full-access` adds
   `--dangerously-bypass-approvals-and-sandbox`;
-- `workspace-write` adds `--full-auto`, exposes external Git metadata
+- `workspace-write` adds `-s workspace-write`, exposes external Git metadata
   directories required by linked worktrees, and optionally enables network
   access in the workspace-write sandbox;
 - `read-only` adds `-s read-only`.
 
 `ThreadSandbox::None` inherits as read-only unless the turn explicitly selects
-a different policy. The current `AgentRunRequest` does not carry
-`ApprovalPolicy`; effective approval behavior comes from the flags above. Do
-not assume the saved Codex approval setting is independently forwarded until
-the request and adapter explicitly support it.
+a different policy. Permission modes are forwarded independently:
+
+- `approve-for-me` uses `approval_policy=on-request` with Auto-review;
+- `full-access` bypasses approvals and the sandbox, as does an explicit
+  `danger-full-access` turn policy.
 
 The adapter maps command execution items into `tool_call` events. Agent message
 content becomes bounded status text. A completed turn emits one token total

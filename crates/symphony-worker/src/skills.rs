@@ -24,8 +24,8 @@ use symphony_agents::{
     OpencodeRunOptions,
 };
 use symphony_core::{
-    AgentBackend, AgentOutcome, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
-    ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy,
+    AgentBackend, AgentOutcome, ClaudePermissionMode, CodexPermissionMode, CursorAgentMode,
+    CursorSandboxMode, ParsedWorkflow, ThreadSandbox, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{process::Command, sync::Mutex};
@@ -900,6 +900,7 @@ fn install_run_request(
         },
         cwd: workspace.to_path_buf(),
         prompt: install_prompt(&config.repo_url, default_branch, &config.skills),
+        codex_permission_mode: CodexPermissionMode::ApproveForMe,
         thread_sandbox: ThreadSandbox::WorkspaceWrite,
         turn_sandbox_policy: TurnSandboxPolicy::WorkspaceWrite,
         network_access: true,
@@ -2449,6 +2450,10 @@ mod tests {
         let request = install_run_request(&config, Path::new("/tmp/ws"), "master");
 
         assert_eq!(request.thread_sandbox, ThreadSandbox::WorkspaceWrite);
+        assert_eq!(
+            request.codex_permission_mode,
+            CodexPermissionMode::ApproveForMe
+        );
         assert_eq!(
             request.turn_sandbox_policy,
             TurnSandboxPolicy::WorkspaceWrite

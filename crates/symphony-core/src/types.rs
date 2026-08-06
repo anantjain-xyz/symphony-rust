@@ -26,16 +26,12 @@ impl AgentBackend {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub enum ApprovalPolicy {
-    #[serde(rename = "never")]
+pub enum CodexPermissionMode {
+    #[serde(rename = "approve-for-me")]
     #[default]
-    Never,
-    #[serde(rename = "on-request")]
-    OnRequest,
-    #[serde(rename = "on-failure")]
-    OnFailure,
-    #[serde(rename = "always")]
-    Always,
+    ApproveForMe,
+    #[serde(rename = "full-access")]
+    FullAccess,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -277,7 +273,7 @@ pub struct CodexConfig {
     #[serde(default = "default_codex_command")]
     pub command: String,
     #[serde(default)]
-    pub approval_policy: ApprovalPolicy,
+    pub permission_mode: CodexPermissionMode,
     #[serde(default)]
     pub thread_sandbox: ThreadSandbox,
     #[serde(default)]
@@ -292,7 +288,7 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             command: default_codex_command(),
-            approval_policy: ApprovalPolicy::Never,
+            permission_mode: CodexPermissionMode::ApproveForMe,
             thread_sandbox: ThreadSandbox::WorkspaceWrite,
             turn_sandbox_policy: TurnSandboxPolicy::Inherit,
             turn_timeout_ms: default_turn_timeout_ms(),
