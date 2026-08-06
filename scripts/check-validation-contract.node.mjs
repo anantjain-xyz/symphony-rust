@@ -31,6 +31,7 @@ function validationFixture(t) {
       "check:frontend-contracts": "pnpm check:frontend-boundaries && pnpm check:preview-coverage",
       "check:harness": "node scripts/check-agent-assets.mjs",
       "check:preview-coverage": "node scripts/check-preview-coverage.mjs",
+      "install:hygiene-tools": "node scripts/fixture.node.mjs",
       test: "vitest run",
       "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
       "test:frontend-contracts":
@@ -368,6 +369,18 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
   );
 });
 
+test("validates the nested scripts behind explicit validation setup", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  delete packageJson.scripts["install:hygiene-tools"];
+  writeJson(root, "package.json", packageJson);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /package script setup:validation references missing package script install:hygiene-tools/,
+  );
+});
+
 test("rejects lifecycle hooks around every required validation script", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -599,6 +612,37 @@ jobs:
   assert.match(
     errors,
     /must run setup command "pnpm exec playwright install --with-deps chromium" before pnpm verify:full/,
+  );
+});
+
+test("requires CI setup in the same job as the blocking full gate", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  setup:
+    steps:
+      - run: pnpm install:hygiene-tools
+      - run: pnpm exec playwright install --with-deps chromium
+  validate:
+    steps:
+      - run: pnpm verify:full
+`,
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /must run setup command "pnpm install:hygiene-tools" in the same job as pnpm verify:full/,
+  );
+  assert.match(
+    errors,
+    /must run setup command "pnpm exec playwright install --with-deps chromium" in the same job as pnpm verify:full/,
   );
 });
 
@@ -931,5 +975,18 @@ test("requires production build before bundle inspection", (t) => {
   assert.match(
     validateValidationContract(root).join("\n"),
     /full validation profile must run frontend-build before bundle-budget so bundle inspection uses current artifacts/,
+  );
+});
+
+test("requires production build before browser validation", (t) => {
+  const root = validationFixture(t);
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
+  contract.profiles.full = contract.profiles.full.filter((command) => command !== "browser-e2e");
+  contract.profiles.full.splice(contract.profiles.full.indexOf("frontend-build"), 0, "browser-e2e");
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /full validation profile must run frontend-build before browser-e2e so Playwright serves current production artifacts/,
   );
 });

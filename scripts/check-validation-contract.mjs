@@ -391,6 +391,10 @@ function validatePackageScript(
       validatePackageExecutable(root, scriptName, tokens, packageJson, errors);
       continue;
     }
+    if (tokens[1] === "exec" && tokens.length >= 3) {
+      validatePackageExecutable(root, scriptName, tokens.slice(2), packageJson, errors);
+      continue;
+    }
 
     const referenced =
       tokens[1] === "run" && tokens.length === 3
@@ -473,6 +477,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
   const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const runPattern = new RegExp(`^( *)-\\s+run:\\s*${escaped}\\s*$`);
   const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const contexts = [];
   const jobsBlocks = lines
     .map((line, index) => ({ index, line }))
     .filter(({ line }) => yamlIndent(line) === 0 && yamlFieldName(line) === "jobs");
@@ -530,6 +535,8 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       errors.push(
         `CI workflow ${workflowPath} canonical entrypoint job must be a direct child of the single top-level jobs block`,
       );
+    } else {
+      contexts.push({ jobIndex: job.index, lineIndex });
     }
 
     let stepEnd = lines.length;
@@ -603,6 +610,7 @@ function validateCiRunStep(content, command, workflowPath, errors) {
       }
     }
   }
+  return contexts;
 }
 
 function validateCiTriggers(content, workflowPath, errors) {
@@ -837,6 +845,9 @@ export function validateValidationContract(
   const executableSet = new Set(contract.executables ?? []);
   const validatedPackageScripts = new Set();
   const packageScriptOwners = new Map();
+  if (typeof packageJson.scripts?.["setup:validation"] === "string") {
+    validatePackageScript(root, "setup:validation", packageJson, errors, validatedPackageScripts);
+  }
 
   for (const [commandId, command] of Object.entries(commands)) {
     if (!command || !Array.isArray(command.argv) || command.argv.length === 0) {
@@ -1007,6 +1018,7 @@ export function validateValidationContract(
   }
   const frontendBuildIndex = fullIds.indexOf("frontend-build");
   const bundleBudgetIndex = fullIds.indexOf("bundle-budget");
+  const browserE2eIndex = fullIds.indexOf("browser-e2e");
   if (
     frontendBuildIndex !== -1 &&
     bundleBudgetIndex !== -1 &&
@@ -1014,6 +1026,11 @@ export function validateValidationContract(
   ) {
     errors.push(
       "full validation profile must run frontend-build before bundle-budget so bundle inspection uses current artifacts",
+    );
+  }
+  if (frontendBuildIndex !== -1 && browserE2eIndex !== -1 && frontendBuildIndex > browserE2eIndex) {
+    errors.push(
+      "full validation profile must run frontend-build before browser-e2e so Playwright serves current production artifacts",
     );
   }
 
@@ -1114,8 +1131,9 @@ export function validateValidationContract(
           )} exactly once; found ${matches.length}`,
         );
       }
+      let gateContext;
       if (ciCommand && matches.length > 0) {
-        validateCiRunStep(content, ciCommand, CI_WORKFLOW, errors);
+        [gateContext] = validateCiRunStep(content, ciCommand, CI_WORKFLOW, errors);
       }
       for (const setupCommand of CI_SETUP_COMMANDS) {
         const setupMatches = [...content.matchAll(exactRunLine(setupCommand))];
@@ -1126,8 +1144,18 @@ export function validateValidationContract(
             )} exactly once; found ${setupMatches.length}`,
           );
         } else {
-          validateCiRunStep(content, setupCommand, CI_WORKFLOW, errors);
-          if (matches[0] && setupMatches[0].index > matches[0].index) {
+          const [setupContext] = validateCiRunStep(content, setupCommand, CI_WORKFLOW, errors);
+          if (gateContext && setupContext && setupContext.jobIndex !== gateContext.jobIndex) {
+            errors.push(
+              `CI workflow ${CI_WORKFLOW} must run setup command ${JSON.stringify(
+                setupCommand,
+              )} in the same job as ${ciCommand}`,
+            );
+          } else if (
+            gateContext &&
+            setupContext &&
+            setupContext.lineIndex > gateContext.lineIndex
+          ) {
             errors.push(
               `CI workflow ${CI_WORKFLOW} must run setup command ${JSON.stringify(
                 setupCommand,
