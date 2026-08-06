@@ -216,10 +216,10 @@ fn valid_env_key(key: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-/// The repos list must route unambiguously: names are label routing keys
-/// (either `repo:<name>` or bare `<name>`) and workspace namespaces, so they
-/// have to exist and be unique, and no team or project may be claimed as the
-/// default of two repos.
+/// Repository names are label routing keys (either `repo:<name>` or bare
+/// `<name>`) and workspace namespaces, so they have to exist and be unique.
+/// Team and project rules may intentionally overlap across repositories; the
+/// routing layer resolves those ties in configured order.
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
     if repos.is_empty() {
         return Some(
@@ -227,8 +227,6 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
         );
     }
     let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-    let mut prefixes: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-    let mut projects: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for repo in repos {
         let name = repo.name.trim();
         if name.is_empty() {
@@ -249,29 +247,6 @@ fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
             return Some(format!(
                 "Repository names \"{other}\" and \"{name}\" collide — they map to the same workspace folder."
             ));
-        }
-        for prefix in &repo.team_prefixes {
-            let key = prefix.trim().trim_end_matches('-').to_uppercase();
-            if key.is_empty() {
-                continue;
-            }
-            if let Some(other) = prefixes.insert(key.clone(), name) {
-                return Some(format!(
-                    "Team prefix \"{key}\" is claimed by both \"{other}\" and \"{name}\"."
-                ));
-            }
-        }
-        for project in &repo.project_ids {
-            let Some(project_ref) = symphony_core::LinearProjectRef::parse(project) else {
-                continue;
-            };
-            let key = project_ref.canonical_key();
-            if let Some(other) = projects.insert(key.clone(), name) {
-                return Some(format!(
-                    "Project \"{}\" is claimed by both \"{other}\" and \"{name}\".",
-                    project.trim()
-                ));
-            }
         }
     }
     if repos.iter().filter(|repo| repo.is_default).count() > 1 {
@@ -1538,36 +1513,6 @@ mod tests {
             .expect("colliding workspace keys")
             .contains("same workspace folder"));
 
-        let mut eng_a = repo("a");
-        eng_a.team_prefixes = vec!["ENG".to_string()];
-        let mut eng_b = repo("b");
-        eng_b.team_prefixes = vec!["eng-".to_string()];
-        assert!(validate_repos(&[eng_a, eng_b])
-            .expect("overlapping prefixes")
-            .contains("Team prefix \"ENG\""));
-
-        let mut proj_a = repo("a");
-        proj_a.project_ids = vec!["proj-1".to_string()];
-        let mut proj_b = repo("b");
-        proj_b.project_ids = vec![" proj-1 ".to_string()];
-        assert!(validate_repos(&[proj_a, proj_b])
-            .expect("overlapping projects")
-            .contains("Project \"proj-1\""));
-
-        let mut proj_url_a = repo("a");
-        proj_url_a.project_ids = vec![
-            "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
-                .to_string(),
-        ];
-        let mut proj_url_b = repo("b");
-        proj_url_b.project_ids = vec![
-            "linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/updates"
-                .to_string(),
-        ];
-        assert!(validate_repos(&[proj_url_a, proj_url_b])
-            .expect("overlapping project URLs")
-            .contains("phase-1-pre-launch-fixes-00bdaf30dd39"));
-
         let two_defaults = vec![
             RepoConfig {
                 is_default: true,
@@ -1590,6 +1535,33 @@ mod tests {
             ..repo("backend")
         };
         assert!(validate_repos(&[web, backend]).is_none());
+    }
+
+    #[test]
+    fn validation_allows_routing_rules_to_overlap_across_repositories() {
+        let mut eng_a = repo("a");
+        eng_a.team_prefixes = vec!["ENG".to_string()];
+        let mut eng_b = repo("b");
+        eng_b.team_prefixes = vec!["eng-".to_string()];
+        assert!(validate_repos(&[eng_a, eng_b]).is_none());
+
+        let mut proj_a = repo("a");
+        proj_a.project_ids = vec!["proj-1".to_string()];
+        let mut proj_b = repo("b");
+        proj_b.project_ids = vec![" proj-1 ".to_string()];
+        assert!(validate_repos(&[proj_a, proj_b]).is_none());
+
+        let mut proj_url_a = repo("a");
+        proj_url_a.project_ids = vec![
+            "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
+                .to_string(),
+        ];
+        let mut proj_url_b = repo("b");
+        proj_url_b.project_ids = vec![
+            "linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/updates"
+                .to_string(),
+        ];
+        assert!(validate_repos(&[proj_url_a, proj_url_b]).is_none());
     }
 
     #[test]

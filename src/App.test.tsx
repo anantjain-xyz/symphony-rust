@@ -2391,6 +2391,25 @@ describe("App settings", () => {
     expect(defaultToggles[1].checked).toBe(true);
   });
 
+  it("does not select newly added repositories as default", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), repos: [] };
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings }));
+
+    render(<App />);
+
+    await openSettings();
+    const addRepository = screen.getByRole("button", { name: "Add repository" });
+    fireEvent.click(addRepository);
+    fireEvent.click(addRepository);
+
+    const defaultToggles = (await screen.findAllByLabelText("Default", {
+      selector: "input",
+    })) as HTMLInputElement[];
+    expect(defaultToggles).toHaveLength(2);
+    expect(defaultToggles.every((toggle) => !toggle.checked)).toBe(true);
+  });
+
   it("starts with all repositories collapsed and expands only the repository being edited", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = {

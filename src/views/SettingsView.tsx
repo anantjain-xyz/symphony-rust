@@ -729,8 +729,7 @@ function SettingsView({
           install_cmd: null,
           team_prefixes: [],
           project_ids: [],
-          // The first repo starts as the fallback, but users can clear it.
-          is_default: settings.repos.length === 0,
+          is_default: false,
           skills_marked_installed: false,
         },
       ],
