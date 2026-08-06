@@ -921,7 +921,7 @@ function SettingsView({
                 </small>
               </label>
               <label>
-                Project ID
+                Linear projects
                 <input
                   {...literalInputProps}
                   value={settings.tracker_project_id ?? ""}
@@ -934,11 +934,11 @@ function SettingsView({
                   }
                 />
                 <small className="hint">
-                  Optional. Watch a single project by pasting its Linear URL or project ID.
+                  Optional. Paste a Linear project URL or ID to watch only issues from that project.
                 </small>
               </label>
               <label>
-                Team prefix
+                Linear teams
                 <input
                   {...literalInputProps}
                   value={settings.tracker_prefix ?? ""}
@@ -949,7 +949,7 @@ function SettingsView({
                   placeholder="ENG"
                 />
                 <small className="hint">
-                  Optional. Watch only issues whose identifier starts with this team key.
+                  Optional. Enter a Linear team key to watch only issues from that team.
                 </small>
               </label>
               <label className="checkbox-row">

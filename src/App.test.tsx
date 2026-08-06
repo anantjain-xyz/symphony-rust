@@ -2472,13 +2472,11 @@ describe("App settings", () => {
     const fields = [
       screen.getByLabelText(/^Repo URL/, { selector: "input" }),
       screen.getByLabelText(/^Install command/, { selector: "input" }),
-      screen.getByLabelText(/^Linear teams/, { selector: "input" }),
-      screen.getByLabelText(/^Linear projects/, { selector: "input" }),
+      ...screen.getAllByLabelText(/^Linear teams/, { selector: "input" }),
+      ...screen.getAllByLabelText(/^Linear projects/, { selector: "input" }),
       screen.getByLabelText(/^Workspace root/, { selector: "input" }),
       screen.getByLabelText(/^API key/, { selector: "input" }),
       screen.getByPlaceholderText("acme"),
-      screen.getByLabelText(/^Project/, { selector: "input" }),
-      screen.getByLabelText(/^Team prefix/, { selector: "input" }),
       screen.getByLabelText(/^Active states/, { selector: "input" }),
       screen.getByLabelText(/^Terminal states/, { selector: "input" }),
       screen.getByLabelText(/^Session environment/, { selector: "textarea" }),
@@ -2495,6 +2493,26 @@ describe("App settings", () => {
     for (const field of fields) {
       expectLiteralInput(field);
     }
+  });
+
+  it("uses consistent Linear team and project labels across Settings", async () => {
+    render(<App />);
+
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+
+    expect(screen.getAllByLabelText(/^Linear teams/, { selector: "input" })).toHaveLength(2);
+    expect(screen.getAllByLabelText(/^Linear projects/, { selector: "input" })).toHaveLength(2);
+    expect(
+      screen.getByText("Optional. Enter a Linear team key to watch only issues from that team."),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Optional. Paste a Linear project URL or ID to watch only issues from that project.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("Project ID")).toBeNull();
+    expect(screen.queryByText("Team prefix")).toBeNull();
   });
 
   it("lets settings number fields be cleared before replacement", async () => {
