@@ -62,9 +62,11 @@ An issue can enter normal dispatch only when all of these are true:
 - no active provider rate limit blocks dispatch; and
 - `pending + running` is below `max_concurrent_agents`.
 
-Repository labels, projects, teams, and the configured default determine
-routing. An unroutable active issue is skipped rather than assigned to an
-arbitrary workspace.
+Linear team and project lists determine which issues enter the active query:
+each list is ORed internally, and non-empty team and project lists are ANDed
+together. Repository labels and the configured default then determine routing.
+An unroutable active issue is skipped rather than assigned to an arbitrary
+workspace.
 
 The worker refreshes locally known issues that leave the active query until
 they reach a configured terminal state. This prevents an intermediate tracker

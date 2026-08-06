@@ -98,6 +98,7 @@ async fn save_settings(
         }
     }
     let mut settings = request.settings;
+    settings::normalize_linear_filters(&mut settings);
     settings.linear_api_key_set = linear_api_key().is_some();
     let json = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
     tokio::fs::write(&state.settings_path, json)
@@ -218,8 +219,6 @@ fn valid_env_key(key: &str) -> bool {
 
 /// Repository names are label routing keys (either `repo:<name>` or bare
 /// `<name>`) and workspace namespaces, so they have to exist and be unique.
-/// Team and project rules may intentionally overlap across repositories; the
-/// routing layer resolves those ties in configured order.
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
     if repos.is_empty() {
         return Some(
@@ -1250,8 +1249,8 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
         Ok(raw) => {
             let (settings, migrated) = parse_settings(&raw)?;
             if migrated {
-                // The legacy workflow's customized front matter is discarded;
-                // keep the original file around in case the user needs it.
+                // Keep the pre-migration file around in case the user needs to
+                // inspect or restore settings from an older shape.
                 let backup = state.settings_path.with_extension("json.bak");
                 tokio::fs::write(&backup, &raw)
                     .await
@@ -1264,7 +1263,7 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
                 tracing::info!(
                     target: "symphony",
                     backup = %backup.display(),
-                    "migrated legacy workflow settings to structured settings"
+                    "migrated settings to the current configuration shape"
                 );
             }
             settings
@@ -1397,7 +1396,8 @@ mod tests {
         let settings = configured_settings();
         let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
         assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
-        assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
+        assert!(workflow.front_matter.tracker.team_keys.is_empty());
+        assert!(workflow.front_matter.tracker.project_ids.is_empty());
         assert!(!workflow.front_matter.tracker.assigned_to_me);
         assert_eq!(
             workflow.front_matter.agent.backend,
@@ -1534,40 +1534,12 @@ mod tests {
             .contains("default"));
 
         // A clean multi-repo config passes.
-        let mut web = repo("web");
-        web.team_prefixes = vec!["WEB".to_string()];
+        let web = repo("web");
         let backend = RepoConfig {
             is_default: true,
             ..repo("backend")
         };
         assert!(validate_repos(&[web, backend]).is_none());
-    }
-
-    #[test]
-    fn validation_allows_routing_rules_to_overlap_across_repositories() {
-        let mut eng_a = repo("a");
-        eng_a.team_prefixes = vec!["ENG".to_string()];
-        let mut eng_b = repo("b");
-        eng_b.team_prefixes = vec!["eng-".to_string()];
-        assert!(validate_repos(&[eng_a, eng_b]).is_none());
-
-        let mut proj_a = repo("a");
-        proj_a.project_ids = vec!["proj-1".to_string()];
-        let mut proj_b = repo("b");
-        proj_b.project_ids = vec![" proj-1 ".to_string()];
-        assert!(validate_repos(&[proj_a, proj_b]).is_none());
-
-        let mut proj_url_a = repo("a");
-        proj_url_a.project_ids = vec![
-            "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
-                .to_string(),
-        ];
-        let mut proj_url_b = repo("b");
-        proj_url_b.project_ids = vec![
-            "linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/updates"
-                .to_string(),
-        ];
-        assert!(validate_repos(&[proj_url_a, proj_url_b]).is_none());
     }
 
     #[test]

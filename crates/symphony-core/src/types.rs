@@ -164,8 +164,10 @@ pub struct TrackerConfig {
     pub api_key: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
-    pub identifier_prefix: Option<String>,
-    pub project_id: Option<String>,
+    #[serde(default)]
+    pub team_keys: Vec<String>,
+    #[serde(default)]
+    pub project_ids: Vec<String>,
     #[serde(default)]
     pub assigned_to_me: bool,
 }
@@ -177,8 +179,8 @@ impl Default for TrackerConfig {
             api_key: String::new(),
             active_states: Vec::new(),
             terminal_states: Vec::new(),
-            identifier_prefix: None,
-            project_id: None,
+            team_keys: Vec::new(),
+            project_ids: Vec::new(),
             assigned_to_me: false,
         }
     }
@@ -473,11 +475,11 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub blockers: Vec<String>,
     pub pr_urls: Vec<String>,
-    /// Linear project the issue belongs to; drives project → repo routing.
+    /// Linear project the issue belongs to; retained for filtering and prompts.
     /// Default so issue snapshots stored before this field deserialize.
     #[serde(default)]
     pub project_id: Option<String>,
-    /// Linear URL slug for the issue's project; lets project URLs route too.
+    /// Linear URL slug for the issue's project; lets project URL filters match.
     /// Default so issue snapshots stored before this field deserialize.
     #[serde(default)]
     pub project_slug_id: Option<String>,
@@ -494,13 +496,7 @@ pub struct RepoConfig {
     pub url: String,
     #[serde(default)]
     pub install_cmd: Option<String>,
-    /// Linear team keys (e.g. "ENG") this repo is the default for.
-    #[serde(default)]
-    pub team_prefixes: Vec<String>,
-    /// Linear project IDs this repo is the default for.
-    #[serde(default)]
-    pub project_ids: Vec<String>,
-    /// Fallback when no label, project, or team rule matches an issue.
+    /// Fallback when no repository label matches an issue.
     #[serde(default)]
     pub is_default: bool,
     /// User override for repos that intentionally do not use Symphony's exact

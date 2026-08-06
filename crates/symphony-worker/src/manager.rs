@@ -669,7 +669,7 @@ async fn tick<T: TrackerClient>(
         let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
             warn!(
                 issue = %issue.identifier,
-                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, add a matching repo rule, or mark a default)"
+                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, or mark a default)"
             );
             continue;
         };
@@ -2136,11 +2136,10 @@ mod tests {
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
         let mut config = runtime_config(temp.path());
-        // No default and no matching team/project rule: a retry created before
-        // this route change should not suppress active dispatch forever.
+        // No default or repository label: a retry created before this route
+        // change should not suppress active dispatch forever.
         config.repos = vec![RepoConfig {
             name: "web".to_string(),
-            team_prefixes: vec!["WEB".to_string()],
             ..RepoConfig::default()
         }];
         let stop = CancellationToken::new();
@@ -2169,16 +2168,14 @@ mod tests {
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
         let mut config = runtime_config(temp.path());
-        // Two repos, neither default, no rule matching SYM-1: unroutable.
+        // Two repos, neither default, and no repository label: unroutable.
         config.repos = vec![
             RepoConfig {
                 name: "web".to_string(),
-                team_prefixes: vec!["WEB".to_string()],
                 ..RepoConfig::default()
             },
             RepoConfig {
                 name: "backend".to_string(),
-                team_prefixes: vec!["ENG".to_string()],
                 ..RepoConfig::default()
             },
         ];
