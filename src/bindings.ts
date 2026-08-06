@@ -95,6 +95,12 @@ export type SkillsInstallState = "idle" | "running" | "completed" | "failed"
 
 export type SkillsInstallStatus = { state: SkillsInstallState; repo_url: string | null; message: string | null; pr_url: string | null; error: string | null }
 
+/**
+ * One bundled skill: `name` is the directory under `.agents/skills/`,
+ * `content` the full SKILL.md body.
+ */
+export type SkillFile = { name: string; content: string }
+
 export type RepoWorkflowSource = "repository" | "default" | "unknown"
 
 export type RepoWorkflowStatus = { source: RepoWorkflowSource; filename: string | null; fallback_reason: string | null; detail: string | null; pr_url: string | null; can_transfer: boolean }

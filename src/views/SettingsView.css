@@ -353,6 +353,124 @@
   padding: 12px 15px;
 }
 
+.default-skills-reference {
+  display: grid;
+}
+
+.default-skills-intro {
+  align-items: center;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px 15px;
+}
+
+.default-skills-intro h4 {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+.default-skills-intro p {
+  margin: 0;
+  max-width: 580px;
+}
+
+.default-skills-list {
+  border-top: 1px solid var(--border);
+}
+
+.default-skills-state {
+  margin: 0;
+  padding: 14px 15px;
+}
+
+.default-skills-error {
+  align-items: center;
+  color: var(--destructive-foreground);
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.default-skills-error p {
+  margin: 0;
+}
+
+.default-skill + .default-skill {
+  border-top: 1px solid var(--border);
+}
+
+.default-skill summary {
+  align-items: start;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 12px 15px;
+}
+
+.default-skill summary::before {
+  color: var(--muted-foreground);
+  content: "›";
+  flex: 0 0 auto;
+  font-size: 18px;
+  line-height: 18px;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.default-skill[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.default-skill summary:hover {
+  background: var(--muted);
+}
+
+.default-skill summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.default-skill-summary {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.default-skill-summary code {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.default-skill-summary small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.default-skill-content {
+  background: var(--muted);
+  border-top: 1px solid var(--border);
+  max-height: min(560px, 65vh);
+  overflow: auto;
+}
+
+.default-skill pre {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 14px 15px;
+  white-space: pre-wrap;
+}
+
 .test-result {
   font-size: 12px;
 }
@@ -715,5 +833,14 @@ textarea.mono-input {
 
   .var-reference {
     border-left: 0;
+  }
+
+  .default-skills-intro {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .default-skills-intro button {
+    justify-self: start;
   }
 }

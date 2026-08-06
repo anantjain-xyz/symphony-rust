@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { settingsNavigationOffset, settingsSectionForScrollPosition } from "./SettingsView";
+import {
+  defaultSkillDescription,
+  settingsNavigationOffset,
+  settingsSectionForScrollPosition,
+} from "./SettingsView";
+
+describe("defaultSkillDescription", () => {
+  it("reads the description from skill front matter", () => {
+    expect(
+      defaultSkillDescription(
+        "---\nname: symphony-test\ndescription: Read-only reference.\n---\n# Test",
+      ),
+    ).toBe("Read-only reference.");
+  });
+
+  it("does not read description-like text outside front matter", () => {
+    expect(defaultSkillDescription("# Test\n\ndescription: Body text")).toBeNull();
+  });
+});
 
 describe("settingsNavigationOffset", () => {
   it("uses the sticky stepper height and layout gap at compact widths", () => {
