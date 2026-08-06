@@ -7,6 +7,7 @@ import type {
   LinearViewerProfile,
   RepoConfig,
   RepoWorkflowStatus,
+  SkillFile,
   SkillsInstallStatus,
   SkillsStatus,
   TrackerTestResult,
@@ -163,6 +164,18 @@ const BUNDLED_SKILL_NAMES = [
 ];
 const BUNDLED_SKILL_COUNT = BUNDLED_SKILL_NAMES.length;
 const BUNDLED_SKILL_EXAMPLES = "symphony-workpad, symphony-commit, symphony-push";
+
+export function defaultSkillDescription(content: string): string | null {
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  if (lines[0]?.trim() !== "---") return null;
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() === "---") return null;
+    const match = line.match(/^description:\s*(.+)$/);
+    if (match) return match[1].trim();
+  }
+  return null;
+}
 
 // Mirrors PROMPT_VARIABLES in symphony-core (crates/symphony-core/src/prompt.rs).
 const PROMPT_VARIABLES: { name: string; description: string; example: string }[] = [
@@ -1859,6 +1872,9 @@ function SettingsView({
                 </small>
               </div>
             </Panel>
+            <Panel title="Default agent skills">
+              <DefaultSkillsReference runtimeAvailable={runtimeAvailable} />
+            </Panel>
           </div>
         </div>
       </div>
@@ -1893,6 +1909,101 @@ function SettingsView({
         <ExternalLink href={`${GITHUB_URL}/issues`}>Report an issue</ExternalLink>
       </p>
     </form>
+  );
+}
+
+export function DefaultSkillsReference({ runtimeAvailable }: { runtimeAvailable: boolean }) {
+  const [visible, setVisible] = useState(false);
+  const [skills, setSkills] = useState<SkillFile[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  async function loadDefaultSkills() {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const loaded = await desktopCommands.getDefaultSkills();
+      if (mountedRef.current) setSkills(loaded);
+    } catch (loadError) {
+      if (mountedRef.current) setError(String(loadError));
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }
+
+  function toggleVisible() {
+    if (visible) {
+      setVisible(false);
+      return;
+    }
+    setVisible(true);
+    if (skills === null && runtimeAvailable) void loadDefaultSkills();
+  }
+
+  return (
+    <div className="default-skills-reference">
+      <div className="default-skills-intro">
+        <div>
+          <h4>Bundled, read-only instructions</h4>
+          <p className="hint">
+            Symphony supplies these defaults to issue runs when a repository does not provide its
+            own copy. Repository skills can adapt them to that codebase.
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-expanded={visible}
+          aria-controls="default-skills-list"
+          disabled={!runtimeAvailable}
+          onClick={toggleVisible}
+        >
+          {visible ? "Hide default skills" : `View ${BUNDLED_SKILL_COUNT} default skills`}
+        </button>
+      </div>
+      {visible ? (
+        <div id="default-skills-list" className="default-skills-list" aria-busy={loading}>
+          {loading ? <p className="default-skills-state hint">Loading default skills...</p> : null}
+          {error ? (
+            <div className="default-skills-state default-skills-error" role="alert">
+              <p>Could not load the bundled skills. {error}</p>
+              <button type="button" onClick={() => void loadDefaultSkills()}>
+                Try again
+              </button>
+            </div>
+          ) : null}
+          {skills?.map((skill) => {
+            const description = defaultSkillDescription(skill.content);
+            return (
+              <details className="default-skill" key={skill.name}>
+                <summary>
+                  <span className="default-skill-summary">
+                    <code>{skill.name}</code>
+                    {description ? <small>{description}</small> : null}
+                  </span>
+                </summary>
+                <section className="default-skill-content" aria-label={`${skill.name} contents`}>
+                  <pre>
+                    <code>{skill.content}</code>
+                  </pre>
+                </section>
+              </details>
+            );
+          })}
+          {skills?.length === 0 ? (
+            <p className="default-skills-state hint">No default skills are bundled.</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

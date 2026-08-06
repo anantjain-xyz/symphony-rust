@@ -13,6 +13,7 @@ import type {
   RunDetail,
   RunWithIssueRow,
   SaveSettingsRequest,
+  SkillFile,
   SkillsInstallStatus,
   SkillsStatus,
   TrackerTestResult,
@@ -48,6 +49,7 @@ export const testTrackerConnection = (request: SaveSettingsRequest) =>
   invokeCommand<TrackerTestResult>("test_tracker_connection", { request });
 export const removeLinearApiKey = () => invokeCommand<AppSettings>("remove_linear_api_key");
 export const getDefaultPrompt = () => invokeCommand<string>("get_default_prompt");
+export const getDefaultSkills = () => invokeCommand<SkillFile[]>("get_default_skills");
 export const startWorker = () => invokeCommand<WorkerStatus>("start_worker");
 export const stopWorker = () => invokeCommand<WorkerStatus>("stop_worker");
 export const stopRun = (id: string) => invokeCommand<RunDetail | null>("stop_run", { id });

@@ -367,6 +367,11 @@ fn get_default_prompt() -> String {
 }
 
 #[tauri::command]
+fn get_default_skills() -> Vec<SkillFile> {
+    bundled_skills()
+}
+
+#[tauri::command]
 async fn get_overview(state: State<'_, AppState>) -> Result<Overview, String> {
     state.repo.overview().await.map_err(|err| err.to_string())
 }
@@ -1190,6 +1195,7 @@ pub fn run() {
             get_linear_viewer,
             remove_linear_api_key,
             get_default_prompt,
+            get_default_skills,
             get_overview,
             list_runs,
             get_run_detail,

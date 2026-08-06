@@ -17,6 +17,7 @@
     "apply_retro_workflow",
     "delete_retro",
     "get_default_prompt",
+    "get_default_skills",
     "get_linear_viewer",
     "get_overview",
     "get_repo_workflow_status",

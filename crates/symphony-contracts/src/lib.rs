@@ -83,6 +83,7 @@ pub fn bindings_source() -> Result<String> {
     export!(symphony_worker::SkillsStatus);
     export!(symphony_worker::SkillsInstallState);
     export!(symphony_worker::SkillsInstallStatus);
+    export!(symphony_worker::SkillFile);
     export!(symphony_worker::RepoWorkflowSource);
     export!(symphony_worker::RepoWorkflowStatus);
     export!(symphony_worker::WorkflowTransferState);
