@@ -63,16 +63,14 @@ function testSettings(): AppSettings {
         name: "widgets",
         url: "git@github.com:acme/widgets.git",
         install_cmd: null,
-        team_prefixes: ["ENG"],
-        project_ids: [],
         is_default: true,
         skills_marked_installed: false,
       },
     ],
     workspace_root: null,
     tracker_workspace: "acme",
-    tracker_prefix: null,
-    tracker_project_id: null,
+    tracker_team_keys: ["ENG"],
+    tracker_project_ids: [],
     tracker_assigned_to_me: false,
     active_states: ["Todo"],
     terminal_states: ["Done"],
@@ -2359,7 +2357,6 @@ describe("App settings", () => {
           ...testSettings().repos[0],
           name: "backend",
           url: "git@github.com:acme/backend.git",
-          team_prefixes: [],
           is_default: false,
         },
       ],
@@ -2420,7 +2417,6 @@ describe("App settings", () => {
           ...testSettings().repos[0],
           name: "backend",
           url: "git@github.com:acme/backend.git",
-          team_prefixes: ["API"],
           is_default: false,
         },
       ],
@@ -2472,8 +2468,8 @@ describe("App settings", () => {
     const fields = [
       screen.getByLabelText(/^Repo URL/, { selector: "input" }),
       screen.getByLabelText(/^Install command/, { selector: "input" }),
-      ...screen.getAllByLabelText(/^Linear teams/, { selector: "input" }),
-      ...screen.getAllByLabelText(/^Linear projects/, { selector: "input" }),
+      screen.getByLabelText(/^Linear teams/, { selector: "input" }),
+      screen.getByLabelText(/^Linear projects/, { selector: "input" }),
       screen.getByLabelText(/^Workspace root/, { selector: "input" }),
       screen.getByLabelText(/^API key/, { selector: "input" }),
       screen.getByPlaceholderText("acme"),
@@ -2495,29 +2491,40 @@ describe("App settings", () => {
     }
   });
 
-  it("uses consistent Linear team and project labels across Settings", async () => {
+  it("uses comma-separated global team and project filter lists", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
     render(<App />);
 
     await openSettings();
-    fireEvent.click(screen.getByRole("button", { name: "Edit widgets repository" }));
+    const teams = screen.getByLabelText(/^Linear teams/, {
+      selector: "input",
+    }) as HTMLInputElement;
+    const projects = screen.getByLabelText(/^Linear projects/, {
+      selector: "input",
+    }) as HTMLInputElement;
+    fireEvent.change(teams, { target: { value: "CBIZPAY, SIM" } });
+    fireEvent.change(projects, { target: { value: "project-a, project-b" } });
 
-    expect(screen.getAllByLabelText(/^Linear teams/, { selector: "input" })).toHaveLength(2);
-    expect(screen.getAllByLabelText(/^Linear projects/, { selector: "input" })).toHaveLength(2);
-    const [topLevelTeams] = screen.getAllByLabelText(/^Linear teams/, { selector: "input" });
-    const [topLevelProjects] = screen.getAllByLabelText(/^Linear projects/, { selector: "input" });
-    expect(topLevelTeams.closest("label")?.nextElementSibling).toBe(
-      topLevelProjects.closest("label"),
-    );
     expect(
-      screen.getByText("Optional. Enter a Linear team key to watch only issues from that team."),
+      screen.getByText(
+        "Optional. Match any listed team. When projects are also set, an issue must match both filters.",
+      ),
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Optional. Paste a Linear project URL or ID to watch only issues from that project.",
+        "Optional. Match any listed project. When teams are also set, an issue must match both filters.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByText("Project ID")).toBeNull();
-    expect(screen.queryByText("Team prefix")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saveCall = () =>
+      tauriMocks.invoke.mock.calls.find(([command]) => command === "save_settings");
+    await waitFor(() => expect(saveCall()).toBeTruthy());
+    expect(saveCall()?.[1].request.settings).toMatchObject({
+      tracker_team_keys: ["CBIZPAY", "SIM"],
+      tracker_project_ids: ["project-a", "project-b"],
+    });
   });
 
   it("lets settings number fields be cleared before replacement", async () => {

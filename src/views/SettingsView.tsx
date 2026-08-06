@@ -740,8 +740,6 @@ function SettingsView({
           name: "",
           url: "",
           install_cmd: null,
-          team_prefixes: [],
-          project_ids: [],
           is_default: false,
           skills_marked_installed: false,
         },
@@ -933,36 +931,36 @@ function SettingsView({
                   links.
                 </small>
               </label>
-              <label>
+              <label htmlFor="linear-team-filters">
                 Linear teams
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_prefix ?? ""}
+                <ListInput
+                  id="linear-team-filters"
+                  value={settings.tracker_team_keys}
                   disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
-                  }
-                  placeholder="ENG"
+                  separator="comma"
+                  onChange={(tracker_team_keys) => setSettings({ ...settings, tracker_team_keys })}
+                  placeholder="ENG, WAL"
                 />
                 <small className="hint">
-                  Optional. Enter a Linear team key to watch only issues from that team.
+                  Optional. Match any listed team. When projects are also set, an issue must match
+                  both filters.
                 </small>
               </label>
-              <label>
+              <label htmlFor="linear-project-filters">
                 Linear projects
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_project_id ?? ""}
+                <ListInput
+                  id="linear-project-filters"
+                  value={settings.tracker_project_ids}
                   disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      tracker_project_id: nullable(e.currentTarget.value),
-                    })
+                  separator="comma"
+                  onChange={(tracker_project_ids) =>
+                    setSettings({ ...settings, tracker_project_ids })
                   }
+                  placeholder="Project URLs or IDs"
                 />
                 <small className="hint">
-                  Optional. Paste a Linear project URL or ID to watch only issues from that project.
+                  Optional. Match any listed project. When teams are also set, an issue must match
+                  both filters.
                 </small>
               </label>
               <label className="checkbox-row">
@@ -1069,8 +1067,8 @@ function SettingsView({
               <h3>Repositories</h3>
               <small className="hint">
                 Each issue routes to one repo: a <code>repo:&lt;name&gt;</code> or matching bare
-                label in Linear wins, then the repo claiming the issue's project, then its team,
-                then the default. Clear the default to require an explicit route.
+                label in Linear wins, then the default. Clear the default to require a repository
+                label.
               </small>
               {settings.repos.map((repo, index) => {
                 const repoTitle = repo.name.trim() || `Repository ${index + 1}`;
@@ -1192,35 +1190,6 @@ function SettingsView({
                           <small className="hint">
                             Runs in the workspace after cloning. Leave blank for <code>npm ci</code>
                             .
-                          </small>
-                        </label>
-                        <label htmlFor={`repo-${index}-linear-teams`}>
-                          Linear teams
-                          <ListInput
-                            id={`repo-${index}-linear-teams`}
-                            value={repo.team_prefixes}
-                            disabled={!runtimeAvailable}
-                            separator="comma"
-                            placeholder="ENG, WAL"
-                            onChange={(next) => updateRepo(index, { team_prefixes: next })}
-                          />
-                          <small className="hint">
-                            Optional. Issues from these team keys land here unless a label or
-                            project rule says otherwise.
-                          </small>
-                        </label>
-                        <label htmlFor={`repo-${index}-linear-projects`}>
-                          Linear projects
-                          <ListInput
-                            id={`repo-${index}-linear-projects`}
-                            value={repo.project_ids}
-                            disabled={!runtimeAvailable}
-                            separator="comma"
-                            placeholder="Project URLs or IDs"
-                            onChange={(next) => updateRepo(index, { project_ids: next })}
-                          />
-                          <small className="hint">
-                            Optional. Paste Linear project URLs or IDs; beats the team rule.
                           </small>
                         </label>
                         <WorkflowBlock

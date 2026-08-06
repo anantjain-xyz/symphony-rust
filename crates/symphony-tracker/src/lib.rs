@@ -78,37 +78,89 @@ impl LinearTracker {
         Ok(data.viewer)
     }
 
-    /// The Linear team key derived from the configured identifier prefix.
-    /// Accepts either form — `WAL` or `WAL-` — by trimming an optional
-    /// trailing hyphen.
-    fn team_key_from_prefix(&self) -> Option<String> {
+    fn team_keys(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         self.config
-            .identifier_prefix
-            .as_ref()
-            .map(|prefix| prefix.strip_suffix('-').unwrap_or(prefix))
-            .filter(|key| !key.is_empty())
-            .map(ToOwned::to_owned)
+            .team_keys
+            .iter()
+            .map(|key| key.trim().trim_end_matches('-').to_ascii_uppercase())
+            .filter(|key| !key.is_empty() && seen.insert(key.clone()))
+            .collect()
     }
 
-    /// The full prefix used to match issue identifiers like `WAL-123`, always
-    /// normalized to include the trailing hyphen so a bare `WAL` doesn't also
-    /// match other teams such as `WALLET-`.
-    fn identifier_match_prefix(&self) -> Option<String> {
-        self.team_key_from_prefix().map(|key| format!("{key}-"))
+    fn project_refs(&self) -> Vec<LinearProjectRef> {
+        let mut seen = std::collections::HashSet::new();
+        self.config
+            .project_ids
+            .iter()
+            .filter_map(|value| LinearProjectRef::parse(value))
+            .filter(|project| seen.insert(project.canonical_key()))
+            .collect()
     }
 
-    fn filter_by_prefix(&self, mut issues: Vec<Issue>) -> Vec<Issue> {
-        if let Some(prefix) = self.identifier_match_prefix() {
-            issues.retain(|issue| issue.identifier.starts_with(&prefix));
-        }
+    /// Apply the same OR-within/AND-across semantics as the server query. This
+    /// is a defensive guard for direct issue fetches and API responses.
+    fn filter_issues(&self, mut issues: Vec<Issue>) -> Vec<Issue> {
+        let team_keys = self.team_keys();
+        let project_refs = self.project_refs();
+        issues.retain(|issue| {
+            let team_matches = team_keys.is_empty()
+                || issue.identifier.split_once('-').is_some_and(|(team, _)| {
+                    team_keys.iter().any(|key| key.eq_ignore_ascii_case(team))
+                });
+            let project_matches = project_refs.is_empty()
+                || project_refs.iter().any(|project| {
+                    project.matches_project(
+                        issue.project_id.as_deref(),
+                        issue.project_slug_id.as_deref(),
+                    )
+                });
+            team_matches && project_matches
+        });
         issues
     }
 
-    fn project_ref(&self) -> Option<LinearProjectRef> {
-        self.config
-            .project_id
-            .as_deref()
-            .and_then(LinearProjectRef::parse)
+    fn push_scope_filters(
+        &self,
+        var_decls: &mut Vec<String>,
+        filter_parts: &mut Vec<String>,
+        variables: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        let team_keys = self.team_keys();
+        if !team_keys.is_empty() {
+            var_decls.push("$teamKeys: [String!]!".to_string());
+            filter_parts.push("team: { key: { in: $teamKeys } }".to_string());
+            variables.insert("teamKeys".to_string(), serde_json::json!(team_keys));
+        }
+
+        let project_refs = self.project_refs();
+        let project_ids = project_refs
+            .iter()
+            .filter_map(LinearProjectRef::id)
+            .collect::<Vec<_>>();
+        let project_slug_ids = project_refs
+            .iter()
+            .filter_map(LinearProjectRef::slug_id)
+            .collect::<Vec<_>>();
+        let mut project_filters = Vec::new();
+        if !project_ids.is_empty() {
+            var_decls.push("$projectIds: [ID!]!".to_string());
+            variables.insert("projectIds".to_string(), serde_json::json!(project_ids));
+            project_filters.push("{ id: { in: $projectIds } }".to_string());
+        }
+        if !project_slug_ids.is_empty() {
+            var_decls.push("$projectSlugIds: [String!]!".to_string());
+            variables.insert(
+                "projectSlugIds".to_string(),
+                serde_json::json!(project_slug_ids),
+            );
+            project_filters.push("{ slugId: { in: $projectSlugIds } }".to_string());
+        }
+        match project_filters.as_slice() {
+            [] => {}
+            [only] => filter_parts.push(format!("project: {only}")),
+            many => filter_parts.push(format!("project: {{ or: [{}] }}", many.join(", "))),
+        }
     }
 
     async fn fetch_by_state_names(
@@ -123,10 +175,31 @@ impl LinearTracker {
             return Ok(Vec::new());
         };
 
-        let data: IssuesByStateData = self
-            .execute(&prepared.query, Some(prepared.variables))
-            .await?;
-        Ok(data.issues.nodes.into_iter().map(normalize).collect())
+        let mut nodes = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..50 {
+            let mut variables = prepared.variables.clone();
+            if let serde_json::Value::Object(map) = &mut variables {
+                map.insert(
+                    "cursor".to_string(),
+                    cursor
+                        .as_deref()
+                        .map(|value| serde_json::Value::String(value.to_string()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            let data: IssuesByStateData = self.execute(&prepared.query, Some(variables)).await?;
+            let page = data.issues.page_info;
+            nodes.extend(data.issues.nodes);
+            match page {
+                Some(page) if page.has_next_page => {
+                    let Some(next) = page.end_cursor else { break };
+                    cursor = Some(next);
+                }
+                _ => break,
+            }
+        }
+        Ok(nodes.into_iter().map(normalize).collect())
     }
 
     async fn build_issues_by_state_query(
@@ -156,7 +229,7 @@ impl LinearTracker {
             return None;
         }
 
-        let mut var_decls = Vec::new();
+        let mut var_decls = vec!["$cursor: String".to_string()];
         let mut or_clauses = Vec::new();
         let mut variables = serde_json::Map::new();
         for (idx, state) in states.iter().enumerate() {
@@ -168,28 +241,7 @@ impl LinearTracker {
             variables.insert(name, serde_json::Value::String(state.clone()));
         }
         let mut filter_parts = vec![format!("or: [{}]", or_clauses.join(", "))];
-        if let Some(team_key) = self.team_key_from_prefix() {
-            var_decls.push("$teamKey: String!".to_string());
-            filter_parts.push("team: { key: { eq: $teamKey } }".to_string());
-            variables.insert("teamKey".to_string(), serde_json::Value::String(team_key));
-        }
-        if let Some(project_ref) = self.project_ref() {
-            if let Some(project_id) = project_ref.id() {
-                var_decls.push("$projectId: ID!".to_string());
-                filter_parts.push("project: { id: { eq: $projectId } }".to_string());
-                variables.insert(
-                    "projectId".to_string(),
-                    serde_json::Value::String(project_id.to_string()),
-                );
-            } else if let Some(project_slug_id) = project_ref.slug_id() {
-                var_decls.push("$projectSlugId: String!".to_string());
-                filter_parts.push("project: { slugId: { eq: $projectSlugId } }".to_string());
-                variables.insert(
-                    "projectSlugId".to_string(),
-                    serde_json::Value::String(project_slug_id.to_string()),
-                );
-            }
-        }
+        self.push_scope_filters(&mut var_decls, &mut filter_parts, &mut variables);
         if let Some(assignee_id) = assignee_id {
             var_decls.push("$assigneeId: ID!".to_string());
             filter_parts.push("assignee: { id: { eq: $assigneeId } }".to_string());
@@ -202,8 +254,9 @@ impl LinearTracker {
         let query = format!(
             r#"
             query SymphonyIssuesByState({}) {{
-              issues(filter: {{ {} }}, first: 100) {{
+              issues(filter: {{ {} }}, first: 100, after: $cursor) {{
                 nodes {{ {} }}
+                pageInfo {{ hasNextPage endCursor }}
               }}
             }}
             "#,
@@ -240,20 +293,8 @@ impl LinearTracker {
                 return Ok(None);
             }
         }
-        if let Some(project_ref) = self.project_ref() {
-            let project_id = node.project.as_ref().map(|p| p.id.as_str());
-            let project_slug_id = node.project.as_ref().and_then(|p| p.slug_id.as_deref());
-            if !project_ref.matches_project(project_id, project_slug_id) {
-                return Ok(None);
-            }
-        }
         let issue = normalize(node);
-        if let Some(prefix) = self.identifier_match_prefix() {
-            if !issue.identifier.starts_with(&prefix) {
-                return Ok(None);
-            }
-        }
-        Ok(Some(issue))
+        Ok(self.filter_issues(vec![issue]).into_iter().next())
     }
 
     async fn execute<T: DeserializeOwned>(
@@ -341,7 +382,7 @@ impl TrackerClient for LinearTracker {
     }
 
     async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
-        let mut issues = self.filter_by_prefix(
+        let mut issues = self.filter_issues(
             self.fetch_by_state_names(&self.config.active_states, self.config.assigned_to_me)
                 .await?,
         );
@@ -350,7 +391,7 @@ impl TrackerClient for LinearTracker {
     }
 
     async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
-        Ok(self.filter_by_prefix(
+        Ok(self.filter_issues(
             self.fetch_by_state_names(&self.config.terminal_states, false)
                 .await?,
         ))
@@ -553,6 +594,8 @@ struct LinearComment {
 #[derive(Deserialize)]
 struct LinearIssueConnection {
     nodes: Vec<LinearIssueNode>,
+    #[serde(default, rename = "pageInfo")]
+    page_info: Option<PageInfo>,
 }
 
 #[derive(Deserialize)]
@@ -820,60 +863,93 @@ mod tests {
         assert!(!is_github_pr_url("https://github.com/a/b/issues/123"));
     }
 
-    fn tracker_with_prefix(prefix: Option<&str>) -> LinearTracker {
+    fn tracker_with_teams(team_keys: &[&str]) -> LinearTracker {
         LinearTracker::new(TrackerConfig {
-            identifier_prefix: prefix.map(ToOwned::to_owned),
+            team_keys: team_keys.iter().map(ToString::to_string).collect(),
             ..Default::default()
         })
     }
 
     #[test]
-    fn prefix_accepts_either_form() {
-        for raw in ["WAL", "WAL-"] {
-            let tracker = tracker_with_prefix(Some(raw));
-            assert_eq!(tracker.team_key_from_prefix().as_deref(), Some("WAL"));
-            assert_eq!(tracker.identifier_match_prefix().as_deref(), Some("WAL-"));
-        }
-
-        // The hyphenated match prefix guards against matching other teams.
-        let tracker = tracker_with_prefix(Some("WAL"));
-        let prefix = tracker.identifier_match_prefix().unwrap();
-        assert!("WAL-123".starts_with(&prefix));
-        assert!(!"WALLET-5".starts_with(&prefix));
+    fn team_keys_normalize_and_deduplicate() {
+        let tracker = tracker_with_teams(&[" wal- ", "WAL", "sim", "-"]);
+        assert_eq!(tracker.team_keys(), ["WAL", "SIM"]);
     }
 
     #[test]
-    fn prefix_absent_or_empty_yields_no_filter() {
-        for raw in [None, Some(""), Some("-")] {
-            let tracker = tracker_with_prefix(raw);
-            assert_eq!(tracker.team_key_from_prefix(), None);
-            assert_eq!(tracker.identifier_match_prefix(), None);
-        }
+    fn absent_or_empty_team_keys_yield_no_filter() {
+        assert!(tracker_with_teams(&[]).team_keys().is_empty());
+        assert!(tracker_with_teams(&["", "-"]).team_keys().is_empty());
     }
 
     #[test]
-    fn project_ref_accepts_linear_project_urls() {
+    fn project_refs_accept_urls_and_deduplicate() {
         let tracker = LinearTracker::new(TrackerConfig {
-            project_id: Some(
+            project_ids: vec![
                 "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
                     .to_string(),
-            ),
+                "phase-1-pre-launch-fixes-00bdaf30dd39".to_string(),
+                "project-id".to_string(),
+            ],
             ..Default::default()
         });
 
+        let refs = tracker.project_refs();
+        assert_eq!(refs.len(), 2);
         assert_eq!(
-            tracker
-                .project_ref()
-                .and_then(|project| { project.slug_id().map(str::to_string) }),
-            Some("phase-1-pre-launch-fixes-00bdaf30dd39".to_string())
+            refs[0].slug_id(),
+            Some("phase-1-pre-launch-fixes-00bdaf30dd39")
+        );
+        assert_eq!(refs[1].id(), Some("project-id"));
+    }
+
+    fn issue_for_filter(identifier: &str, project_id: Option<&str>) -> Issue {
+        Issue {
+            id: identifier.to_string(),
+            identifier: identifier.to_string(),
+            title: "Filter fixture".to_string(),
+            description: None,
+            priority: 0,
+            state: "todo".to_string(),
+            branch: None,
+            labels: vec![],
+            blockers: vec![],
+            pr_urls: vec![],
+            project_id: project_id.map(str::to_string),
+            project_slug_id: None,
+        }
+    }
+
+    #[test]
+    fn team_and_project_lists_or_within_and_and_across() {
+        let tracker = LinearTracker::new(TrackerConfig {
+            team_keys: vec!["ENG".to_string(), "SIM".to_string()],
+            project_ids: vec!["project-a".to_string(), "project-b".to_string()],
+            ..Default::default()
+        });
+        let issues = vec![
+            issue_for_filter("ENG-1", Some("project-a")),
+            issue_for_filter("SIM-2", Some("project-b")),
+            issue_for_filter("ENG-3", Some("project-c")),
+            issue_for_filter("OPS-4", Some("project-a")),
+            issue_for_filter("ENG-5", None),
+        ];
+
+        let matched = tracker.filter_issues(issues);
+        assert_eq!(
+            matched
+                .iter()
+                .map(|issue| issue.identifier.as_str())
+                .collect::<Vec<_>>(),
+            ["ENG-1", "SIM-2"]
         );
     }
 
     #[test]
     fn assigned_query_uses_root_issues_with_assignee_filter() {
         let tracker = LinearTracker::new(TrackerConfig {
-            identifier_prefix: Some("ENG".to_string()),
-            project_id: Some("project-1".to_string()),
+            team_keys: vec!["ENG".to_string(), "SIM".to_string()],
+            project_ids: vec!["project-1".to_string(), "phase-1-00bdaf30dd39".to_string()],
             ..Default::default()
         });
         let states = vec!["Todo".to_string(), "Rework".to_string()];
@@ -883,22 +959,33 @@ mod tests {
             .expect("query");
 
         assert!(prepared.query.contains("issues(filter:"));
+        assert!(prepared.query.contains("after: $cursor"));
+        assert!(prepared
+            .query
+            .contains("pageInfo { hasNextPage endCursor }"));
         assert!(!prepared.query.contains("assignedIssues"));
         assert!(!prepared.query.contains("viewer {"));
         assert!(prepared.query.contains("$assigneeId: ID!"));
         assert!(prepared
             .query
             .contains("assignee: { id: { eq: $assigneeId } }"));
-        assert!(prepared.query.contains("team: { key: { eq: $teamKey } }"));
-        assert!(prepared
-            .query
-            .contains("project: { id: { eq: $projectId } }"));
+        assert!(prepared.query.contains("team: { key: { in: $teamKeys } }"));
+        assert!(prepared.query.contains(
+            "project: { or: [{ id: { in: $projectIds } }, { slugId: { in: $projectSlugIds } }] }"
+        ));
         assert_eq!(prepared.variables["s0"], serde_json::json!("Todo"));
         assert_eq!(prepared.variables["s1"], serde_json::json!("Rework"));
-        assert_eq!(prepared.variables["teamKey"], serde_json::json!("ENG"));
         assert_eq!(
-            prepared.variables["projectId"],
-            serde_json::json!("project-1")
+            prepared.variables["teamKeys"],
+            serde_json::json!(["ENG", "SIM"])
+        );
+        assert_eq!(
+            prepared.variables["projectIds"],
+            serde_json::json!(["project-1"])
+        );
+        assert_eq!(
+            prepared.variables["projectSlugIds"],
+            serde_json::json!(["phase-1-00bdaf30dd39"])
         );
         assert_eq!(
             prepared.variables["assigneeId"],
@@ -908,7 +995,7 @@ mod tests {
 
     #[test]
     fn issue_queries_bound_nested_connections() {
-        let tracker = tracker_with_prefix(None);
+        let tracker = tracker_with_teams(&[]);
         let states = vec!["Todo".to_string()];
         let prepared = tracker
             .build_issues_by_state_query_for_assignee(&states, None)

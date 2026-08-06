@@ -14,7 +14,7 @@ pub struct AppSettings {
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
     // Repositories; each issue routes to one by repo:<name> or bare repo-name
-    // label, project, team key, or the default flag (symphony_core::route_issue).
+    // label, or the default flag (symphony_core::route_issue).
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
     #[serde(default)]
@@ -23,9 +23,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub tracker_workspace: Option<String>,
     #[serde(default)]
-    pub tracker_prefix: Option<String>,
+    pub tracker_team_keys: Vec<String>,
     #[serde(default)]
-    pub tracker_project_id: Option<String>,
+    pub tracker_project_ids: Vec<String>,
     #[serde(default)]
     pub tracker_assigned_to_me: bool,
     #[serde(default = "default_active_states")]
@@ -115,8 +115,8 @@ impl Default for AppSettings {
             repos: Vec::new(),
             workspace_root: None,
             tracker_workspace: None,
-            tracker_prefix: None,
-            tracker_project_id: None,
+            tracker_team_keys: Vec::new(),
+            tracker_project_ids: Vec::new(),
             tracker_assigned_to_me: false,
             active_states: default_active_states(),
             terminal_states: default_terminal_states(),

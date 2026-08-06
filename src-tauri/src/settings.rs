@@ -14,6 +14,33 @@ fn normalize_opt(value: &Option<String>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn normalized_team_keys(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .map(|value| value.trim().trim_end_matches('-').to_ascii_uppercase())
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
+}
+
+fn normalized_project_ids(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .filter_map(|value| {
+            let value = value.trim();
+            let project = symphony_core::LinearProjectRef::parse(value)?;
+            seen.insert(project.canonical_key())
+                .then(|| value.to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn normalize_linear_filters(settings: &mut AppSettings) {
+    settings.tracker_team_keys = normalized_team_keys(&settings.tracker_team_keys);
+    settings.tracker_project_ids = normalized_project_ids(&settings.tracker_project_ids);
+}
+
 fn effective_command(override_cmd: &Option<String>, default: &str) -> String {
     normalize_opt(override_cmd).unwrap_or_else(|| default.to_string())
 }
@@ -42,8 +69,8 @@ pub fn workflow_from_settings(
             api_key: linear_api_key.unwrap_or_default().to_string(),
             active_states: settings.active_states.clone(),
             terminal_states: settings.terminal_states.clone(),
-            identifier_prefix: normalize_opt(&settings.tracker_prefix),
-            project_id: normalize_opt(&settings.tracker_project_id),
+            team_keys: normalized_team_keys(&settings.tracker_team_keys),
+            project_ids: normalized_project_ids(&settings.tracker_project_ids),
             assigned_to_me: settings.tracker_assigned_to_me,
             ..TrackerConfig::default()
         },
@@ -139,6 +166,7 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         .as_object()
         .is_some_and(|obj| obj.contains_key("workflow_source"));
     if !is_legacy {
+        let linear_filters_migrated = migrate_linear_filter_lists(&mut value);
         let single_repo = value
             .as_object()
             .filter(|obj| !obj.contains_key("repos"))
@@ -159,7 +187,10 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
             settings.repos = repos_from_single(&repo_url, install_cmd);
             return Ok((settings, true));
         }
-        return Ok((settings, permission_mode_migrated));
+        return Ok((
+            settings,
+            permission_mode_migrated || linear_filters_migrated,
+        ));
     }
 
     let legacy: LegacySettings = serde_json::from_value(value).map_err(|err| err.to_string())?;
@@ -174,8 +205,8 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         prompt_template,
         repos: repos_from_single(&legacy.repo_url, legacy.install_cmd),
         tracker_workspace: legacy.tracker_workspace,
-        tracker_prefix: legacy.tracker_prefix,
-        tracker_project_id: legacy.tracker_project_id,
+        tracker_team_keys: split_legacy_list(legacy.tracker_prefix.as_deref()),
+        tracker_project_ids: split_legacy_list(legacy.tracker_project_id.as_deref()),
         workspace_root: legacy.workspace_root,
         agent_backend: legacy.agent_backend,
         codex_command: legacy.codex_command,
@@ -183,6 +214,112 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         ..AppSettings::default()
     };
     Ok((settings, true))
+}
+
+fn split_legacy_list(value: Option<&str>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Move the old single global filters and repository-scoped routing rules into
+/// the new global filter lists. Stable-order de-duplication keeps the explicit
+/// global values first, followed by repository values in configured order.
+fn migrate_linear_filter_lists(value: &mut serde_json::Value) -> bool {
+    let Some(settings) = value.as_object_mut() else {
+        return false;
+    };
+    let has_legacy_global =
+        settings.contains_key("tracker_prefix") || settings.contains_key("tracker_project_id");
+    let has_legacy_repo = settings
+        .get("repos")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|repos| {
+            repos.iter().any(|repo| {
+                repo.as_object().is_some_and(|repo| {
+                    repo.contains_key("team_prefixes") || repo.contains_key("project_ids")
+                })
+            })
+        });
+    if !has_legacy_global && !has_legacy_repo {
+        return false;
+    }
+
+    let mut teams = settings
+        .get("tracker_team_keys")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut projects = settings
+        .get("tracker_project_ids")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    teams.extend(split_legacy_list(
+        settings
+            .get("tracker_prefix")
+            .and_then(serde_json::Value::as_str),
+    ));
+    projects.extend(split_legacy_list(
+        settings
+            .get("tracker_project_id")
+            .and_then(serde_json::Value::as_str),
+    ));
+
+    if let Some(repos) = settings
+        .get_mut("repos")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for repo in repos {
+            let Some(repo) = repo.as_object_mut() else {
+                continue;
+            };
+            if let Some(values) = repo
+                .remove("team_prefixes")
+                .and_then(|value| value.as_array().cloned())
+            {
+                teams.extend(
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+            if let Some(values) = repo
+                .remove("project_ids")
+                .and_then(|value| value.as_array().cloned())
+            {
+                projects.extend(
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+
+    settings.remove("tracker_prefix");
+    settings.remove("tracker_project_id");
+    settings.insert(
+        "tracker_team_keys".to_string(),
+        serde_json::to_value(normalized_team_keys(&teams)).expect("team filters serialize"),
+    );
+    settings.insert(
+        "tracker_project_ids".to_string(),
+        serde_json::to_value(normalized_project_ids(&projects)).expect("project filters serialize"),
+    );
+    true
 }
 
 /// Replace the unused legacy approval setting with Codex's current permission
@@ -216,8 +353,6 @@ fn repos_from_single(repo_url: &str, install_cmd: Option<String>) -> Vec<RepoCon
         name: repo_name_from_url(url),
         url: url.to_string(),
         install_cmd,
-        team_prefixes: Vec::new(),
-        project_ids: Vec::new(),
         is_default: true,
         skills_marked_installed: false,
     }]
@@ -282,7 +417,8 @@ mod tests {
         let workflow = workflow_from_settings(&settings, Some("lin_api_test"));
 
         assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
-        assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
+        assert!(workflow.front_matter.tracker.team_keys.is_empty());
+        assert!(workflow.front_matter.tracker.project_ids.is_empty());
         assert_eq!(workflow.front_matter.codex.command, "codex");
         assert_eq!(
             workflow.front_matter.codex.permission_mode,
@@ -304,6 +440,19 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
         assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn normalizes_linear_filter_lists_before_persisting() {
+        let mut settings = AppSettings {
+            tracker_team_keys: vec![" eng- ".to_string(), "ENG".to_string(), "sim".to_string()],
+            tracker_project_ids: vec![" project-a ".to_string(), "project-a".to_string()],
+            ..AppSettings::default()
+        };
+
+        normalize_linear_filters(&mut settings);
+        assert_eq!(settings.tracker_team_keys, ["ENG", "SIM"]);
+        assert_eq!(settings.tracker_project_ids, ["project-a"]);
     }
 
     #[test]
@@ -355,6 +504,56 @@ mod tests {
     }
 
     #[test]
+    fn migrates_repository_routing_rules_and_single_filters_to_global_lists() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("tracker_team_keys");
+        object.remove("tracker_project_ids");
+        object.insert(
+            "tracker_prefix".to_string(),
+            serde_json::json!("CBIZPAY, sim"),
+        );
+        object.insert(
+            "tracker_project_id".to_string(),
+            serde_json::json!("global-project"),
+        );
+        object.insert(
+            "repos".to_string(),
+            serde_json::json!([
+                {
+                    "name": "api",
+                    "url": "git@github.com:acme/api.git",
+                    "team_prefixes": ["cbizpay", "WAL-"],
+                    "project_ids": ["global-project", "repo-project"],
+                    "is_default": false,
+                    "skills_marked_installed": false
+                },
+                {
+                    "name": "web",
+                    "url": "git@github.com:acme/web.git",
+                    "team_prefixes": ["SIM"],
+                    "project_ids": ["repo-project"],
+                    "is_default": false,
+                    "skills_marked_installed": false
+                }
+            ]),
+        );
+
+        let (settings, migrated) = parse_settings(&value.to_string()).unwrap();
+        assert!(migrated);
+        assert_eq!(settings.tracker_team_keys, ["CBIZPAY", "SIM", "WAL"]);
+        assert_eq!(
+            settings.tracker_project_ids,
+            ["global-project", "repo-project"]
+        );
+        assert_eq!(settings.repos.len(), 2);
+
+        let rewritten = serde_json::to_string(&settings).unwrap();
+        let (_, migrated_again) = parse_settings(&rewritten).unwrap();
+        assert!(!migrated_again);
+    }
+
+    #[test]
     fn migrates_empty_single_repo_settings_to_no_repos() {
         let raw = serde_json::json!({ "repo_url": "", "install_cmd": "npm ci" }).to_string();
         let (settings, migrated) = parse_settings(&raw).unwrap();
@@ -403,6 +602,8 @@ mod tests {
         );
         assert!(settings.repos[0].is_default);
         assert_eq!(settings.tracker_workspace.as_deref(), Some("acme"));
+        assert_eq!(settings.tracker_team_keys, ["ENG"]);
+        assert!(settings.tracker_project_ids.is_empty());
         assert_eq!(settings.agent_backend, AgentBackend::Claude);
         assert_eq!(
             settings.claude_command.as_deref(),
