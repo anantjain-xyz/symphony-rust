@@ -921,6 +921,21 @@ function SettingsView({
                 </small>
               </label>
               <label>
+                Linear teams
+                <input
+                  {...literalInputProps}
+                  value={settings.tracker_prefix ?? ""}
+                  disabled={!runtimeAvailable}
+                  onChange={(e) =>
+                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
+                  }
+                  placeholder="ENG"
+                />
+                <small className="hint">
+                  Optional. Enter a Linear team key to watch only issues from that team.
+                </small>
+              </label>
+              <label>
                 Linear projects
                 <input
                   {...literalInputProps}
@@ -935,21 +950,6 @@ function SettingsView({
                 />
                 <small className="hint">
                   Optional. Paste a Linear project URL or ID to watch only issues from that project.
-                </small>
-              </label>
-              <label>
-                Linear teams
-                <input
-                  {...literalInputProps}
-                  value={settings.tracker_prefix ?? ""}
-                  disabled={!runtimeAvailable}
-                  onChange={(e) =>
-                    setSettings({ ...settings, tracker_prefix: nullable(e.currentTarget.value) })
-                  }
-                  placeholder="ENG"
-                />
-                <small className="hint">
-                  Optional. Enter a Linear team key to watch only issues from that team.
                 </small>
               </label>
               <label className="checkbox-row">
