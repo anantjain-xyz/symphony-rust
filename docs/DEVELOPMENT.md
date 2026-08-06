@@ -11,17 +11,23 @@ The authoritative setup and validation sources are `Cargo.toml`, `package.json`,
   CI currently uses Node.js 22.
 - pnpm 11.5.2, pinned by the `packageManager` field in `package.json`.
 - On macOS, Xcode Command Line Tools for the Tauri desktop build.
-- Chromium from Playwright for browser end-to-end tests.
+- Chromium from Playwright for optional local browser end-to-end tests.
 
 From a new checkout:
 
 ```sh
 pnpm install
-pnpm exec playwright install chromium
 ```
 
-CI uses `pnpm install --frozen-lockfile` and installs Chromium with Linux system
-dependencies via `pnpm exec playwright install --with-deps chromium`.
+The fast local gate needs no additional tools. To run the full CI-equivalent
+gate locally, install its pinned hygiene tools and Playwright browser once:
+
+```sh
+pnpm setup:validation
+```
+
+CI performs equivalent setup explicitly, using Playwright's `--with-deps`
+installer on Linux.
 
 ## Run the app
 
@@ -137,10 +143,11 @@ hand-edit `src/bindings.ts`.
 
 ## Playwright
 
-`pnpm test:e2e` runs `playwright test`. The checked-in configuration:
+`pnpm test:e2e` builds the frontend once, then runs `playwright test`. The
+checked-in configuration:
 
 - discovers `e2e/**/*.e2e.ts`;
-- builds the frontend, then serves `pnpm preview` at
+- serves the existing production build with `pnpm preview` at
   `http://127.0.0.1:4173`;
 - uses the Desktop Chrome profile against the browser preview;
 - runs fully parallel, with two retries only in CI;
@@ -196,10 +203,10 @@ and Rust stable plus `rustfmt` and `clippy`. After
 pnpm verify:full
 ```
 
-`validation/contract.json` owns the ordered commands behind that entrypoint,
-including the contract checks that keep CI, documentation, bundled agent
-assets, frontend boundaries, build output, bundle inspection, and browser
-validation synchronized.
+`scripts/run-validation.mjs` contains the readable command lists. The full
+profile includes the fast profile plus agent assets, repository hygiene,
+boundaries, generated/static contracts, build output, bundle inspection, and
+browser validation. Tool and browser installation are separate CI setup steps.
 
 `pnpm check:bundle` reads the Vite manifest and enforces eager JavaScript/CSS,
 lazy-view size, and import-boundary budgets.
@@ -207,5 +214,5 @@ lazy-view size, and import-boundary budgets.
 also verifies lazy-chunk and theme behavior and uploads its screenshots in CI.
 
 During development, start with the smallest package, test file, or E2E file
-that owns the behavior. Before submitting a pull request, run the canonical
-full gate above.
+that owns the behavior. Before submitting a pull request, run `pnpm verify:fast`.
+CI remains the blocking authority for the full gate.

@@ -124,7 +124,7 @@ authority rules these tests must protect.
 
 [`playwright.config.ts`](../playwright.config.ts):
 
-- builds the frontend and serves Vite preview at `127.0.0.1:4173`;
+- serves an existing frontend build with Vite preview at `127.0.0.1:4173`;
 - runs Chromium with desktop Chrome defaults;
 - runs test files in parallel;
 - retries twice in CI and not locally;
@@ -139,7 +139,8 @@ The checked-in suites are:
   cold loading, preloading, chunk relationships, key views, responsive states,
   hover behavior, and chunk failure.
 
-CI installs Chromium, runs `pnpm test:e2e`, and uploads PNGs under
+CI builds the frontend once, installs Chromium in a separate setup step, runs
+Playwright, and uploads PNGs under
 `test-results/**/*.png`. The artifact is currently named
 `theme-e2e-screenshots`, although it may contain captures from both suites.
 

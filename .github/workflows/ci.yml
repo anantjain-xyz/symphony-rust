@@ -35,10 +35,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: pnpm install --frozen-lockfile
-      # validation/contract.json owns the ordered gate. The full profile keeps
-      # symphony-desktop excluded from Linux Rust checks to avoid webkit2gtk,
-      # and includes hygiene, boundary, runtime, generated/static, frontend,
-      # bundle, and browser verification.
+      - name: Install validation tools
+        run: pnpm install:hygiene-tools
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+      # External tools are prepared above; validation only runs repository checks.
       - run: pnpm verify:full
       - name: Upload theme screenshots
         if: always()
