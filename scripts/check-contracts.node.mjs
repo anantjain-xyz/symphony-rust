@@ -548,6 +548,9 @@ const releaseFixture = {
   tauriConfig: {
     productName: "Symphony",
     version: "1.2.3",
+    build: {
+      beforeBuildCommand: "pnpm typecheck && pnpm build",
+    },
     plugins: {
       updater: {
         endpoints: ["https://github.com/acme/symphony/releases/latest/download/latest.json"],
@@ -643,6 +646,24 @@ const releaseFixture = {
 
 test("release checker accepts synchronized versions and artifacts", () => {
   assert.deepEqual(checkReleaseContract(releaseFixture), []);
+});
+
+test("release checker requires TypeScript checking before Tauri builds", () => {
+  const diagnostics = checkReleaseContract({
+    ...releaseFixture,
+    tauriConfig: {
+      ...releaseFixture.tauriConfig,
+      build: { beforeBuildCommand: "pnpm build" },
+    },
+  });
+
+  assert.ok(
+    diagnostics.some(
+      (message) =>
+        message.includes("build.beforeBuildCommand") &&
+        message.includes("pnpm typecheck && pnpm build"),
+    ),
+  );
 });
 
 test("release checker binds publication to the configured repository", () => {

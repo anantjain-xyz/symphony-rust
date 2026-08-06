@@ -961,6 +961,19 @@ test("rejects external tool installation inside validation profiles", (t) => {
   );
 });
 
+test("rejects external tool installation hidden behind nested package scripts", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["check:frontend-contracts"] =
+    "pnpm install:hygiene-tools && pnpm check:frontend-boundaries && pnpm check:preview-coverage";
+  writeJson(root, "package.json", packageJson);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /validation profile full must not install external tools \(frontend-contracts\); move installation to explicit setup/,
+  );
+});
+
 test("requires production build before bundle inspection", (t) => {
   const root = validationFixture(t);
   const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));

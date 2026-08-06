@@ -787,6 +787,11 @@ export function checkReleaseContract({
       `src-tauri/tauri.conf.json: productName ${JSON.stringify(tauriConfig.productName)} != ${JSON.stringify(contract.productName)}`,
     );
   }
+  if (tauriConfig.build?.beforeBuildCommand !== "pnpm typecheck && pnpm build") {
+    diagnostics.push(
+      `src-tauri/tauri.conf.json: build.beforeBuildCommand must be "pnpm typecheck && pnpm build", received ${JSON.stringify(tauriConfig.build?.beforeBuildCommand)}`,
+    );
+  }
   const expectedEndpoint = `https://github.com/${contract.repository}/releases/latest/download/${contract.updaterFeed}`;
   const endpoints = tauriConfig.plugins?.updater?.endpoints;
   if (JSON.stringify(endpoints) !== JSON.stringify([expectedEndpoint])) {

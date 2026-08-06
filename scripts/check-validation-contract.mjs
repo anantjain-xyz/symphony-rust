@@ -373,19 +373,21 @@ function validatePackageScript(
   errors,
   validated = new Set(),
   stack = [],
+  externalToolInstallScripts = new Set(),
 ) {
-  if (validated.has(scriptName)) return;
+  if (validated.has(scriptName)) return externalToolInstallScripts.has(scriptName);
   if (stack.includes(scriptName)) {
     errors.push(`package scripts contain a cycle: ${[...stack, scriptName].join(" -> ")}`);
-    return;
+    return false;
   }
   const body = packageJson.scripts?.[scriptName];
   if (typeof body !== "string" || body.trim() === "") {
     errors.push(`package script ${scriptName} is missing or empty`);
-    return;
+    return false;
   }
 
   const nextStack = [...stack, scriptName];
+  let installsExternalTools = scriptName === "install:hygiene-tools";
   for (const tokens of parseSimpleShellScript(body, scriptName, errors)) {
     if (tokens[0] !== "pnpm") {
       validatePackageExecutable(root, scriptName, tokens, packageJson, errors);
@@ -393,6 +395,9 @@ function validatePackageScript(
     }
     if (tokens[1] === "exec" && tokens.length >= 3) {
       validatePackageExecutable(root, scriptName, tokens.slice(2), packageJson, errors);
+      if (tokens[2] === "playwright" && tokens[3] === "install") {
+        installsExternalTools = true;
+      }
       continue;
     }
 
@@ -412,9 +417,23 @@ function validatePackageScript(
       errors.push(`package script ${scriptName} references missing package script ${referenced}`);
       continue;
     }
-    validatePackageScript(root, referenced, packageJson, errors, validated, nextStack);
+    if (
+      validatePackageScript(
+        root,
+        referenced,
+        packageJson,
+        errors,
+        validated,
+        nextStack,
+        externalToolInstallScripts,
+      )
+    ) {
+      installsExternalTools = true;
+    }
   }
   validated.add(scriptName);
+  if (installsExternalTools) externalToolInstallScripts.add(scriptName);
+  return installsExternalTools;
 }
 
 function isValidationPackageScript(scriptName) {
@@ -844,9 +863,18 @@ export function validateValidationContract(
   }
   const executableSet = new Set(contract.executables ?? []);
   const validatedPackageScripts = new Set();
+  const externalToolInstallScripts = new Set();
   const packageScriptOwners = new Map();
   if (typeof packageJson.scripts?.["setup:validation"] === "string") {
-    validatePackageScript(root, "setup:validation", packageJson, errors, validatedPackageScripts);
+    validatePackageScript(
+      root,
+      "setup:validation",
+      packageJson,
+      errors,
+      validatedPackageScripts,
+      [],
+      externalToolInstallScripts,
+    );
   }
 
   for (const [commandId, command] of Object.entries(commands)) {
@@ -884,7 +912,15 @@ export function validateValidationContract(
           `validation command ${commandId} references missing package script ${scriptName}`,
         );
       } else {
-        validatePackageScript(root, scriptName, packageJson, errors, validatedPackageScripts);
+        validatePackageScript(
+          root,
+          scriptName,
+          packageJson,
+          errors,
+          validatedPackageScripts,
+          [],
+          externalToolInstallScripts,
+        );
       }
     }
   }
@@ -978,6 +1014,7 @@ export function validateValidationContract(
       command?.installsBrowser ||
       command?.installsExternalTools ||
       command?.packageScript === "install:hygiene-tools" ||
+      externalToolInstallScripts.has(command?.packageScript) ||
       (argv[0] === "pnpm" &&
         argv[1] === "exec" &&
         argv[2] === "playwright" &&
