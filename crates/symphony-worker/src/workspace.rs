@@ -166,13 +166,18 @@ impl WorkspaceManager {
 }
 
 /// Resolve the directory per-issue workspaces (and the skills-install
-/// workspace) live in: the workflow's `workspace.root` as a plain path,
-/// falling back to `<app data dir>/workspaces` when the spec is empty.
+/// workspace) live in: expand a leading `~` component against the user's home
+/// directory, or fall back to `<app data dir>/workspaces` when the spec is
+/// empty. Other relative paths retain their existing process-relative meaning.
 pub fn resolve_workspace_root_dir(spec: &str, app_data_dir: &Path) -> PathBuf {
-    if spec.trim().is_empty() {
+    let spec = spec.trim();
+    if spec.is_empty() {
         app_data_dir.join("workspaces")
+    } else if let (Some(home), Ok(relative)) = (dirs::home_dir(), Path::new(spec).strip_prefix("~"))
+    {
+        home.join(relative)
     } else {
-        PathBuf::from(spec.trim())
+        PathBuf::from(spec)
     }
 }
 
@@ -232,6 +237,40 @@ mod tests {
         assert_eq!(sanitize_key("SYM-1"), "SYM-1");
         assert_eq!(sanitize_key("../bad"), "___bad");
         assert_eq!(sanitize_key(""), "_");
+    }
+
+    #[test]
+    fn expands_home_relative_workspace_root() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+
+        assert_eq!(
+            resolve_workspace_root_dir("~/Developer/worktrees", Path::new("/app-data")),
+            home.join("Developer/worktrees")
+        );
+        assert_eq!(
+            resolve_workspace_root_dir("~", Path::new("/app-data")),
+            home
+        );
+        assert_eq!(
+            resolve_workspace_root_dir("~another-user/worktrees", Path::new("/app-data")),
+            PathBuf::from("~another-user/worktrees")
+        );
+    }
+
+    #[test]
+    fn workspace_root_preserves_empty_fallback_and_absolute_paths() {
+        let app_data = Path::new("/app-data");
+
+        assert_eq!(
+            resolve_workspace_root_dir("", app_data),
+            app_data.join("workspaces")
+        );
+        assert_eq!(
+            resolve_workspace_root_dir("/custom/worktrees", app_data),
+            PathBuf::from("/custom/worktrees")
+        );
     }
 
     // A root reached through a symlink (and, on case-insensitive volumes, a

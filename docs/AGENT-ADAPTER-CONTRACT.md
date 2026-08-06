@@ -28,10 +28,10 @@ The contract has two purposes:
 It returns `AgentRunResult` with stable thread/turn identifiers, an
 `AgentOutcome`, and optional error class/message.
 
-The default desktop workspace root normally makes that path absolute, but a
-nonempty configured workspace root is currently retained verbatim and may be
-relative. Adapters must not rely on `cwd` being absolute until configuration
-normalizes or rejects relative roots.
+The default desktop workspace root and roots beginning with a standalone `~`
+make that path absolute. Other nonempty configured workspace roots are retained
+verbatim and may be relative. Adapters must not rely on `cwd` being absolute
+until configuration normalizes or rejects every relative root.
 
 The worker must know nothing about provider JSON field names. Adapters map
 their streams into:
