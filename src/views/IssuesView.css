@@ -30,3 +30,306 @@
   box-shadow: var(--shadow-sm);
   color: var(--foreground);
 }
+
+.issue-board {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 4px 8px;
+}
+
+.issue-board-columns {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.issue-board-error {
+  background: var(--destructive);
+  border-radius: var(--radius);
+  color: var(--destructive-foreground);
+  font-size: 0.8125rem;
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.issue-board-column {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex: 0 0 260px;
+  flex-direction: column;
+  max-height: 70vh;
+  min-width: 260px;
+}
+
+.issue-board-column-header {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.issue-board-count {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.issue-board-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.issue-board-empty {
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  margin: 0;
+  padding: 6px 2px;
+}
+
+.issue-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+}
+
+.issue-card-top {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.issue-card-top strong {
+  font-size: 0.8125rem;
+}
+
+.issue-card-priority {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.issue-card-priority.priority-1 {
+  color: var(--destructive-foreground);
+  font-weight: 600;
+}
+
+.issue-card-title {
+  color: var(--foreground);
+  font-size: 0.875rem;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.issue-card-foot {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  font-size: 0.75rem;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.issue-board-column.drag-over {
+  background: var(--info);
+  border-color: color-mix(in srgb, var(--info-foreground) 55%, var(--border));
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--info-foreground) 38%, transparent),
+    0 0 10px color-mix(in srgb, var(--info-foreground) 30%, transparent);
+}
+
+.issue-card.draggable {
+  cursor: grab;
+  /* Pointer-driven drag; disable native HTML5 drag and text selection. */
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.issue-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 16px rgb(0 0 0 / 25%);
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 6px 10px;
+}
+
+.issue-card.moving {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.issue-card-moving {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+.issue-board-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  overflow-x: auto;
+  /* Vertical room so a drop-target lane's glow isn't clipped by overflow. */
+  padding: 10px 2px;
+}
+
+.issue-board-body .issue-board-columns {
+  overflow-x: visible;
+  padding-bottom: 0;
+}
+
+.issue-board-hidden {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 320px;
+  padding-left: 16px;
+}
+
+.issue-board-hidden-toggle {
+  background: transparent;
+  border: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 6px 0;
+  text-align: left;
+}
+
+.issue-board-hidden-toggle:hover {
+  color: var(--foreground);
+}
+
+.issue-board-hidden-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  min-width: 200px;
+  padding: 0;
+}
+
+.issue-board-hidden-item {
+  align-items: center;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.issue-board-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  padding: 0 4px 4px;
+}
+
+.issue-board-updated {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+.issue-board-refresh {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 0.75rem;
+  height: 26px;
+  padding: 0 10px;
+}
+
+.issue-board-refresh:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.issue-board-refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.issue-board-updated-error {
+  color: var(--destructive-foreground);
+}
+
+.issue-board-column-title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.issue-board-watched {
+  cursor: default;
+  font-size: 0.875rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.issue-board-confirm {
+  align-items: center;
+  background: var(--warning);
+  border: 1px solid var(--warning-foreground);
+  border-radius: var(--radius);
+  color: var(--warning-foreground);
+  display: flex;
+  font-size: 0.8125rem;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.issue-board-confirm-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.issue-board-confirm-actions button {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 0.75rem;
+  height: 26px;
+  padding: 0 12px;
+}
+
+.issue-board-confirm-actions button:first-child {
+  background: var(--warning-solid);
+  border-color: var(--warning-solid);
+  color: var(--background);
+  font-weight: 600;
+}

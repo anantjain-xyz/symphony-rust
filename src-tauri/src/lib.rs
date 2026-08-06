@@ -5,7 +5,7 @@ use std::{
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
     IssueDetail, LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult,
-    ValidationResult,
+    ValidationResult, WorkflowStateRow,
 };
 use symphony_storage::{
     now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
@@ -346,6 +346,109 @@ async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerP
         display_name: viewer.display_name,
         email: viewer.email,
     })
+}
+
+#[tauri::command]
+async fn list_workflow_states(state: State<'_, AppState>) -> Result<Vec<WorkflowStateRow>, String> {
+    let Some(api_key) = linear_api_key() else {
+        return Err(
+            "No Linear API key configured. Add one under Settings → Linear to load the board columns."
+                .to_string(),
+        );
+    };
+    let settings = load_settings_from_disk(&state).await?;
+    let workflow = workflow_from_settings(&settings, Some(&api_key));
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    let states = tracker
+        .list_workflow_states()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(states
+        .into_iter()
+        .map(|ws| WorkflowStateRow {
+            id: ws.id,
+            name: ws.name,
+            state_type: ws.state_type,
+            position: ws.position,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn set_issue_state(
+    state: State<'_, AppState>,
+    issue_id: String,
+    state_id: String,
+) -> Result<(), String> {
+    // Authoritatively block a move while an agent run is active. The frontend guard
+    // uses a (possibly stale) overview snapshot; enforce it here at the mutation
+    // boundary against the local run table to close the TOCTOU race.
+    if state
+        .repo
+        .has_active_run(&issue_id)
+        .await
+        .map_err(|err| err.to_string())?
+    {
+        return Err(
+            "Can't move this issue while an agent run is active — stop the run first.".to_string(),
+        );
+    }
+    // Trust boundary: the mutation runs against Linear with the user's own key.
+    let Some(api_key) = linear_api_key() else {
+        return Err(
+            "No Linear API key configured. Add one under Settings → Linear to move issues."
+                .to_string(),
+        );
+    };
+    let settings = load_settings_from_disk(&state).await?;
+    let workflow = workflow_from_settings(&settings, Some(&api_key));
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    tracker
+        .set_issue_state(&issue_id, &state_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
+    let Some(api_key) = linear_api_key() else {
+        return Err(
+            "No Linear API key configured. Add one under Settings → Linear to load the board."
+                .to_string(),
+        );
+    };
+    let settings = load_settings_from_disk(&state).await?;
+    let workflow = workflow_from_settings(&settings, Some(&api_key));
+    let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
+    let issues = tracker
+        .fetch_board_issues()
+        .await
+        .map_err(|err| err.to_string())?;
+    let seen_at = now_iso();
+    issues
+        .into_iter()
+        .map(|issue| {
+            // Serialize the raw snapshot before moving fields out of `issue`.
+            let labels = serde_json::to_string(&issue.labels).map_err(|err| err.to_string())?;
+            let blockers = serde_json::to_string(&issue.blockers).map_err(|err| err.to_string())?;
+            let pr_urls = serde_json::to_string(&issue.pr_urls).map_err(|err| err.to_string())?;
+            let raw = serde_json::to_string(&issue).map_err(|err| err.to_string())?;
+            Ok(IssueRow {
+                id: issue.id,
+                identifier: issue.identifier,
+                title: issue.title,
+                description: issue.description,
+                priority: i64::from(issue.priority),
+                state: issue.state,
+                branch: issue.branch,
+                labels,
+                blockers,
+                pr_urls,
+                raw,
+                last_seen_at: seen_at.clone(),
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -1200,6 +1303,9 @@ pub fn run() {
             get_run_detail,
             stop_run,
             list_issues,
+            list_workflow_states,
+            set_issue_state,
+            list_board_issues,
             get_issue_detail,
             get_worker_status,
             start_worker,

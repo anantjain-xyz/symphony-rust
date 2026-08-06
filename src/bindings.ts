@@ -33,6 +33,11 @@ export type TrackerTestResult = { ok: boolean; message: string; active_issue_cou
 
 export type LinearViewerProfile = { id: string; username: string; display_name: string | null; email: string | null }
 
+/**
+ * A Linear workflow state, projected as a Kanban column for the Issues board.
+ */
+export type WorkflowStateRow = { id: string; name: string; state_type: string; position: number }
+
 export type ValidationResult = { workflow_ok: boolean; workflow_blocking: boolean; workflow_error: string | null; codex_found: boolean; claude_found: boolean; cursor_found: boolean; opencode_found: boolean; codex_command: string; claude_command: string; cursor_command: string; opencode_command: string; app_data_dir: string; database_path: string }
 
 export type WorkerState = "stopped" | "running" | "stopping"

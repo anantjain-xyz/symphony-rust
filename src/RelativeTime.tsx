@@ -24,6 +24,12 @@ function publish() {
   });
 }
 
+/// Advance the shared clock to now and notify listeners. Call after creating a
+/// client-side "now" timestamp so it isn't briefly ahead of the (coarse) snapshot.
+export function markRelativeTimeNow() {
+  publish();
+}
+
 function scheduleNextBoundary() {
   if (timer !== null) window.clearTimeout(timer);
   const remainder = Date.now() % CLOCK_INTERVAL_MS;
@@ -77,11 +83,7 @@ export function RelativeTime({ value }: { value: string }) {
   const relative = relativeTime(value, now);
   return (
     // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the label intentionally combines relative and absolute time for assistive technology.
-    <time
-      dateTime={date.toISOString()}
-      title={absolute}
-      aria-label={`${relative} — ${absolute}`}
-    >
+    <time dateTime={date.toISOString()} title={absolute} aria-label={`${relative} — ${absolute}`}>
       {relative}
     </time>
   );
