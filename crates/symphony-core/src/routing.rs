@@ -226,6 +226,38 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_team_and_project_rules_use_configured_order() {
+        let mut first = repo("first");
+        first.team_prefixes = vec!["ENG".to_string()];
+        first.project_ids = vec!["proj-1".to_string()];
+        let mut second = repo("second");
+        second.team_prefixes = vec!["eng-".to_string()];
+        second.project_ids = vec![" proj-1 ".to_string()];
+
+        let mut repos = vec![first, second];
+        assert_eq!(
+            route_issue(&repos, &issue("OPS-1", &[], Some("proj-1")))
+                .map(|repo| repo.name.as_str()),
+            Some("first")
+        );
+        assert_eq!(
+            route_issue(&repos, &issue("ENG-1", &[], None)).map(|repo| repo.name.as_str()),
+            Some("first")
+        );
+
+        repos.reverse();
+        assert_eq!(
+            route_issue(&repos, &issue("OPS-1", &[], Some("proj-1")))
+                .map(|repo| repo.name.as_str()),
+            Some("second")
+        );
+        assert_eq!(
+            route_issue(&repos, &issue("ENG-1", &[], None)).map(|repo| repo.name.as_str()),
+            Some("second")
+        );
+    }
+
+    #[test]
     fn falls_back_only_to_an_explicit_default() {
         let mut fallback = repo("backend");
         fallback.is_default = true;
