@@ -38,7 +38,7 @@ pub fn bindings_source() -> Result<String> {
     }
 
     export!(symphony_core::AgentBackend);
-    export!(symphony_core::ApprovalPolicy);
+    export!(symphony_core::CodexPermissionMode);
     export!(symphony_core::ThreadSandbox);
     export!(symphony_core::TurnSandboxPolicy);
     export!(symphony_core::ClaudePermissionMode);

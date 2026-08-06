@@ -89,7 +89,7 @@ function testSettings(): AppSettings {
     claude_command: null,
     turn_timeout_ms: 3_600_000,
     session_env: {},
-    codex_approval_policy: "never",
+    codex_permission_mode: "approve-for-me",
     codex_thread_sandbox: "workspace-write",
     codex_turn_sandbox_policy: "inherit",
     codex_network_access: true,
