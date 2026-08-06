@@ -1385,7 +1385,6 @@ function SettingsView({
                         })
                       }
                     >
-                      <option value="ask-for-approval">Ask for approval</option>
                       <option value="approve-for-me">Approve for me (Auto-review)</option>
                       <option value="full-access">Full Access</option>
                     </select>

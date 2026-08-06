@@ -27,8 +27,6 @@ impl AgentBackend {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub enum CodexPermissionMode {
-    #[serde(rename = "ask-for-approval")]
-    AskForApproval,
     #[serde(rename = "approve-for-me")]
     #[default]
     ApproveForMe,

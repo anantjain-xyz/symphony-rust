@@ -288,14 +288,7 @@ fn codex_args_with_git_metadata_dirs(
     args.push("-c".to_string());
     args.push("approval_policy=on-request".to_string());
     args.push("-c".to_string());
-    args.push(
-        match request.codex_permission_mode {
-            CodexPermissionMode::AskForApproval => "approvals_reviewer=user",
-            CodexPermissionMode::ApproveForMe => "approvals_reviewer=auto_review",
-            CodexPermissionMode::FullAccess => unreachable!("handled above"),
-        }
-        .to_string(),
-    );
+    args.push("approvals_reviewer=auto_review".to_string());
     args
 }
 
@@ -2610,7 +2603,7 @@ mod tests {
         let args = codex_args_with_git_metadata_dirs(
             &codex_test_request(
                 cwd,
-                CodexPermissionMode::AskForApproval,
+                CodexPermissionMode::ApproveForMe,
                 ThreadSandbox::WorkspaceWrite,
                 TurnSandboxPolicy::ReadOnly,
                 true,
@@ -2627,7 +2620,7 @@ mod tests {
             .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
         assert!(args
             .windows(2)
-            .any(|pair| pair[0] == "-c" && pair[1] == "approvals_reviewer=user"));
+            .any(|pair| pair[0] == "-c" && pair[1] == "approvals_reviewer=auto_review"));
     }
 
     #[test]

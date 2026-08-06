@@ -120,8 +120,7 @@ when the turn inherits:
 `ThreadSandbox::None` inherits as read-only unless the turn explicitly selects
 a different policy. Permission modes are forwarded independently:
 
-- `ask-for-approval` uses `approval_policy=on-request` with the user as reviewer;
-- `approve-for-me` uses the same approval policy with Auto-review;
+- `approve-for-me` uses `approval_policy=on-request` with Auto-review;
 - `full-access` bypasses approvals and the sandbox, as does an explicit
   `danger-full-access` turn policy.
 

@@ -186,9 +186,8 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
 }
 
 /// Replace the unused legacy approval setting with Codex's current permission
-/// modes. `never` historically selected Symphony's unattended workspace mode,
-/// so migrate it to Auto-review without broadening the sandbox. The remaining
-/// legacy values expressed an intent to stop for a person.
+/// modes. Every legacy value maps to Symphony's unattended Auto-review mode
+/// without broadening the sandbox.
 fn migrate_codex_permission_mode(value: &mut serde_json::Value) -> bool {
     let Some(settings) = value.as_object_mut() else {
         return false;
@@ -196,17 +195,12 @@ fn migrate_codex_permission_mode(value: &mut serde_json::Value) -> bool {
     if settings.contains_key("codex_permission_mode") {
         return settings.remove("codex_approval_policy").is_some();
     }
-    let Some(legacy) = settings.remove("codex_approval_policy") else {
+    if settings.remove("codex_approval_policy").is_none() {
         return false;
-    };
-    let permission_mode = match legacy.as_str() {
-        Some("never") => "approve-for-me",
-        Some("on-request" | "on-failure" | "always") => "ask-for-approval",
-        _ => "approve-for-me",
-    };
+    }
     settings.insert(
         "codex_permission_mode".to_string(),
-        serde_json::Value::String(permission_mode.to_string()),
+        serde_json::Value::String("approve-for-me".to_string()),
     );
     true
 }
@@ -316,9 +310,9 @@ mod tests {
     fn migrates_legacy_codex_approval_policies_to_permission_modes() {
         for (legacy, expected) in [
             ("never", CodexPermissionMode::ApproveForMe),
-            ("on-request", CodexPermissionMode::AskForApproval),
-            ("on-failure", CodexPermissionMode::AskForApproval),
-            ("always", CodexPermissionMode::AskForApproval),
+            ("on-request", CodexPermissionMode::ApproveForMe),
+            ("on-failure", CodexPermissionMode::ApproveForMe),
+            ("always", CodexPermissionMode::ApproveForMe),
         ] {
             let mut value = serde_json::to_value(AppSettings::default()).unwrap();
             let object = value.as_object_mut().unwrap();
