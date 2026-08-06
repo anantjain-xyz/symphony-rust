@@ -1190,6 +1190,7 @@ where
         },
         cwd: workspace.path.clone(),
         prompt,
+        codex_permission_mode: config.workflow.front_matter.codex.permission_mode.clone(),
         thread_sandbox: config.workflow.front_matter.codex.thread_sandbox.clone(),
         turn_sandbox_policy: config
             .workflow

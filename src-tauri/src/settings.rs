@@ -67,7 +67,7 @@ pub fn workflow_from_settings(
         },
         codex: CodexConfig {
             command: effective_command(&settings.codex_command, "codex"),
-            approval_policy: settings.codex_approval_policy.clone(),
+            permission_mode: settings.codex_permission_mode.clone(),
             thread_sandbox: settings.codex_thread_sandbox.clone(),
             turn_sandbox_policy: settings.codex_turn_sandbox_policy.clone(),
             turn_timeout_ms: settings.turn_timeout_ms,
@@ -133,7 +133,8 @@ struct LegacySettings {
 /// fields that predate the `repos` list. Returns the settings and whether a
 /// migration happened (so the caller can back up and rewrite the file).
 pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
-    let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
+    let mut value: serde_json::Value = serde_json::from_str(raw).map_err(|err| err.to_string())?;
+    let permission_mode_migrated = migrate_codex_permission_mode(&mut value);
     let is_legacy = value
         .as_object()
         .is_some_and(|obj| obj.contains_key("workflow_source"));
@@ -158,7 +159,7 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
             settings.repos = repos_from_single(&repo_url, install_cmd);
             return Ok((settings, true));
         }
-        return Ok((settings, false));
+        return Ok((settings, permission_mode_migrated));
     }
 
     let legacy: LegacySettings = serde_json::from_value(value).map_err(|err| err.to_string())?;
@@ -182,6 +183,26 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         ..AppSettings::default()
     };
     Ok((settings, true))
+}
+
+/// Replace the unused legacy approval setting with Codex's current permission
+/// modes. Every legacy value maps to Symphony's unattended Auto-review mode
+/// without broadening the sandbox.
+fn migrate_codex_permission_mode(value: &mut serde_json::Value) -> bool {
+    let Some(settings) = value.as_object_mut() else {
+        return false;
+    };
+    if settings.contains_key("codex_permission_mode") {
+        return settings.remove("codex_approval_policy").is_some();
+    }
+    if settings.remove("codex_approval_policy").is_none() {
+        return false;
+    }
+    settings.insert(
+        "codex_permission_mode".to_string(),
+        serde_json::Value::String("approve-for-me".to_string()),
+    );
+    true
 }
 
 /// The repos list a pre-multi-repo config maps to: its one repo, as the
@@ -223,7 +244,7 @@ fn repo_name_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symphony_core::ClaudePermissionMode;
+    use symphony_core::{ClaudePermissionMode, CodexPermissionMode};
 
     #[test]
     fn defaults_match_the_previously_bundled_workflow() {
@@ -236,6 +257,10 @@ mod tests {
         assert_eq!(settings.max_concurrent_agents, 3);
         assert!(settings.session_env.is_empty());
         assert!(settings.codex_network_access);
+        assert_eq!(
+            settings.codex_permission_mode,
+            CodexPermissionMode::ApproveForMe
+        );
         assert_eq!(settings.claude_permission_mode, ClaudePermissionMode::Auto);
         assert!(settings
             .claude_allowed_tools
@@ -260,6 +285,10 @@ mod tests {
         assert_eq!(workflow.front_matter.tracker.identifier_prefix, None);
         assert_eq!(workflow.front_matter.codex.command, "codex");
         assert_eq!(
+            workflow.front_matter.codex.permission_mode,
+            CodexPermissionMode::ApproveForMe
+        );
+        assert_eq!(
             workflow.front_matter.claude.command,
             "mycode --agent claude"
         );
@@ -275,6 +304,28 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
         assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn migrates_legacy_codex_approval_policies_to_permission_modes() {
+        for (legacy, expected) in [
+            ("never", CodexPermissionMode::ApproveForMe),
+            ("on-request", CodexPermissionMode::ApproveForMe),
+            ("on-failure", CodexPermissionMode::ApproveForMe),
+            ("always", CodexPermissionMode::ApproveForMe),
+        ] {
+            let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("codex_permission_mode");
+            object.insert(
+                "codex_approval_policy".to_string(),
+                serde_json::Value::String(legacy.to_string()),
+            );
+
+            let (settings, migrated) = parse_settings(&value.to_string()).unwrap();
+            assert!(migrated, "{legacy} was not marked as migrated");
+            assert_eq!(settings.codex_permission_mode, expected, "legacy {legacy}");
+        }
     }
 
     #[test]

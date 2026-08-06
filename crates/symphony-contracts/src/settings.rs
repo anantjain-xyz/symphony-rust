@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::BTreeMap;
 use symphony_core::{
-    AgentBackend, ApprovalPolicy, ClaudePermissionMode, CursorAgentMode, CursorSandboxMode,
+    AgentBackend, ClaudePermissionMode, CodexPermissionMode, CursorAgentMode, CursorSandboxMode,
     RepoConfig, ThreadSandbox, TurnSandboxPolicy,
 };
 
@@ -63,7 +63,7 @@ pub struct AppSettings {
     pub session_env: BTreeMap<String, String>,
     // Codex options
     #[serde(default)]
-    pub codex_approval_policy: ApprovalPolicy,
+    pub codex_permission_mode: CodexPermissionMode,
     #[serde(default)]
     pub codex_thread_sandbox: ThreadSandbox,
     #[serde(default)]
@@ -133,7 +133,7 @@ impl Default for AppSettings {
             claude_command: None,
             turn_timeout_ms: default_turn_timeout_ms(),
             session_env: BTreeMap::new(),
-            codex_approval_policy: ApprovalPolicy::Never,
+            codex_permission_mode: CodexPermissionMode::ApproveForMe,
             codex_thread_sandbox: ThreadSandbox::WorkspaceWrite,
             codex_turn_sandbox_policy: TurnSandboxPolicy::Inherit,
             codex_network_access: true,

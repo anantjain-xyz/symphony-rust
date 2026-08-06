@@ -1373,25 +1373,25 @@ function SettingsView({
               {settings.agent_backend === "codex" ? (
                 <>
                   <label>
-                    Approval policy
+                    Permission mode
                     <select
-                      value={settings.codex_approval_policy}
+                      value={settings.codex_permission_mode}
                       disabled={!runtimeAvailable}
                       onChange={(e) =>
                         setSettings({
                           ...settings,
-                          codex_approval_policy: e.currentTarget
-                            .value as AppSettings["codex_approval_policy"],
+                          codex_permission_mode: e.currentTarget
+                            .value as AppSettings["codex_permission_mode"],
                         })
                       }
                     >
-                      <option value="never">Never (unattended)</option>
-                      <option value="on-request">On request</option>
-                      <option value="on-failure">On failure</option>
-                      <option value="always">Always</option>
+                      <option value="approve-for-me">Approve for me (Auto-review)</option>
+                      <option value="full-access">Full Access</option>
                     </select>
                     <small className="hint">
-                      When Codex pauses for approval. Runs are unattended — keep <code>Never</code>.
+                      <code>Approve for me</code> keeps the sandbox and sends boundary crossings to
+                      Codex Auto-review. <code>Full Access</code> bypasses approvals and the
+                      sandbox.
                     </small>
                   </label>
                   <label>

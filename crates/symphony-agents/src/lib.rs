@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 use symphony_core::{
-    AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CursorAgentMode,
-    CursorSandboxMode, MappedAgentEvent, RateLimitPayload, SessionInfoPayload, ThreadSandbox,
-    TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
+    AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CodexPermissionMode,
+    CursorAgentMode, CursorSandboxMode, MappedAgentEvent, RateLimitPayload, SessionInfoPayload,
+    ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{
@@ -41,6 +41,7 @@ pub struct AgentRunRequest {
     pub command: String,
     pub cwd: PathBuf,
     pub prompt: String,
+    pub codex_permission_mode: CodexPermissionMode,
     pub thread_sandbox: ThreadSandbox,
     pub turn_sandbox_policy: TurnSandboxPolicy,
     pub network_access: bool,
@@ -259,10 +260,17 @@ fn codex_args_with_git_metadata_dirs(
         "-C".to_string(),
         request.cwd.display().to_string(),
     ];
+    if sandbox == "danger-full-access"
+        || request.codex_permission_mode == CodexPermissionMode::FullAccess
+    {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        return args;
+    }
+
     match sandbox.as_str() {
-        "danger-full-access" => args.push("--dangerously-bypass-approvals-and-sandbox".to_string()),
         "workspace-write" => {
-            args.push("--full-auto".to_string());
+            args.push("-s".to_string());
+            args.push("workspace-write".to_string());
             for dir in git_metadata_dirs {
                 args.push("--add-dir".to_string());
                 args.push(dir.display().to_string());
@@ -277,6 +285,10 @@ fn codex_args_with_git_metadata_dirs(
             args.push("read-only".to_string());
         }
     }
+    args.push("-c".to_string());
+    args.push("approval_policy=on-request".to_string());
+    args.push("-c".to_string());
+    args.push("approvals_reviewer=auto_review".to_string());
     args
 }
 
@@ -2087,6 +2099,7 @@ mod tests {
 
     fn codex_test_request(
         cwd: PathBuf,
+        permission_mode: CodexPermissionMode,
         thread_sandbox: ThreadSandbox,
         turn_sandbox_policy: TurnSandboxPolicy,
         network_access: bool,
@@ -2096,6 +2109,7 @@ mod tests {
             command: "codex".to_string(),
             cwd,
             prompt: String::new(),
+            codex_permission_mode: permission_mode,
             thread_sandbox,
             turn_sandbox_policy,
             network_access,
@@ -2113,6 +2127,7 @@ mod tests {
             backend,
             cwd: PathBuf::from("/fixture/workspace"),
             prompt: "sanitized fixture prompt".to_string(),
+            codex_permission_mode: CodexPermissionMode::ApproveForMe,
             thread_sandbox: ThreadSandbox::WorkspaceWrite,
             turn_sandbox_policy: TurnSandboxPolicy::Inherit,
             network_access: true,
@@ -2160,11 +2175,16 @@ mod tests {
                 "--skip-git-repo-check",
                 "-C",
                 "/fixture/workspace",
-                "--full-auto",
+                "-s",
+                "workspace-write",
                 "--add-dir",
                 "/fixture/git-metadata",
                 "-c",
                 "sandbox_workspace_write.network_access=true",
+                "-c",
+                "approval_policy=on-request",
+                "-c",
+                "approvals_reviewer=auto_review",
             ]
             .map(str::to_string)
         );
@@ -2545,6 +2565,7 @@ mod tests {
         let args = codex_args_with_git_metadata_dirs(
             &codex_test_request(
                 cwd,
+                CodexPermissionMode::ApproveForMe,
                 ThreadSandbox::WorkspaceWrite,
                 TurnSandboxPolicy::Inherit,
                 true,
@@ -2554,7 +2575,10 @@ mod tests {
         let git_dir = git_dir.display().to_string();
         let common_dir = common_dir.display().to_string();
 
-        assert!(args.iter().any(|arg| arg == "--full-auto"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-s" && pair[1] == "workspace-write"));
+        assert!(!args.iter().any(|arg| arg == "--full-auto"));
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
@@ -2564,6 +2588,12 @@ mod tests {
         assert!(args.windows(2).any(
             |pair| pair[0] == "-c" && pair[1] == "sandbox_workspace_write.network_access=true"
         ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "approval_policy=on-request"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "approvals_reviewer=auto_review"));
     }
 
     #[test]
@@ -2573,6 +2603,7 @@ mod tests {
         let args = codex_args_with_git_metadata_dirs(
             &codex_test_request(
                 cwd,
+                CodexPermissionMode::ApproveForMe,
                 ThreadSandbox::WorkspaceWrite,
                 TurnSandboxPolicy::ReadOnly,
                 true,
@@ -2587,6 +2618,9 @@ mod tests {
         assert!(!args
             .windows(2)
             .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "approvals_reviewer=auto_review"));
     }
 
     #[test]
@@ -2596,6 +2630,7 @@ mod tests {
         let args = codex_args_with_git_metadata_dirs(
             &codex_test_request(
                 cwd,
+                CodexPermissionMode::ApproveForMe,
                 ThreadSandbox::WorkspaceWrite,
                 TurnSandboxPolicy::DangerFullAccess,
                 true,
@@ -2610,6 +2645,26 @@ mod tests {
         assert!(!args
             .windows(2)
             .any(|pair| pair[0] == "--add-dir" && pair[1] == git_dir));
+    }
+
+    #[test]
+    fn codex_full_access_permission_mode_bypasses_the_sandbox() {
+        let args = codex_args_with_git_metadata_dirs(
+            &codex_test_request(
+                PathBuf::from("/tmp/symphony/OP-272"),
+                CodexPermissionMode::FullAccess,
+                ThreadSandbox::WorkspaceWrite,
+                TurnSandboxPolicy::Inherit,
+                true,
+            ),
+            vec![PathBuf::from("/tmp/symphony/.git/worktrees/OP-272")],
+        );
+
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+        assert!(!args.iter().any(|arg| arg == "--add-dir"));
+        assert!(!args.iter().any(|arg| arg == "approval_policy=on-request"));
     }
 
     #[test]
