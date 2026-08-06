@@ -10,6 +10,7 @@ const CI_WORKFLOW = ".github/workflows/ci.yml";
 const CONTRIBUTOR_GUIDE = "CONTRIBUTING.md";
 const DEVELOPMENT_GUIDE = "docs/DEVELOPMENT.md";
 const LOCAL_SETUP_COMMAND = "pnpm setup:validation";
+const CI_DEPENDENCY_INSTALL_COMMAND = "pnpm install --frozen-lockfile";
 const CI_SETUP_COMMANDS = [
   "pnpm install:hygiene-tools",
   "pnpm exec playwright install --with-deps chromium",
@@ -1172,6 +1173,35 @@ export function validateValidationContract(
       if (ciCommand && matches.length > 0) {
         [gateContext] = validateCiRunStep(content, ciCommand, CI_WORKFLOW, errors);
       }
+      const dependencyInstallMatches = [
+        ...content.matchAll(exactRunLine(CI_DEPENDENCY_INSTALL_COMMAND)),
+      ];
+      let dependencyInstallContext;
+      if (dependencyInstallMatches.length !== 1) {
+        errors.push(
+          `CI workflow ${CI_WORKFLOW} must run dependency installation ${JSON.stringify(
+            CI_DEPENDENCY_INSTALL_COMMAND,
+          )} exactly once; found ${dependencyInstallMatches.length}`,
+        );
+      } else {
+        [dependencyInstallContext] = validateCiRunStep(
+          content,
+          CI_DEPENDENCY_INSTALL_COMMAND,
+          CI_WORKFLOW,
+          errors,
+        );
+        if (
+          gateContext &&
+          dependencyInstallContext &&
+          dependencyInstallContext.jobIndex !== gateContext.jobIndex
+        ) {
+          errors.push(
+            `CI workflow ${CI_WORKFLOW} must run dependency installation ${JSON.stringify(
+              CI_DEPENDENCY_INSTALL_COMMAND,
+            )} in the same job as ${ciCommand}`,
+          );
+        }
+      }
       for (const setupCommand of CI_SETUP_COMMANDS) {
         const setupMatches = [...content.matchAll(exactRunLine(setupCommand))];
         if (setupMatches.length !== 1) {
@@ -1197,6 +1227,18 @@ export function validateValidationContract(
               `CI workflow ${CI_WORKFLOW} must run setup command ${JSON.stringify(
                 setupCommand,
               )} before ${ciCommand}`,
+            );
+          }
+          if (
+            dependencyInstallContext &&
+            setupContext &&
+            dependencyInstallContext.jobIndex === setupContext.jobIndex &&
+            dependencyInstallContext.lineIndex > setupContext.lineIndex
+          ) {
+            errors.push(
+              `CI workflow ${CI_WORKFLOW} must run dependency installation ${JSON.stringify(
+                CI_DEPENDENCY_INSTALL_COMMAND,
+              )} before setup command ${JSON.stringify(setupCommand)}`,
             );
           }
         }

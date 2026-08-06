@@ -71,7 +71,7 @@ function validationFixture(t) {
   write(
     root,
     ".github/workflows/ci.yml",
-    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm install:hygiene-tools\n      - run: pnpm exec playwright install --with-deps chromium\n      - run: pnpm verify:full\n",
+    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm install --frozen-lockfile\n      - run: pnpm install:hygiene-tools\n      - run: pnpm exec playwright install --with-deps chromium\n      - run: pnpm verify:full\n",
   );
   write(
     root,
@@ -533,6 +533,7 @@ shadow:
 jobs:
   validate:
     steps:
+      - run: pnpm install --frozen-lockfile
       - run: pnpm verify:full
 jobs:
   noop:
@@ -631,6 +632,7 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
   validate:
     steps:
+      - run: pnpm install --frozen-lockfile
       - run: pnpm verify:full
 `,
   );
@@ -643,6 +645,63 @@ jobs:
   assert.match(
     errors,
     /must run setup command "pnpm exec playwright install --with-deps chromium" in the same job as pnpm verify:full/,
+  );
+});
+
+test("requires CI dependency installation before validation tool setup", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  validate:
+    steps:
+      - run: pnpm install:hygiene-tools
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:full
+`,
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /must run dependency installation "pnpm install --frozen-lockfile" before setup command "pnpm install:hygiene-tools"/,
+  );
+  assert.match(
+    errors,
+    /must run dependency installation "pnpm install --frozen-lockfile" before setup command "pnpm exec playwright install --with-deps chromium"/,
+  );
+});
+
+test("requires CI dependency installation in the blocking validation job", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  dependencies:
+    steps:
+      - run: pnpm install --frozen-lockfile
+  validate:
+    steps:
+      - run: pnpm install:hygiene-tools
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm verify:full
+`,
+  );
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /must run dependency installation "pnpm install --frozen-lockfile" in the same job as pnpm verify:full/,
   );
 });
 
