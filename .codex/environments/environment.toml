@@ -6,4 +6,5 @@ name = "symphony-rust"
 script = '''
 cd "$CODEX_WORKTREE_PATH"
 pnpm install
+pnpm setup:validation
 '''

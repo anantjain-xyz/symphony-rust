@@ -9,7 +9,9 @@ const RUNNER_SCRIPT = "scripts/run-validation.mjs";
 const CI_WORKFLOW = ".github/workflows/ci.yml";
 const CONTRIBUTOR_GUIDE = "CONTRIBUTING.md";
 const DEVELOPMENT_GUIDE = "docs/DEVELOPMENT.md";
+const CODEX_ENVIRONMENT = ".codex/environments/environment.toml";
 const LOCAL_SETUP_COMMAND = "pnpm setup:validation";
+const WORKSPACE_PROVISIONING_COMMANDS = ["pnpm install", LOCAL_SETUP_COMMAND];
 const CI_DEPENDENCY_INSTALL_COMMAND = "pnpm install --frozen-lockfile";
 const CI_SETUP_COMMANDS = [
   "pnpm install:hygiene-tools",
@@ -854,13 +856,6 @@ export function validateValidationContract(
         )}, received ${JSON.stringify(actualBody)}`,
       );
     }
-    for (const lifecycleScript of [`pre${scriptName}`, `post${scriptName}`]) {
-      if (Object.hasOwn(packageJson.scripts ?? {}, lifecycleScript)) {
-        errors.push(
-          `validation lifecycle hook ${lifecycleScript} is not allowed because it can mutate or suppress the canonical gate`,
-        );
-      }
-    }
   }
   const executableSet = new Set(contract.executables ?? []);
   const validatedPackageScripts = new Set();
@@ -932,6 +927,19 @@ export function validateValidationContract(
           ", ",
         )}`,
       );
+    }
+  }
+  const protectedPackageScripts = new Set([
+    ...REQUIRED_PACKAGE_SCRIPTS.keys(),
+    ...packageScriptOwners.keys(),
+  ]);
+  for (const scriptName of protectedPackageScripts) {
+    for (const lifecycleScript of [`pre${scriptName}`, `post${scriptName}`]) {
+      if (Object.hasOwn(packageJson.scripts ?? {}, lifecycleScript)) {
+        errors.push(
+          `validation lifecycle hook ${lifecycleScript} is not allowed because it can mutate or suppress the canonical gate`,
+        );
+      }
     }
   }
 
@@ -1364,6 +1372,53 @@ export function validateValidationContract(
           setup.command,
         )}`,
       );
+    }
+    const expectedProvisioning = {
+      path: CODEX_ENVIRONMENT,
+      commands: WORKSPACE_PROVISIONING_COMMANDS,
+    };
+    if (JSON.stringify(setup.provisioning) !== JSON.stringify(expectedProvisioning)) {
+      errors.push(
+        `local setup provisioning must be ${JSON.stringify(
+          expectedProvisioning,
+        )}, received ${JSON.stringify(setup.provisioning)}`,
+      );
+    }
+    const environmentPath = resolveInside(
+      root,
+      CODEX_ENVIRONMENT,
+      errors,
+      "Codex workspace environment",
+    );
+    if (environmentPath && !existsSync(environmentPath)) {
+      errors.push(`Codex workspace environment is missing at ${CODEX_ENVIRONMENT}`);
+    } else if (environmentPath) {
+      const content = readFileSync(environmentPath, "utf8");
+      const setupScript = /\[setup\][\s\S]*?script\s*=\s*'''([\s\S]*?)'''/.exec(content)?.[1];
+      if (!setupScript) {
+        errors.push(`${CODEX_ENVIRONMENT} must define a triple-quoted [setup] script`);
+      } else {
+        let previousIndex = -1;
+        for (const command of WORKSPACE_PROVISIONING_COMMANDS) {
+          const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const matches = [...setupScript.matchAll(new RegExp(`^\\s*${escaped}\\s*$`, "gm"))];
+          if (matches.length !== 1) {
+            errors.push(
+              `${CODEX_ENVIRONMENT} setup must run ${JSON.stringify(command)} exactly once; found ${matches.length}`,
+            );
+          } else if (matches[0].index < previousIndex) {
+            errors.push(
+              `${CODEX_ENVIRONMENT} setup must run ${JSON.stringify(command)} after ${JSON.stringify(
+                WORKSPACE_PROVISIONING_COMMANDS[
+                  WORKSPACE_PROVISIONING_COMMANDS.indexOf(command) - 1
+                ],
+              )}`,
+            );
+          } else {
+            previousIndex = matches[0].index;
+          }
+        }
+      }
     }
     for (const guide of [CONTRIBUTOR_GUIDE, DEVELOPMENT_GUIDE]) {
       const path = resolveInside(root, guide, errors, "setup guide");

@@ -182,7 +182,11 @@
     },
     "setup": {
       "packageScript": "setup:validation",
-      "command": "pnpm setup:validation"
+      "command": "pnpm setup:validation",
+      "provisioning": {
+        "path": ".codex/environments/environment.toml",
+        "commands": ["pnpm install", "pnpm setup:validation"]
+      }
     }
   }
 }

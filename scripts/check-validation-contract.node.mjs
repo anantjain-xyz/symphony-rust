@@ -79,6 +79,11 @@ function validationFixture(t) {
     "```sh\npnpm setup:validation\npnpm verify:fast\npnpm verify:full\n```\n",
   );
   write(root, "docs/DEVELOPMENT.md", "```sh\npnpm setup:validation\npnpm verify:full\n```\n");
+  write(
+    root,
+    ".codex/environments/environment.toml",
+    "version = 1\n[setup]\nscript = '''\npnpm install\npnpm setup:validation\n'''\n",
+  );
   for (const name of ["pull", "push"]) {
     write(root, `.agents/skills/symphony-${name}/SKILL.md`, "Run `pnpm verify:fast`.\n");
   }
@@ -219,6 +224,10 @@ function validationFixture(t) {
       setup: {
         packageScript: "setup:validation",
         command: "pnpm setup:validation",
+        provisioning: {
+          path: ".codex/environments/environment.toml",
+          commands: ["pnpm install", "pnpm setup:validation"],
+        },
       },
     },
   });
@@ -381,6 +390,34 @@ test("validates the nested scripts behind explicit validation setup", (t) => {
   );
 });
 
+test("requires validation setup during Codex workspace provisioning", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".codex/environments/environment.toml",
+    "version = 1\n[setup]\nscript = '''\npnpm install\n'''\n",
+  );
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /\.codex\/environments\/environment\.toml setup must run "pnpm setup:validation" exactly once; found 0/,
+  );
+});
+
+test("requires dependency installation before validation setup in Codex workspaces", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".codex/environments/environment.toml",
+    "version = 1\n[setup]\nscript = '''\npnpm setup:validation\npnpm install\n'''\n",
+  );
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /\.codex\/environments\/environment\.toml setup must run "pnpm setup:validation" after "pnpm install"/,
+  );
+});
+
 test("rejects lifecycle hooks around every required validation script", (t) => {
   const root = validationFixture(t);
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -396,6 +433,27 @@ test("rejects lifecycle hooks around every required validation script", (t) => {
   assert.match(
     errors,
     /validation lifecycle hook posttest is not allowed because it can mutate or suppress the canonical gate/,
+  );
+});
+
+test("rejects lifecycle hooks around every profile-owned package script", (t) => {
+  const root = validationFixture(t);
+  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  packageJson.scripts["check:hygiene"] = "node scripts/fixture.node.mjs";
+  packageJson.scripts["precheck:hygiene"] = "pnpm install:hygiene-tools";
+  writeJson(root, "package.json", packageJson);
+  const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
+  contract.commands["hygiene-checks"] = {
+    label: "hygiene",
+    argv: ["pnpm", "check:hygiene"],
+    packageScript: "check:hygiene",
+  };
+  contract.profiles.full.push("hygiene-checks");
+  writeJson(root, "validation/contract.json", contract);
+
+  assert.match(
+    validateValidationContract(root).join("\n"),
+    /validation lifecycle hook precheck:hygiene is not allowed because it can mutate or suppress the canonical gate/,
   );
 });
 
