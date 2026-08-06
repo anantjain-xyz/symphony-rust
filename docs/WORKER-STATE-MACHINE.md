@@ -136,12 +136,14 @@ by themselves. `after_run` is not invoked when the driver returns an
 that path goes directly through cancellation arbitration and
 `dispatch_error` handling.
 
-An empty workspace-root setting expands to `<app-data>/workspaces`. A
-nonempty configured root is retained as a plain `PathBuf`; it is not rebased
-or made absolute at the configuration boundary. Relative roots can therefore
-remain relative and are interpreted against the desktop process's working
-directory when used. Requiring an absolute root (or resolving it against a
-documented base) is a proposed configuration invariant, not current behavior.
+An empty workspace-root setting expands to `<app-data>/workspaces`. A leading
+standalone `~` path component expands to the current user's home directory, so
+values such as `~/Developer/worktrees` are absolute and do not depend on the
+desktop process's working directory. Other nonempty configured roots are
+retained as plain `PathBuf`s; relative roots without `~` therefore remain
+relative and are interpreted against the desktop process's working directory.
+Requiring all roots to be absolute (or resolving them against a documented
+base) is a proposed configuration invariant, not current behavior.
 
 Every cancellation-sensitive boundary checks the run token. This is
 intentional: cancellation can arrive during clone/setup, a hook, skill
