@@ -567,7 +567,7 @@ tr:focus-visible {
 }
 
 .boot-skeleton-kpis {
-  grid-template-columns: repeat(4, minmax(0, 132px));
+  grid-template-columns: repeat(3, minmax(0, 132px));
 }
 
 .boot-skeleton-kpis span {
