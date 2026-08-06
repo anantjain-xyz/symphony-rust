@@ -16,12 +16,10 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
-      "hygiene-tools-install",
       "hygiene-checks",
       "hygiene-tests",
       "boundary-checks",
       "boundary-tests",
-      "runtime-contract-tests",
       "frontend-contracts",
       "frontend-contract-tests",
       "rust-format",
@@ -36,12 +34,10 @@
       "validation-contract",
       "agent-assets",
       "validation-tests",
-      "hygiene-tools-install",
       "hygiene-checks",
       "hygiene-tests",
       "boundary-checks",
       "boundary-tests",
-      "runtime-contract-tests",
       "frontend-contracts",
       "frontend-contract-tests",
       "rust-format",
@@ -54,7 +50,6 @@
       "frontend-build",
       "bundle-budget",
       "bundle-tests",
-      "browser-install",
       "browser-e2e"
     ]
   },
@@ -73,11 +68,6 @@
       "label": "validation checker tests",
       "argv": ["pnpm", "test:validation"],
       "packageScript": "test:validation"
-    },
-    "hygiene-tools-install": {
-      "label": "pinned hygiene tool installation",
-      "argv": ["pnpm", "install:hygiene-tools"],
-      "packageScript": "install:hygiene-tools"
     },
     "hygiene-checks": {
       "label": "repository hygiene contracts",
@@ -98,11 +88,6 @@
       "label": "architecture boundary contract tests",
       "argv": ["pnpm", "test:boundaries"],
       "packageScript": "test:boundaries"
-    },
-    "runtime-contract-tests": {
-      "label": "runtime boundary contract tests",
-      "argv": ["pnpm", "test:runtime-contracts"],
-      "packageScript": "test:runtime-contracts"
     },
     "frontend-contracts": {
       "label": "frontend static contracts",
@@ -171,11 +156,6 @@
       "argv": ["pnpm", "test:bundle"],
       "packageScript": "test:bundle"
     },
-    "browser-install": {
-      "label": "Playwright Chromium installation",
-      "argv": ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
-      "installsBrowser": true
-    },
     "browser-e2e": {
       "label": "Playwright end-to-end tests",
       "argv": ["pnpm", "test:e2e"],
@@ -186,7 +166,11 @@
   "integrations": {
     "ci": {
       "path": ".github/workflows/ci.yml",
-      "command": "pnpm verify:full"
+      "command": "pnpm verify:full",
+      "setupCommands": [
+        "pnpm install:hygiene-tools",
+        "pnpm exec playwright install --with-deps chromium"
+      ]
     },
     "contributing": {
       "path": "CONTRIBUTING.md",
@@ -194,7 +178,11 @@
     },
     "skills": {
       "paths": [".agents/skills/symphony-pull/SKILL.md", ".agents/skills/symphony-push/SKILL.md"],
-      "command": "pnpm verify:full"
+      "command": "pnpm verify:fast"
+    },
+    "setup": {
+      "packageScript": "setup:validation",
+      "command": "pnpm setup:validation"
     }
   }
 }

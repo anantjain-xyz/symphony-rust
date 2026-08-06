@@ -17,11 +17,14 @@ From a new checkout:
 
 ```sh
 pnpm install
-pnpm exec playwright install chromium
+pnpm setup:validation
 ```
 
-CI uses `pnpm install --frozen-lockfile` and installs Chromium with Linux system
-dependencies via `pnpm exec playwright install --with-deps chromium`.
+`pnpm setup:validation` is explicit, one-time local setup for the pinned hygiene
+tools and Playwright Chromium. Neither validation profile installs external
+tools. CI uses `pnpm install --frozen-lockfile`, installs the hygiene tools, and
+installs Chromium with Linux system dependencies in dedicated setup steps before
+validation.
 
 ## Run the app
 
@@ -137,11 +140,11 @@ hand-edit `src/bindings.ts`.
 
 ## Playwright
 
-`pnpm test:e2e` runs `playwright test`. The checked-in configuration:
+`pnpm test:e2e` runs `playwright test` against an existing production build.
+The checked-in configuration:
 
 - discovers `e2e/**/*.e2e.ts`;
-- builds the frontend, then serves `pnpm preview` at
-  `http://127.0.0.1:4173`;
+- serves `pnpm preview` at `http://127.0.0.1:4173`;
 - uses the Desktop Chrome profile against the browser preview;
 - runs fully parallel, with two retries only in CI;
 - retains traces on failure and writes screenshots/artifacts under
@@ -150,10 +153,15 @@ hand-edit `src/bindings.ts`.
 Run all or one file:
 
 ```sh
+pnpm build
 pnpm test:e2e
 pnpm exec playwright test e2e/theme-first-frame.e2e.ts
 pnpm exec playwright test --grep "theme toggle"
 ```
+
+Build once before focused Playwright invocations so the preview always reflects
+the current source. The full validation profile orders the production build
+before bundle inspection and browser tests.
 
 These tests validate the production frontend bundle and preview fixtures, not a
 native Tauri window.
@@ -207,5 +215,11 @@ lazy-view size, and import-boundary budgets.
 also verifies lazy-chunk and theme behavior and uploads its screenshots in CI.
 
 During development, start with the smallest package, test file, or E2E file
-that owns the behavior. Before submitting a pull request, run the canonical
-full gate above.
+that owns the behavior. Before pushing or submitting a pull request, run the
+canonical local gate:
+
+```sh
+pnpm verify:fast
+```
+
+The browser-inclusive `pnpm verify:full` remains the blocking CI merge gate.

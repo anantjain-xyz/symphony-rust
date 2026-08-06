@@ -35,10 +35,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: pnpm install --frozen-lockfile
+      # External validation tools are setup inputs, never profile commands.
+      - run: pnpm install:hygiene-tools
+      - run: pnpm exec playwright install --with-deps chromium
       # validation/contract.json owns the ordered gate. The full profile keeps
       # symphony-desktop excluded from Linux Rust checks to avoid webkit2gtk,
       # and includes hygiene, boundary, runtime, generated/static, frontend,
-      # bundle, and browser verification.
+      # bundle, and browser verification. Tool installation stays in the
+      # explicit setup steps above, outside the validation profile.
       - run: pnpm verify:full
       - name: Upload theme screenshots
         if: always()

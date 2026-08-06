@@ -124,7 +124,7 @@ authority rules these tests must protect.
 
 [`playwright.config.ts`](../playwright.config.ts):
 
-- builds the frontend and serves Vite preview at `127.0.0.1:4173`;
+- serves an existing frontend build with Vite preview at `127.0.0.1:4173`;
 - runs Chromium with desktop Chrome defaults;
 - runs test files in parallel;
 - retries twice in CI and not locally;
@@ -146,7 +146,8 @@ CI installs Chromium, runs `pnpm test:e2e`, and uploads PNGs under
 Run locally:
 
 ```sh
-pnpm exec playwright install chromium
+pnpm setup:validation  # one-time
+pnpm build
 pnpm test:e2e
 ```
 
@@ -155,6 +156,9 @@ Use the CI form on a Linux machine that needs browser system dependencies:
 ```sh
 pnpm exec playwright install --with-deps chromium
 ```
+
+The full validation profile builds before Playwright. For focused local E2E
+runs, rebuild first so the preview does not serve stale artifacts.
 
 ### Proposed invariant
 

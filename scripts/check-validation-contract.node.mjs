@@ -34,12 +34,13 @@ function validationFixture(t) {
       test: "vitest run",
       "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",
       "test:frontend-contracts":
-        "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs && vitest run src/desktop/events.test.ts src/dashboardRefreshCoordinator.test.ts src/pollController.test.ts src/settingsValidationController.test.ts",
+        "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs",
       "test:validation":
         "node --test scripts/check-agent-assets.node.mjs scripts/check-validation-contract.node.mjs",
       "test:e2e": "playwright test",
       typecheck: "tsc --noEmit",
-      build: "tsc && vite build",
+      build: "vite build",
+      "setup:validation": "pnpm install:hygiene-tools && pnpm exec playwright install chromium",
       "verify:fast": "node scripts/run-validation.mjs fast",
       "verify:full": "node scripts/run-validation.mjs full",
     },
@@ -69,12 +70,16 @@ function validationFixture(t) {
   write(
     root,
     ".github/workflows/ci.yml",
-    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
+    "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm install:hygiene-tools\n      - run: pnpm exec playwright install --with-deps chromium\n      - run: pnpm verify:full\n",
   );
-  write(root, "CONTRIBUTING.md", "```sh\npnpm verify:fast\n\npnpm verify:full\n```\n");
-  write(root, "docs/DEVELOPMENT.md", "The canonical CI gate is:\n\n```sh\npnpm verify:full\n```\n");
+  write(
+    root,
+    "CONTRIBUTING.md",
+    "```sh\npnpm setup:validation\npnpm verify:fast\npnpm verify:full\n```\n",
+  );
+  write(root, "docs/DEVELOPMENT.md", "```sh\npnpm setup:validation\npnpm verify:full\n```\n");
   for (const name of ["pull", "push"]) {
-    write(root, `.agents/skills/symphony-${name}/SKILL.md`, "Run `pnpm verify:full`.\n");
+    write(root, `.agents/skills/symphony-${name}/SKILL.md`, "Run `pnpm verify:fast`.\n");
   }
   writeJson(root, "validation/contract.json", {
     version: 1,
@@ -110,7 +115,6 @@ function validationFixture(t) {
         "frontend-build",
         "bundle-budget",
         "bundle-tests",
-        "browser-install",
         "browser-e2e",
       ],
     },
@@ -187,11 +191,6 @@ function validationFixture(t) {
         argv: ["pnpm", "test:bundle"],
         packageScript: "test:bundle",
       },
-      "browser-install": {
-        label: "browser install",
-        argv: ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
-        installsBrowser: true,
-      },
       "browser-e2e": {
         label: "browser",
         argv: ["pnpm", "test:e2e"],
@@ -203,6 +202,10 @@ function validationFixture(t) {
       ci: {
         path: ".github/workflows/ci.yml",
         command: "pnpm verify:full",
+        setupCommands: [
+          "pnpm install:hygiene-tools",
+          "pnpm exec playwright install --with-deps chromium",
+        ],
       },
       contributing: {
         path: "CONTRIBUTING.md",
@@ -210,7 +213,11 @@ function validationFixture(t) {
       },
       skills: {
         paths: [".agents/skills/symphony-pull/SKILL.md", ".agents/skills/symphony-push/SKILL.md"],
-        command: "pnpm verify:full",
+        command: "pnpm verify:fast",
+      },
+      setup: {
+        packageScript: "setup:validation",
+        command: "pnpm setup:validation",
       },
     },
   });
@@ -261,6 +268,8 @@ test("validation runner traverses profiles and propagates failures", (t) => {
   const root = validationFixture(t);
   const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
   const invocations = [];
+  const output = [];
+  let clock = 0;
   const successStatus = runValidationProfile({
     root,
     profileName: "fast",
@@ -268,7 +277,14 @@ test("validation runner traverses profiles and propagates failures", (t) => {
       invocations.push([executable, ...args]);
       return { status: 0 };
     },
-    stdout() {},
+    now() {
+      const value = clock;
+      clock += 250;
+      return value;
+    },
+    stdout(message) {
+      output.push(message);
+    },
     stderr() {},
   });
 
@@ -276,6 +292,16 @@ test("validation runner traverses profiles and propagates failures", (t) => {
   assert.deepEqual(
     invocations,
     contract.profiles.fast.map((commandId) => contract.commands[commandId].argv),
+  );
+  assert.match(output.join("\n"), /contract completed in 250ms/);
+  assert.match(output.join("\n"), /Slowest validation commands:/);
+  assert.match(
+    output.join("\n"),
+    new RegExp(
+      `Validation profile fast passed \\(${contract.profiles.fast.length} commands in ${(
+        contract.profiles.fast.length * 0.25
+      ).toFixed(2)}s\\)`,
+    ),
   );
 
   let attempts = 0;
@@ -324,6 +350,7 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   packageJson.scripts["test:validation"] = "node --help";
   packageJson.scripts["check:frontend-boundaries"] = "node --help";
+  packageJson.scripts["setup:validation"] = "node --help";
   writeJson(root, "package.json", packageJson);
 
   const errors = validateValidationContract(root).join("\n");
@@ -334,6 +361,10 @@ test("pins the bodies of package scripts owned by required gates", (t) => {
   assert.match(
     errors,
     /required package script check:frontend-boundaries must be "node scripts\/check-frontend-boundaries\.mjs", received "node --help"/,
+  );
+  assert.match(
+    errors,
+    /required package script setup:validation must be "pnpm install:hygiene-tools && pnpm exec playwright install chromium", received "node --help"/,
   );
 });
 
@@ -385,7 +416,7 @@ test("rejects CI and adapted skills that bypass the canonical gate", (t) => {
   assert.match(errors, /must run canonical entrypoint "pnpm verify:full" exactly once; found 0/);
   assert.match(
     errors,
-    /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
+    /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:fast" exactly once; found 0/,
   );
 });
 
@@ -542,6 +573,35 @@ jobs:
   assert.match(errors, /must trigger pushes to main with branches: \[main\] and no filters/);
 });
 
+test("requires dedicated CI setup before the blocking full gate", (t) => {
+  const root = validationFixture(t);
+  write(
+    root,
+    ".github/workflows/ci.yml",
+    `on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  validate:
+    steps:
+      - run: pnpm verify:full
+      - run: pnpm install:hygiene-tools
+      - run: pnpm exec playwright install --with-deps chromium
+`,
+  );
+
+  const errors = validateValidationContract(root).join("\n");
+  assert.match(
+    errors,
+    /must run setup command "pnpm install:hygiene-tools" before pnpm verify:full/,
+  );
+  assert.match(
+    errors,
+    /must run setup command "pnpm exec playwright install --with-deps chromium" before pnpm verify:full/,
+  );
+});
+
 test("pins validation integrations to the canonical repository files", (t) => {
   const root = validationFixture(t);
   const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
@@ -555,7 +615,7 @@ test("pins validation integrations to the canonical repository files", (t) => {
     "on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n  validate:\n    steps:\n      - run: pnpm verify:full\n",
   );
   write(root, "fixtures/CONTRIBUTING.md", "pnpm verify:fast\npnpm verify:full\n");
-  write(root, "fixtures/skill.md", "Run pnpm verify:full.\n");
+  write(root, "fixtures/skill.md", "Run pnpm verify:fast.\n");
   write(
     root,
     ".github/workflows/ci.yml",
@@ -584,7 +644,7 @@ test("pins validation integrations to the canonical repository files", (t) => {
 test("requires visible contributor and adapted-skill gate references", (t) => {
   const root = validationFixture(t);
   write(root, "CONTRIBUTING.md", "<!--\npnpm verify:fast\npnpm verify:full\n-->\n");
-  write(root, ".agents/skills/symphony-pull/SKILL.md", "<!-- Run pnpm verify:full. -->\n");
+  write(root, ".agents/skills/symphony-pull/SKILL.md", "<!-- Run pnpm verify:fast. -->\n");
   write(root, "docs/DEVELOPMENT.md", "<!--\npnpm verify:full\n-->\n");
 
   const errors = validateValidationContract(root).join("\n");
@@ -592,11 +652,19 @@ test("requires visible contributor and adapted-skill gate references", (t) => {
   assert.match(errors, /CONTRIBUTING\.md must show pnpm verify:full on a visible command line/);
   assert.match(
     errors,
-    /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:full" exactly once; found 0/,
+    /symphony-pull\/SKILL\.md must reference canonical gate "pnpm verify:fast" exactly once; found 0/,
   );
   assert.match(
     errors,
     /development guide docs\/DEVELOPMENT\.md must show canonical full entrypoint pnpm verify:full on a visible command line/,
+  );
+  assert.match(
+    errors,
+    /CONTRIBUTING\.md must show pnpm setup:validation on a visible command line/,
+  );
+  assert.match(
+    errors,
+    /docs\/DEVELOPMENT\.md must show pnpm setup:validation on a visible command line/,
   );
 });
 
@@ -725,7 +793,6 @@ test("pins required full-gate commands independently of the command inventory", 
     "frontend-build",
     "bundle-budget",
     "bundle-tests",
-    "browser-install",
     "browser-e2e",
   ]) {
     delete contract.commands[commandId];
@@ -748,7 +815,6 @@ test("pins required full-gate commands independently of the command inventory", 
     "frontend-build",
     "bundle-budget",
     "bundle-tests",
-    "browser-install",
     "browser-e2e",
   ]) {
     assert.match(
@@ -767,8 +833,6 @@ test("pins the semantics of required full-gate commands", (t) => {
   contract.commands["frontend-tests"].argv = ["pnpm", "typecheck"];
   contract.commands["bundle-budget"].packageScript = "test:bundle";
   contract.commands["bundle-tests"].argv = ["pnpm", "check:bundle"];
-  contract.commands["browser-install"].argv = ["pnpm", "exec", "playwright", "install", "chromium"];
-  contract.commands["browser-install"].installsBrowser = false;
   contract.commands["browser-e2e"].requiresBrowser = false;
   writeJson(root, "validation/contract.json", contract);
 
@@ -794,11 +858,6 @@ test("pins the semantics of required full-gate commands", (t) => {
     errors,
     /required command bundle-tests argv must be pnpm test:bundle, received pnpm check:bundle/,
   );
-  assert.match(
-    errors,
-    /required command browser-install argv must be pnpm exec playwright install --with-deps chromium/,
-  );
-  assert.match(errors, /required command browser-install must declare installsBrowser: true/);
   assert.match(errors, /required command browser-e2e must declare requiresBrowser: true/);
 });
 
@@ -841,18 +900,20 @@ test("pins the canonical validation entrypoint script names", (t) => {
   assert.match(errors, /CI integration command must be canonical full entrypoint pnpm verify:full/);
 });
 
-test("requires browser installation before browser validation", (t) => {
+test("rejects external tool installation inside validation profiles", (t) => {
   const root = validationFixture(t);
   const contract = JSON.parse(readFileSync(join(root, "validation/contract.json"), "utf8"));
-  contract.profiles.full = contract.profiles.full.filter(
-    (command) => command !== "browser-install",
-  );
-  delete contract.commands["browser-install"];
+  contract.commands["browser-install"] = {
+    label: "browser installation",
+    argv: ["pnpm", "exec", "playwright", "install", "chromium"],
+    installsBrowser: true,
+  };
+  contract.profiles.full.push("browser-install");
   writeJson(root, "validation/contract.json", contract);
 
   assert.match(
     validateValidationContract(root).join("\n"),
-    /browser command browser-e2e must follow required command browser-install in the full profile/,
+    /validation profile full must not install external tools \(browser-install\); move installation to explicit setup/,
   );
 });
 

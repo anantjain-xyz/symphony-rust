@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -8,6 +9,11 @@ const RUNNER_SCRIPT = "scripts/run-validation.mjs";
 const CI_WORKFLOW = ".github/workflows/ci.yml";
 const CONTRIBUTOR_GUIDE = "CONTRIBUTING.md";
 const DEVELOPMENT_GUIDE = "docs/DEVELOPMENT.md";
+const LOCAL_SETUP_COMMAND = "pnpm setup:validation";
+const CI_SETUP_COMMANDS = [
+  "pnpm install:hygiene-tools",
+  "pnpm exec playwright install --with-deps chromium",
+];
 const ADAPTED_SKILL_PATHS = [
   ".agents/skills/symphony-pull/SKILL.md",
   ".agents/skills/symphony-push/SKILL.md",
@@ -116,13 +122,7 @@ const REQUIRED_FULL_COMMANDS = new Map([
       packageScript: "test",
     },
   ],
-  [
-    "frontend-build",
-    {
-      argv: ["pnpm", "build"],
-      packageScript: "build",
-    },
-  ],
+  ["frontend-build", { argv: ["pnpm", "build"], packageScript: "build" }],
   [
     "bundle-budget",
     {
@@ -135,12 +135,6 @@ const REQUIRED_FULL_COMMANDS = new Map([
     {
       argv: ["pnpm", "test:bundle"],
       packageScript: "test:bundle",
-    },
-  ],
-  [
-    "browser-install",
-    {
-      argv: ["pnpm", "exec", "playwright", "install", "--with-deps", "chromium"],
     },
   ],
   [
@@ -166,14 +160,15 @@ const REQUIRED_PACKAGE_SCRIPTS = new Map([
   ["check:preview-coverage", "node scripts/check-preview-coverage.mjs"],
   [
     "test:frontend-contracts",
-    "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs && vitest run src/desktop/events.test.ts src/dashboardRefreshCoordinator.test.ts src/pollController.test.ts src/settingsValidationController.test.ts",
+    "node --test scripts/check-frontend-boundaries.node.mjs scripts/check-preview-coverage.node.mjs",
   ],
   ["typecheck", "tsc --noEmit"],
   ["test", "vitest run"],
-  ["build", "tsc && vite build"],
+  ["build", "vite build"],
   ["check:bundle", "node scripts/check-bundle-budget.mjs"],
   ["test:bundle", "node --test scripts/check-bundle-budget.node.mjs"],
   ["test:e2e", "playwright test"],
+  ["setup:validation", "pnpm install:hygiene-tools && pnpm exec playwright install chromium"],
 ]);
 const SUPPORTED_SCRIPT_EXECUTABLES = new Map([
   ["biome", ["@biomejs/biome"]],
@@ -692,12 +687,31 @@ function validateCiTriggers(content, workflowPath, errors) {
   }
 }
 
+function formatElapsed(milliseconds) {
+  if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
+  return `${(milliseconds / 1_000).toFixed(2)}s`;
+}
+
+function printTimingSummary(timings, stdout) {
+  if (timings.length === 0) return;
+  stdout("\nSlowest validation commands:");
+  for (const [index, timing] of [...timings]
+    .sort((left, right) => right.elapsedMs - left.elapsedMs)
+    .slice(0, 5)
+    .entries()) {
+    stdout(
+      `${index + 1}. ${timing.label} (${timing.commandId}) — ${formatElapsed(timing.elapsedMs)}`,
+    );
+  }
+}
+
 export function runValidationProfile({
   root = DEFAULT_ROOT,
   profileName,
   spawn = spawnSync,
   platform = process.platform,
   environment = process.env,
+  now = () => performance.now(),
   stdout = (message) => console.log(message),
   stderr = (message) => console.error(message),
 } = {}) {
@@ -726,6 +740,7 @@ export function runValidationProfile({
     return 2;
   }
 
+  const timings = [];
   for (const [index, commandId] of commandIds.entries()) {
     const command = contract.commands?.[commandId];
     if (!command || !Array.isArray(command.argv) || command.argv.length === 0) {
@@ -740,26 +755,44 @@ export function runValidationProfile({
     stdout(`\n==> [${index + 1}/${commandIds.length}] ${command.label ?? commandId}`);
     stdout(`$ ${command.argv.join(" ")}`);
 
+    const startedAt = now();
     const result = spawn(platformExecutable, platformArgs, {
       cwd: root,
       env: environment,
       stdio: "inherit",
     });
+    const elapsedMs = Math.max(0, now() - startedAt);
+    const timing = {
+      commandId,
+      label: command.label ?? commandId,
+      elapsedMs,
+    };
+    timings.push(timing);
+    stdout(`<== ${timing.label} completed in ${formatElapsed(elapsedMs)}`);
     if (result.error) {
       stderr(`Validation command ${commandId} could not start: ${result.error.message}`);
+      printTimingSummary(timings, stdout);
       return 1;
     }
     if (result.signal) {
       stderr(`Validation command ${commandId} terminated by signal ${result.signal}`);
+      printTimingSummary(timings, stdout);
       return 1;
     }
     if (result.status !== 0) {
       stderr(`Validation command ${commandId} failed with exit ${result.status}`);
+      printTimingSummary(timings, stdout);
       return result.status ?? 1;
     }
   }
 
-  stdout(`\nValidation profile ${profileName} passed (${commandIds.length} commands).`);
+  const totalMs = timings.reduce((sum, timing) => sum + timing.elapsedMs, 0);
+  printTimingSummary(timings, stdout);
+  stdout(
+    `\nValidation profile ${profileName} passed (${commandIds.length} commands in ${formatElapsed(
+      totalMs,
+    )}).`,
+  );
   return 0;
 }
 
@@ -927,6 +960,23 @@ export function validateValidationContract(
       errors.push(`fast validation profile must not install a browser (${commandId})`);
     }
   }
+  for (const commandId of full) {
+    const command = commands[commandId];
+    const argv = command?.argv ?? [];
+    if (
+      command?.installsBrowser ||
+      command?.installsExternalTools ||
+      command?.packageScript === "install:hygiene-tools" ||
+      (argv[0] === "pnpm" &&
+        argv[1] === "exec" &&
+        argv[2] === "playwright" &&
+        argv[3] === "install")
+    ) {
+      errors.push(
+        `validation profile full must not install external tools (${commandId}); move installation to explicit setup`,
+      );
+    }
+  }
   for (const commandId of commandIds) {
     if (!full.has(commandId)) {
       errors.push(`full validation profile omits declared command ${commandId}`);
@@ -954,19 +1004,6 @@ export function validateValidationContract(
   const fullIds = Array.isArray(profiles.full) ? profiles.full : [];
   if (!fullIds.some((id) => commands[id]?.requiresBrowser)) {
     errors.push("full validation profile must include a browser command");
-  }
-  if (commands["browser-install"]?.installsBrowser !== true) {
-    errors.push("required command browser-install must declare installsBrowser: true");
-  }
-  for (const [index, commandId] of fullIds.entries()) {
-    if (
-      commands[commandId]?.requiresBrowser &&
-      !fullIds.slice(0, index).includes("browser-install")
-    ) {
-      errors.push(
-        `browser command ${commandId} must follow required command browser-install in the full profile`,
-      );
-    }
   }
   const frontendBuildIndex = fullIds.indexOf("frontend-build");
   const bundleBudgetIndex = fullIds.indexOf("bundle-budget");
@@ -1050,6 +1087,14 @@ export function validateValidationContract(
         )}`,
       );
     }
+    const setupCommands = Array.isArray(ci.setupCommands) ? ci.setupCommands : [];
+    if (JSON.stringify(setupCommands) !== JSON.stringify(CI_SETUP_COMMANDS)) {
+      errors.push(
+        `CI integration setupCommands must be ${JSON.stringify(
+          CI_SETUP_COMMANDS,
+        )}, received ${JSON.stringify(ci.setupCommands)}`,
+      );
+    }
     if (ci.path !== CI_WORKFLOW) {
       errors.push(
         `CI integration path must be ${CI_WORKFLOW}, received ${JSON.stringify(ci.path)}`,
@@ -1071,6 +1116,25 @@ export function validateValidationContract(
       }
       if (ciCommand && matches.length > 0) {
         validateCiRunStep(content, ciCommand, CI_WORKFLOW, errors);
+      }
+      for (const setupCommand of CI_SETUP_COMMANDS) {
+        const setupMatches = [...content.matchAll(exactRunLine(setupCommand))];
+        if (setupMatches.length !== 1) {
+          errors.push(
+            `CI workflow ${CI_WORKFLOW} must run setup command ${JSON.stringify(
+              setupCommand,
+            )} exactly once; found ${setupMatches.length}`,
+          );
+        } else {
+          validateCiRunStep(content, setupCommand, CI_WORKFLOW, errors);
+          if (matches[0] && setupMatches[0].index > matches[0].index) {
+            errors.push(
+              `CI workflow ${CI_WORKFLOW} must run setup command ${JSON.stringify(
+                setupCommand,
+              )} before ${ciCommand}`,
+            );
+          }
+        }
       }
       for (const command of Object.values(commands)) {
         const direct = command.argv?.join(" ");
@@ -1149,9 +1213,9 @@ export function validateValidationContract(
         )}, received ${JSON.stringify(skills.paths)}`,
       );
     }
-    if (canonicalFullCommand && skills.command !== canonicalFullCommand) {
+    if (canonicalFastCommand && skills.command !== canonicalFastCommand) {
       errors.push(
-        `adapted-skill integration command must be canonical full entrypoint ${canonicalFullCommand}, received ${JSON.stringify(
+        `adapted-skill integration command must be canonical fast entrypoint ${canonicalFastCommand}, received ${JSON.stringify(
           skills.command,
         )}`,
       );
@@ -1174,6 +1238,34 @@ export function validateValidationContract(
     }
   } else {
     errors.push("validation contract is missing adapted-skill integration");
+  }
+
+  const setup = contract.integrations?.setup;
+  if (!setup) {
+    errors.push("validation contract is missing local setup integration");
+  } else {
+    if (setup.packageScript !== "setup:validation") {
+      errors.push(
+        `local setup packageScript must be setup:validation, received ${JSON.stringify(
+          setup.packageScript,
+        )}`,
+      );
+    }
+    if (setup.command !== LOCAL_SETUP_COMMAND) {
+      errors.push(
+        `local setup command must be ${LOCAL_SETUP_COMMAND}, received ${JSON.stringify(
+          setup.command,
+        )}`,
+      );
+    }
+    for (const guide of [CONTRIBUTOR_GUIDE, DEVELOPMENT_GUIDE]) {
+      const path = resolveInside(root, guide, errors, "setup guide");
+      if (path && !existsSync(path)) {
+        errors.push(`setup guide is missing at ${guide}`);
+      } else if (path && !hasMarkdownCommandLine(readFileSync(path, "utf8"), LOCAL_SETUP_COMMAND)) {
+        errors.push(`${guide} must show ${LOCAL_SETUP_COMMAND} on a visible command line`);
+      }
+    }
   }
 
   return errors;

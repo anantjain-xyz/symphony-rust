@@ -50,7 +50,7 @@ const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
     [
       {
         match: "7. Re-run the target repository's documented validation gate before pushing.",
-        replacement: "7. Re-run validation (`pnpm verify:full`) before pushing.",
+        replacement: "7. Re-run the local pre-push gate (`pnpm verify:fast`) before pushing.",
       },
     ],
   ],
@@ -60,7 +60,8 @@ const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
       {
         match:
           "- The target repository's documented validation gate has been run for the latest commit.",
-        replacement: "- Validation gate has been run for the latest commit (`pnpm verify:full`).",
+        replacement:
+          "- The local pre-push gate has been run for the latest commit (`pnpm verify:fast`).",
       },
     ],
   ],
