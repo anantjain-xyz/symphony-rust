@@ -13,29 +13,26 @@ Thanks for your interest in improving Symphony! This guide covers the developmen
 
 ```sh
 pnpm install
-pnpm install:hygiene-tools  # pinned actionlint + ShellCheck binaries
-pnpm tauri dev        # run the desktop app with hot reload
+pnpm tauri dev  # run the desktop app with hot reload
 ```
 
-Run the browser-free validation profile during development:
+Before pushing or opening a pull request, run the fast local gate:
 
 ```sh
 pnpm verify:fast
 ```
 
-Before opening a pull request, run the same canonical full gate as CI. The
-profile installs its pinned Playwright Chromium build and required system
-dependencies before running E2E tests:
+CI blocks merges on the broader full gate. To run it locally, first install its
+external tools once, then run the profile:
 
 ```sh
+pnpm setup:validation
 pnpm verify:full
 ```
 
-The ordered command lists live in `validation/contract.json`; CI, this guide,
-and the repository-adapted pull/push skills point to the entrypoints instead of
-copying the commands. Both profiles install the external hygiene tools in
-`.cache/hygiene-tools` from exact, checksum-verified GitHub release assets for
-macOS or Linux on arm64/x64.
+`scripts/run-validation.mjs` contains the two short, ordered command lists and
+prints elapsed time for every command. Validation profiles never install
+external tools. CI performs setup explicitly before `pnpm verify:full`.
 
 Biome formatting is adopted incrementally. Existing unformatted files are
 hash-pinned in `scripts/biome-format-baseline.json`; format any file you change
@@ -61,6 +58,6 @@ For signed, notarized release builds (`pnpm release:mac`), see [Building](README
 
 ## Pull requests
 
-- Keep PRs focused; run `pnpm verify:full` before submitting.
+- Keep PRs focused; run `pnpm verify:fast` before submitting.
 - For UI changes, include before/after screenshots (light and dark).
 - Significant behavior changes should update the README.

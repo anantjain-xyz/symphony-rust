@@ -80,14 +80,15 @@ function harnessFixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const portableGate =
     "7. Re-run the target repository's documented validation gate before pushing.";
-  const adaptedGate = "7. Re-run validation (`pnpm verify:full`) before pushing.";
+  const adaptedGate = "7. Re-run the local pre-push gate (`pnpm verify:fast`) before pushing.";
   const portablePushGate =
     "- The target repository's documented validation gate has been run for the latest commit.";
   const adaptedPushGate =
-    "- Validation gate has been run for the latest commit (`pnpm verify:full`).";
+    "- The local pre-push gate has been run for the latest commit (`pnpm verify:fast`).";
 
   writeJson(root, "package.json", {
     scripts: {
+      "verify:fast": "node scripts/run-validation.mjs fast",
       "verify:full": "node scripts/run-validation.mjs full",
     },
   });
