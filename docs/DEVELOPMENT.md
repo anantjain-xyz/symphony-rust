@@ -158,9 +158,12 @@ Run all or one file:
 
 ```sh
 pnpm test:e2e
-pnpm exec playwright test e2e/theme-first-frame.e2e.ts
-pnpm exec playwright test --grep "theme toggle"
+pnpm test:e2e e2e/theme-first-frame.e2e.ts
+pnpm test:e2e --grep "theme toggle"
 ```
+
+Use the package script for focused runs as well as the full suite so it rebuilds
+the production bundle before Playwright starts Vite preview.
 
 These tests validate the production frontend bundle and preview fixtures, not a
 native Tauri window.

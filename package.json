@@ -24,7 +24,7 @@
     "format:check": "node scripts/check-biome-format.mjs",
     "generate:bindings": "cargo run -p symphony-contracts --bin export-bindings -- src/bindings.ts",
     "install:hygiene-tools": "node scripts/install-hygiene-tools.mjs",
-    "setup:validation": "pnpm install:hygiene-tools && pnpm exec playwright install chromium",
+    "setup:validation": "pnpm install:hygiene-tools && pnpm exec playwright install --with-deps chromium",
     "lint": "biome lint --error-on-warnings .",
     "test:boundaries": "node --test scripts/check-boundaries.node.mjs",
     "test:bundle": "node --test scripts/check-bundle-budget.node.mjs",

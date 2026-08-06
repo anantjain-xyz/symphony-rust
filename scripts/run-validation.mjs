@@ -74,10 +74,6 @@ function seconds(milliseconds) {
   return `${(milliseconds / 1_000).toFixed(1)}s`;
 }
 
-function executable(command) {
-  return process.platform === "win32" && command === "pnpm" ? "pnpm.cmd" : command;
-}
-
 function printSummary(timings, totalElapsed) {
   console.log("\nSlowest validation commands:");
   for (const timing of [...timings].sort((a, b) => b.elapsed - a.elapsed).slice(0, 5)) {
@@ -97,13 +93,19 @@ function run(profileName) {
   const timings = [];
   for (const [index, name] of profile.entries()) {
     const argv = COMMANDS[name];
+    const [command, ...args] = argv;
+    const usesWindowsPnpm = process.platform === "win32" && command === "pnpm";
     const started = performance.now();
     console.log(`\n[${index + 1}/${profile.length}] ${name}: ${argv.join(" ")}`);
-    const result = spawnSync(executable(argv[0]), argv.slice(1), {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: "inherit",
-    });
+    const result = spawnSync(
+      usesWindowsPnpm ? "cmd.exe" : command,
+      usesWindowsPnpm ? ["/d", "/s", "/c", "pnpm.cmd", ...args] : args,
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: "inherit",
+      },
+    );
     const elapsed = performance.now() - started;
     timings.push({ name, elapsed });
     console.log(`[${name}] finished in ${seconds(elapsed)}`);
