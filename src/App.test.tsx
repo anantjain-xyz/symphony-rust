@@ -2503,6 +2503,11 @@ describe("App settings", () => {
 
     expect(screen.getAllByLabelText(/^Linear teams/, { selector: "input" })).toHaveLength(2);
     expect(screen.getAllByLabelText(/^Linear projects/, { selector: "input" })).toHaveLength(2);
+    const [topLevelTeams] = screen.getAllByLabelText(/^Linear teams/, { selector: "input" });
+    const [topLevelProjects] = screen.getAllByLabelText(/^Linear projects/, { selector: "input" });
+    expect(topLevelTeams.closest("label")?.nextElementSibling).toBe(
+      topLevelProjects.closest("label"),
+    );
     expect(
       screen.getByText("Optional. Enter a Linear team key to watch only issues from that team."),
     ).toBeTruthy();
