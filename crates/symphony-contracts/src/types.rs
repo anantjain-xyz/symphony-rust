@@ -47,6 +47,16 @@ pub struct LinearViewerProfile {
     pub email: Option<String>,
 }
 
+/// A Linear workflow state, projected as a Kanban column for the Issues board.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkflowStateRow {
+    pub id: String,
+    pub name: String,
+    /// Linear state category: backlog | unstarted | started | completed | canceled.
+    pub state_type: String,
+    pub position: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RunDetail {
     pub run: RunWithIssueRow,

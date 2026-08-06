@@ -1,9 +1,19 @@
 use async_trait::async_trait;
 use reqwest::{header::RETRY_AFTER, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::sync::OnceLock;
 use std::time::Duration;
 use symphony_core::{Issue, LinearProjectRef, TrackerConfig};
 use thiserror::Error;
+
+/// Process-wide reqwest client. `reqwest::Client` is an Arc internally and is
+/// meant to be reused so its connection pool is shared; building one per request
+/// (e.g. the 15s board poll) would leak connections and add TLS handshakes.
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn shared_http_client() -> reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new).clone()
+}
 
 #[derive(Debug, Error)]
 pub enum TrackerError {
@@ -38,6 +48,21 @@ pub trait TrackerClient: Send + Sync {
         &self,
         issue_ids: &[String],
     ) -> Result<Vec<WorkpadComment>, TrackerError>;
+    /// Workflow states (columns) for the configured team, ordered by position.
+    /// Defaults to empty for trackers that do not model workflow states.
+    async fn list_workflow_states(&self) -> Result<Vec<WorkflowState>, TrackerError> {
+        Ok(Vec::new())
+    }
+    /// Move an issue to a new workflow state. Defaults to unsupported.
+    async fn set_issue_state(&self, _issue_id: &str, _state_id: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::Invalid(
+            "changing issue state is not supported by this tracker".to_string(),
+        ))
+    }
+    /// All issues for the configured team/project across every state (board view).
+    async fn fetch_board_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,7 +86,7 @@ impl LinearTracker {
     pub fn new(config: TrackerConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: shared_http_client(),
             request_timeout_ms: 15_000,
             max_attempts: 3,
         }
@@ -270,6 +295,35 @@ impl LinearTracker {
         })
     }
 
+    fn build_board_issues_query(&self) -> PreparedIssuesQuery {
+        // No state filter: the board wants every issue for the configured scope so it can
+        // populate lanes (e.g. In Review) that are not in the watched dispatch states.
+        // Paginated (250 per page) via `after: $cursor`; callers must scope by a
+        // team/project so this never fans out to the whole workspace.
+        let mut var_decls = vec!["$cursor: String".to_string()];
+        let mut filter_parts = Vec::new();
+        let mut variables = serde_json::Map::new();
+        self.push_scope_filters(&mut var_decls, &mut filter_parts, &mut variables);
+        let filter = filter_parts.join(", ");
+        let query = format!(
+            r#"
+            query SymphonyBoardIssues({}) {{
+              issues(filter: {{ {} }}, first: 250, after: $cursor) {{
+                nodes {{ {} }}
+                pageInfo {{ hasNextPage endCursor }}
+              }}
+            }}
+            "#,
+            var_decls.join(", "),
+            filter,
+            ISSUE_FIELDS
+        );
+        PreparedIssuesQuery {
+            query,
+            variables: variables.into(),
+        }
+    }
+
     async fn fetch_by_id_inner(
         &self,
         id: &str,
@@ -403,6 +457,75 @@ impl TrackerClient for LinearTracker {
 
     async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
         self.fetch_by_id_inner(id, self.config.assigned_to_me).await
+    }
+
+    async fn list_workflow_states(&self) -> Result<Vec<WorkflowState>, TrackerError> {
+        // Linear workflow state IDs belong to one team. Showing one team's IDs
+        // for a multi-team board would make drag-to-move invalid for issues from
+        // every other team, so enable state-aware lanes only for a single team.
+        let team_keys = self.team_keys();
+        let [team_key] = team_keys.as_slice() else {
+            return Ok(Vec::new());
+        };
+        let variables = serde_json::json!({ "teamKey": team_key });
+        let data: WorkflowStatesData = self.execute(WORKFLOW_STATES_QUERY, Some(variables)).await?;
+        let mut states = data.workflow_states.nodes;
+        states.sort_by(|a, b| {
+            a.position
+                .partial_cmp(&b.position)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(states)
+    }
+
+    async fn set_issue_state(&self, issue_id: &str, state_id: &str) -> Result<(), TrackerError> {
+        let variables = serde_json::json!({ "id": issue_id, "stateId": state_id });
+        let data: IssueUpdateData = self
+            .execute(SET_ISSUE_STATE_MUTATION, Some(variables))
+            .await?;
+        if !data.issue_update.success {
+            return Err(TrackerError::Invalid(
+                "Linear rejected the issue state change".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn fetch_board_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+        // Never fetch the entire workspace: require a team or project scope.
+        if self.team_keys().is_empty() && self.project_refs().is_empty() {
+            return Ok(Vec::new());
+        }
+        let prepared = self.build_board_issues_query();
+        let mut nodes = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Page through the whole board (250/page) so large teams aren't truncated.
+        // Cap the page count defensively against a pathological pageInfo loop.
+        for _ in 0..50 {
+            let mut variables = prepared.variables.clone();
+            if let serde_json::Value::Object(map) = &mut variables {
+                map.insert(
+                    "cursor".to_string(),
+                    cursor
+                        .as_deref()
+                        .map(|value| serde_json::Value::String(value.to_string()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            let data: IssuesByStateData = self.execute(&prepared.query, Some(variables)).await?;
+            let page = data.issues.page_info;
+            nodes.extend(data.issues.nodes);
+            match page {
+                Some(page) if page.has_next_page => {
+                    let Some(next) = page.end_cursor else { break };
+                    cursor = Some(next);
+                }
+                _ => break,
+            }
+        }
+        let mut issues = self.filter_issues(nodes.into_iter().map(normalize).collect());
+        issues.sort_by(by_priority_then_identifier);
+        Ok(issues)
     }
 
     async fn fetch_workpads(
@@ -541,6 +664,40 @@ pub struct LinearViewer {
     pub name: Option<String>,
     pub display_name: Option<String>,
     pub email: Option<String>,
+}
+
+/// A Linear workflow state (a Kanban column) for a team.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowState {
+    pub id: String,
+    pub name: String,
+    /// Linear state category: backlog | unstarted | started | completed | canceled.
+    #[serde(rename = "type")]
+    pub state_type: String,
+    pub position: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStatesData {
+    workflow_states: WorkflowStateConnection,
+}
+
+#[derive(Deserialize)]
+struct WorkflowStateConnection {
+    nodes: Vec<WorkflowState>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueUpdateData {
+    issue_update: IssueUpdatePayload,
+}
+
+#[derive(Deserialize)]
+struct IssueUpdatePayload {
+    success: bool,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +973,27 @@ const ISSUE_COMMENTS_QUERY: &str = r#"
   }
 "#;
 
+const WORKFLOW_STATES_QUERY: &str = r#"
+  query SymphonyWorkflowStates($teamKey: String!) {
+    workflowStates(filter: { team: { key: { eq: $teamKey } } }, first: 100) {
+      nodes {
+        id
+        name
+        type
+        position
+      }
+    }
+  }
+"#;
+
+const SET_ISSUE_STATE_MUTATION: &str = r#"
+  mutation SymphonySetIssueState($id: String!, $stateId: String!) {
+    issueUpdate(id: $id, input: { stateId: $stateId }) {
+      success
+    }
+  }
+"#;
+
 #[derive(Debug, Clone)]
 pub struct StaticTracker {
     pub active: Vec<Issue>,
@@ -1006,5 +1184,61 @@ mod tests {
             assert!(query.contains("inverseRelations(first: 25)"));
             assert!(query.contains("attachments(first: 25)"));
         }
+    }
+
+    #[test]
+    fn workflow_state_query_targets_team_and_orders_by_position() {
+        assert!(WORKFLOW_STATES_QUERY
+            .contains("workflowStates(filter: { team: { key: { eq: $teamKey } } }"));
+        assert!(WORKFLOW_STATES_QUERY.contains("position"));
+        assert!(
+            SET_ISSUE_STATE_MUTATION.contains("issueUpdate(id: $id, input: { stateId: $stateId })")
+        );
+        assert!(SET_ISSUE_STATE_MUTATION.contains("success"));
+    }
+
+    #[test]
+    fn workflow_states_deserialize_and_sort_by_position() {
+        let payload = serde_json::json!({
+            "workflowStates": {
+                "nodes": [
+                    { "id": "s2", "name": "In Progress", "type": "started", "position": 2.0 },
+                    { "id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0 }
+                ]
+            }
+        });
+        let data: WorkflowStatesData = serde_json::from_value(payload).expect("deserialize");
+        let mut states = data.workflow_states.nodes;
+        states.sort_by(|a, b| a.position.partial_cmp(&b.position).unwrap());
+        assert_eq!(states[0].name, "Todo");
+        assert_eq!(states[0].state_type, "unstarted");
+        assert_eq!(states[1].id, "s2");
+    }
+
+    #[test]
+    fn board_issues_query_filters_team_and_project_without_states() {
+        let tracker = LinearTracker::new(TrackerConfig {
+            team_keys: vec!["ENG".to_string(), "SIM".to_string()],
+            project_ids: vec!["project-9".to_string()],
+            ..Default::default()
+        });
+        let prepared = tracker.build_board_issues_query();
+        assert!(prepared.query.contains("SymphonyBoardIssues"));
+        assert!(prepared.query.contains("team: { key: { in: $teamKeys } }"));
+        assert!(prepared
+            .query
+            .contains("project: { id: { in: $projectIds } }"));
+        assert!(!prepared.query.contains("state:"));
+        assert_eq!(
+            prepared.variables["teamKeys"],
+            serde_json::json!(["ENG", "SIM"])
+        );
+        assert_eq!(
+            prepared.variables["projectIds"],
+            serde_json::json!(["project-9"])
+        );
+        assert!(prepared.query.contains("after: $cursor"));
+        assert!(prepared.query.contains("pageInfo"));
+        assert!(prepared.query.contains("$cursor: String"));
     }
 }

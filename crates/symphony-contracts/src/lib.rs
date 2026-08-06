@@ -52,6 +52,7 @@ pub fn bindings_source() -> Result<String> {
     export!(SaveSettingsRequest);
     export!(TrackerTestResult);
     export!(LinearViewerProfile);
+    export!(WorkflowStateRow);
     export!(ValidationResult);
     export!(symphony_worker::WorkerState);
     export!(symphony_worker::WorkerStatus);

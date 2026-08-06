@@ -493,6 +493,13 @@ function App({ onRender }: { onRender?: () => void } = {}) {
   const overview = dashboardResources.overview.data ?? emptyOverview;
   const runs = dashboardResources.runs.data ?? [];
   const issues = dashboardResources.issues.data ?? [];
+  // overview refreshes on the Issues view too (run-table changes invalidate it, and
+  // overview is always "visible"), but with debounce/IPC latency — so this is a
+  // best-effort convenience guard, not an authoritative check.
+  const activeRunIssueIds = useMemo(
+    () => overview.active_runs.map((run) => run.issue_id),
+    [overview.active_runs],
+  );
   const retros = dashboardResources.retroList.data?.retros ?? [];
   const retroStatus = dashboardResources.retroList.data?.retroStatus ?? emptyRetroStatus;
   const worker = dashboardResources.worker.data ?? {
@@ -2279,6 +2286,16 @@ function App({ onRender }: { onRender?: () => void } = {}) {
               <IssuesView
                 issues={issues}
                 linearWorkspace={settings?.tracker_workspace ?? null}
+                stateOrder={
+                  settings ? [...settings.active_states, ...settings.terminal_states] : undefined
+                }
+                loadWorkflowStates={
+                  runtimeAvailable ? desktopCommands.listWorkflowStates : undefined
+                }
+                onMoveIssue={runtimeAvailable ? desktopCommands.setIssueState : undefined}
+                loadBoardIssues={runtimeAvailable ? desktopCommands.listBoardIssues : undefined}
+                activeRunIssueIds={activeRunIssueIds}
+                activeStates={settings?.active_states ?? undefined}
                 initialMode={issuesViewMode}
                 onModeChange={setIssuesViewMode}
                 onOpenSettings={() => setView("settings")}

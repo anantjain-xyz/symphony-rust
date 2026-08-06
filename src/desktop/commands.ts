@@ -20,6 +20,7 @@ import type {
   ValidationResult,
   WorkflowTransferStatus,
   WorkerStatus,
+  WorkflowStateRow,
 } from "../bindings";
 
 function invokeCommand<Result>(command: string, args?: Record<string, unknown>): Promise<Result> {
@@ -29,6 +30,10 @@ function invokeCommand<Result>(command: string, args?: Record<string, unknown>):
 export const getOverview = () => invokeCommand<Overview>("get_overview");
 export const listRuns = () => invokeCommand<RunWithIssueRow[]>("list_runs");
 export const listIssues = () => invokeCommand<IssueRow[]>("list_issues");
+export const listBoardIssues = () => invokeCommand<IssueRow[]>("list_board_issues");
+export const listWorkflowStates = () => invokeCommand<WorkflowStateRow[]>("list_workflow_states");
+export const setIssueState = (issueId: string, stateId: string) =>
+  invokeCommand<void>("set_issue_state", { issueId, stateId });
 export const getWorkerStatus = () => invokeCommand<WorkerStatus>("get_worker_status");
 export const getRunDetail = (id: string) =>
   invokeCommand<RunDetail | null>("get_run_detail", { id });
