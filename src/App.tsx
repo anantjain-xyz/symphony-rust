@@ -2495,7 +2495,6 @@ function BootLoading({ preview }: { preview: boolean }) {
           <span />
           <span />
           <span />
-          <span />
         </div>
         <div className="boot-skeleton-panels">
           <span />
@@ -2585,10 +2584,6 @@ function OverviewView({
           <Kpi
             label={overview.retry_count === 1 ? "Retry" : "Retries"}
             value={overview.retry_count}
-          />
-          <Kpi
-            label={overview.failure_count === 1 ? "Failure" : "Failures"}
-            value={overview.failure_count}
           />
           <Kpi label="Cleanup" value={overview.workspace_cleanup_count} />
         </div>

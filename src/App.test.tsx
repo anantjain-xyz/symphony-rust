@@ -3585,7 +3585,7 @@ describe("App settings", () => {
     expect(screen.queryByText("Install agent skills")).toBeNull();
   });
 
-  it("shows total retry and failure counts instead of bounded preview lengths", async () => {
+  it("shows the total retry count without a failures tile", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true };
     tauriMocks.invoke.mockImplementation(
@@ -3610,7 +3610,7 @@ describe("App settings", () => {
 
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(Array.from(document.querySelectorAll(".kpi"), (element) => element.textContent)).toEqual(
-      ["0Active", "51Retries", "23Failures", "7Cleanup"],
+      ["0Active", "51Retries", "7Cleanup"],
     );
   });
 
