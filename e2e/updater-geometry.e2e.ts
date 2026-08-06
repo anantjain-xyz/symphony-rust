@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
 import type { Locator } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 type Box = NonNullable<Awaited<ReturnType<Locator["boundingBox"]>>>;
 
@@ -43,6 +43,7 @@ test("centers the updater icon in its circle through hover and focus transitions
     name: "Update Symphony to vpreview",
   });
   const icon = button.locator(".update-button-icon");
+  const label = button.locator(".update-button-label");
   await expect(button).toBeVisible();
 
   let [buttonBox, iconBox] = await boxes(button, icon);
@@ -50,9 +51,15 @@ test("centers the updater icon in its circle through hover and focus transitions
   expectIconAtCircleCenter(buttonBox, iconBox);
 
   await button.hover();
-  await expect.poll(async () => (await button.boundingBox())?.width ?? 0).toBeGreaterThan(71);
+  await expect.poll(async () => (await button.boundingBox())?.width ?? 0).toBeGreaterThan(81);
   [buttonBox, iconBox] = await boxes(button, icon);
   expectIconAtCircleCenter(buttonBox, iconBox);
+  const labelBox = await label.boundingBox();
+  expect(labelBox).not.toBeNull();
+  if (labelBox) {
+    const labelRightInset = buttonBox.x + buttonBox.width - (labelBox.x + labelBox.width);
+    expect(labelRightInset).toBeGreaterThanOrEqual(8);
+  }
 
   await page.mouse.move(300, 300);
   await expect.poll(async () => (await button.boundingBox())?.width ?? Infinity).toBeLessThan(20);
@@ -60,7 +67,7 @@ test("centers the updater icon in its circle through hover and focus transitions
   expectIconAtCircleCenter(buttonBox, iconBox);
 
   await button.focus();
-  await expect.poll(async () => (await button.boundingBox())?.width ?? 0).toBeGreaterThan(71);
+  await expect.poll(async () => (await button.boundingBox())?.width ?? 0).toBeGreaterThan(81);
   [buttonBox, iconBox] = await boxes(button, icon);
   expectIconAtCircleCenter(buttonBox, iconBox);
 
