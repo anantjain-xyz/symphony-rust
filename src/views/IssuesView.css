@@ -39,9 +39,9 @@
 }
 
 .issue-board-columns {
+  align-items: stretch;
   display: flex;
   gap: 12px;
-  align-items: flex-start;
   overflow-x: auto;
   padding-bottom: 4px;
 }

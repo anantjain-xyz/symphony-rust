@@ -27,6 +27,7 @@ vi.mock("./DependencyGraphPanel", () => {
 import IssuesView, {
   BOARD_COLUMN_PAGE_SIZE,
   BOARD_REFRESH_INTERVAL_MS,
+  boardDragScrollDelta,
   boardColumns,
 } from "./IssuesView";
 
@@ -201,6 +202,12 @@ it("boardColumns falls back to stateOrder and appends unknown states", () => {
   expect(columns.every((column) => column.id === null)).toBe(true);
 });
 
+it("scrolls the board toward columns near either horizontal edge", () => {
+  expect(boardDragScrollDelta(120, 100, 500)).toBeLessThan(0);
+  expect(boardDragScrollDelta(300, 100, 500)).toBe(0);
+  expect(boardDragScrollDelta(480, 100, 500)).toBeGreaterThan(0);
+});
+
 async function dragCardToColumn(card: HTMLElement, column: HTMLElement, expectActive = true) {
   // Pointer-based drag (matches the WKWebView-safe implementation).
   fireEvent.pointerDown(card, { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
@@ -243,6 +250,69 @@ it("moves a card to another workflow lane via drag and drop", async () => {
   // Optimistic move: the card is now under In Progress.
   await waitFor(() => expect(screen.getByRole("region", { name: "In Progress (1)" })).toBeTruthy());
   expect(screen.getByRole("region", { name: "Todo (0)" })).toBeTruthy();
+});
+
+it("auto-scrolls horizontally while dragging near the board edge", async () => {
+  render(
+    <IssuesView
+      issues={[issue("SYM-1", "todo")]}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(workflowStates)}
+      onMoveIssue={() => Promise.resolve()}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+
+  const todo = await screen.findByRole("region", { name: "Todo (1)" });
+  const boardBody = todo.closest(".issue-board-body") as HTMLElement;
+  Object.defineProperties(boardBody, {
+    clientWidth: { configurable: true, value: 300 },
+    scrollWidth: { configurable: true, value: 900 },
+  });
+  vi.spyOn(boardBody, "getBoundingClientRect").mockReturnValue({
+    bottom: 400,
+    height: 300,
+    left: 0,
+    right: 300,
+    top: 100,
+    width: 300,
+    x: 0,
+    y: 100,
+    toJSON: () => ({}),
+  });
+  const frames: FrameRequestCallback[] = [];
+  const requestFrame = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation((callback) => frames.push(callback));
+  const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+  const pointerEvent = (type: string, clientX: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, {
+      button: { value: 0 },
+      clientX: { value: clientX },
+      clientY: { value: 150 },
+      pointerId: { value: 7 },
+    });
+    return event;
+  };
+
+  const card = todo.querySelector(".issue-card") as HTMLElement;
+  try {
+    fireEvent(card, pointerEvent("pointerdown", 100));
+    await waitFor(() => {
+      // Retry until the effect-backed global pointer listener is attached.
+      fireEvent(window, pointerEvent("pointermove", 295));
+      expect(frames).toHaveLength(1);
+    });
+
+    frames.shift()?.(0);
+    expect(boardBody.scrollLeft).toBeGreaterThan(0);
+  } finally {
+    fireEvent(window, pointerEvent("pointerup", 295));
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
+  }
 });
 
 it("reverts the card and surfaces an error when the move fails", async () => {
