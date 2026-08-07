@@ -8,6 +8,24 @@ import "./IssuesView.css";
 
 export type IssueViewMode = "list" | "board" | "dependencies";
 
+const BOARD_DRAG_EDGE_SIZE = 48;
+const BOARD_DRAG_MAX_SCROLL_STEP = 18;
+
+export function boardDragScrollDelta(pointerX: number, left: number, right: number): number {
+  if (pointerX < left + BOARD_DRAG_EDGE_SIZE) {
+    const intensity = Math.min(1, (left + BOARD_DRAG_EDGE_SIZE - pointerX) / BOARD_DRAG_EDGE_SIZE);
+    return -Math.ceil(BOARD_DRAG_MAX_SCROLL_STEP * intensity);
+  }
+  if (pointerX > right - BOARD_DRAG_EDGE_SIZE) {
+    const intensity = Math.min(
+      1,
+      (pointerX - (right - BOARD_DRAG_EDGE_SIZE)) / BOARD_DRAG_EDGE_SIZE,
+    );
+    return Math.ceil(BOARD_DRAG_MAX_SCROLL_STEP * intensity);
+  }
+  return 0;
+}
+
 const MODE_LABELS: Record<IssueViewMode, string> = {
   list: "List",
   board: "Board",
@@ -303,9 +321,6 @@ export type BoardColumn = {
   issues: IssueRow[];
 };
 
-// Lanes Linear hides from a board by default; we mirror that behavior.
-const HIDDEN_STATE_TYPES = new Set(["backlog", "triage", "completed", "canceled", "duplicate"]);
-
 // Board ordering follows Linear: by state category first, then position within it.
 const STATE_TYPE_ORDER: Record<string, number> = {
   triage: 0,
@@ -319,10 +334,6 @@ const STATE_TYPE_ORDER: Record<string, number> = {
 
 function stateTypeRank(type: string): number {
   return STATE_TYPE_ORDER[type] ?? 3.5;
-}
-
-export function isHiddenBoardColumn(column: BoardColumn): boolean {
-  return column.type !== null && HIDDEN_STATE_TYPES.has(column.type);
 }
 
 export function boardColumns(
@@ -392,6 +403,8 @@ function samePointer(a: number | null | undefined, b: number | null | undefined)
 
 // How often the board re-polls Linear for issue movement while it is open.
 export const BOARD_REFRESH_INTERVAL_MS = 15_000;
+// Bound mounted card trees while keeping every workflow lane visible.
+export const BOARD_COLUMN_PAGE_SIZE = 50;
 
 function IssuesBoard({
   issues,
@@ -434,6 +447,7 @@ function IssuesBoard({
   const [draggingLabel, setDraggingLabel] = useState<string | null>(null);
   const ghostRef = useRef<HTMLDivElement | null>(null);
   const ghostPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const boardBodyRef = useRef<HTMLDivElement | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [boardError, setBoardError] = useState<string | null>(null);
@@ -443,7 +457,9 @@ function IssuesBoard({
   // Coalesce fetches: the 15s interval can be shorter than a retrying request.
   const inFlightRef = useRef(false);
   const [moveError, setMoveError] = useState<string | null>(null);
-  const [hiddenOpen, setHiddenOpen] = useState(false);
+  const [visibleIssueCounts, setVisibleIssueCounts] = useState<Map<string, number>>(
+    () => new Map(),
+  );
 
   useEffect(() => {
     // Set on mount too: StrictMode's simulated unmount/remount would otherwise
@@ -622,9 +638,60 @@ function IssuesBoard({
     [moveIssue, onMoveIssue, overrides, watchedKeys],
   );
 
+  const setHoveredColumnKey = useCallback((key: string | null) => {
+    const drag = dragRef.current;
+    if (drag === null || !drag.active || drag.hoverKey === key) return;
+    drag.hoverKey = key;
+    setDragKey(key);
+  }, []);
+
+  const updateHoveredColumnAtPoint = useCallback(
+    (x: number, y: number) => {
+      if (typeof document.elementFromPoint !== "function") return;
+      const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-board-drop-key]");
+      setHoveredColumnKey(target?.dataset.boardDropKey ?? null);
+    },
+    [setHoveredColumnKey],
+  );
+
   // Global pointer listeners keep the drag alive as the cursor leaves the card.
   useEffect(() => {
     if (!dragEnabled) return;
+    let autoScrollFrame: number | null = null;
+    let pointerPosition = { x: 0, y: 0 };
+
+    const stopAutoScroll = () => {
+      if (autoScrollFrame === null) return;
+      window.cancelAnimationFrame(autoScrollFrame);
+      autoScrollFrame = null;
+    };
+    const autoScroll = () => {
+      autoScrollFrame = null;
+      const drag = dragRef.current;
+      const body = boardBodyRef.current;
+      if (!drag?.active || !body) return;
+
+      const bounds = body.getBoundingClientRect();
+      const pointerInsideBoard =
+        pointerPosition.y >= bounds.top && pointerPosition.y <= bounds.bottom;
+      const delta = pointerInsideBoard
+        ? boardDragScrollDelta(pointerPosition.x, bounds.left, bounds.right)
+        : 0;
+      const maxScrollLeft = Math.max(0, body.scrollWidth - body.clientWidth);
+      const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, body.scrollLeft + delta));
+      if (delta === 0 || nextScrollLeft === body.scrollLeft) return;
+
+      body.scrollLeft = nextScrollLeft;
+      // Scrolling moves lanes underneath a stationary pointer, so refresh the
+      // drop target even when the browser does not emit another pointermove.
+      updateHoveredColumnAtPoint(pointerPosition.x, pointerPosition.y);
+      autoScrollFrame = window.requestAnimationFrame(autoScroll);
+    };
+    const startAutoScroll = () => {
+      if (autoScrollFrame === null) {
+        autoScrollFrame = window.requestAnimationFrame(autoScroll);
+      }
+    };
     const onMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag || !samePointer(drag.pointerId, event.pointerId)) return;
@@ -634,16 +701,19 @@ function IssuesBoard({
         setDraggingLabel(drag.identifier);
       }
       event.preventDefault();
+      pointerPosition = { x: event.clientX, y: event.clientY };
       ghostPosRef.current = { x: event.clientX, y: event.clientY };
       const ghost = ghostRef.current;
       if (ghost) {
         ghost.style.left = `${Number.isFinite(event.clientX) ? event.clientX + 12 : 0}px`;
         ghost.style.top = `${Number.isFinite(event.clientY) ? event.clientY + 12 : 0}px`;
       }
+      startAutoScroll();
     };
     const onUp = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag || !samePointer(drag.pointerId, event.pointerId)) return;
+      stopAutoScroll();
       dragRef.current = null;
       const { active, hoverKey, issueId } = drag;
       setDraggingLabel(null);
@@ -661,8 +731,9 @@ function IssuesBoard({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
+      stopAutoScroll();
     };
-  }, [dragEnabled, columns, effectiveIssues, requestMove]);
+  }, [dragEnabled, columns, effectiveIssues, requestMove, updateHoveredColumnAtPoint]);
 
   const startDrag = useCallback(
     (event: React.PointerEvent, issue: IssueRow) => {
@@ -689,12 +760,12 @@ function IssuesBoard({
     [dragEnabled],
   );
 
-  const hoverColumn = useCallback((column: BoardColumn) => {
-    const drag = dragRef.current;
-    if (drag === null || !drag.active || column.id === null) return;
-    drag.hoverKey = column.key;
-    setDragKey(column.key);
-  }, []);
+  const hoverColumn = useCallback(
+    (column: BoardColumn) => {
+      if (column.id !== null) setHoveredColumnKey(column.key);
+    },
+    [setHoveredColumnKey],
+  );
 
   const leaveColumn = useCallback((column: BoardColumn) => {
     const drag = dragRef.current;
@@ -708,10 +779,14 @@ function IssuesBoard({
   const renderColumn = (column: BoardColumn) => {
     const droppable = dragEnabled && column.id !== null;
     const watched = watchedKeys.has(column.key);
+    const visibleIssueCount = visibleIssueCounts.get(column.key) ?? BOARD_COLUMN_PAGE_SIZE;
+    const visibleIssues = column.issues.slice(0, visibleIssueCount);
+    const remainingIssueCount = column.issues.length - visibleIssues.length;
     return (
       <section
         key={column.key}
         data-board-column={column.key}
+        data-board-drop-key={droppable ? column.key : undefined}
         className={`issue-board-column${dragKey === column.key ? " drag-over" : ""}`}
         aria-label={`${column.label} (${column.issues.length})`}
         onPointerMove={droppable ? () => hoverColumn(column) : undefined}
@@ -737,7 +812,7 @@ function IssuesBoard({
           {column.issues.length === 0 ? (
             <p className="issue-board-empty">No issues</p>
           ) : (
-            column.issues.map((issue) => (
+            visibleIssues.map((issue) => (
               <IssueCard
                 key={issue.id}
                 issue={issue}
@@ -750,13 +825,27 @@ function IssuesBoard({
               />
             ))
           )}
+          {remainingIssueCount > 0 ? (
+            <button
+              type="button"
+              className="issue-board-more"
+              aria-label={`Show more issues in ${column.label}`}
+              onClick={() =>
+                setVisibleIssueCounts((current) =>
+                  new Map(current).set(
+                    column.key,
+                    (current.get(column.key) ?? BOARD_COLUMN_PAGE_SIZE) + BOARD_COLUMN_PAGE_SIZE,
+                  ),
+                )
+              }
+            >
+              Show {Math.min(BOARD_COLUMN_PAGE_SIZE, remainingIssueCount)} more issues
+            </button>
+          ) : null}
         </div>
       </section>
     );
   };
-
-  const visibleColumns = columns.filter((column) => !isHiddenBoardColumn(column));
-  const hiddenColumns = columns.filter((column) => isHiddenBoardColumn(column));
 
   return (
     <div
@@ -818,32 +907,8 @@ function IssuesBoard({
           </div>
         </div>
       ) : null}
-      <div className="issue-board-body">
-        <div className="issue-board-columns">{visibleColumns.map(renderColumn)}</div>
-        {hiddenColumns.length > 0 ? (
-          <div className="issue-board-hidden">
-            <button
-              type="button"
-              className="issue-board-hidden-toggle"
-              aria-expanded={hiddenOpen}
-              onClick={() => setHiddenOpen((open) => !open)}
-            >
-              {hiddenOpen ? "▾" : "▸"} Hidden columns ({hiddenColumns.length})
-            </button>
-            {hiddenOpen ? (
-              <div className="issue-board-columns">{hiddenColumns.map(renderColumn)}</div>
-            ) : (
-              <ul className="issue-board-hidden-list">
-                {hiddenColumns.map((column) => (
-                  <li key={column.key} className="issue-board-hidden-item">
-                    <Badge status={column.label} />
-                    <span className="issue-board-count tnum">{column.issues.length}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ) : null}
+      <div ref={boardBodyRef} className="issue-board-body">
+        <div className="issue-board-columns">{columns.map(renderColumn)}</div>
       </div>
       {draggingLabel ? (
         <div

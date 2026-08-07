@@ -21,10 +21,7 @@ export const LAZY_ENTRIES = [
   "src/views/SettingsView.tsx",
 ];
 
-export const FORBIDDEN_EAGER_ENTRIES = [
-  "src/preview/runtime.ts",
-  "src/AppUpdate.tsx",
-];
+export const FORBIDDEN_EAGER_ENTRIES = ["src/preview/runtime.ts", "src/AppUpdate.tsx"];
 
 export function collectStaticGraph(manifest, entryKey) {
   const visited = new Set();
@@ -49,9 +46,19 @@ export function collectJavaScriptFiles(manifest, graph, excludedGraph = new Set(
   return files;
 }
 
+export function normalizeHashedAssetReferences(source) {
+  // Vite hashes are opaque entropy: changing a lazy chunk can shift the entry
+  // chunk's gzip size even when its raw byte count is identical. Normalize only
+  // those generated references so the compressed budget measures source growth.
+  return source.replace(/-[A-Za-z0-9_-]{8}(?=\.(?:css|js|woff2))/g, "-00000000");
+}
+
 async function compressedSize(relativePath) {
   const bytes = await readFile(resolve(DIST_DIR, relativePath));
-  return { raw: bytes.byteLength, gzip: gzipSync(bytes).byteLength };
+  const gzipInput = /\.(?:css|js)$/.test(relativePath)
+    ? normalizeHashedAssetReferences(bytes.toString("utf8"))
+    : bytes;
+  return { raw: bytes.byteLength, gzip: gzipSync(gzipInput).byteLength };
 }
 
 function formatSize(bytes) {

@@ -25,9 +25,10 @@ vi.mock("./DependencyGraphPanel", () => {
 });
 
 import IssuesView, {
+  BOARD_COLUMN_PAGE_SIZE,
   BOARD_REFRESH_INTERVAL_MS,
+  boardDragScrollDelta,
   boardColumns,
-  isHiddenBoardColumn,
 } from "./IssuesView";
 
 function issue(identifier: string, state = "Todo", priority = 2): IssueRow {
@@ -201,11 +202,24 @@ it("boardColumns falls back to stateOrder and appends unknown states", () => {
   expect(columns.every((column) => column.id === null)).toBe(true);
 });
 
-function dragCardToColumn(card: HTMLElement, column: HTMLElement) {
+it("scrolls the board toward columns near either horizontal edge", () => {
+  expect(boardDragScrollDelta(120, 100, 500)).toBeLessThan(0);
+  expect(boardDragScrollDelta(300, 100, 500)).toBe(0);
+  expect(boardDragScrollDelta(480, 100, 500)).toBeGreaterThan(0);
+});
+
+async function dragCardToColumn(card: HTMLElement, column: HTMLElement, expectActive = true) {
   // Pointer-based drag (matches the WKWebView-safe implementation).
   fireEvent.pointerDown(card, { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
   // Cross the movement threshold on window to activate the drag.
   fireEvent.pointerMove(window, { pointerId: 1, clientX: 60, clientY: 60 });
+  if (expectActive) {
+    await waitFor(() => {
+      // Retry until the effect-backed global pointer listener is attached.
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 60, clientY: 60 });
+      expect(document.querySelector(".issue-drag-ghost")).toBeTruthy();
+    });
+  }
   // Move over the target lane so it becomes the hovered drop target.
   fireEvent.pointerMove(column, { pointerId: 1, clientX: 200, clientY: 80 });
   fireEvent.pointerUp(window, { pointerId: 1, clientX: 200, clientY: 80 });
@@ -230,12 +244,75 @@ it("moves a card to another workflow lane via drag and drop", async () => {
   const card = todo.querySelector(".issue-card") as HTMLElement;
   expect(card).toBeTruthy();
 
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
 
   expect(onMoveIssue).toHaveBeenCalledWith("issue-SYM-1", "state-in-progress");
   // Optimistic move: the card is now under In Progress.
   await waitFor(() => expect(screen.getByRole("region", { name: "In Progress (1)" })).toBeTruthy());
   expect(screen.getByRole("region", { name: "Todo (0)" })).toBeTruthy();
+});
+
+it("auto-scrolls horizontally while dragging near the board edge", async () => {
+  render(
+    <IssuesView
+      issues={[issue("SYM-1", "todo")]}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(workflowStates)}
+      onMoveIssue={() => Promise.resolve()}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+
+  const todo = await screen.findByRole("region", { name: "Todo (1)" });
+  const boardBody = todo.closest(".issue-board-body") as HTMLElement;
+  Object.defineProperties(boardBody, {
+    clientWidth: { configurable: true, value: 300 },
+    scrollWidth: { configurable: true, value: 900 },
+  });
+  vi.spyOn(boardBody, "getBoundingClientRect").mockReturnValue({
+    bottom: 400,
+    height: 300,
+    left: 0,
+    right: 300,
+    top: 100,
+    width: 300,
+    x: 0,
+    y: 100,
+    toJSON: () => ({}),
+  });
+  const frames: FrameRequestCallback[] = [];
+  const requestFrame = vi
+    .spyOn(window, "requestAnimationFrame")
+    .mockImplementation((callback) => frames.push(callback));
+  const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+  const pointerEvent = (type: string, clientX: number) => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, {
+      button: { value: 0 },
+      clientX: { value: clientX },
+      clientY: { value: 150 },
+      pointerId: { value: 7 },
+    });
+    return event;
+  };
+
+  const card = todo.querySelector(".issue-card") as HTMLElement;
+  try {
+    fireEvent(card, pointerEvent("pointerdown", 100));
+    await waitFor(() => {
+      // Retry until the effect-backed global pointer listener is attached.
+      fireEvent(window, pointerEvent("pointermove", 295));
+      expect(frames).toHaveLength(1);
+    });
+
+    frames.shift()?.(0);
+    expect(boardBody.scrollLeft).toBeGreaterThan(0);
+  } finally {
+    fireEvent(window, pointerEvent("pointerup", 295));
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
+  }
 });
 
 it("reverts the card and surfaces an error when the move fails", async () => {
@@ -256,7 +333,7 @@ it("reverts the card and surfaces an error when the move fails", async () => {
     .getByRole("region", { name: "Todo (1)" })
     .querySelector(".issue-card") as HTMLElement;
 
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
 
   // The failure is surfaced and the card rolls back to its original lane.
   await screen.findByRole("alert");
@@ -286,18 +363,9 @@ it("orders lanes by state category then position, matching Linear", () => {
     "Canceled",
     "Duplicate",
   ]);
-  expect(
-    columns.filter((column) => !isHiddenBoardColumn(column)).map((column) => column.label),
-  ).toEqual(["Todo", "In Progress", "In Review"]);
-  expect(columns.filter(isHiddenBoardColumn).map((column) => column.label)).toEqual([
-    "Backlog",
-    "Done",
-    "Canceled",
-    "Duplicate",
-  ]);
 });
 
-it("collapses Linear's hidden lanes behind a Hidden columns toggle", async () => {
+it("renders all board lanes as columns, including Linear's backlog/terminal states", async () => {
   render(
     <IssuesView
       issues={[issue("ENG-99", "todo")]}
@@ -308,17 +376,34 @@ it("collapses Linear's hidden lanes behind a Hidden columns toggle", async () =>
     />,
   );
 
-  // Only unstarted/started lanes render as visible columns by default.
   await screen.findByRole("region", { name: "Todo (1)" });
-  const regionNames = screen.getAllByRole("region").map((node) => node.getAttribute("aria-label"));
-  expect(regionNames).toEqual(["Todo (1)", "In Progress (0)", "In Review (0)"]);
-
-  // Backlog/Done/Canceled/Duplicate are tucked behind the toggle until expanded.
-  const toggle = screen.getByRole("button", { name: /Hidden columns \(4\)/ });
-  expect(screen.queryByRole("region", { name: "Backlog (0)" })).toBeNull();
-  fireEvent.click(toggle);
   expect(screen.getByRole("region", { name: "Backlog (0)" })).toBeTruthy();
   expect(screen.getByRole("region", { name: "Done (0)" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Canceled (0)" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Duplicate (0)" })).toBeTruthy();
+});
+
+it("mounts board cards in bounded pages while keeping the full lane count visible", async () => {
+  const doneIssues = Array.from({ length: BOARD_COLUMN_PAGE_SIZE + 1 }, (_, index) =>
+    issue(`DONE-${index + 1}`, "done"),
+  );
+  render(
+    <IssuesView
+      issues={doneIssues}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(sampleWorkflowStates)}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+
+  const done = await screen.findByRole("region", {
+    name: `Done (${BOARD_COLUMN_PAGE_SIZE + 1})`,
+  });
+  expect(done.querySelectorAll(".issue-card")).toHaveLength(BOARD_COLUMN_PAGE_SIZE);
+
+  fireEvent.click(screen.getByRole("button", { name: "Show more issues in Done" }));
+  expect(done.querySelectorAll(".issue-card")).toHaveLength(BOARD_COLUMN_PAGE_SIZE + 1);
 });
 
 it("populates lanes from live board issues, not only watched issues", async () => {
@@ -452,7 +537,7 @@ it("blocks moving an issue that has an active agent run (#5)", async () => {
   const card = screen
     .getByRole("region", { name: "Todo (1)" })
     .querySelector(".issue-card") as HTMLElement;
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
 
   await screen.findByRole("alert");
   expect(onMoveIssue).not.toHaveBeenCalled();
@@ -477,7 +562,7 @@ it("locks a card from a second move while the first is pending (#3)", async () =
   const card = screen
     .getByRole("region", { name: "Todo (1)" })
     .querySelector(".issue-card") as HTMLElement;
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
   expect(onMoveIssue).toHaveBeenCalledTimes(1);
 
   // Optimistically moved and pending — a second drag must be a no-op.
@@ -485,7 +570,7 @@ it("locks a card from a second move while the first is pending (#3)", async () =
   const pendingCard = screen
     .getByRole("region", { name: "In Progress (1)" })
     .querySelector(".issue-card") as HTMLElement;
-  dragCardToColumn(pendingCard, screen.getByRole("region", { name: "Todo (0)" }));
+  await dragCardToColumn(pendingCard, screen.getByRole("region", { name: "Todo (0)" }), false);
   expect(onMoveIssue).toHaveBeenCalledTimes(1);
 
   pending.resolve();
@@ -551,7 +636,7 @@ it("clears an override when Linear advances the issue past the target (#1)", asy
     .querySelector(".issue-card") as HTMLElement;
 
   // Drag Todo -> In Progress; the post-move re-pull reports it already advanced to In Review.
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
   await waitFor(() => expect(onMoveIssue).toHaveBeenCalledWith("issue-SYM-1", "state-in-progress"));
 
   // The override must not pin the card to In Progress; it follows Linear to In Review.
@@ -578,7 +663,7 @@ it("confirms a drop that crosses into a watched (dispatch) state (#2)", async ()
     .getByRole("region", { name: "In Review (1)" })
     .querySelector(".issue-card") as HTMLElement;
 
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
   // Crossing into a watched lane must confirm rather than mutate immediately.
   await screen.findByRole("alertdialog");
   expect(onMoveIssue).not.toHaveBeenCalled();
@@ -606,7 +691,7 @@ it("cancels a boundary-crossing move without calling Linear (#2)", async () => {
     .getByRole("region", { name: "In Review (1)" })
     .querySelector(".issue-card") as HTMLElement;
 
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
   await screen.findByRole("alertdialog");
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -650,7 +735,7 @@ it("keeps a card locked from a second move until the first reconciles (chained-m
   const card = screen
     .getByRole("region", { name: "Todo (1)" })
     .querySelector(".issue-card") as HTMLElement;
-  dragCardToColumn(card, inProgress);
+  await dragCardToColumn(card, inProgress);
   await waitFor(() => expect(onMoveIssue).toHaveBeenCalledTimes(1));
 
   // Wait until the mutation settles (no more "moving"), so only the still-pending
@@ -666,6 +751,6 @@ it("keeps a card locked from a second move until the first reconciles (chained-m
     .getByRole("region", { name: "In Progress (1)" })
     .querySelector(".issue-card") as HTMLElement;
   // A second move must be blocked until the first reconciles (prevents stale-poll revert).
-  dragCardToColumn(moved, screen.getByRole("region", { name: "In Review (0)" }));
+  await dragCardToColumn(moved, screen.getByRole("region", { name: "In Review (0)" }), false);
   expect(onMoveIssue).toHaveBeenCalledTimes(1);
 });

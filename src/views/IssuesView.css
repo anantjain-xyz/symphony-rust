@@ -39,9 +39,9 @@
 }
 
 .issue-board-columns {
+  align-items: stretch;
   display: flex;
   gap: 12px;
-  align-items: flex-start;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -62,17 +62,20 @@
   display: flex;
   flex: 1 0 260px;
   flex-direction: column;
-  max-height: 70vh;
   min-width: 260px;
 }
 
 .issue-board-column-header {
   align-items: center;
+  background: var(--muted);
   border-bottom: 1px solid var(--border);
   display: flex;
   gap: 8px;
   justify-content: space-between;
   padding: 12px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .issue-board-count {
@@ -85,7 +88,6 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow-y: auto;
   padding: 12px;
 }
 
@@ -94,6 +96,20 @@
   font-size: 0.8125rem;
   margin: 0;
   padding: 6px 2px;
+}
+
+.issue-board-more {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 8px 10px;
+}
+
+.issue-board-more:hover {
+  background: var(--accent);
 }
 
 .issue-card {
@@ -191,7 +207,8 @@
   display: flex;
   gap: 16px;
   align-items: flex-start;
-  overflow-x: auto;
+  max-height: 70vh;
+  overflow: auto;
   /* Vertical room so a drop-target lane's glow isn't clipped by overflow. */
   padding: 10px 2px;
 }
@@ -201,51 +218,6 @@
   min-width: min-content;
   overflow-x: visible;
   padding-bottom: 0;
-}
-
-.issue-board-hidden {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 320px;
-  padding-left: 16px;
-}
-
-.issue-board-hidden-toggle {
-  background: transparent;
-  border: none;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  padding: 6px 0;
-  text-align: left;
-}
-
-.issue-board-hidden-toggle:hover {
-  color: var(--foreground);
-}
-
-.issue-board-hidden-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  list-style: none;
-  margin: 0;
-  min-width: 200px;
-  padding: 0;
-}
-
-.issue-board-hidden-item {
-  align-items: center;
-  background: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  padding: 8px 12px;
 }
 
 .issue-board-toolbar {
