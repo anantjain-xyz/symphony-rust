@@ -67,11 +67,15 @@
 
 .issue-board-column-header {
   align-items: center;
+  background: var(--muted);
   border-bottom: 1px solid var(--border);
   display: flex;
   gap: 8px;
   justify-content: space-between;
   padding: 12px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .issue-board-count {
@@ -92,6 +96,20 @@
   font-size: 0.8125rem;
   margin: 0;
   padding: 6px 2px;
+}
+
+.issue-board-more {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 8px 10px;
+}
+
+.issue-board-more:hover {
+  background: var(--accent);
 }
 
 .issue-card {
@@ -189,7 +207,8 @@
   display: flex;
   gap: 16px;
   align-items: flex-start;
-  overflow-x: auto;
+  max-height: 70vh;
+  overflow: auto;
   /* Vertical room so a drop-target lane's glow isn't clipped by overflow. */
   padding: 10px 2px;
 }

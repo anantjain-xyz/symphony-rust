@@ -385,6 +385,8 @@ function samePointer(a: number | null | undefined, b: number | null | undefined)
 
 // How often the board re-polls Linear for issue movement while it is open.
 export const BOARD_REFRESH_INTERVAL_MS = 15_000;
+// Bound mounted card trees while keeping every workflow lane visible.
+export const BOARD_COLUMN_PAGE_SIZE = 50;
 
 function IssuesBoard({
   issues,
@@ -436,6 +438,9 @@ function IssuesBoard({
   // Coalesce fetches: the 15s interval can be shorter than a retrying request.
   const inFlightRef = useRef(false);
   const [moveError, setMoveError] = useState<string | null>(null);
+  const [visibleIssueCounts, setVisibleIssueCounts] = useState<Map<string, number>>(
+    () => new Map(),
+  );
 
   useEffect(() => {
     // Set on mount too: StrictMode's simulated unmount/remount would otherwise
@@ -700,6 +705,9 @@ function IssuesBoard({
   const renderColumn = (column: BoardColumn) => {
     const droppable = dragEnabled && column.id !== null;
     const watched = watchedKeys.has(column.key);
+    const visibleIssueCount = visibleIssueCounts.get(column.key) ?? BOARD_COLUMN_PAGE_SIZE;
+    const visibleIssues = column.issues.slice(0, visibleIssueCount);
+    const remainingIssueCount = column.issues.length - visibleIssues.length;
     return (
       <section
         key={column.key}
@@ -729,7 +737,7 @@ function IssuesBoard({
           {column.issues.length === 0 ? (
             <p className="issue-board-empty">No issues</p>
           ) : (
-            column.issues.map((issue) => (
+            visibleIssues.map((issue) => (
               <IssueCard
                 key={issue.id}
                 issue={issue}
@@ -742,6 +750,23 @@ function IssuesBoard({
               />
             ))
           )}
+          {remainingIssueCount > 0 ? (
+            <button
+              type="button"
+              className="issue-board-more"
+              aria-label={`Show more issues in ${column.label}`}
+              onClick={() =>
+                setVisibleIssueCounts((current) =>
+                  new Map(current).set(
+                    column.key,
+                    (current.get(column.key) ?? BOARD_COLUMN_PAGE_SIZE) + BOARD_COLUMN_PAGE_SIZE,
+                  ),
+                )
+              }
+            >
+              Show {Math.min(BOARD_COLUMN_PAGE_SIZE, remainingIssueCount)} more issues
+            </button>
+          ) : null}
         </div>
       </section>
     );
