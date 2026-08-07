@@ -303,9 +303,6 @@ export type BoardColumn = {
   issues: IssueRow[];
 };
 
-// Lanes Linear hides from a board by default; we mirror that behavior.
-const HIDDEN_STATE_TYPES = new Set(["backlog", "triage", "completed", "canceled", "duplicate"]);
-
 // Board ordering follows Linear: by state category first, then position within it.
 const STATE_TYPE_ORDER: Record<string, number> = {
   triage: 0,
@@ -319,10 +316,6 @@ const STATE_TYPE_ORDER: Record<string, number> = {
 
 function stateTypeRank(type: string): number {
   return STATE_TYPE_ORDER[type] ?? 3.5;
-}
-
-export function isHiddenBoardColumn(column: BoardColumn): boolean {
-  return column.type !== null && HIDDEN_STATE_TYPES.has(column.type);
 }
 
 export function boardColumns(
@@ -443,7 +436,6 @@ function IssuesBoard({
   // Coalesce fetches: the 15s interval can be shorter than a retrying request.
   const inFlightRef = useRef(false);
   const [moveError, setMoveError] = useState<string | null>(null);
-  const [hiddenOpen, setHiddenOpen] = useState(false);
 
   useEffect(() => {
     // Set on mount too: StrictMode's simulated unmount/remount would otherwise
@@ -755,9 +747,6 @@ function IssuesBoard({
     );
   };
 
-  const visibleColumns = columns.filter((column) => !isHiddenBoardColumn(column));
-  const hiddenColumns = columns.filter((column) => isHiddenBoardColumn(column));
-
   return (
     <div
       className="issue-board"
@@ -819,31 +808,7 @@ function IssuesBoard({
         </div>
       ) : null}
       <div className="issue-board-body">
-        <div className="issue-board-columns">{visibleColumns.map(renderColumn)}</div>
-        {hiddenColumns.length > 0 ? (
-          <div className="issue-board-hidden">
-            <button
-              type="button"
-              className="issue-board-hidden-toggle"
-              aria-expanded={hiddenOpen}
-              onClick={() => setHiddenOpen((open) => !open)}
-            >
-              {hiddenOpen ? "▾" : "▸"} Hidden columns ({hiddenColumns.length})
-            </button>
-            {hiddenOpen ? (
-              <div className="issue-board-columns">{hiddenColumns.map(renderColumn)}</div>
-            ) : (
-              <ul className="issue-board-hidden-list">
-                {hiddenColumns.map((column) => (
-                  <li key={column.key} className="issue-board-hidden-item">
-                    <Badge status={column.label} />
-                    <span className="issue-board-count tnum">{column.issues.length}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ) : null}
+        <div className="issue-board-columns">{columns.map(renderColumn)}</div>
       </div>
       {draggingLabel ? (
         <div

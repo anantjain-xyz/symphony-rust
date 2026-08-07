@@ -62,7 +62,6 @@
   display: flex;
   flex: 1 0 260px;
   flex-direction: column;
-  max-height: 70vh;
   min-width: 260px;
 }
 
@@ -85,7 +84,6 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow-y: auto;
   padding: 12px;
 }
 
@@ -201,51 +199,6 @@
   min-width: min-content;
   overflow-x: visible;
   padding-bottom: 0;
-}
-
-.issue-board-hidden {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 8px;
-  max-width: 320px;
-  padding-left: 16px;
-}
-
-.issue-board-hidden-toggle {
-  background: transparent;
-  border: none;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  padding: 6px 0;
-  text-align: left;
-}
-
-.issue-board-hidden-toggle:hover {
-  color: var(--foreground);
-}
-
-.issue-board-hidden-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  list-style: none;
-  margin: 0;
-  min-width: 200px;
-  padding: 0;
-}
-
-.issue-board-hidden-item {
-  align-items: center;
-  background: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  padding: 8px 12px;
 }
 
 .issue-board-toolbar {

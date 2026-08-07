@@ -27,7 +27,6 @@ vi.mock("./DependencyGraphPanel", () => {
 import IssuesView, {
   BOARD_REFRESH_INTERVAL_MS,
   boardColumns,
-  isHiddenBoardColumn,
 } from "./IssuesView";
 
 function issue(identifier: string, state = "Todo", priority = 2): IssueRow {
@@ -286,18 +285,9 @@ it("orders lanes by state category then position, matching Linear", () => {
     "Canceled",
     "Duplicate",
   ]);
-  expect(
-    columns.filter((column) => !isHiddenBoardColumn(column)).map((column) => column.label),
-  ).toEqual(["Todo", "In Progress", "In Review"]);
-  expect(columns.filter(isHiddenBoardColumn).map((column) => column.label)).toEqual([
-    "Backlog",
-    "Done",
-    "Canceled",
-    "Duplicate",
-  ]);
 });
 
-it("collapses Linear's hidden lanes behind a Hidden columns toggle", async () => {
+it("renders all board lanes as columns, including Linear's backlog/terminal states", async () => {
   render(
     <IssuesView
       issues={[issue("ENG-99", "todo")]}
@@ -308,17 +298,11 @@ it("collapses Linear's hidden lanes behind a Hidden columns toggle", async () =>
     />,
   );
 
-  // Only unstarted/started lanes render as visible columns by default.
   await screen.findByRole("region", { name: "Todo (1)" });
-  const regionNames = screen.getAllByRole("region").map((node) => node.getAttribute("aria-label"));
-  expect(regionNames).toEqual(["Todo (1)", "In Progress (0)", "In Review (0)"]);
-
-  // Backlog/Done/Canceled/Duplicate are tucked behind the toggle until expanded.
-  const toggle = screen.getByRole("button", { name: /Hidden columns \(4\)/ });
-  expect(screen.queryByRole("region", { name: "Backlog (0)" })).toBeNull();
-  fireEvent.click(toggle);
   expect(screen.getByRole("region", { name: "Backlog (0)" })).toBeTruthy();
   expect(screen.getByRole("region", { name: "Done (0)" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Canceled (0)" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Duplicate (0)" })).toBeTruthy();
 });
 
 it("populates lanes from live board issues, not only watched issues", async () => {
