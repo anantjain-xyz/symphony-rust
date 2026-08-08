@@ -54,6 +54,14 @@ test("reports missing files and anchors with file and line context", async (cont
   ]);
 });
 
+test("validates a reference definition once when used repeatedly", async (context) => {
+  const problems = await checkRepository(context, {
+    "README.md": ["[First][missing]", "[Second][missing]", "", "[missing]: missing.md"].join("\n"),
+  });
+
+  assert.deepEqual(problems, ['README.md:4:1: missing local target "missing.md"']);
+});
+
 test("uses GitHub duplicate-heading semantics", async (context) => {
   const problems = await checkRepository(context, {
     "README.md": [

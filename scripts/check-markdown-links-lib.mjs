@@ -61,9 +61,7 @@ function extractTargets(tree) {
     const reference = normalizeReference(node.identifier ?? node.label);
     if (!definitions.has(reference)) {
       targets.push({ node, reference, unresolvedReference: true });
-      return;
     }
-    targets.push({ node, target: definitions.get(reference) });
   });
 
   return targets;
