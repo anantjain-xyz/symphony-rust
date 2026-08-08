@@ -1504,7 +1504,7 @@ mod tests {
         assert_eq!(workflow.front_matter.tracker.api_key, "lin_api_test");
         assert!(workflow.front_matter.tracker.team_keys.is_empty());
         assert!(workflow.front_matter.tracker.project_ids.is_empty());
-        assert!(!workflow.front_matter.tracker.assigned_to_me);
+        assert!(workflow.front_matter.tracker.assigned_to_me);
         assert_eq!(
             workflow.front_matter.agent.backend,
             symphony_core::AgentBackend::Codex
