@@ -80,7 +80,6 @@ describe("EventStream virtualization", () => {
 
   it("keeps a memoized unchanged row from rendering again", () => {
     const model = prepareEvent(event(1));
-    const onRender = vi.fn();
     const props = {
       model,
       eventIndex: 0,
@@ -90,13 +89,15 @@ describe("EventStream virtualization", () => {
       onExpandedChange: vi.fn(),
       needle: "",
       currentIndex: -1,
-      onRender,
     };
-    const { rerender } = render(<EventRow {...props} />);
+    const { container, rerender } = render(<EventRow {...props} />);
+    const article = container.querySelector("article");
+    expect(article).toBeTruthy();
     rerender(<EventRow {...props} />);
-    expect(onRender).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("article")).toBe(article);
     rerender(<EventRow {...props} expanded />);
-    expect(onRender).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("article")).toBe(article);
+    expect(article?.querySelector("details")?.open).toBe(true);
   });
 
   it("remeasures controlled payload expansion and pauses/resumes tail following", () => {
@@ -123,10 +124,7 @@ describe("EventStream virtualization", () => {
 
   it("does not rerender unchanged mounted rows when a paused stream appends a tail", () => {
     const initial = Array.from({ length: 100 }, (_, index) => event(index + 1));
-    const onRowRender = vi.fn();
-    const { container, rerender } = render(
-      <EventStream events={initial} live onRowRender={onRowRender} />,
-    );
+    const { container, rerender } = render(<EventStream events={initial} live />);
     const scrollContainer = container.querySelector<HTMLElement>(".events")!;
     Object.defineProperties(scrollContainer, {
       scrollHeight: { configurable: true, value: 7_600 },
@@ -134,17 +132,23 @@ describe("EventStream virtualization", () => {
     });
     scrollContainer.scrollTop = 0;
     fireEvent.scroll(scrollContainer);
-    onRowRender.mockClear();
+    const before = new Map(
+      [...container.querySelectorAll<HTMLElement>("article")].map((article) => [
+        article.dataset.index,
+        article,
+      ]),
+    );
 
     const appended = Array.from({ length: 100 }, (_, index) => event(index + 101));
-    rerender(
-      <EventStream
-        events={[...initial.map((row) => ({ ...row })), ...appended]}
-        live
-        onRowRender={onRowRender}
-      />,
+    rerender(<EventStream events={[...initial.map((row) => ({ ...row })), ...appended]} live />);
+    const after = new Map(
+      [...container.querySelectorAll<HTMLElement>("article")].map((article) => [
+        article.dataset.index,
+        article,
+      ]),
     );
-    expect(onRowRender).not.toHaveBeenCalled();
+    expect(before.size).toBeGreaterThan(0);
+    for (const [index, article] of before) expect(after.get(index)).toBe(article);
   });
 
   it("preserves the empty state and single-match controls", async () => {

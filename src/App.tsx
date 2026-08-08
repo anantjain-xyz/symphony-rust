@@ -463,8 +463,7 @@ function formSnapshot(settings: AppSettings) {
   return JSON.stringify(form);
 }
 
-function App({ onRender }: { onRender?: () => void } = {}) {
-  onRender?.();
+function App() {
   const runtimeAvailable = isDesktopRuntime();
   const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
