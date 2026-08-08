@@ -1,71 +1,71 @@
-import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FORBIDDEN_MCP_NAMESPACE_PATTERN = "mcp__[A-Za-z0-9_-]+__";
-const DEFAULT_PROMPT_RETURN_FUNCTION = "default_prompt_template";
-const FORBIDDEN_PORTABLE_OWNER_PATTERN = "\\bpnpm\\b";
-const REQUIRED_RUST_SOURCE_ROOTS = ["crates", "src-tauri"];
-const REQUIRED_SKILL_TOPOLOGY = {
-  ownerRoot: "src-tauri/assets/skills",
-  inventoryFile: "src-tauri/src/lib.rs",
-  inventoryFunction: "bundled_skills",
-  projectionRoot: ".agents/skills",
-  projectionPrefix: "symphony-",
-};
-const REQUIRED_DEFAULT_PROMPT_PATH = "src-tauri/assets/default-prompt.md";
 const REQUIRED_SETTINGS_CONTRACT_SOURCE = "crates/symphony-contracts/src/settings.rs";
 const REQUIRED_SETTINGS_RUNTIME_SOURCE = "src-tauri/src/settings.rs";
-const REQUIRED_SKILL_RUNTIME_CONSUMERS = [
-  {
-    functionName: "worker_start_config",
-    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
-  },
-  {
-    functionName: "start_retro",
-    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
-  },
-  {
-    functionName: "get_skills_status",
-    sequences: [
-      ["let", "names", ":", "Vec", "<", "String", ">", "=", "bundled_skills", "(", ")"],
-      ["check_skills", "(", "&", "repo_url", ",", "&", "names", ",", "&", "session_env", ")"],
-    ],
-  },
-  {
-    functionName: "install_skills",
-    sequences: [["skills", ":", "bundled_skills", "(", ")"]],
-  },
-];
-const REQUIRED_DISCOVERY_PROJECTION = {
-  path: ".claude/skills",
-  target: "../.agents/skills",
-};
-const REQUIRED_STANDALONE_ROOTS = [".codex/skills"];
-const REQUIRED_PNPM_BUILTINS = ["add", "dlx", "exec", "install", "remove", "run"];
-const REQUIRED_ALLOWED_ADAPTATIONS = new Map([
-  [
-    "pull",
-    [
-      {
-        match: "7. Re-run the target repository's documented validation gate before pushing.",
-        replacement: "7. Re-run the local pre-push gate (`pnpm verify:fast`) before pushing.",
-      },
-    ],
-  ],
-  [
-    "push",
-    [
-      {
-        match:
-          "- The target repository's documented validation gate has been run for the latest commit.",
-        replacement:
-          "- The local pre-push gate has been run for the latest commit (`pnpm verify:fast`).",
-      },
-    ],
-  ],
-]);
+
+function skillRuntimeConsumers(inventoryFunction) {
+  return [
+    {
+      functionName: "worker_start_config",
+      sequences: [["skills", ":", inventoryFunction, "(", ")"]],
+    },
+    {
+      functionName: "start_retro",
+      sequences: [["skills", ":", inventoryFunction, "(", ")"]],
+    },
+    {
+      functionName: "get_skills_status",
+      sequences: [
+        ["let", "names", ":", "Vec", "<", "String", ">", "=", inventoryFunction, "(", ")"],
+        ["check_skills", "(", "&", "repo_url", ",", "&", "names", ",", "&", "session_env", ")"],
+      ],
+    },
+    {
+      functionName: "install_skills",
+      sequences: [["skills", ":", inventoryFunction, "(", ")"]],
+    },
+  ];
+}
+
+function requireNonEmptyString(value, label, errors) {
+  if (typeof value !== "string" || value.trim() === "") {
+    errors.push(`${label} must be a non-empty string`);
+    return null;
+  }
+  return value;
+}
+
+function requireStringArray(value, label, errors) {
+  if (!Array.isArray(value)) {
+    errors.push(`${label} must be an array of non-empty strings`);
+    return null;
+  }
+  const items = [];
+  for (const [index, entry] of value.entries()) {
+    const item = requireNonEmptyString(entry, `${label}[${index}]`, errors);
+    if (item !== null) items.push(item);
+  }
+  return items.length === value.length ? items : null;
+}
+
+function requireObject(value, label, errors) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${label} must be an object`);
+    return null;
+  }
+  return value;
+}
 
 function resolveInside(root, path, errors, label) {
   if (typeof path !== "string" || path.trim() === "") {
@@ -83,6 +83,10 @@ function resolveInside(root, path, errors, label) {
 
 function relativePath(root, path) {
   return relative(root, path).split(sep).join("/");
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function readJson(root, path, errors, label) {
@@ -111,6 +115,32 @@ function walkFiles(path) {
     else if (entry.isFile()) files.push(child);
   }
   return files;
+}
+
+function canonicalPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+function samePath(left, right) {
+  return canonicalPath(left) === canonicalPath(right);
+}
+
+function resolutionBase(path) {
+  // Only follow a final-path symlink so relative include_str! targets resolve
+  // from the real source file; keep lexical dirname otherwise so repository
+  // root spellings (e.g. /var vs /private/var) stay consistent in diagnostics.
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      return dirname(realpathSync(path));
+    }
+  } catch {
+    // Fall through to the lexical dirname.
+  }
+  return dirname(path);
 }
 
 function parseYamlStringScalar(value, path, line, key, errors) {
@@ -260,7 +290,15 @@ function firstDifference(expected, actual) {
 
 function applyAdaptations(content, skillId, adaptations, errors) {
   let expected = content;
-  for (const [index, adaptation] of (adaptations?.[skillId] ?? []).entries()) {
+  const list = adaptations?.[skillId];
+  // Schema validation already records malformed lists/entries; skip them here so
+  // check:harness returns accumulated diagnostics instead of throwing TypeError.
+  if (list === undefined) return expected;
+  if (!Array.isArray(list)) return expected;
+  for (const [index, adaptation] of list.entries()) {
+    if (!adaptation || typeof adaptation !== "object" || Array.isArray(adaptation)) {
+      continue;
+    }
     if (
       typeof adaptation.match !== "string" ||
       adaptation.match === "" ||
@@ -278,7 +316,8 @@ function applyAdaptations(content, skillId, adaptations, errors) {
       );
       continue;
     }
-    expected = expected.replace(adaptation.match, adaptation.replacement);
+    // Use a callback so replacement text is applied literally (no $&, $$, etc.).
+    expected = expected.replace(adaptation.match, () => adaptation.replacement);
   }
   return expected;
 }
@@ -647,12 +686,12 @@ function requireModuleImport(tokens, moduleName, symbol, sourcePath, errors) {
   }
 }
 
-function validateSkillRuntimeConsumers(root, sourcePath, errors) {
+function validateSkillRuntimeConsumers(root, sourcePath, inventoryFunction, errors) {
   const absolute = resolveInside(root, sourcePath, errors, "bundled skill runtime source");
-  if (!absolute || !existsSync(absolute)) return;
+  if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) return;
   const tokens = rustTokens(readFileSync(absolute, "utf8"));
   const bodies = new Map();
-  for (const { functionName, sequences } of REQUIRED_SKILL_RUNTIME_CONSUMERS) {
+  for (const { functionName, sequences } of skillRuntimeConsumers(inventoryFunction)) {
     const body = requireFunctionSequences(tokens, functionName, sequences, sourcePath, errors);
     if (body) bodies.set(functionName, body);
   }
@@ -671,7 +710,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       requireStructField(
         returned[0],
         "skills",
-        ["bundled_skills", "(", ")"],
+        [inventoryFunction, "(", ")"],
         sourcePath,
         "worker_start_config",
         errors,
@@ -699,7 +738,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       requireStructField(
         proposals[0],
         "skills",
-        ["bundled_skills", "(", ")"],
+        [inventoryFunction, "(", ")"],
         sourcePath,
         "start_retro",
         errors,
@@ -733,7 +772,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
   if (statusBody) {
     if (countTokenSequence(tokens, ["let", "names"], statusBody.start, statusBody.end) !== 1) {
       errors.push(
-        `${sourcePath} get_skills_status must derive its single names binding from bundled_skills()`,
+        `${sourcePath} get_skills_status must derive its single names binding from ${inventoryFunction}()`,
       );
     }
   }
@@ -758,7 +797,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
       requireStructField(
         installs[0],
         "skills",
-        ["bundled_skills", "(", ")"],
+        [inventoryFunction, "(", ")"],
         sourcePath,
         "install_skills",
         errors,
@@ -767,7 +806,7 @@ function validateSkillRuntimeConsumers(root, sourcePath, errors) {
   }
 }
 
-function validateDefaultPromptRuntimeConsumers(root, errors) {
+function validateDefaultPromptRuntimeConsumers(root, inventoryFile, returnFunction, errors) {
   const contractAbsolute = resolveInside(
     root,
     REQUIRED_SETTINGS_CONTRACT_SOURCE,
@@ -782,7 +821,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
   );
   const desktopAbsolute = resolveInside(
     root,
-    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
+    inventoryFile,
     errors,
     "default prompt desktop source",
   );
@@ -792,7 +831,8 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
     !desktopAbsolute ||
     !existsSync(contractAbsolute) ||
     !existsSync(runtimeAbsolute) ||
-    !existsSync(desktopAbsolute)
+    !existsSync(desktopAbsolute) ||
+    !statSync(desktopAbsolute).isFile()
   ) {
     return;
   }
@@ -801,7 +841,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
   const defaultBody = requireFunctionSequences(
     contractTokens,
     "default",
-    [["prompt_template", ":", "default_prompt_template", "(", ")"]],
+    [["prompt_template", ":", returnFunction, "(", ")"]],
     REQUIRED_SETTINGS_CONTRACT_SOURCE,
     errors,
   );
@@ -820,7 +860,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
       requireStructField(
         returned[0],
         "prompt_template",
-        ["default_prompt_template", "(", ")"],
+        [returnFunction, "(", ")"],
         REQUIRED_SETTINGS_CONTRACT_SOURCE,
         "default",
         errors,
@@ -831,7 +871,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
   const parseBody = requireFunctionSequences(
     runtimeTokens,
     "parse_settings",
-    [["unwrap_or_else", "(", "default_prompt_template", ")"]],
+    [["unwrap_or_else", "(", returnFunction, ")"]],
     REQUIRED_SETTINGS_RUNTIME_SOURCE,
     errors,
   );
@@ -846,15 +886,10 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
     );
     if (
       promptStatements.length !== 1 ||
-      countTokenSequence(promptStatements[0], [
-        "unwrap_or_else",
-        "(",
-        "default_prompt_template",
-        ")",
-      ]) !== 1
+      countTokenSequence(promptStatements[0], ["unwrap_or_else", "(", returnFunction, ")"]) !== 1
     ) {
       errors.push(
-        `${REQUIRED_SETTINGS_RUNTIME_SOURCE} parse_settings must derive its single prompt_template binding with default_prompt_template`,
+        `${REQUIRED_SETTINGS_RUNTIME_SOURCE} parse_settings must derive its single prompt_template binding with ${returnFunction}`,
       );
     }
   }
@@ -865,7 +900,7 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
     "(",
     "default",
     "=",
-    "default_prompt_template",
+    returnFunction,
     ")",
     "]",
     "pub",
@@ -889,22 +924,16 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
   }
   if (serdeCount !== 1) {
     errors.push(
-      `${REQUIRED_SETTINGS_CONTRACT_SOURCE} AppSettings.prompt_template must use serde default_prompt_template exactly once; found ${serdeCount}`,
+      `${REQUIRED_SETTINGS_CONTRACT_SOURCE} AppSettings.prompt_template must use serde ${returnFunction} exactly once; found ${serdeCount}`,
     );
   }
 
   const desktopTokens = rustTokens(readFileSync(desktopAbsolute, "utf8"));
-  requireModuleImport(
-    desktopTokens,
-    "settings",
-    DEFAULT_PROMPT_RETURN_FUNCTION,
-    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
-    errors,
-  );
+  requireModuleImport(desktopTokens, "settings", returnFunction, inventoryFile, errors);
   const bodies = namedFunctionBodies(desktopTokens, "get_default_prompt");
   if (bodies.length !== 1) {
     errors.push(
-      `${REQUIRED_SKILL_TOPOLOGY.inventoryFile} must define exactly one get_default_prompt runtime consumer; found ${bodies.length}`,
+      `${inventoryFile} must define exactly one get_default_prompt runtime consumer; found ${bodies.length}`,
     );
     return;
   }
@@ -913,11 +942,9 @@ function validateDefaultPromptRuntimeConsumers(root, errors) {
   if (expression.at(-1)?.value === ";") expression = expression.slice(0, -1);
   if (
     JSON.stringify(expression.map((token) => token.value)) !==
-    JSON.stringify([DEFAULT_PROMPT_RETURN_FUNCTION, "(", ")"])
+    JSON.stringify([returnFunction, "(", ")"])
   ) {
-    errors.push(
-      `${REQUIRED_SKILL_TOPOLOGY.inventoryFile} get_default_prompt must directly return ${DEFAULT_PROMPT_RETURN_FUNCTION}()`,
-    );
+    errors.push(`${inventoryFile} get_default_prompt must directly return ${returnFunction}()`);
   }
 }
 
@@ -1186,6 +1213,14 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
       verifiedDynamicIncludes: new Set(),
     };
   }
+  if (!statSync(absolute).isFile()) {
+    errors.push(`bundled skill inventory at ${inventoryFile} must be a regular file`);
+    return {
+      ids: new Set(),
+      references: [],
+      verifiedDynamicIncludes: new Set(),
+    };
+  }
   const content = readFileSync(absolute, "utf8");
   const tokens = rustTokens(content);
   const body = namedFunctionBody(tokens, functionName, inventoryFile, errors);
@@ -1248,10 +1283,11 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
   const references = [];
   const verifiedDynamicIncludes = new Set();
   if (verifiedInclude) {
-    verifiedDynamicIncludes.add(`${absolute}\0${verifiedInclude.includeIndex}`);
+    const canonicalInventory = canonicalPath(absolute);
+    verifiedDynamicIncludes.add(`${canonicalInventory}\0${verifiedInclude.includeIndex}`);
     for (const skillId of unique) {
       const target = resolve(
-        dirname(absolute),
+        resolutionBase(absolute),
         `${verifiedInclude.dynamic[0]}${skillId}${verifiedInclude.dynamic[1]}`,
       );
       references.push({ source: absolute, target });
@@ -1270,6 +1306,7 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
 
 function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
   const references = [];
+  const seenFiles = new Set();
   for (const sourceRoot of sourceRoots ?? []) {
     const absoluteRoot = resolveInside(root, sourceRoot, errors, "Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) {
@@ -1279,6 +1316,9 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
+      const identity = canonicalPath(file);
+      if (seenFiles.has(identity)) continue;
+      seenFiles.add(identity);
       const content = readFileSync(file, "utf8");
       const tokens = rustTokens(content);
       for (let index = 0; index < tokens.length; index += 1) {
@@ -1291,7 +1331,7 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
 
         const literal = singleStringArgument(include.arguments);
         if (literal !== null) {
-          const target = resolve(dirname(file), literal);
+          const target = resolve(resolutionBase(file), literal);
           references.push({ source: file, target });
           if (!existsSync(target)) {
             errors.push(
@@ -1305,7 +1345,7 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
           continue;
         }
 
-        const includeKey = `${file}\0${tokens[index].index}`;
+        const includeKey = `${identity}\0${tokens[index].index}`;
         if (!verifiedDynamicIncludes.has(includeKey)) {
           errors.push(
             `${relativePath(root, file)} has an unsupported include_str! expression; extend the harness checker before adding it`,
@@ -1318,16 +1358,20 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
   return references;
 }
 
-function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, errors) {
+function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, returnFunction, errors) {
   const definitions = [];
+  const seenFiles = new Set();
   for (const sourceRoot of sourceRoots ?? []) {
     const absoluteRoot = resolveInside(root, sourceRoot, errors, "default prompt Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) continue;
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
+      const identity = canonicalPath(file);
+      if (seenFiles.has(identity)) continue;
+      seenFiles.add(identity);
       const tokens = rustTokens(readFileSync(file, "utf8"));
-      for (const body of namedFunctionBodies(tokens, DEFAULT_PROMPT_RETURN_FUNCTION)) {
+      for (const body of namedFunctionBodies(tokens, returnFunction)) {
         definitions.push({ body, file, tokens });
       }
     }
@@ -1335,7 +1379,7 @@ function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, errors)
 
   if (definitions.length !== 1) {
     errors.push(
-      `Rust source roots must define exactly one ${DEFAULT_PROMPT_RETURN_FUNCTION} function; found ${definitions.length}`,
+      `Rust source roots must define exactly one ${returnFunction} function; found ${definitions.length}`,
     );
     return null;
   }
@@ -1351,15 +1395,15 @@ function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, errors)
   const literal = include?.arguments ? singleStringArgument(include.arguments) : null;
   if (literal === null || JSON.stringify(suffix) !== JSON.stringify([".", "to_string", "(", ")"])) {
     errors.push(
-      `${relativePath(root, file)} ${DEFAULT_PROMPT_RETURN_FUNCTION} must directly return include_str!("...").to_string()`,
+      `${relativePath(root, file)} ${returnFunction} must directly return include_str!("...").to_string()`,
     );
     return null;
   }
 
-  const target = resolve(dirname(file), literal);
-  if (target !== expectedPrompt) {
+  const target = resolve(resolutionBase(file), literal);
+  if (!samePath(target, expectedPrompt)) {
     errors.push(
-      `${relativePath(root, file)} ${DEFAULT_PROMPT_RETURN_FUNCTION} returns ${relativePath(
+      `${relativePath(root, file)} ${returnFunction} returns ${relativePath(
         root,
         target,
       )}; expected ${relativePath(root, expectedPrompt)}`,
@@ -1447,74 +1491,130 @@ export function validateAgentAssets(
       `agent asset contract version must be 1, received ${JSON.stringify(contract.version)}`,
     );
   }
-  if (
-    !Array.isArray(contract.pnpmBuiltins) ||
-    JSON.stringify([...contract.pnpmBuiltins].sort()) !==
-      JSON.stringify([...REQUIRED_PNPM_BUILTINS].sort())
-  ) {
-    errors.push(
-      `pnpmBuiltins must be ${JSON.stringify(
-        REQUIRED_PNPM_BUILTINS,
-      )}, received ${JSON.stringify(contract.pnpmBuiltins)}`,
-    );
-  }
 
-  if (JSON.stringify(contract.rustSourceRoots) !== JSON.stringify(REQUIRED_RUST_SOURCE_ROOTS)) {
-    errors.push(
-      `rustSourceRoots must be ${JSON.stringify(
-        REQUIRED_RUST_SOURCE_ROOTS,
-      )}, received ${JSON.stringify(contract.rustSourceRoots)}`,
-    );
-  }
-
-  const skillConfig = contract.skills ?? {};
-  for (const [field, expected] of Object.entries(REQUIRED_SKILL_TOPOLOGY)) {
-    if (skillConfig[field] !== expected) {
-      errors.push(
-        `skill ${field} must be ${expected}, received ${JSON.stringify(skillConfig[field])}`,
-      );
+  const pnpmBuiltins = requireStringArray(contract.pnpmBuiltins, "pnpmBuiltins", errors);
+  const rustSourceRoots = requireStringArray(contract.rustSourceRoots, "rustSourceRoots", errors);
+  const skillConfig = requireObject(contract.skills, "skills", errors);
+  const ownerRoot = skillConfig
+    ? requireNonEmptyString(skillConfig.ownerRoot, "skills.ownerRoot", errors)
+    : null;
+  const inventoryFile = skillConfig
+    ? requireNonEmptyString(skillConfig.inventoryFile, "skills.inventoryFile", errors)
+    : null;
+  const inventoryFunction = skillConfig
+    ? requireNonEmptyString(skillConfig.inventoryFunction, "skills.inventoryFunction", errors)
+    : null;
+  const projectionRoot = skillConfig
+    ? requireNonEmptyString(skillConfig.projectionRoot, "skills.projectionRoot", errors)
+    : null;
+  const prefix = skillConfig
+    ? requireNonEmptyString(skillConfig.projectionPrefix, "skills.projectionPrefix", errors)
+    : null;
+  const portableOwnerForbiddenPattern = skillConfig
+    ? requireNonEmptyString(
+        skillConfig.portableOwnerForbiddenPattern,
+        "skills.portableOwnerForbiddenPattern",
+        errors,
+      )
+    : null;
+  const standaloneRoots = skillConfig
+    ? requireStringArray(skillConfig.standaloneRoots, "skills.standaloneRoots", errors)
+    : null;
+  const discoveryConfig = skillConfig
+    ? requireObject(skillConfig.discoveryProjection, "skills.discoveryProjection", errors)
+    : null;
+  const discoveryPath = discoveryConfig
+    ? requireNonEmptyString(discoveryConfig.path, "skills.discoveryProjection.path", errors)
+    : null;
+  const discoveryTarget = discoveryConfig
+    ? requireNonEmptyString(discoveryConfig.target, "skills.discoveryProjection.target", errors)
+    : null;
+  const allowedAdaptations = skillConfig
+    ? requireObject(skillConfig.allowedAdaptations, "skills.allowedAdaptations", errors)
+    : null;
+  if (allowedAdaptations) {
+    for (const [skillId, adaptationList] of Object.entries(allowedAdaptations)) {
+      if (!Array.isArray(adaptationList)) {
+        errors.push(`skills.allowedAdaptations.${skillId} must be an array`);
+        continue;
+      }
+      for (const [index, adaptation] of adaptationList.entries()) {
+        const label = `skills.allowedAdaptations.${skillId}[${index}]`;
+        const entry = requireObject(adaptation, label, errors);
+        if (!entry) continue;
+        requireNonEmptyString(entry.match, `${label}.match`, errors);
+        if (typeof entry.replacement !== "string") {
+          errors.push(`${label}.replacement must be a string`);
+        }
+      }
     }
   }
-  const prefix = REQUIRED_SKILL_TOPOLOGY.projectionPrefix;
+
+  const promptConfig = requireObject(contract.defaultPrompt, "defaultPrompt", errors);
+  const promptPath = promptConfig
+    ? requireNonEmptyString(promptConfig.path, "defaultPrompt.path", errors)
+    : null;
+  const returnFunction = promptConfig
+    ? requireNonEmptyString(promptConfig.returnFunction, "defaultPrompt.returnFunction", errors)
+    : null;
+  const forbiddenNamespacePattern = promptConfig
+    ? requireNonEmptyString(
+        promptConfig.forbiddenNamespacePattern,
+        "defaultPrompt.forbiddenNamespacePattern",
+        errors,
+      )
+    : null;
+
+  if (
+    !rustSourceRoots ||
+    !ownerRoot ||
+    !inventoryFile ||
+    !inventoryFunction ||
+    !projectionRoot ||
+    !prefix ||
+    !standaloneRoots ||
+    !pnpmBuiltins
+  ) {
+    return errors;
+  }
+
   const owners = discoverSkills(
     root,
-    REQUIRED_SKILL_TOPOLOGY.ownerRoot,
+    ownerRoot,
     (id) => `${prefix}${id}`,
     errors,
     "skill owner root",
     true,
   );
-  if (skillConfig.portableOwnerForbiddenPattern !== FORBIDDEN_PORTABLE_OWNER_PATTERN) {
-    errors.push(
-      `portableOwnerForbiddenPattern must be ${JSON.stringify(
-        FORBIDDEN_PORTABLE_OWNER_PATTERN,
-      )}, received ${JSON.stringify(skillConfig.portableOwnerForbiddenPattern)}`,
-    );
-  }
-  const portableOwnerPattern = new RegExp(FORBIDDEN_PORTABLE_OWNER_PATTERN);
-  for (const owner of owners.values()) {
-    const match = portableOwnerPattern.exec(owner.content);
-    if (match) {
+  if (portableOwnerForbiddenPattern) {
+    let portableOwnerPattern;
+    try {
+      portableOwnerPattern = new RegExp(portableOwnerForbiddenPattern);
+    } catch (error) {
       errors.push(
-        `${owner.manifestPath}:${lineNumber(
-          owner.content,
-          match.index,
-        )} portable bundled skill owners must not reference pnpm: ${match[0]}`,
+        `skills.portableOwnerForbiddenPattern is not a valid regular expression: ${error.message}`,
       );
     }
+    if (portableOwnerPattern) {
+      for (const owner of owners.values()) {
+        const match = portableOwnerPattern.exec(owner.content);
+        if (match) {
+          errors.push(
+            `${owner.manifestPath}:${lineNumber(
+              owner.content,
+              match.index,
+            )} portable bundled skill owners must not reference pnpm: ${match[0]}`,
+          );
+        }
+      }
+    }
   }
-  const bundled = inventoryFromRust(
-    root,
-    REQUIRED_SKILL_TOPOLOGY.inventoryFile,
-    REQUIRED_SKILL_TOPOLOGY.inventoryFunction,
-    prefix,
-    errors,
-  );
-  validateSkillRuntimeConsumers(root, REQUIRED_SKILL_TOPOLOGY.inventoryFile, errors);
+  const bundled = inventoryFromRust(root, inventoryFile, inventoryFunction, prefix, errors);
+  validateSkillRuntimeConsumers(root, inventoryFile, inventoryFunction, errors);
   const inventory = bundled.ids;
   const projectionsByDirectory = discoverSkills(
     root,
-    REQUIRED_SKILL_TOPOLOGY.projectionRoot,
+    projectionRoot,
     (id) => id,
     errors,
     "skill projection root",
@@ -1533,49 +1633,21 @@ export function validateAgentAssets(
     errors,
   );
 
-  const allowedAdaptations = skillConfig.allowedAdaptations;
-  if (
-    !allowedAdaptations ||
-    typeof allowedAdaptations !== "object" ||
-    Array.isArray(allowedAdaptations)
-  ) {
-    errors.push("allowed adaptations must be an object");
-  } else {
-    for (const skillId of Object.keys(allowedAdaptations)) {
-      if (!REQUIRED_ALLOWED_ADAPTATIONS.has(skillId)) {
-        errors.push(`allowed adaptation skill ids has undeclared extra ${skillId}`);
+  if (allowedAdaptations) {
+    for (const [skillId, adaptationList] of Object.entries(allowedAdaptations)) {
+      if (!owners.has(skillId)) {
+        errors.push(`allowed adaptations declare unknown owner skill ${skillId}`);
       }
-    }
-    for (const [skillId, expected] of REQUIRED_ALLOWED_ADAPTATIONS) {
-      if (
-        !Object.hasOwn(allowedAdaptations, skillId) ||
-        JSON.stringify(allowedAdaptations[skillId]) !== JSON.stringify(expected)
-      ) {
-        errors.push(
-          `allowed adaptations for ${skillId} must be the exact validation-gate substitution`,
-        );
+      if (!Array.isArray(adaptationList)) {
+        errors.push(`allowed adaptations for ${skillId} must be an array`);
       }
-    }
-  }
-
-  for (const [skillId, adaptationList] of Object.entries(allowedAdaptations ?? {})) {
-    if (!owners.has(skillId)) {
-      errors.push(`allowed adaptations declare unknown owner skill ${skillId}`);
-    }
-    if (!Array.isArray(adaptationList)) {
-      errors.push(`allowed adaptations for ${skillId} must be an array`);
     }
   }
 
   for (const [skillId, owner] of owners) {
     const projection = projections.get(skillId);
     if (!projection) continue;
-    const expected = applyAdaptations(
-      owner.content,
-      skillId,
-      skillConfig.allowedAdaptations,
-      errors,
-    );
+    const expected = applyAdaptations(owner.content, skillId, allowedAdaptations, errors);
     if (expected !== projection.content) {
       const difference = firstDifference(expected, projection.content);
       errors.push(
@@ -1588,63 +1660,47 @@ export function validateAgentAssets(
     }
   }
 
-  const discovery = skillConfig.discoveryProjection;
-  if (
-    discovery?.path !== REQUIRED_DISCOVERY_PROJECTION.path ||
-    discovery?.target !== REQUIRED_DISCOVERY_PROJECTION.target
-  ) {
-    errors.push(
-      `skill discovery projection must be ${JSON.stringify(
-        REQUIRED_DISCOVERY_PROJECTION,
-      )}, received ${JSON.stringify(discovery)}`,
-    );
-  }
-  {
-    const path = resolveInside(
-      root,
-      REQUIRED_DISCOVERY_PROJECTION.path,
-      errors,
-      "skill discovery projection",
-    );
+  if (discoveryPath && discoveryTarget && projectionRoot) {
+    const path = resolveInside(root, discoveryPath, errors, "skill discovery projection");
     if (path && !existsSync(path)) {
-      errors.push(`skill discovery projection is missing at ${REQUIRED_DISCOVERY_PROJECTION.path}`);
+      errors.push(`skill discovery projection is missing at ${discoveryPath}`);
     } else if (path) {
+      const resolvedTarget = resolve(dirname(path), discoveryTarget);
+      const expectedProjection = resolve(root, projectionRoot);
+      if (!samePath(resolvedTarget, expectedProjection)) {
+        errors.push(
+          `skill discovery projection target ${JSON.stringify(
+            discoveryTarget,
+          )} must resolve to skills.projectionRoot ${JSON.stringify(projectionRoot)}`,
+        );
+      }
       const metadata = lstatSync(path);
       if (metadata.isSymbolicLink()) {
         const target = readlinkSync(path);
-        if (target !== REQUIRED_DISCOVERY_PROJECTION.target) {
+        if (target !== discoveryTarget) {
           errors.push(
-            `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} points to ${target}; expected ${REQUIRED_DISCOVERY_PROJECTION.target}`,
+            `skill discovery projection ${discoveryPath} points to ${target}; expected ${discoveryTarget}`,
           );
         }
       } else if (metadata.isFile()) {
         const target = readFileSync(path, "utf8");
-        if (target !== REQUIRED_DISCOVERY_PROJECTION.target) {
+        if (target !== discoveryTarget) {
           errors.push(
-            `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} contains ${JSON.stringify(
+            `skill discovery projection ${discoveryPath} contains ${JSON.stringify(
               target,
-            )}; expected Git flattened symlink target ${JSON.stringify(
-              REQUIRED_DISCOVERY_PROJECTION.target,
-            )}`,
+            )}; expected Git flattened symlink target ${JSON.stringify(discoveryTarget)}`,
           );
         }
       } else {
         errors.push(
-          `skill discovery projection ${REQUIRED_DISCOVERY_PROJECTION.path} must be a symlink or Git flattened symlink file targeting ${REQUIRED_DISCOVERY_PROJECTION.target}`,
+          `skill discovery projection ${discoveryPath} must be a symlink or Git flattened symlink file targeting ${discoveryTarget}`,
         );
       }
     }
   }
 
-  if (JSON.stringify(skillConfig.standaloneRoots) !== JSON.stringify(REQUIRED_STANDALONE_ROOTS)) {
-    errors.push(
-      `standaloneRoots must be ${JSON.stringify(
-        REQUIRED_STANDALONE_ROOTS,
-      )}, received ${JSON.stringify(skillConfig.standaloneRoots)}`,
-    );
-  }
   const standaloneFiles = [];
-  for (const standaloneRoot of REQUIRED_STANDALONE_ROOTS) {
+  for (const standaloneRoot of standaloneRoots) {
     const standalone = discoverSkills(
       root,
       standaloneRoot,
@@ -1659,11 +1715,13 @@ export function validateAgentAssets(
 
   const includeReferences = [
     ...bundled.references,
-    ...checkRustIncludes(root, REQUIRED_RUST_SOURCE_ROOTS, bundled.verifiedDynamicIncludes, errors),
+    ...checkRustIncludes(root, rustSourceRoots, bundled.verifiedDynamicIncludes, errors),
   ];
   for (const owner of owners.values()) {
     const ownerFile = resolve(root, owner.manifestPath);
-    const ownerIncludes = includeReferences.filter((reference) => reference.target === ownerFile);
+    const ownerIncludes = includeReferences.filter((reference) =>
+      samePath(reference.target, ownerFile),
+    );
     if (ownerIncludes.length !== 1) {
       const includeOwners = ownerIncludes
         .map((reference) => relativePath(root, reference.source))
@@ -1676,74 +1734,71 @@ export function validateAgentAssets(
     }
   }
 
-  const promptConfig = contract.defaultPrompt;
   let promptFile = null;
-  validateDefaultPromptRuntimeConsumers(root, errors);
-  if (promptConfig) {
-    if (promptConfig.path !== REQUIRED_DEFAULT_PROMPT_PATH) {
-      errors.push(
-        `defaultPrompt path must be ${REQUIRED_DEFAULT_PROMPT_PATH}, received ${JSON.stringify(
-          promptConfig.path,
-        )}`,
-      );
-    }
-    if (promptConfig.returnFunction !== DEFAULT_PROMPT_RETURN_FUNCTION) {
-      errors.push(
-        `defaultPrompt returnFunction must be ${DEFAULT_PROMPT_RETURN_FUNCTION}, received ${JSON.stringify(
-          promptConfig.returnFunction,
-        )}`,
-      );
-    }
-    if (promptConfig.forbiddenNamespacePattern !== FORBIDDEN_MCP_NAMESPACE_PATTERN) {
-      errors.push(
-        `defaultPrompt forbiddenNamespacePattern must be ${JSON.stringify(
-          FORBIDDEN_MCP_NAMESPACE_PATTERN,
-        )}, received ${JSON.stringify(promptConfig.forbiddenNamespacePattern)}`,
-      );
-    }
-    promptFile = resolveInside(root, REQUIRED_DEFAULT_PROMPT_PATH, errors, "default prompt");
+  if (inventoryFile && returnFunction) {
+    validateDefaultPromptRuntimeConsumers(root, inventoryFile, returnFunction, errors);
+  }
+  if (promptPath) {
+    promptFile = resolveInside(root, promptPath, errors, "default prompt");
     if (promptFile && !existsSync(promptFile)) {
-      errors.push(`default prompt is missing at ${REQUIRED_DEFAULT_PROMPT_PATH}`);
+      errors.push(`default prompt is missing at ${promptPath}`);
+      promptFile = null;
+    } else if (promptFile && !statSync(promptFile).isFile()) {
+      errors.push(`default prompt at ${promptPath} must be a regular file`);
+      promptFile = null;
     }
-    if (promptFile) {
-      defaultPromptReturnReference(root, REQUIRED_RUST_SOURCE_ROOTS, promptFile, errors);
-      const promptIncludes = includeReferences.filter(
-        (reference) => reference.target === promptFile,
+    if (promptFile && returnFunction) {
+      defaultPromptReturnReference(root, rustSourceRoots, promptFile, returnFunction, errors);
+      const promptIncludes = includeReferences.filter((reference) =>
+        samePath(reference.target, promptFile),
       );
       if (promptIncludes.length !== 1) {
-        const owners = promptIncludes
+        const promptOwners = promptIncludes
           .map((reference) => relativePath(root, reference.source))
           .sort();
         errors.push(
-          `default prompt ${REQUIRED_DEFAULT_PROMPT_PATH} must have exactly one Rust include_str! owner; found ${promptIncludes.length}${
-            owners.length > 0 ? ` (${owners.join(", ")})` : ""
+          `default prompt ${promptPath} must have exactly one Rust include_str! owner; found ${promptIncludes.length}${
+            promptOwners.length > 0 ? ` (${promptOwners.join(", ")})` : ""
           }`,
         );
       }
     }
-    if (promptFile && existsSync(promptFile)) {
+    if (promptFile) {
       const prompt = readFileSync(promptFile, "utf8");
       const visiblePrompt = stripMarkdownHtmlComments(prompt);
       const promptSkills = new Set(
-        [...visiblePrompt.matchAll(/\|\s*`(symphony-[^`]+)`\s*\|/g)].map((match) => match[1]),
+        [
+          ...visiblePrompt.matchAll(
+            new RegExp(`\\|\\s*\`(${escapeRegExp(prefix)}[^\`]+)\`\\s*\\|`, "g"),
+          ),
+        ].map((match) => match[1]),
       );
       const expectedPromptSkills = new Set(
         [...owners.keys()].map((skillId) => `${prefix}${skillId}`),
       );
       compareSets("default prompt skill table", expectedPromptSkills, promptSkills, errors);
-      const namespacePattern = new RegExp(FORBIDDEN_MCP_NAMESPACE_PATTERN);
-      const match = namespacePattern.exec(prompt);
-      if (match) {
-        errors.push(
-          `${REQUIRED_DEFAULT_PROMPT_PATH}:${lineNumber(
-            prompt,
-            match.index,
-          )} hard-codes MCP namespace ${match[0]}; describe the capability without assuming a server name`,
-        );
+      if (forbiddenNamespacePattern) {
+        let namespacePattern;
+        try {
+          namespacePattern = new RegExp(forbiddenNamespacePattern);
+        } catch (error) {
+          errors.push(
+            `defaultPrompt.forbiddenNamespacePattern is not a valid regular expression: ${error.message}`,
+          );
+        }
+        if (namespacePattern) {
+          const match = namespacePattern.exec(prompt);
+          if (match) {
+            errors.push(
+              `${promptPath}:${lineNumber(
+                prompt,
+                match.index,
+              )} hard-codes MCP namespace ${match[0]}; describe the capability without assuming a server name`,
+            );
+          }
+        }
       }
     }
-  } else {
-    errors.push("agent asset contract is missing defaultPrompt configuration");
   }
 
   const markdownFiles = new Set([
@@ -1752,7 +1807,7 @@ export function validateAgentAssets(
     ...standaloneFiles,
   ]);
   if (promptFile && existsSync(promptFile)) markdownFiles.add(promptFile);
-  checkPnpmReferences(root, markdownFiles, packageJson, REQUIRED_PNPM_BUILTINS, errors);
+  checkPnpmReferences(root, markdownFiles, packageJson, pnpmBuiltins, errors);
 
   for (const forbidden of contract.forbiddenText ?? []) {
     let pattern;
