@@ -67,10 +67,24 @@ export function assertLatestJson(feed) {
     throw new Error("error: latest.json is missing version, url, or signature");
   }
 }
+function stripInlineShellComment(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === "\\" && quote === '"') i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === "#") return line.slice(0, i).trimEnd();
+  }
+  return line;
+}
 export function parseEnvFile(contents) {
   const env = {};
   for (const raw of contents.split(/\r?\n/u)) {
-    const line = raw.trim();
+    const line = stripInlineShellComment(raw.trim());
     if (!line || line.startsWith("#")) continue;
     const i = line.indexOf("=");
     if (i < 0) continue;
@@ -143,11 +157,13 @@ export function createDefaultRunner() {
       encoding: "utf8",
       stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     });
+    // spawnSync status is null when the child is killed by a signal.
     return {
-      status: result.status ?? (result.error ? 1 : 0),
+      status: result.status == null ? 1 : result.status,
       stdout: result.stdout ?? "",
       stderr: result.stderr ?? "",
       error: result.error ?? null,
+      signal: result.signal ?? null,
     };
   };
 }
@@ -155,7 +171,10 @@ export function requireOk(result, label) {
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const detail = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    throw new Error(detail || `error: ${label} failed with status ${result.status}`);
+    const reason = result.signal
+      ? `error: ${label} terminated by signal ${result.signal}`
+      : `error: ${label} failed with status ${result.status}`;
+    throw new Error(detail || reason);
   }
   return result;
 }

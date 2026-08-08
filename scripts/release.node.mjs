@@ -76,6 +76,17 @@ test("constants, artifacts, feed, credentials", () => {
   );
   assert.equal(r.credentialsEnvPath({}, "/h"), "/h/.symphony-release.env");
   assert.equal(r.parseEnvFile('K="V"').K, "V");
+  assert.equal(r.parseEnvFile(`APPLE_SIGNING_IDENTITY="${ID}" # note`).APPLE_SIGNING_IDENTITY, ID);
+  assert.equal(r.parseEnvFile('PATH="#hash"').PATH, "#hash");
+  assert.throws(
+    () => r.requireOk({ status: 1, stdout: "", stderr: "", error: null }, "cmd"),
+    /status 1/,
+  );
+  assert.throws(
+    () =>
+      r.requireOk({ status: 1, stdout: "", stderr: "", error: null, signal: "SIGTERM" }, "spctl"),
+    /SIGTERM/,
+  );
   assert.throws(
     () =>
       r.resolveCredentialsEnvironment({

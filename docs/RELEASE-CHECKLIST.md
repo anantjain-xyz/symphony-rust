@@ -262,78 +262,23 @@ draft to published. The resulting tag is `v<version>`.
 
 ## Recovery from failure
 
-### Build, signing, or notarization fails
-
-No release has been created because publication happens after the verified
-build. Fix credentials, certificate/keychain state, source, or Apple service
-failure; clean only known generated build outputs if necessary; then rerun from
-a clean, synchronized `main`.
-
-Do not weaken or skip `spctl`, stapler, or updater-signature verification to
-force publication.
-
-### The version tag already exists
-
-Determine whether the local and remote tag point at the exact intended release
-commit. If it points elsewhere, prefer bumping the version. Delete a tag only
-after confirming it belongs to a failed, unpublished attempt and coordinating
-with anyone who could have fetched it. Never silently move a published release
-tag.
-
-### A GitHub release already exists
-
-Inspect it before acting. If it is a published release, bump the version. If it
-is an incomplete draft from this exact commit and artifact set, verify every
-asset and signature before resuming. Do not create a second release with mixed
-or partially replaced artifacts.
-
-### Draft creation succeeds but asset verification fails
-
-The script deliberately leaves the release as a draft. Keep it private from the
-`latest` endpoint while investigating.
-
-Either:
-
-1. upload the missing correct artifact from the same verified build, recheck all
-   assets and feed contents, then publish; or
-2. delete the failed draft and its unpublished tag after verifying their scope,
-   then rerun the complete publish from a clean commit.
-
-Do not publish a draft merely because the human-facing DMG is present; updater
-clients also require the tarball, signature, and valid feed.
-
-### The updater feed or signature is bad after publication
-
-Existing installations should continue running, but update checks cannot
-complete safely. Stop promoting the release. Compare the published
-`latest.json`, tag, tarball, signature, embedded public key, and local verified
-artifacts. Repair the GitHub assets only with a coherent set from the same
-commit, or publish a new version.
-
-Do not point `releases/latest` at an unsigned bundle and do not reuse a signature
-for different bytes.
-
-### Installation fails in the app
-
-The current UI attempts to restore the worker and leaves the downloaded update
-available. Confirm the worker and active runs are safe, collect redacted logs,
-then retry the Update action.
-
-If installation succeeded but relaunch failed, use the offered Restart action.
-If restart still fails, quit and reopen Symphony manually before attempting a
-new download; do not repeatedly reinstall the same candidate.
+- **Build / signing / notarization fails:** no release exists yet. Fix credentials
+  or tooling, then rerun from clean `main`. Never skip `spctl`, stapler, or
+  updater-signature verification.
+- **Tag or published release already exists:** bump the version. Delete a tag
+  only when it belongs to a failed unpublished attempt.
+- **Draft exists but asset verification fails:** leave it draft. Upload the
+  correct same-build artifacts or delete the draft/tag and rerun fully. Do not
+  publish without all five assets.
+- **Bad updater feed/signature after publish:** stop promoting the release;
+  repair only with a coherent same-commit artifact set, or ship a new version.
+- **Install fails in-app:** retry Update after confirming the worker/runs are
+  safe; use Restart if install succeeded but relaunch failed.
 
 ## Post-release checks
 
-- [ ] GitHub shows the expected published tag and exact target commit.
-- [ ] All five assets have plausible non-zero sizes.
-- [ ] The stable DMG download works on a clean machine.
-- [ ] Gatekeeper accepts the installed application.
-- [ ] The application reports the intended version.
-- [ ] A prior supported version sees the update.
-- [ ] Unsafe active work triggers confirmation.
-- [ ] The worker stops before install and the app relaunches.
-- [ ] Settings, database contents, and keychain-backed credentials survive.
-- [ ] Logs contain no signing or updater secrets.
-- [ ] Any schema upgrade passes the integrity checks in
-      [`STORAGE-AND-MIGRATIONS.md`](STORAGE-AND-MIGRATIONS.md).
+- [ ] Published tag targets the built commit; all five assets are non-empty.
+- [ ] Stable DMG downloads; Gatekeeper accepts the app; version matches.
+- [ ] A prior build can check/download/install/restart; unsafe work confirms.
+- [ ] Settings, database, and keychain credentials survive; logs stay secret-free.
+- [ ] Schema upgrades pass [`STORAGE-AND-MIGRATIONS.md`](STORAGE-AND-MIGRATIONS.md).
