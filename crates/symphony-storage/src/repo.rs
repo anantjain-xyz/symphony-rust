@@ -1362,7 +1362,7 @@ impl Repository {
         self.changed("retros", "insert");
         match self.get_retro(&id).await? {
             Some(retro) => Ok(retro),
-            None => Err(StorageError::Sqlx(sqlx::Error::RowNotFound)),
+            None => Err(sqlx::Error::RowNotFound.into()),
         }
     }
 
