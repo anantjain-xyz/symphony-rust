@@ -12,8 +12,6 @@ const COMMANDS = {
   "hygiene-tests": ["pnpm", "test:hygiene"],
   boundaries: ["pnpm", "check:boundaries"],
   "boundary-tests": ["pnpm", "test:boundaries"],
-  "frontend-contracts": ["pnpm", "check:frontend-boundaries"],
-  "frontend-contract-tests": ["node", "--test", "scripts/check-frontend-boundaries.node.mjs"],
   "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
   "rust-clippy": [
     "cargo",
@@ -27,6 +25,8 @@ const COMMANDS = {
     "warnings",
   ],
   "rust-tests": ["cargo", "test", "--workspace", "--exclude", "symphony-desktop"],
+  ipc: ["pnpm", "check:ipc"],
+  projections: ["pnpm", "check:projections"],
   "static-contracts": ["pnpm", "check:static"],
   "static-tests": ["pnpm", "test:static"],
   typecheck: ["pnpm", "typecheck"],
@@ -40,13 +40,15 @@ const COMMANDS = {
 const FAST_PROFILE = [
   "lint",
   "format",
-  "frontend-contracts",
-  "frontend-contract-tests",
   "rust-format",
   "rust-clippy",
   "rust-tests",
   "typecheck",
   "frontend-tests",
+  // Surviving replacements for the removed frontend-boundary fast-gate checks:
+  // import ownership is Biome lint; command/event drift stays in these checkers.
+  "ipc",
+  "projections",
 ];
 
 const PROFILES = {
@@ -54,7 +56,8 @@ const PROFILES = {
   full: [
     "agent-assets",
     "agent-asset-tests",
-    ...FAST_PROFILE,
+    // Omit ipc/projections here: `static-contracts` (`pnpm check:static`) already runs them.
+    ...FAST_PROFILE.filter((name) => name !== "ipc" && name !== "projections"),
     "workflows",
     "shell",
     "links",

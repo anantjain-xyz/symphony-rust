@@ -60,6 +60,147 @@
   },
   "overrides": [
     {
+      "includes": [
+        "**",
+        "!src/desktop/shell.ts",
+        "!src/desktop/commands.ts",
+        "!src/desktop/runtime.ts",
+        "!src/desktop/events.ts",
+        "!src/desktop/updater.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**"],
+                    "message": "Import Tauri modules only through src/desktop adapters"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/shell.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "@tauri-apps/**",
+                      "!@tauri-apps/api/app",
+                      "!@tauri-apps/plugin-opener"
+                    ],
+                    "message": "shell.ts may import only @tauri-apps/api/app and @tauri-apps/plugin-opener"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/commands.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/core"],
+                    "message": "commands.ts may import only @tauri-apps/api/core"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/runtime.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/core"],
+                    "message": "runtime.ts may import only @tauri-apps/api/core"
+                  }
+                ],
+                "paths": {
+                  "@tauri-apps/api/core": {
+                    "allowImportNames": ["isTauri"],
+                    "message": "runtime.ts may import only isTauri from @tauri-apps/api/core; invoke belongs in commands.ts"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/events.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/event"],
+                    "message": "events.ts may import only @tauri-apps/api/event"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/updater.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": [
+                      "@tauri-apps/**",
+                      "!@tauri-apps/plugin-process",
+                      "!@tauri-apps/plugin-updater"
+                    ],
+                    "message": "updater.ts may import only @tauri-apps/plugin-process and @tauri-apps/plugin-updater"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "includes": ["**/*.test.ts", "**/*.test.tsx"],
       "linter": {
         "rules": {
