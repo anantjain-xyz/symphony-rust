@@ -51,7 +51,7 @@
     "validate_settings"
   ],
   "eventOwner": "src/desktop/events.ts",
-  "events": ["agent_event", "db_changed", "rate_limit_changed"],
+  "events": ["agent_event", "db_changed", "rate_limit_changed", "workflow_ready"],
   "asyncInvariantTests": [
     {
       "id": "per-caller-settlement",
