@@ -173,13 +173,15 @@ impl LinearTracker {
             variables.insert("projectIds".to_string(), serde_json::json!(project_ids));
             project_filters.push("{ id: { in: $projectIds } }".to_string());
         }
-        if !project_slug_ids.is_empty() {
-            var_decls.push("$projectSlugIds: [String!]!".to_string());
-            variables.insert(
-                "projectSlugIds".to_string(),
-                serde_json::json!(project_slug_ids),
-            );
-            project_filters.push("{ slugId: { in: $projectSlugIds } }".to_string());
+        for (index, project_slug_id) in project_slug_ids.iter().enumerate() {
+            let variable = if project_slug_ids.len() == 1 {
+                "projectSlugId".to_string()
+            } else {
+                format!("projectSlugId{index}")
+            };
+            var_decls.push(format!("${variable}: String!"));
+            variables.insert(variable.clone(), serde_json::json!(project_slug_id));
+            project_filters.push(format!("{{ slugId: {{ eq: ${variable} }} }}"));
         }
         match project_filters.as_slice() {
             [] => {}
@@ -1064,21 +1066,19 @@ mod tests {
     fn project_refs_accept_urls_and_deduplicate() {
         let tracker = LinearTracker::new(TrackerConfig {
             project_ids: vec![
-                "https://linear.app/optimism-llc/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview"
+                "https://linear.app/optimism-llc/project/symphony-3171f2ba1c70/overview"
                     .to_string(),
-                "phase-1-pre-launch-fixes-00bdaf30dd39".to_string(),
-                "project-id".to_string(),
+                "https://linear.app/optimism-llc/project/symphony-3171f2ba1c70/overview"
+                    .to_string(),
+                "0daba920-df53-4648-93da-114035afb611".to_string(),
             ],
             ..Default::default()
         });
 
         let refs = tracker.project_refs();
         assert_eq!(refs.len(), 2);
-        assert_eq!(
-            refs[0].slug_id(),
-            Some("phase-1-pre-launch-fixes-00bdaf30dd39")
-        );
-        assert_eq!(refs[1].id(), Some("project-id"));
+        assert_eq!(refs[0].slug_id(), Some("symphony-3171f2ba1c70"));
+        assert_eq!(refs[1].id(), Some("0daba920-df53-4648-93da-114035afb611"));
     }
 
     fn issue_for_filter(identifier: &str, project_id: Option<&str>) -> Issue {
@@ -1149,7 +1149,7 @@ mod tests {
             .contains("assignee: { id: { eq: $assigneeId } }"));
         assert!(prepared.query.contains("team: { key: { in: $teamKeys } }"));
         assert!(prepared.query.contains(
-            "project: { or: [{ id: { in: $projectIds } }, { slugId: { in: $projectSlugIds } }] }"
+            "project: { or: [{ id: { in: $projectIds } }, { slugId: { eq: $projectSlugId } }] }"
         ));
         assert_eq!(prepared.variables["s0"], serde_json::json!("Todo"));
         assert_eq!(prepared.variables["s1"], serde_json::json!("Rework"));
@@ -1162,8 +1162,8 @@ mod tests {
             serde_json::json!(["project-1"])
         );
         assert_eq!(
-            prepared.variables["projectSlugIds"],
-            serde_json::json!(["phase-1-00bdaf30dd39"])
+            prepared.variables["projectSlugId"],
+            serde_json::json!("phase-1-00bdaf30dd39")
         );
         assert_eq!(
             prepared.variables["assigneeId"],

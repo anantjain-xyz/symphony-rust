@@ -1410,7 +1410,6 @@ async fn persist_run_event(
     if let Some(tokens) = &event.tokens {
         repo.upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
             .await?;
-        repo.update_tokens(run_id, tokens).await?;
         repo.record_token_usage(provider, tokens).await?;
     }
     if let Some(rate_limit) = &event.rate_limit {
@@ -1712,6 +1711,111 @@ mod tests {
             },
             events: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn persists_token_event_once_and_keeps_counts_after_final_identity_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.mark_running(&run.id).await.unwrap();
+        let mut storage_events = repo.events().subscribe();
+
+        persist_run_event(
+            &repo,
+            &run.id,
+            "codex",
+            &MappedAgentEvent {
+                kind: symphony_core::AgentEventKind::TokenCount,
+                payload: serde_json::json!({
+                    "input_tokens": 120,
+                    "output_tokens": 34,
+                    "total_tokens": 154,
+                }),
+                humanized: None,
+                tokens: Some(TokenCountPayload {
+                    input_tokens: 120,
+                    output_tokens: 34,
+                    total_tokens: 154,
+                }),
+                rate_limit: None,
+                session_info: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut live_session_upserts = 0;
+        let mut token_usage_upserts = 0;
+        while let Ok(event) = storage_events.try_recv() {
+            if let symphony_storage::StorageEvent::DbChanged { table, op } = event {
+                if table == "live_sessions" && op == "upsert" {
+                    live_session_upserts += 1;
+                }
+                if table == "token_usage" && op == "upsert" {
+                    token_usage_upserts += 1;
+                }
+            }
+        }
+        assert_eq!(live_session_upserts, 1);
+        assert_eq!(token_usage_upserts, 1);
+
+        let session = repo
+            .overview()
+            .await
+            .unwrap()
+            .live_sessions
+            .into_iter()
+            .find(|session| session.run_id == run.id)
+            .unwrap();
+        assert_eq!(session.input_tokens, 120);
+        assert_eq!(session.output_tokens, 34);
+        assert_eq!(session.total_tokens, 154);
+        assert!(!session.last_event_at.is_empty());
+
+        repo.upsert_live_session(
+            &run.id,
+            "final-session",
+            "thread-1",
+            "turn-1",
+            &TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let session = repo
+            .overview()
+            .await
+            .unwrap()
+            .live_sessions
+            .into_iter()
+            .find(|session| session.run_id == run.id)
+            .unwrap();
+        assert_eq!(session.session_id, "final-session");
+        assert_eq!(session.thread_id, "thread-1");
+        assert_eq!(session.turn_id, "turn-1");
+        assert_eq!(session.input_tokens, 120);
+        assert_eq!(session.output_tokens, 34);
+        assert_eq!(session.total_tokens, 154);
+
+        let usage = repo.overview().await.unwrap().token_usage;
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].source, "codex");
+        assert_eq!(usage[0].input_tokens, 120);
+        assert_eq!(usage[0].output_tokens, 34);
+        assert_eq!(usage[0].total_tokens, 154);
+        assert_eq!(usage[0].run_count, 1);
     }
 
     async fn wait_for_path(path: &std::path::Path) {

@@ -869,9 +869,29 @@ impl Repository {
               session_id = excluded.session_id,
               thread_id = excluded.thread_id,
               turn_id = excluded.turn_id,
-              input_tokens = excluded.input_tokens,
-              output_tokens = excluded.output_tokens,
-              total_tokens = excluded.total_tokens,
+              -- The final identity-only upsert carries an all-zero payload;
+              -- keep the cumulative token columns in that case.
+              input_tokens = case
+                when excluded.input_tokens = 0
+                 and excluded.output_tokens = 0
+                 and excluded.total_tokens = 0
+                then input_tokens
+                else excluded.input_tokens
+              end,
+              output_tokens = case
+                when excluded.input_tokens = 0
+                 and excluded.output_tokens = 0
+                 and excluded.total_tokens = 0
+                then output_tokens
+                else excluded.output_tokens
+              end,
+              total_tokens = case
+                when excluded.input_tokens = 0
+                 and excluded.output_tokens = 0
+                 and excluded.total_tokens = 0
+                then total_tokens
+                else excluded.total_tokens
+              end,
               last_event_at = excluded.last_event_at
             "#,
         )
@@ -886,29 +906,6 @@ impl Repository {
         .execute(&self.pool)
         .await?;
         self.changed("live_sessions", "upsert");
-        Ok(())
-    }
-
-    pub async fn update_tokens(
-        &self,
-        run_id: &str,
-        tokens: &TokenCountPayload,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            update live_sessions
-            set input_tokens = ?1, output_tokens = ?2, total_tokens = ?3, last_event_at = ?4
-            where run_id = ?5
-            "#,
-        )
-        .bind(tokens.input_tokens)
-        .bind(tokens.output_tokens)
-        .bind(tokens.total_tokens)
-        .bind(now_iso())
-        .bind(run_id)
-        .execute(&self.pool)
-        .await?;
-        self.changed("live_sessions", "update");
         Ok(())
     }
 
@@ -2547,6 +2544,60 @@ mod tests {
         assert_eq!(codex.source, "codex");
         assert_eq!(codex.total_tokens, 55);
         assert_eq!(codex.run_count, 1);
+    }
+
+    #[tokio::test]
+    async fn identity_upsert_preserves_accumulated_live_session_tokens() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        repo.upsert_live_session(
+            &run.id,
+            "pending-session",
+            "",
+            "",
+            &TokenCountPayload {
+                input_tokens: 120,
+                output_tokens: 34,
+                total_tokens: 154,
+            },
+        )
+        .await
+        .unwrap();
+        repo.upsert_live_session(
+            &run.id,
+            "final-session",
+            "thread-1",
+            "turn-1",
+            &TokenCountPayload {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let session = repo
+            .overview()
+            .await
+            .unwrap()
+            .live_sessions
+            .into_iter()
+            .find(|session| session.run_id == run.id)
+            .unwrap();
+        assert_eq!(session.session_id, "final-session");
+        assert_eq!(session.thread_id, "thread-1");
+        assert_eq!(session.turn_id, "turn-1");
+        assert_eq!(session.input_tokens, 120);
+        assert_eq!(session.output_tokens, 34);
+        assert_eq!(session.total_tokens, 154);
+        assert!(!session.last_event_at.is_empty());
     }
 
     #[tokio::test]

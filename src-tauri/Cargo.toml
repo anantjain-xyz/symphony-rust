@@ -26,16 +26,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-chrono.workspace = true
 keyring.workspace = true
 keyring-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 similar.workspace = true
-specta.workspace = true
-symphony-agents = { path = "../crates/symphony-agents" }
 symphony-contracts = { path = "../crates/symphony-contracts" }
 symphony-core = { path = "../crates/symphony-core" }
 symphony-storage = { path = "../crates/symphony-storage" }
@@ -45,7 +41,6 @@ tauri.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-plugin-process.workspace = true
 tauri-plugin-updater.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
