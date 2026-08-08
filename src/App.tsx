@@ -194,7 +194,6 @@ const emptyOverview: Overview = {
   retry_queue: [],
   retry_count: 0,
   recent_failures: [],
-  failure_count: 0,
   workspace_cleanup_count: 0,
   live_sessions: [],
   rate_limits: [],

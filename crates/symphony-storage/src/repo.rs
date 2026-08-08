@@ -235,7 +235,6 @@ pub struct Overview {
     pub retry_queue: Vec<RetryWithIssueRow>,
     pub retry_count: i64,
     pub recent_failures: Vec<RunWithIssueRow>,
-    pub failure_count: i64,
     pub workspace_cleanup_count: i64,
     pub live_sessions: Vec<LiveSessionRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
@@ -1102,17 +1101,15 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        let (retry_count, failure_count, workspace_cleanup_count): (i64, i64, i64) =
-            sqlx::query_as(
-                r#"
+        let (retry_count, workspace_cleanup_count): (i64, i64) = sqlx::query_as(
+            r#"
             select
               (select count(*) from retry_queue),
-              (select count(*) from runs where status in ('failure', 'timeout')),
               (select count(*) from workspace_cleanup_queue)
             "#,
-            )
-            .fetch_one(&self.pool)
-            .await?;
+        )
+        .fetch_one(&self.pool)
+        .await?;
         let recent_failures = self
             .runs_with_issue(
                 "where r.status in ('failure', 'timeout') order by r.ended_at desc",
@@ -1159,7 +1156,6 @@ impl Repository {
             retry_queue,
             retry_count,
             recent_failures,
-            failure_count,
             workspace_cleanup_count,
             live_sessions,
             rate_limits,
@@ -2341,7 +2337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_counts_all_failures_and_retries_beyond_preview_limits() {
+    async fn overview_previews_failures_and_counts_all_retries_beyond_limits() {
         let repo = repo().await;
         let issues = (0..51)
             .map(|index| Issue {
@@ -2379,7 +2375,6 @@ mod tests {
 
         let overview = repo.overview().await.unwrap();
 
-        assert_eq!(overview.failure_count, 51);
         assert_eq!(overview.recent_failures.len(), 20);
         assert_eq!(overview.retry_count, 51);
         assert_eq!(overview.retry_queue.len(), 50);

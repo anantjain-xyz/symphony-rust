@@ -360,7 +360,6 @@ const previewOverview: Overview = {
   ],
   retry_count: 1,
   recent_failures: [previewFailedRun],
-  failure_count: 1,
   workspace_cleanup_count: 2,
   live_sessions: [
     {
