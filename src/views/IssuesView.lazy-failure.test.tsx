@@ -35,7 +35,6 @@ const issue: IssueRow = {
   branch: null,
   labels: "[]",
   blockers: "[]",
-  pr_urls: "[]",
   raw: "{}",
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };

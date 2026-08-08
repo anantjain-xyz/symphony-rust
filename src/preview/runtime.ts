@@ -217,7 +217,6 @@ const previewIssues: IssueRow[] = [
     branch: "codex/sym-58-stop-run",
     labels: JSON.stringify(["symphony", "ui"]),
     blockers: JSON.stringify([]),
-    pr_urls: JSON.stringify([]),
     raw: JSON.stringify({
       id: "preview-issue-sym-58",
       identifier: "SYM-58",
@@ -228,7 +227,6 @@ const previewIssues: IssueRow[] = [
       branch: "codex/sym-58-stop-run",
       labels: ["symphony", "ui"],
       blockers: [],
-      pr_urls: [],
       project_id: null,
     }),
     last_seen_at: previewIso(-45_000),
@@ -243,7 +241,6 @@ const previewIssues: IssueRow[] = [
     branch: "codex/sym-61-skills-install-ux",
     labels: JSON.stringify(["ui", "skills"]),
     blockers: JSON.stringify(["SYM-60"]),
-    pr_urls: JSON.stringify(["https://github.com/acme/widgets/pull/61"]),
     raw: JSON.stringify({
       id: "preview-issue-sym-61",
       identifier: "SYM-61",
@@ -254,7 +251,6 @@ const previewIssues: IssueRow[] = [
       branch: "codex/sym-61-skills-install-ux",
       labels: ["ui", "skills"],
       blockers: ["SYM-60"],
-      pr_urls: ["https://github.com/acme/widgets/pull/61"],
       project_id: null,
     }),
     last_seen_at: previewIso(-4 * 60_000),
@@ -269,7 +265,6 @@ const previewIssues: IssueRow[] = [
     branch: "codex/sym-57-skills",
     labels: JSON.stringify(["skills"]),
     blockers: JSON.stringify([]),
-    pr_urls: JSON.stringify(["https://github.com/acme/widgets/pull/57"]),
     raw: JSON.stringify({
       id: "preview-issue-sym-57",
       identifier: "SYM-57",
@@ -280,7 +275,6 @@ const previewIssues: IssueRow[] = [
       branch: "codex/sym-57-skills",
       labels: ["skills"],
       blockers: [],
-      pr_urls: ["https://github.com/acme/widgets/pull/57"],
       project_id: null,
     }),
     last_seen_at: previewIso(-25 * 60 * 60_000),

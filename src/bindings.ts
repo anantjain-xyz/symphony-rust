@@ -86,7 +86,7 @@ export type RetroSuggestionTarget = "prompt" | "skill"
 
 export type RetroConfidence = "low" | "medium" | "high"
 
-export type IssueRow = { id: string; identifier: string; title: string; description: string | null; priority: number; state: string; branch: string | null; labels: string; blockers: string; pr_urls: string; raw: string; last_seen_at: string }
+export type IssueRow = { id: string; identifier: string; title: string; description: string | null; priority: number; state: string; branch: string | null; labels: string; blockers: string; raw: string; last_seen_at: string }
 
 export type AgentEventRow = { id: number; run_id: string; kind: string; payload: string; created_at: string }
 
