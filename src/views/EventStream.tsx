@@ -34,7 +34,6 @@ export type EventRowProps = {
   needle: string;
   matchStarts?: EventMatchStarts;
   currentIndex: number;
-  onRender?: (key: string) => void;
 };
 
 function EventRowComponent({
@@ -47,9 +46,7 @@ function EventRowComponent({
   needle,
   matchStarts = NO_MATCH_STARTS,
   currentIndex,
-  onRender,
 }: EventRowProps) {
-  onRender?.(model.key);
   const { event, label, summary, tone, prettyPayload, summaryBlocks } = model;
   return (
     <article
@@ -57,7 +54,13 @@ function EventRowComponent({
       data-index={eventIndex}
       aria-posinset={eventIndex + 1}
       className={tone === "error" ? "event-error" : undefined}
-      style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${start}px)` }}
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        width: "100%",
+        transform: `translateY(${start}px)`,
+      }}
     >
       <div className="event-line">
         <span className="event-kind">
@@ -79,14 +82,10 @@ function EventRowComponent({
       </div>
       <details
         open={expanded}
-        onToggle={(toggleEvent) =>
-          onExpandedChange(model.key, toggleEvent.currentTarget.open)
-        }
+        onToggle={(toggleEvent) => onExpandedChange(model.key, toggleEvent.currentTarget.open)}
       >
         <summary>payload</summary>
-        <pre>
-          {highlightMatches(prettyPayload, needle, matchStarts.payload, currentIndex)}
-        </pre>
+        <pre>{highlightMatches(prettyPayload, needle, matchStarts.payload, currentIndex)}</pre>
       </details>
     </article>
   );
@@ -108,15 +107,7 @@ function centerExactMatch(container: HTMLElement | null, matchIndex: number) {
   if (mark instanceof HTMLElement) mark.scrollIntoView({ block: "center", inline: "nearest" });
 }
 
-export function EventStream({
-  events,
-  live,
-  onRowRender,
-}: {
-  events: AgentEventRow[];
-  live: boolean;
-  onRowRender?: (key: string) => void;
-}) {
+export function EventStream({ events, live }: { events: AgentEventRow[]; live: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const preparedCacheRef = useRef<PreparedEventCache>(new Map());
@@ -130,10 +121,7 @@ export function EventStream({
   const [current, setCurrent] = useState(0);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
 
-  const prepared = useMemo(
-    () => prepareEvents(events, preparedCacheRef.current),
-    [events],
-  );
+  const prepared = useMemo(() => prepareEvents(events, preparedCacheRef.current), [events]);
   eventCountRef.current = prepared.length;
   const deferredQuery = useDeferredValue(searchOpen ? query : "");
   const search = useMemo(
@@ -142,10 +130,7 @@ export function EventStream({
   );
   const totalMatches = search.totalMatches;
   const activeMatchIndex = Math.min(current, totalMatches - 1);
-  const activeMatch = useMemo(
-    () => search.matchAt(activeMatchIndex),
-    [activeMatchIndex, search],
-  );
+  const activeMatch = useMemo(() => search.matchAt(activeMatchIndex), [activeMatchIndex, search]);
 
   const virtualizer = useVirtualizer({
     count: prepared.length,
@@ -161,15 +146,13 @@ export function EventStream({
         }),
       ),
     estimateSize: () => COLLAPSED_ROW_ESTIMATE,
-    measureElement: (element) =>
-      element.getBoundingClientRect().height || COLLAPSED_ROW_ESTIMATE,
+    measureElement: (element) => element.getBoundingClientRect().height || COLLAPSED_ROW_ESTIMATE,
     overscan: OVERSCAN_ROWS,
     getItemKey: (index) => prepared[index]?.key ?? index,
     useFlushSync: false,
   });
   const measureElement = useCallback<RefCallback<HTMLElement>>(
-    (element) =>
-      measureEventElement(element, eventCountRef.current, virtualizer.measureElement),
+    (element) => measureEventElement(element, eventCountRef.current, virtualizer.measureElement),
     [virtualizer],
   );
   const onExpandedChange = useCallback((key: string, expanded: boolean) => {
@@ -324,12 +307,42 @@ export function EventStream({
               aria-live="polite"
               aria-label={`${totalMatches} search matches`}
             >
-              {totalMatches === 0 ? "0/0" : `${Math.min(current + 1, totalMatches)}/${totalMatches}`}
+              {totalMatches === 0
+                ? "0/0"
+                : `${Math.min(current + 1, totalMatches)}/${totalMatches}`}
             </span>
           ) : null}
-          <button type="button" title="Previous match (Shift+Enter)" aria-label="Previous match" disabled={totalMatches === 0} onMouseDown={(event) => event.preventDefault()} onClick={() => step(-1)}>↑</button>
-          <button type="button" title="Next match (Enter)" aria-label="Next match" disabled={totalMatches === 0} onMouseDown={(event) => event.preventDefault()} onClick={() => step(1)}>↓</button>
-          <button type="button" title="Close (Esc)" aria-label="Close search" onClick={() => { setSearchOpen(false); readingMatchRef.current = false; }}>✕</button>
+          <button
+            type="button"
+            title="Previous match (Shift+Enter)"
+            aria-label="Previous match"
+            disabled={totalMatches === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => step(-1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            title="Next match (Enter)"
+            aria-label="Next match"
+            disabled={totalMatches === 0}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => step(1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            title="Close (Esc)"
+            aria-label="Close search"
+            onClick={() => {
+              setSearchOpen(false);
+              readingMatchRef.current = false;
+            }}
+          >
+            ✕
+          </button>
         </div>
       ) : null}
       <div
@@ -339,11 +352,15 @@ export function EventStream({
           const element = containerRef.current;
           if (!element) return;
           const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
-          if (!atBottom) readingMatchRef.current = readingMatchRef.current || Boolean(search.needle);
+          if (!atBottom)
+            readingMatchRef.current = readingMatchRef.current || Boolean(search.needle);
           setFollow(atBottom && !readingMatchRef.current);
         }}
       >
-        <div className="events-virtual" style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative", width: "100%" }}>
+        <div
+          className="events-virtual"
+          style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative", width: "100%" }}
+        >
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const model = prepared[virtualRow.index];
             const starts = search.starts.get(model.key);
@@ -359,7 +376,6 @@ export function EventStream({
                 needle={starts ? search.needle : ""}
                 matchStarts={starts}
                 currentIndex={virtualRow.index === activeEventIndex ? current : -1}
-                onRender={onRowRender}
               />
             );
           })}

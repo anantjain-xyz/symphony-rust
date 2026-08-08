@@ -17,7 +17,6 @@ import type {
 import { SettingsValidationController } from "../settingsValidationController";
 import type { SettingsValidationState } from "../settingsValidationController";
 import { nullable } from "../format";
-import { reconcileSettingsDraft } from "../viewHelpers";
 import { formSnapshot, Panel } from "../viewPrimitives";
 import "./IconSelect.css";
 import "./SettingsView.css";
@@ -434,7 +433,7 @@ function SettingsFeature({
   }, [draftRef, ensureController, revisionRef, saveControllerRef, savePending, savedSettings]);
 
   useEffect(() => {
-    const next = reconcileSettingsDraft(savedSettings, draftRef.current ?? draft, dirtyRef.current);
+    const next = dirtyRef.current ? (draftRef.current ?? draft) : savedSettings;
     if (next === draftRef.current) return;
     draftRef.current = next;
     setDraft(next);

@@ -10,9 +10,22 @@ import type {
 import { openExternalUrl } from "../desktop/shell";
 import { shortTime } from "../format";
 import { RelativeTime } from "../RelativeTime";
-import { retroRepoBatchState } from "../viewHelpers";
 import { Badge, Empty, Panel } from "../viewPrimitives";
 import "./RetroView.css";
+
+export function retroRepoBatchState(
+  batches: RetroBatchRow[],
+  repoName: string,
+): "available" | "locked" | "stale" {
+  const repoBatches = batches.filter(
+    (batch) => batch.kind === "repo_pr" && batch.repo_name === repoName,
+  );
+  if (repoBatches.some((batch) => ["queued", "running", "completed"].includes(batch.state))) {
+    return "locked";
+  }
+  if (repoBatches.some((batch) => batch.state === "stale")) return "stale";
+  return "available";
+}
 
 function RetroView({
   retros,

@@ -451,8 +451,7 @@ function skillsCheckContextKey(repoUrl: string, sessionEnv: AppSettings["session
   return `${repoUrl}\n${stableSessionEnvKey(sessionEnv)}`;
 }
 
-function App({ onRender }: { onRender?: () => void } = {}) {
-  onRender?.();
+function App() {
   const runtimeAvailable = isDesktopRuntime();
   const [theme, toggleTheme] = useTheme();
   const [view, setView] = useState<View>("overview");
