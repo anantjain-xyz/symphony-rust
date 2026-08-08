@@ -156,7 +156,6 @@ function settingsInvoke({
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -226,7 +225,6 @@ function dashboardInvoke({
     retry_queue: [],
     retry_count: 0,
     recent_failures: [],
-    failure_count: 0,
     workspace_cleanup_count: 0,
     live_sessions: [],
     rate_limits: [],
@@ -387,7 +385,6 @@ function runRow(overrides: Partial<RunWithIssueRow> = {}): RunWithIssueRow {
     ended_at: null,
     error_class: null,
     error_message: null,
-    worker_pid: 123,
     session_info: null,
     repo_name: "widgets",
     created_at: "2026-01-01T00:00:00.000Z",
@@ -964,7 +961,6 @@ describe("App settings", () => {
       retry_queue: [],
       retry_count: 0,
       recent_failures: [],
-      failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
       rate_limits: [],
@@ -1049,7 +1045,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -1061,7 +1056,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1101,7 +1096,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -1113,7 +1107,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1143,7 +1137,6 @@ describe("App settings", () => {
       retry_queue: [],
       retry_count: 0,
       recent_failures: [],
-      failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
       rate_limits: [],
@@ -1185,7 +1178,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1240,7 +1233,7 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
 
     rendered.unmount();
-    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(4));
   });
 
   it("fetches the bootstrap-selected Retro detail only when Retro opens", async () => {
@@ -1293,7 +1286,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1328,7 +1321,6 @@ describe("App settings", () => {
       retry_queue: [],
       retry_count: 0,
       recent_failures: [],
-      failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
       rate_limits: [],
@@ -1360,7 +1352,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
     fireEvent.click(await screen.findByRole("tab", { name: "List" }));
     expect(await screen.findByText("Last good issue")).toBeTruthy();
@@ -1462,7 +1454,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
 
     vi.useFakeTimers();
     try {
@@ -1483,7 +1475,6 @@ describe("App settings", () => {
         retry_queue: [],
         retry_count: 0,
         recent_failures: [],
-        failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
         rate_limits: [],
@@ -1514,7 +1505,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
@@ -1699,7 +1690,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1783,7 +1774,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     listeners.get("db_changed")!({
       payload: { type: "db_changed", table: "runs", op: "update" },
@@ -2185,6 +2176,7 @@ describe("App settings", () => {
         "agent_event",
         "db_changed",
         "rate_limit_changed",
+        "workflow_ready",
       ]);
 
       act(() => {
@@ -2216,7 +2208,6 @@ describe("App settings", () => {
         retry_queue: [],
         retry_count: 0,
         recent_failures: [],
-        failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
         rate_limits: [],
@@ -2255,7 +2246,7 @@ describe("App settings", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(unlisten).toHaveBeenCalledTimes(3);
+      expect(unlisten).toHaveBeenCalledTimes(4);
     } finally {
       vi.useRealTimers();
     }
@@ -2710,7 +2701,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -2756,7 +2746,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -2813,7 +2802,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 0,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -3588,7 +3576,6 @@ describe("App settings", () => {
           retry_queue: [],
           retry_count: 51,
           recent_failures: [],
-          failure_count: 23,
           workspace_cleanup_count: 7,
           live_sessions: [],
           rate_limits: [],
@@ -3627,7 +3614,6 @@ describe("App settings", () => {
           ],
           retry_count: 1,
           recent_failures: [],
-          failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
           rate_limits: [],
@@ -3665,7 +3651,6 @@ describe("App settings", () => {
       ended_at: "2026-01-01T00:10:00.000Z",
       error_class: "cancelled",
       error_message: "run cancelled",
-      worker_pid: null,
       created_at: "2026-01-01T00:00:00.000Z",
       issue_identifier: "SYM-100",
       issue_title: "Retry the cancelled run",
@@ -3678,7 +3663,6 @@ describe("App settings", () => {
         retry_queue: [],
         retry_count: 0,
         recent_failures: [],
-        failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
         rate_limits: [],
@@ -3723,7 +3707,6 @@ describe("App settings", () => {
       retry_queue: [],
       retry_count: 0,
       recent_failures: [],
-      failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
       rate_limits: [],

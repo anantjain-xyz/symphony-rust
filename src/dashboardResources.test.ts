@@ -16,14 +16,12 @@ describe("dashboard resource invalidation map", () => {
     ["retry_queue", ["issues", "overview"]],
     ["runs", ["runs", "overview", "selectedRun"]],
     ["live_sessions", ["runs", "overview", "selectedRun"]],
-    ["hook_runs", ["runs", "overview", "selectedRun"]],
     ["agent_events", ["overview", "selectedRun"]],
     ["retros", ["retroList", "selectedRetro"]],
     ["retro_suggestions", ["retroList", "selectedRetro"]],
     ["retro_inputs", ["retroList", "selectedRetro"]],
     ["workpad_snapshots", ["retroList", "selectedRetro"]],
     ["retro_batches", ["retroBatches", "selectedRetro"]],
-    ["workflows", ["overview"]],
   ] as const)("maps %s", (table, expected) => {
     expect(resourcesForDbChange(table)).toEqual(expected);
   });

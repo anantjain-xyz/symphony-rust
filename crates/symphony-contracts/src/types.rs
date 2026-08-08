@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use symphony_storage::{
-    AgentEventRow, IssueRow, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
+    AgentEventRow, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
 };
 
 use crate::AppSettings;
@@ -61,11 +61,6 @@ pub struct WorkflowStateRow {
 pub struct RunDetail {
     pub run: RunWithIssueRow,
     pub events: Vec<AgentEventRow>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct IssueDetail {
-    pub issue: IssueRow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

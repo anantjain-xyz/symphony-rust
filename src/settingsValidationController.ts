@@ -144,8 +144,7 @@ export class SettingsValidationController {
         this.resolveWaiters(this.queued.id, {
           kind: "unavailable",
           cause: "superseded",
-          reason:
-            "Settings changed again while validation was queued, so this Save was skipped.",
+          reason: "Settings changed again while validation was queued, so this Save was skipped.",
         });
       }
       this.queued = revision;

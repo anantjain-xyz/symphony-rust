@@ -194,7 +194,6 @@ const emptyOverview: Overview = {
   retry_queue: [],
   retry_count: 0,
   recent_failures: [],
-  failure_count: 0,
   workspace_cleanup_count: 0,
   live_sessions: [],
   rate_limits: [],
@@ -1144,10 +1143,6 @@ function App() {
 
     const unsubscribe = subscribeDesktopEvents({
       onDbChanged: (payload) => {
-        if (payload.table === "workflows") {
-          workflowReadinessDirtyRef.current = true;
-          setWorkflowReadinessEpoch((epoch) => epoch + 1);
-        }
         let keys = resourcesForDbChange(payload.table);
         if (payload.table === "agent_events" && typedAgentEventAwaitingDbChangeRef.current) {
           typedAgentEventAwaitingDbChangeRef.current = false;
@@ -1177,6 +1172,10 @@ function App() {
       },
       onRateLimitChanged: () => {
         scheduleRefresh(["overview"]);
+      },
+      onWorkflowReady: () => {
+        workflowReadinessDirtyRef.current = true;
+        setWorkflowReadinessEpoch((epoch) => epoch + 1);
       },
       onError: (err) => {
         if (!cancelled) setError(formatError(err));

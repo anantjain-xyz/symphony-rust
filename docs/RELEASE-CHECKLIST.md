@@ -7,12 +7,17 @@ recovery from partial failures.
 ## Status and release shape
 
 **Current behavior** describes checked-in scripts and configuration.
-**Proposed invariants** are release rules. Version equality is not currently
-enforced by a standalone static verifier.
+**Proposed invariants** are release rules. Version equality across checked-in
+surfaces is enforced by `pnpm check:release` (also part of `pnpm check:static`
+and the validation profiles).
 
 The supported publish script produces an Apple Silicon macOS release and an
 updater feed for `darwin-aarch64`. It must run on Apple Silicon macOS from a
 clean `main` commit that exactly matches `origin/main`.
+
+Microsoft Store packaging is not supported. Standard Windows bundles continue
+to use `icons/icon.ico` from the Tauri bundle icon list; Store-specific logo
+assets are not kept in the repository.
 
 ## Version surfaces
 
@@ -50,8 +55,9 @@ After a bump:
 5. choose a version whose `v<version>` tag and GitHub release do not already
    represent a different commit.
 
-A future version verifier should read structured JSON/TOML/lockfile data and
-compare these surfaces. No such verifier is currently wired into CI.
+[`scripts/check-release.mjs`](../scripts/check-release.mjs) (`pnpm check:release`)
+reads structured JSON/TOML/lockfile data and compares these surfaces. Run it
+locally and in CI before treating a bump as release-ready.
 
 ## Release identities and secrets
 

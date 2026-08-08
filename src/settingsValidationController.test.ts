@@ -5,11 +5,10 @@ import {
   SettingsValidationController,
 } from "./settingsValidationController";
 
-const settings = (prompt_template: string) =>
-  ({ prompt_template } as AppSettings);
+const settings = (prompt_template: string) => ({ prompt_template }) as AppSettings;
 const valid = (workflow_error: string | null = null): ValidationResult =>
-  ({ workflow_blocking: workflow_error !== null, workflow_error } as ValidationResult);
-const deferred = <T,>() => {
+  ({ workflow_blocking: workflow_error !== null, workflow_error }) as ValidationResult;
+const deferred = <T>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => (resolve = next));
   return { promise, resolve };
@@ -126,9 +125,10 @@ describe("SettingsValidationController", () => {
     controller.clearScheduled();
     await vi.advanceTimersByTimeAsync(SETTINGS_VALIDATION_DEBOUNCE_MS);
     expect(validate).not.toHaveBeenCalled();
-    await expect(
-      controller.validateNow({ id: 2, settings: settings("save") }),
-    ).resolves.toEqual({ status: "ok", result: valid() });
+    await expect(controller.validateNow({ id: 2, settings: settings("save") })).resolves.toEqual({
+      status: "ok",
+      result: valid(),
+    });
     expect(validate).toHaveBeenCalledTimes(1);
   });
 
@@ -166,9 +166,7 @@ describe("SettingsValidationController", () => {
           reason: state.status === "unavailable" ? state.reason : undefined,
         }),
     );
-    await expect(
-      controller.validateNow({ id: 1, settings: settings("draft") }),
-    ).resolves.toEqual({
+    await expect(controller.validateNow({ id: 1, settings: settings("draft") })).resolves.toEqual({
       status: "unavailable",
       cause: "error",
       reason: "command validate_settings not found",

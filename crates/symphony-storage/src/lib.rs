@@ -69,6 +69,7 @@ pub enum StorageEvent {
     DbChanged { table: String, op: String },
     AgentEvent { event: AgentEventRow },
     RateLimitChanged { source: String },
+    WorkflowReady,
 }
 
 #[derive(Debug, Clone)]

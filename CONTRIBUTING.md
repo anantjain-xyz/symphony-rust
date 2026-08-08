@@ -34,9 +34,8 @@ pnpm verify:full
 prints elapsed time for every command. Validation profiles never install
 external tools. CI performs setup explicitly before `pnpm verify:full`.
 
-Biome formatting is adopted incrementally. Existing unformatted files are
-hash-pinned in `scripts/biome-format-baseline.json`; format any file you change
-with `pnpm biome format --write <file>` and remove its stale baseline entry.
+Run `pnpm format:check` (or `pnpm biome format .`) to verify formatting. Fix
+drift with `pnpm biome format --write <file>` or `pnpm biome format --write .`.
 
 ### TypeScript bindings
 

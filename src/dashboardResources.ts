@@ -21,14 +21,12 @@ const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   retry_queue: ["issues", "overview"],
   runs: ["runs", "overview", "selectedRun"],
   live_sessions: ["runs", "overview", "selectedRun"],
-  hook_runs: ["runs", "overview", "selectedRun"],
   agent_events: ["overview", "selectedRun"],
   retros: ["retroList", "selectedRetro"],
   retro_suggestions: ["retroList", "selectedRetro"],
   retro_inputs: ["retroList", "selectedRetro"],
   workpad_snapshots: ["retroList", "selectedRetro"],
   retro_batches: ["retroBatches", "selectedRetro"],
-  workflows: ["overview"],
 };
 
 const UNKNOWN_TABLE_FALLBACK: readonly DashboardResourceKey[] = [

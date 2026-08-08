@@ -47,11 +47,7 @@ describe("dashboard resource envelopes", () => {
     const retrying = beginResourceRefresh(stale, "2026-07-18T12:00:02.000Z");
     expect(retrying.error).not.toBeNull();
 
-    const recovered = completeResourceRefresh(
-      retrying,
-      ["fresh"],
-      "2026-07-18T12:00:03.000Z",
-    );
+    const recovered = completeResourceRefresh(retrying, ["fresh"], "2026-07-18T12:00:03.000Z");
     expect(recovered).toMatchObject({
       data: ["fresh"],
       status: "ready",

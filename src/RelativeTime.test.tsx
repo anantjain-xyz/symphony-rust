@@ -56,9 +56,7 @@ describe("relative-time clock", () => {
     vi.advanceTimersByTime(1);
 
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(getRelativeTimeSnapshot()).toBe(
-      new Date("2026-06-10T12:00:30.000Z").getTime(),
-    );
+    expect(getRelativeTimeSnapshot()).toBe(new Date("2026-06-10T12:00:30.000Z").getTime());
     expect(vi.getTimerCount()).toBe(1);
     unsubscribe();
   });
@@ -130,9 +128,7 @@ describe("RelativeTime", () => {
   });
 
   it("renders machine-readable and absolute timestamp affordances", () => {
-    const { container } = render(
-      <RelativeTime value="2026-06-10T11:59:28.000Z" />,
-    );
+    const { container } = render(<RelativeTime value="2026-06-10T11:59:28.000Z" />);
     const time = container.querySelector("time");
 
     expect(time?.dateTime).toBe("2026-06-10T11:59:28.000Z");
@@ -147,9 +143,7 @@ describe("RelativeTime", () => {
   });
 
   it("keeps absolute event times machine-readable and accessible", () => {
-    const { container, rerender } = render(
-      <AbsoluteTime value="2026-06-10T11:59:28.000Z" />,
-    );
+    const { container, rerender } = render(<AbsoluteTime value="2026-06-10T11:59:28.000Z" />);
     const time = container.querySelector("time");
 
     expect(time?.dateTime).toBe("2026-06-10T11:59:28.000Z");

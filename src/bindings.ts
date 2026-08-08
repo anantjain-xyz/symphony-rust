@@ -44,7 +44,7 @@ export type WorkerState = "stopped" | "running" | "stopping"
 
 export type WorkerStatus = { state: WorkerState; started_at: string | null; last_error: string | null }
 
-export type RunWithIssueRow = { id: string; issue_id: string; run_number: number; workspace_path: string; status: string; started_at: string | null; ended_at: string | null; error_class: string | null; error_message: string | null; worker_pid: number | null; session_info: string | null; repo_name: string | null; created_at: string; issue_identifier: string; issue_title: string; issue_state: string }
+export type RunWithIssueRow = { id: string; issue_id: string; run_number: number; workspace_path: string; status: string; started_at: string | null; ended_at: string | null; error_class: string | null; error_message: string | null; session_info: string | null; repo_name: string | null; created_at: string; issue_identifier: string; issue_title: string; issue_state: string }
 
 export type RetryWithIssueRow = { issue_id: string; run_number: number; due_at: string; error_class: string | null; error_message: string | null; created_at: string; issue_identifier: string; issue_title: string }
 
@@ -54,7 +54,7 @@ export type RateLimitStateRow = { source: string; remaining: number | null; rese
 
 export type TokenUsageRow = { source: string; input_tokens: number; output_tokens: number; total_tokens: number; run_count: number; updated_at: string }
 
-export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; failure_count: number; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
+export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
 
 export type RetroRow = { id: string; since_at: string; until_at: string; status: string; run_count: number; issue_count: number; report_json: string | null; error_message: string | null; created_at: string; completed_at: string | null }
 
@@ -88,7 +88,7 @@ export type IssueRow = { id: string; identifier: string; title: string; descript
 
 export type AgentEventRow = { id: number; run_id: string; kind: string; payload: string; created_at: string }
 
-export type StorageEvent = { type: "db_changed"; table: string; op: string } | { type: "agent_event"; event: AgentEventRow } | { type: "rate_limit_changed"; source: string }
+export type StorageEvent = { type: "db_changed"; table: string; op: string } | { type: "agent_event"; event: AgentEventRow } | { type: "rate_limit_changed"; source: string } | { type: "workflow_ready" }
 
 export type SkillsState = "installed" | "pr_open" | "missing" | "unavailable"
 
@@ -113,5 +113,3 @@ export type WorkflowTransferState = "idle" | "running" | "completed" | "failed"
 export type WorkflowTransferStatus = { state: WorkflowTransferState; repo_url: string | null; message: string | null; pr_url: string | null; error: string | null }
 
 export type RunDetail = { run: RunWithIssueRow; events: AgentEventRow[] }
-
-export type IssueDetail = { issue: IssueRow }

@@ -25,6 +25,8 @@ const COMMANDS = {
     "warnings",
   ],
   "rust-tests": ["cargo", "test", "--workspace", "--exclude", "symphony-desktop"],
+  ipc: ["pnpm", "check:ipc"],
+  projections: ["pnpm", "check:projections"],
   "static-contracts": ["pnpm", "check:static"],
   "static-tests": ["pnpm", "test:static"],
   typecheck: ["pnpm", "typecheck"],
@@ -43,6 +45,10 @@ const FAST_PROFILE = [
   "rust-tests",
   "typecheck",
   "frontend-tests",
+  // Surviving replacements for the removed frontend-boundary fast-gate checks:
+  // import ownership is Biome lint; command/event drift stays in these checkers.
+  "ipc",
+  "projections",
 ];
 
 const PROFILES = {
