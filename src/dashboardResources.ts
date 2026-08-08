@@ -28,7 +28,7 @@ const TABLE_INVALIDATIONS: Record<string, readonly DashboardResourceKey[]> = {
   retro_inputs: ["retroList", "selectedRetro"],
   workpad_snapshots: ["retroList", "selectedRetro"],
   retro_batches: ["retroBatches", "selectedRetro"],
-  workflows: ["overview"],
+  workflows: [],
 };
 
 const UNKNOWN_TABLE_FALLBACK: readonly DashboardResourceKey[] = [

@@ -5782,6 +5782,7 @@ dependencies = [
  "serde",
  "serde_json",
  "specta",
+ "sqlx",
  "symphony-agents",
  "symphony-core",
  "symphony-storage",

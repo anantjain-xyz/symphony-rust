@@ -1061,7 +1061,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1113,7 +1113,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1185,7 +1185,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1240,7 +1240,7 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
 
     rendered.unmount();
-    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(4));
   });
 
   it("fetches the bootstrap-selected Retro detail only when Retro opens", async () => {
@@ -1293,7 +1293,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1360,7 +1360,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
     fireEvent.click(await screen.findByRole("tab", { name: "List" }));
     expect(await screen.findByText("Last good issue")).toBeTruthy();
@@ -1462,7 +1462,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
 
     vi.useFakeTimers();
     try {
@@ -1514,7 +1514,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
@@ -1699,7 +1699,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1783,7 +1783,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     listeners.get("db_changed")!({
       payload: { type: "db_changed", table: "runs", op: "update" },
@@ -2185,6 +2185,7 @@ describe("App settings", () => {
         "agent_event",
         "db_changed",
         "rate_limit_changed",
+        "workflow_ready",
       ]);
 
       act(() => {
@@ -2255,7 +2256,7 @@ describe("App settings", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(unlisten).toHaveBeenCalledTimes(3);
+      expect(unlisten).toHaveBeenCalledTimes(4);
     } finally {
       vi.useRealTimers();
     }

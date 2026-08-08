@@ -361,7 +361,7 @@ async fn run_worker(
     stop: CancellationToken,
 ) -> Result<(), WorkerError> {
     let initial_config = config.read().await.clone();
-    repo.upsert_workflow(&initial_config.workflow).await?;
+    repo.notify_workflow_ready();
     let tracker_config = initial_config.workflow.front_matter.tracker.clone();
     let tracker = LinearTracker::new(tracker_config.clone());
     if !prepare_worker(&repo, &tracker, &initial_config, &stop).await? {
@@ -3561,5 +3561,45 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("cleanup paused after worker stop");
+    }
+
+    #[tokio::test]
+    async fn worker_start_emits_workflow_ready_without_db_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let bus = symphony_storage::EventBus::default();
+        let mut rx = bus.subscribe();
+        let repo = Repository::new(pool.clone(), bus);
+        let manager = WorkerManager::new(repo.clone());
+        let config = start_config(runtime_config(temp.path()));
+        let expected_hash = config.workflow.source_hash.clone();
+
+        // Start worker – run_worker emits workflow_ready before any tracker I/O.
+        let _status = manager.start(config).await.unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("workflow_ready should be emitted promptly")
+            .unwrap();
+        assert!(
+            matches!(event, symphony_storage::StorageEvent::WorkflowReady),
+            "expected WorkflowReady, got {event:?}"
+        );
+        // No persistent row was created.
+        let count: (i64,) = sqlx::query_as("select count(*) from workflows")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0, "workflows table must remain empty");
+        // The in-memory workflow hash is still available for Retro consumers.
+        assert!(!expected_hash.is_empty());
+        // Ensure overview was not invalidated by the readiness signal – the
+        // frontend mapping treats workflow_ready as a Settings-only refresh.
+        // The DB_CHANGED path for workflows must be empty so it does not pull
+        // overview into the invalidation set.
+        manager.stop().await;
+        // Give the background task a moment to exit cleanly.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
