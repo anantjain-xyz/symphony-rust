@@ -226,7 +226,6 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers: vec![],
-            pr_urls: vec![],
             project_id: None,
             project_slug_id: None,
         }

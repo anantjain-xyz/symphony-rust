@@ -159,7 +159,6 @@ function settingsInvoke({
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         };
@@ -230,7 +229,6 @@ function dashboardInvoke({
     failure_count: 0,
     workspace_cleanup_count: 0,
     live_sessions: [],
-    worker_heartbeat: null,
     rate_limits: [],
     token_usage: [],
   },
@@ -361,7 +359,6 @@ function issueRow({
     branch: null,
     labels: "[]",
     blockers: JSON.stringify(blockers),
-    pr_urls: "[]",
     raw: JSON.stringify({
       id,
       identifier,
@@ -372,7 +369,6 @@ function issueRow({
       branch: null,
       labels: [],
       blockers,
-      pr_urls: [],
       project_id: null,
       project_slug_id: null,
     }),
@@ -971,7 +967,6 @@ describe("App settings", () => {
       failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
-      worker_heartbeat: null,
       rate_limits: [],
       token_usage: [],
     });
@@ -1057,7 +1052,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         };
@@ -1110,7 +1104,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         };
@@ -1153,7 +1146,6 @@ describe("App settings", () => {
       failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
-      worker_heartbeat: null,
       rate_limits: [],
       token_usage: [],
     });
@@ -1339,7 +1331,6 @@ describe("App settings", () => {
       failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
-      worker_heartbeat: null,
       rate_limits: [],
       token_usage: [],
     } satisfies Overview;
@@ -1495,7 +1486,6 @@ describe("App settings", () => {
         failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
-        worker_heartbeat: null,
         rate_limits: [],
         token_usage: [],
       });
@@ -2229,7 +2219,6 @@ describe("App settings", () => {
         failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
-        worker_heartbeat: null,
         rate_limits: [],
         token_usage: [],
       });
@@ -2724,7 +2713,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         },
@@ -2771,7 +2759,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         },
@@ -2829,7 +2816,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         },
@@ -3605,7 +3591,6 @@ describe("App settings", () => {
           failure_count: 23,
           workspace_cleanup_count: 7,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         },
@@ -3645,7 +3630,6 @@ describe("App settings", () => {
           failure_count: 0,
           workspace_cleanup_count: 0,
           live_sessions: [],
-          worker_heartbeat: null,
           rate_limits: [],
           token_usage: [],
         },
@@ -3697,7 +3681,6 @@ describe("App settings", () => {
         failure_count: 0,
         workspace_cleanup_count: 0,
         live_sessions: [],
-        worker_heartbeat: null,
         rate_limits: [],
         token_usage: [],
       },
@@ -3743,7 +3726,6 @@ describe("App settings", () => {
       failure_count: 0,
       workspace_cleanup_count: 0,
       live_sessions: [],
-      worker_heartbeat: null,
       rate_limits: [],
       token_usage: [],
     } satisfies Overview;

@@ -17,8 +17,8 @@ The in-memory worker has three states:
 
 `start()` publishes `running` before the spawned task finishes tracker
 preflight and restart recovery. This lets the UI show startup immediately.
-Errors returned by startup preflight, restart recovery, or heartbeat setup
-eventually return the manager to `stopped` and record `last_error`. Once the
+Errors returned by startup preflight or restart recovery eventually return the
+manager to `stopped` and record `last_error`. Once the
 poll loop is running, an individual tick error is logged and the next
 tick still runs; it does not stop the manager or update `last_error`. A failed
 live-reconfiguration preflight is different again: it leaves the worker
@@ -243,9 +243,9 @@ Persisted `pending` rows receive the same treatment with a message explaining
 that restart happened before the run was claimed. Orphaned placeholder live
 sessions for already-terminal runs are removed.
 
-After local run recovery, the worker publishes its heartbeat and fetches
-terminal issues. Their workspaces are atomically renamed under the repository
-workspace's `.symphony-trash` directory and entered in
+After local run recovery, the worker fetches terminal issues. Their workspaces
+are atomically renamed under the repository workspace's `.symphony-trash`
+directory and entered in
 `workspace_cleanup_queue`; recursive deletion is never awaited by startup.
 The original issue path is therefore immediately reusable if an issue reopens.
 
