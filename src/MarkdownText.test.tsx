@@ -2,7 +2,7 @@
 
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { MarkdownText, countMarkdownMatches } from "./MarkdownText";
+import { MarkdownText } from "./MarkdownText";
 
 afterEach(cleanup);
 
@@ -27,18 +27,16 @@ describe("MarkdownText", () => {
   });
 
   it("counts and highlights visible markdown text", () => {
-    const markdown = ["| Package | Status |", "| --- | --- |", "| renderer | fixed |"].join(
-      "\n",
-    );
+    const markdown = ["| Package | Status |", "| --- | --- |", "| renderer | fixed |"].join("\n");
 
-    expect(countMarkdownMatches(markdown, "status")).toBe(1);
     const { container } = render(
       <MarkdownText text={markdown} needle="status" firstIndex={4} currentIndex={4} />,
     );
 
-    const mark = container.querySelector('mark[data-match-index="4"]');
-    expect(mark?.textContent).toBe("Status");
-    expect(mark?.classList.contains("current")).toBe(true);
+    const marks = container.querySelectorAll('mark[data-match-index="4"]');
+    expect(marks).toHaveLength(1);
+    expect(marks[0].textContent).toBe("Status");
+    expect(marks[0].classList.contains("current")).toBe(true);
   });
 
   it("keeps ragged rows in the table", () => {
@@ -91,11 +89,9 @@ describe("MarkdownText", () => {
   it("ignores pipes inside inline code spans when splitting table rows", () => {
     render(
       <MarkdownText
-        text={[
-          "| Kind | Example |",
-          "| --- | --- |",
-          "| Command | `cat log | grep err` |",
-        ].join("\n")}
+        text={["| Kind | Example |", "| --- | --- |", "| Command | `cat log | grep err` |"].join(
+          "\n",
+        )}
       />,
     );
 

@@ -12,7 +12,7 @@ import {
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { useDeferredUpdater } from "./App";
-import { reconcileSettingsDraft, retroRepoBatchState } from "./viewHelpers";
+import { retroRepoBatchState } from "./views/RetroView";
 import type {
   AppSettings,
   AgentEventRow,
@@ -35,6 +35,7 @@ const tauriMocks = vi.hoisted(() => ({
   listen: vi.fn(),
   openUrl: vi.fn(),
   revealItemInDir: vi.fn(),
+  renderProbe: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({
@@ -53,6 +54,13 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: tauriMocks.openUrl,
   revealItemInDir: tauriMocks.revealItemInDir,
+}));
+
+vi.mock("./desktop/runtime", () => ({
+  isDesktopRuntime: () => {
+    tauriMocks.renderProbe();
+    return tauriMocks.runtimeAvailable;
+  },
 }));
 
 function testSettings(): AppSettings {
@@ -431,6 +439,7 @@ describe("App settings", () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.openUrl.mockReset();
     tauriMocks.revealItemInDir.mockReset();
+    tauriMocks.renderProbe.mockReset();
     setDocumentHidden(false);
 
     Object.defineProperty(window, "matchMedia", {
@@ -457,14 +466,6 @@ describe("App settings", () => {
         clear: vi.fn(() => localStorageItems.clear()),
       },
     });
-  });
-
-  it("keeps clean drafts synchronized with reloads and protects dirty drafts", () => {
-    const saved = testSettings();
-    const reloaded = { ...saved, prompt_template: "Reloaded" };
-    const dirty = { ...saved, prompt_template: "Unsaved" };
-    expect(reconcileSettingsDraft(reloaded, saved, false)).toBe(reloaded);
-    expect(reconcileSettingsDraft(reloaded, dirty, true)).toBe(dirty);
   });
 
   it("preserves an unsaved prompt across Settings navigation", async () => {
@@ -502,15 +503,14 @@ describe("App settings", () => {
   it("does not rerender the app shell for every prompt keystroke", async () => {
     tauriMocks.runtimeAvailable = true;
     tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
-    const onRender = vi.fn();
-    const { container } = render(<App onRender={onRender} />);
+    const { container } = render(<App />);
     await openSettings();
     const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
-    const before = onRender.mock.calls.length;
+    const before = tauriMocks.renderProbe.mock.calls.length;
     for (let index = 1; index <= 10; index += 1) {
       fireEvent.change(prompt, { target: { value: "x".repeat(index) } });
     }
-    expect(onRender.mock.calls.length - before).toBe(1);
+    expect(tauriMocks.renderProbe.mock.calls.length - before).toBe(1);
   });
 
   it("saves the exact prompt draft revision that passed validation", async () => {

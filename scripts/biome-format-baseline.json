@@ -1,8 +1,6 @@
 {
   "src/AppUpdate.test.tsx": "36fd1215215e010aa8763d3b4f605f7e68d9a6ef00e6b93d7e73c755a11940c9",
   "src/ChunkBoundary.test.tsx": "24fdbbb7547d9f1495ad79bf800291a392f2ded4f3d8c0022587af4c67b25ea8",
-  "src/MarkdownText.test.tsx": "aa1dbda5ae777ed9429d684e873047c1470e3f50d4a2cb0716ad1fbe6c2203df",
-  "src/MarkdownText.tsx": "92bfcb8f275deca01d3d24ba2c31e05aec962d362bb41d9ebdcaa796bbf7c2aa",
   "src/RelativeTime.test.tsx": "6c38c60589f7fdf3d4953eb511010e3dee049c4e13816ac712ab3f52f8517d2a",
   "src/dashboardRefreshCoordinator.ts": "137e14c4bfd89794d5f07394f56ea0394398fbf9a225661d3dfde793a0e96844",
   "src/dashboardResourceState.test.ts": "9a7bd983caf812cb12341e9c57fc65c978949e42cbfb65982083c93d3851f2f2",
@@ -13,11 +11,5 @@
   "src/preview/eventStressFixture.ts": "aee32dd113adc19106d0116dbbb2acd80bef90ed5f7f93af2e59ae72529ffb19",
   "src/settingsValidationController.test.ts": "9c4b40be38059f8b57bf45854033a113211df25e612504d8bb22dafad1dce9af",
   "src/settingsValidationController.ts": "d3215e2dda07d1b5ad56bde7c81f18b6a292aaf495da95fbf6cdf1fe31ed86db",
-  "src/themeBootstrap.test.tsx": "9fcae5604969e704717a9c999cef9c2ec51bdc63d42941009a3aa49a544b2e81",
-  "src/viewHelpers.ts": "8f2120c03f6885e325ab364564f74e8445fe1bed643c3849a4cbe6fb7635d96f",
-  "src/views/DependencyGraphPanel.tsx": "cce365ede74f0c882b830d8938ec80119dae0c4c113dc32e323fc5cd544267c2",
-  "src/views/EventStream.tsx": "c41c3993a9e1ec22f4445655a696a5d7b44be00c4b4434d7db43fefea6465ad7",
-  "src/views/RunsView.tsx": "e8e43d2e885dbc2d929ff7a1302138662e5c28a11b3c2224c4b7d5e304b66d57",
-  "src/views/eventStreamModel.test.ts": "535c496ec5e3f3771c3acb3bd847c43cd99f19cb8d3b18dd1a06b1256f461026",
-  "src/views/eventStreamModel.ts": "5e3cc32bd7bd9628e4e49c962cab06bf82642a14cb1cae71253e0bf18d545808"
+  "src/themeBootstrap.test.tsx": "9fcae5604969e704717a9c999cef9c2ec51bdc63d42941009a3aa49a544b2e81"
 }

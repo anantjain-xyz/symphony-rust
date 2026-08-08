@@ -74,14 +74,12 @@
             "noRestrictedImports": {
               "level": "error",
               "options": {
-                "paths": {
-                  "@tauri-apps/api/app": "Import of @tauri-apps/api/app is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/plugin-opener": "Import of @tauri-apps/plugin-opener is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/api/core": "Import of @tauri-apps/api/core is restricted to src/desktop/commands.ts and src/desktop/runtime.ts",
-                  "@tauri-apps/api/event": "Import of @tauri-apps/api/event is restricted to src/desktop/events.ts",
-                  "@tauri-apps/plugin-process": "Import of @tauri-apps/plugin-process is restricted to src/desktop/updater.ts",
-                  "@tauri-apps/plugin-updater": "Import of @tauri-apps/plugin-updater is restricted to src/desktop/updater.ts"
-                }
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**"],
+                    "message": "Import Tauri modules only through src/desktop adapters"
+                  }
+                ]
               }
             }
           }
@@ -96,12 +94,16 @@
             "noRestrictedImports": {
               "level": "error",
               "options": {
-                "paths": {
-                  "@tauri-apps/api/core": "Import of @tauri-apps/api/core is restricted to src/desktop/commands.ts and src/desktop/runtime.ts",
-                  "@tauri-apps/api/event": "Import of @tauri-apps/api/event is restricted to src/desktop/events.ts",
-                  "@tauri-apps/plugin-process": "Import of @tauri-apps/plugin-process is restricted to src/desktop/updater.ts",
-                  "@tauri-apps/plugin-updater": "Import of @tauri-apps/plugin-updater is restricted to src/desktop/updater.ts"
-                }
+                "patterns": [
+                  {
+                    "group": [
+                      "@tauri-apps/**",
+                      "!@tauri-apps/api/app",
+                      "!@tauri-apps/plugin-opener"
+                    ],
+                    "message": "shell.ts may import only @tauri-apps/api/app and @tauri-apps/plugin-opener"
+                  }
+                ]
               }
             }
           }
@@ -109,19 +111,44 @@
       }
     },
     {
-      "includes": ["src/desktop/commands.ts", "src/desktop/runtime.ts"],
+      "includes": ["src/desktop/commands.ts"],
       "linter": {
         "rules": {
           "style": {
             "noRestrictedImports": {
               "level": "error",
               "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/core"],
+                    "message": "commands.ts may import only @tauri-apps/api/core"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/desktop/runtime.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/core"],
+                    "message": "runtime.ts may import only @tauri-apps/api/core"
+                  }
+                ],
                 "paths": {
-                  "@tauri-apps/api/app": "Import of @tauri-apps/api/app is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/plugin-opener": "Import of @tauri-apps/plugin-opener is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/api/event": "Import of @tauri-apps/api/event is restricted to src/desktop/events.ts",
-                  "@tauri-apps/plugin-process": "Import of @tauri-apps/plugin-process is restricted to src/desktop/updater.ts",
-                  "@tauri-apps/plugin-updater": "Import of @tauri-apps/plugin-updater is restricted to src/desktop/updater.ts"
+                  "@tauri-apps/api/core": {
+                    "importNames": ["invoke"],
+                    "message": "invoke is restricted to src/desktop/commands.ts; use typed desktop command wrappers"
+                  }
                 }
               }
             }
@@ -137,13 +164,12 @@
             "noRestrictedImports": {
               "level": "error",
               "options": {
-                "paths": {
-                  "@tauri-apps/api/app": "Import of @tauri-apps/api/app is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/plugin-opener": "Import of @tauri-apps/plugin-opener is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/api/core": "Import of @tauri-apps/api/core is restricted to src/desktop/commands.ts and src/desktop/runtime.ts",
-                  "@tauri-apps/plugin-process": "Import of @tauri-apps/plugin-process is restricted to src/desktop/updater.ts",
-                  "@tauri-apps/plugin-updater": "Import of @tauri-apps/plugin-updater is restricted to src/desktop/updater.ts"
-                }
+                "patterns": [
+                  {
+                    "group": ["@tauri-apps/**", "!@tauri-apps/api/event"],
+                    "message": "events.ts may import only @tauri-apps/api/event"
+                  }
+                ]
               }
             }
           }
@@ -158,12 +184,16 @@
             "noRestrictedImports": {
               "level": "error",
               "options": {
-                "paths": {
-                  "@tauri-apps/api/app": "Import of @tauri-apps/api/app is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/plugin-opener": "Import of @tauri-apps/plugin-opener is restricted to src/desktop/shell.ts",
-                  "@tauri-apps/api/core": "Import of @tauri-apps/api/core is restricted to src/desktop/commands.ts and src/desktop/runtime.ts",
-                  "@tauri-apps/api/event": "Import of @tauri-apps/api/event is restricted to src/desktop/events.ts"
-                }
+                "patterns": [
+                  {
+                    "group": [
+                      "@tauri-apps/**",
+                      "!@tauri-apps/plugin-process",
+                      "!@tauri-apps/plugin-updater"
+                    ],
+                    "message": "updater.ts may import only @tauri-apps/plugin-process and @tauri-apps/plugin-updater"
+                  }
+                ]
               }
             }
           }

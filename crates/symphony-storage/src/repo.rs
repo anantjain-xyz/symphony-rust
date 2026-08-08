@@ -1,8 +1,8 @@
-use crate::{kind_from_str, now_iso, EventBus, StorageError, StorageEvent};
+use crate::{now_iso, EventBus, StorageError, StorageEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
-use sqlx::{sqlite::SqliteQueryResult, FromRow, QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::BTreeMap;
 use symphony_core::{
     AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus,
@@ -1918,13 +1918,6 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn issue_from_id(&self, id: &str) -> Result<Option<Issue>, StorageError> {
-        let row = self.get_issue(id).await?;
-        Ok(row
-            .map(|row| serde_json::from_str::<Issue>(&row.raw))
-            .transpose()?)
-    }
-
     async fn runs_with_issue(
         &self,
         clause: &str,
@@ -1955,16 +1948,6 @@ impl Repository {
             op: op.to_string(),
         });
     }
-}
-
-pub fn parse_agent_event_payload(row: &AgentEventRow) -> (AgentEventKind, Value) {
-    let value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
-    (kind_from_str(&row.kind), value)
-}
-
-#[allow(dead_code)]
-fn _rows_affected(result: SqliteQueryResult) -> u64 {
-    result.rows_affected()
 }
 
 #[cfg(test)]

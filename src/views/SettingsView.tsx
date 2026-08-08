@@ -17,7 +17,7 @@ import type {
 import { SettingsValidationController } from "../settingsValidationController";
 import type { SettingsValidationState } from "../settingsValidationController";
 import { nullable } from "../format";
-import { reconcileSettingsDraft } from "../viewHelpers";
+import { formSnapshot, Panel } from "../viewPrimitives";
 import "./IconSelect.css";
 import "./SettingsView.css";
 
@@ -81,11 +81,6 @@ export function settingsSectionForScrollPosition({
     if (top !== undefined && top <= activationLine + 1) current = section.id;
   }
   return current;
-}
-
-function formSnapshot(settings: AppSettings) {
-  const { linear_api_key_set: _ignored, ...form } = settings;
-  return JSON.stringify(form);
 }
 
 type SettingsNumberInputProps = Omit<
@@ -438,7 +433,7 @@ function SettingsFeature({
   }, [draftRef, ensureController, revisionRef, saveControllerRef, savePending, savedSettings]);
 
   useEffect(() => {
-    const next = reconcileSettingsDraft(savedSettings, draftRef.current ?? draft, dirtyRef.current);
+    const next = dirtyRef.current ? (draftRef.current ?? draft) : savedSettings;
     if (next === draftRef.current) return;
     draftRef.current = next;
     setDraft(next);
@@ -2818,15 +2813,6 @@ function ExternalLink({ href, children }: { href: string; children: React.ReactN
     >
       {children}
     </button>
-  );
-}
-
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="panel">
-      <h3>{title}</h3>
-      {children}
-    </section>
   );
 }
 

@@ -1,8 +1,5 @@
 import type { AgentEventRow } from "../bindings";
-import {
-  type MarkdownBlock,
-  parseMarkdownBlocks,
-} from "../MarkdownText";
+import { type MarkdownBlock, parseMarkdownBlocks } from "../MarkdownText";
 import {
   describeEvent,
   EVENT_PAYLOAD_PARSE_FAILED,
@@ -40,12 +37,6 @@ export type EventMatchStarts = {
   payload: number;
 };
 
-export type PrepareInstrumentation = {
-  parsedPayload?: () => void;
-  parsedMarkdown?: () => void;
-  builtRevisionKey?: () => void;
-};
-
 type PreparedEventCacheEntry = {
   kind: string;
   payload: string;
@@ -74,22 +65,16 @@ function markdownSegments(blocks: MarkdownBlock[]) {
   });
 }
 
-export function prepareEvent(
-  event: AgentEventRow,
-  instrumentation?: PrepareInstrumentation,
-): PreparedEvent {
-  instrumentation?.parsedPayload?.();
+export function prepareEvent(event: AgentEventRow): PreparedEvent {
   const parsedJson = parseEventPayload(event.payload);
   const { label, summary, tone } = describeEvent(event.kind, event.payload, parsedJson);
   const pretty = prettyPayload(event.payload, parsedJson);
-  instrumentation?.parsedMarkdown?.();
   const summaryBlocks = parseMarkdownBlocks(summary);
   const normalizedSections = {
     label: label.toLowerCase(),
     summary: markdownSegments(summaryBlocks).map((text) => text.toLowerCase()),
     payload: pretty.toLowerCase(),
   };
-  instrumentation?.builtRevisionKey?.();
   return {
     event,
     key: eventRevisionKey(event),
@@ -108,11 +93,7 @@ export function prepareEvent(
   };
 }
 
-export function prepareEvents(
-  events: AgentEventRow[],
-  cache: PreparedEventCache,
-  instrumentation?: PrepareInstrumentation,
-) {
+export function prepareEvents(events: AgentEventRow[], cache: PreparedEventCache) {
   const seenIds = new Set<number>();
   const prepared: PreparedEvent[] = [];
   for (const event of events) {
@@ -128,7 +109,7 @@ export function prepareEvents(
     if (unchanged) {
       model = cached.model;
     } else {
-      model = prepareEvent(event, instrumentation);
+      model = prepareEvent(event);
       cache.set(event.id, {
         kind: event.kind,
         payload: event.payload,
@@ -182,11 +163,7 @@ export function searchPreparedEvents(events: PreparedEvent[], query: string) {
 
   if (!needle) return { needle, totalMatches, matchSpans, matchAt, starts };
 
-  const addSpan = (
-    eventIndex: number,
-    section: EventMatch["section"],
-    count: number,
-  ) => {
+  const addSpan = (eventIndex: number, section: EventMatch["section"], count: number) => {
     if (count === 0) return;
     matchSpans.push({ eventIndex, section, start: totalMatches, count });
     totalMatches += count;

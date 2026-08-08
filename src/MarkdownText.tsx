@@ -27,35 +27,6 @@ export function countMatches(text: string, needle: string) {
   return count;
 }
 
-export function countMarkdownMatches(text: string, needle: string) {
-  if (!needle) return 0;
-  return countPreparedMarkdownMatches(parseMarkdownBlocks(text), needle);
-}
-
-export function countPreparedMarkdownMatches(blocks: MarkdownBlock[], needle: string) {
-  if (!needle) return 0;
-  return blocks.reduce((total, block) => {
-    if (block.type === "paragraph") {
-      return (
-        total +
-        block.lines.reduce((lineTotal, line) => lineTotal + countMatches(line, needle), 0)
-      );
-    }
-    if (block.type === "code") {
-      return total + countMatches(block.text, needle);
-    }
-    return (
-      total +
-      block.headers.reduce((sum, cell) => sum + countMatches(cell, needle), 0) +
-      block.rows.reduce(
-        (rowSum, row) =>
-          rowSum + row.reduce((cellSum, cell) => cellSum + countMatches(cell, needle), 0),
-        0,
-      )
-    );
-  }, 0);
-}
-
 export function highlightMatches(
   text: string,
   needle: string,
