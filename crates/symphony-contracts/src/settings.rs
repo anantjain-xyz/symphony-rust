@@ -47,8 +47,6 @@ pub struct AppSettings {
     pub hook_before_run: Option<String>,
     #[serde(default)]
     pub hook_after_run: Option<String>,
-    #[serde(default)]
-    pub hook_before_remove: Option<String>,
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
     // Agent
@@ -127,7 +125,6 @@ impl Default for AppSettings {
             hook_after_create: default_after_create_hook(),
             hook_before_run: None,
             hook_after_run: None,
-            hook_before_remove: None,
             hook_timeout_ms: default_hook_timeout_ms(),
             agent_backend: AgentBackend::Codex,
             codex_command: None,
