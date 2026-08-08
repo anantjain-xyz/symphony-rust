@@ -12,8 +12,8 @@ const COMMANDS = {
   "hygiene-tests": ["pnpm", "test:hygiene"],
   boundaries: ["pnpm", "check:boundaries"],
   "boundary-tests": ["pnpm", "test:boundaries"],
-  "frontend-contracts": ["pnpm", "check:frontend-contracts"],
-  "frontend-contract-tests": ["pnpm", "test:frontend-contracts"],
+  "frontend-contracts": ["pnpm", "check:frontend-boundaries"],
+  "frontend-contract-tests": ["node", "--test", "scripts/check-frontend-boundaries.node.mjs"],
   "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
   "rust-clippy": [
     "cargo",
