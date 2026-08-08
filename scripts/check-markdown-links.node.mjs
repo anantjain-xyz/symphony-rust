@@ -139,19 +139,24 @@ test("validates GFM links while ignoring code and raw HTML nodes", async (contex
 test("reports unresolved references and preserves explicit HTML anchors", async (context) => {
   const problems = await checkRepository(context, {
     "README.md": [
-      '<div id="details"></div>',
+      '<div id="foo&amp;bar"></div>',
       "",
       '<a name="legacy"></a>',
       "",
-      "[Details](#details)",
+      "[Entity](#foo%26bar)",
       "[Legacy](#legacy)",
       "[Missing][unknown]",
+      "[Spaced] [spaced-unknown]",
+      "[Soft]",
+      "[soft-unknown]",
       "![Pixel][missing-image]",
     ].join("\n"),
   });
 
   assert.deepEqual(problems, [
+    "README.md:11:1: undefined link reference [missing-image]",
     "README.md:7:1: undefined link reference [unknown]",
-    "README.md:8:1: undefined link reference [missing-image]",
+    "README.md:8:1: undefined link reference [spaced-unknown]",
+    "README.md:9:1: undefined link reference [soft-unknown]",
   ]);
 });

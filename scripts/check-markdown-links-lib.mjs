@@ -1,15 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import GithubSlugger from "github-slugger";
+import { JSDOM } from "jsdom";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+const HTML_ENTITY = /&(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi;
 const HTML_START_TAG = /<([A-Za-z][A-Za-z0-9:-]*)(?:\s[^<>]*?)?>/g;
 const HTML_ATTRIBUTE =
   /\s([A-Za-z_:][A-Za-z0-9_.:-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
-const UNRESOLVED_REFERENCE = /!?\[([^\]\r\n]*)\]\[([^\]\r\n]*)\]/g;
+const entityDecoder = new JSDOM("").window.document.createElement("textarea");
 const parser = unified().use(remarkParse).use(remarkGfm);
 
 function walk(node, visit) {
@@ -21,6 +23,12 @@ function normalizeReference(value) {
     .trim()
     .replace(/\s+/g, " ")
     .toLocaleLowerCase("en-US");
+}
+function decodeHtmlEntities(value) {
+  return value.replace(HTML_ENTITY, (entity) => {
+    entityDecoder.innerHTML = entity;
+    return entityDecoder.value;
+  });
 }
 function headingText(node) {
   return (node.children ?? []).map(renderHeadingNode).join("").replace(/\s+/gu, " ").trim();
@@ -59,10 +67,10 @@ function htmlAnchors(tree) {
     for (const match of node.value.matchAll(HTML_START_TAG)) {
       const tag = match[1].toLocaleLowerCase("en-US");
       const id = htmlAttributeValue(match[0], "id");
-      if (id) anchors.add(id);
+      if (id) anchors.add(decodeHtmlEntities(id));
       if (tag === "a") {
         const name = htmlAttributeValue(match[0], "name");
-        if (name) anchors.add(name);
+        if (name) anchors.add(decodeHtmlEntities(name));
       }
     }
   });
@@ -75,6 +83,63 @@ function isEscaped(value, index) {
     backslashes += 1;
   }
   return backslashes % 2 === 1;
+}
+
+function findClosingBracket(value, start) {
+  let depth = 0;
+  for (let cursor = start; cursor < value.length; cursor += 1) {
+    if (value[cursor] === "\\") {
+      cursor += 1;
+    } else if (value[cursor] === "[") {
+      depth += 1;
+    } else if (value[cursor] === "]") {
+      if (depth === 0) return cursor;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+function skipInlineWhitespace(value, cursor) {
+  let lineEndings = 0;
+  while (cursor < value.length) {
+    if (value[cursor] === " " || value[cursor] === "\t") {
+      cursor += 1;
+      continue;
+    }
+    if (value[cursor] === "\r" || value[cursor] === "\n") {
+      lineEndings += 1;
+      if (lineEndings > 1) return -1;
+      if (value[cursor] === "\r" && value[cursor + 1] === "\n") cursor += 1;
+      cursor += 1;
+      continue;
+    }
+    break;
+  }
+  return cursor;
+}
+
+function unresolvedReferenceUses(value) {
+  const references = [];
+  for (let cursor = 0; cursor < value.length; cursor += 1) {
+    const image = value[cursor] === "!" && value[cursor + 1] === "[";
+    if (image && isEscaped(value, cursor)) continue;
+    const labelStart = image ? cursor + 1 : cursor;
+    if (value[labelStart] !== "[" || isEscaped(value, labelStart)) continue;
+    const labelEnd = findClosingBracket(value, labelStart + 1);
+    if (labelEnd === -1) continue;
+    const referenceStart = skipInlineWhitespace(value, labelEnd + 1);
+    if (referenceStart === -1 || value[referenceStart] !== "[") continue;
+    const referenceEnd = findClosingBracket(value, referenceStart + 1);
+    if (referenceEnd === -1) continue;
+    const label = value.slice(labelStart + 1, labelEnd);
+    references.push({
+      reference: normalizeReference(value.slice(referenceStart + 1, referenceEnd) || label),
+      start: cursor,
+    });
+    cursor = referenceEnd;
+  }
+  return references;
 }
 
 function nodeAtOffset(node, offset) {
@@ -125,12 +190,11 @@ function extractTargets(tree) {
 
   walk(tree, (node) => {
     if (node.type !== "text") return;
-    for (const match of node.value.matchAll(UNRESOLVED_REFERENCE)) {
-      if (isEscaped(node.value, match.index)) continue;
-      const reference = normalizeReference(match[2] || match[1]);
+    for (const unresolved of unresolvedReferenceUses(node.value)) {
+      const reference = unresolved.reference;
       if (definitions.has(reference)) continue;
       targets.push({
-        node: nodeAtOffset(node, match.index),
+        node: nodeAtOffset(node, unresolved.start),
         reference,
         unresolvedReference: true,
       });
