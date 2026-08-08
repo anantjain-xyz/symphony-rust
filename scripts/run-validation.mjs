@@ -56,7 +56,8 @@ const PROFILES = {
   full: [
     "agent-assets",
     "agent-asset-tests",
-    ...FAST_PROFILE,
+    // Omit ipc/projections here: `static-contracts` (`pnpm check:static`) already runs them.
+    ...FAST_PROFILE.filter((name) => name !== "ipc" && name !== "projections"),
     "workflows",
     "shell",
     "links",
