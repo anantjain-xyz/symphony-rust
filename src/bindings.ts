@@ -88,7 +88,7 @@ export type IssueRow = { id: string; identifier: string; title: string; descript
 
 export type AgentEventRow = { id: number; run_id: string; kind: string; payload: string; created_at: string }
 
-export type StorageEvent = { type: "db_changed"; table: string; op: string } | { type: "agent_event"; event: AgentEventRow } | { type: "rate_limit_changed"; source: string } | { type: "workflow_ready" }
+export type StorageEvent = { type: "db_changed"; table: string; op: string } | { type: "agent_event"; event: AgentEventRow } | { type: "rate_limit_changed"; source: string }
 
 export type SkillsState = "installed" | "pr_open" | "missing" | "unavailable"
 

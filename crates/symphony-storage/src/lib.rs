@@ -10,7 +10,6 @@ use sqlx::{
 };
 use std::path::Path;
 use std::time::Duration;
-use symphony_core::AgentEventKind;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
@@ -70,7 +69,6 @@ pub enum StorageEvent {
     DbChanged { table: String, op: String },
     AgentEvent { event: AgentEventRow },
     RateLimitChanged { source: String },
-    WorkflowReady,
 }
 
 #[derive(Debug, Clone)]
@@ -208,17 +206,4 @@ pub(crate) async fn apply_migrations(
 
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-pub(crate) fn kind_from_str(kind: &str) -> AgentEventKind {
-    match kind {
-        "tool_call" => AgentEventKind::ToolCall,
-        "approval" => AgentEventKind::Approval,
-        "token_count" => AgentEventKind::TokenCount,
-        "error" => AgentEventKind::Error,
-        "user_input" => AgentEventKind::UserInput,
-        "humanized" => AgentEventKind::Humanized,
-        "rate_limit" => AgentEventKind::RateLimit,
-        _ => AgentEventKind::Status,
-    }
 }

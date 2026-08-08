@@ -1343,9 +1343,6 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
                 StorageEvent::RateLimitChanged { .. } => {
                     let _ = handle.emit("rate_limit_changed", &event);
                 }
-                StorageEvent::WorkflowReady => {
-                    let _ = handle.emit("workflow_ready", &event);
-                }
             }
         }
     });

@@ -8,10 +8,24 @@ import type {
   RetroSuggestionRow,
 } from "../bindings";
 import { openExternalUrl } from "../desktop/shell";
-import { shortTime, statusSlug } from "../format";
+import { shortTime } from "../format";
 import { RelativeTime } from "../RelativeTime";
-import { retroRepoBatchState } from "../viewHelpers";
+import { Badge, Empty, Panel } from "../viewPrimitives";
 import "./RetroView.css";
+
+export function retroRepoBatchState(
+  batches: RetroBatchRow[],
+  repoName: string,
+): "available" | "locked" | "stale" {
+  const repoBatches = batches.filter(
+    (batch) => batch.kind === "repo_pr" && batch.repo_name === repoName,
+  );
+  if (repoBatches.some((batch) => ["queued", "running", "completed"].includes(batch.state))) {
+    return "locked";
+  }
+  if (repoBatches.some((batch) => batch.state === "stale")) return "stale";
+  return "available";
+}
 
 function RetroView({
   retros,
@@ -692,45 +706,6 @@ function LegacyRetroRepoCard({ repo }: { repo: RetroReport["repos"][number] }) {
       </div>
     </article>
   );
-}
-
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="panel">
-      <h3>{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-function Empty({
-  title,
-  text,
-  actionLabel,
-  actionDisabled,
-  onAction,
-}: {
-  title: string;
-  text?: string;
-  actionLabel?: string;
-  actionDisabled?: boolean;
-  onAction?: () => void;
-}) {
-  return (
-    <div className="empty">
-      <strong>{title}</strong>
-      {text ? <span>{text}</span> : null}
-      {actionLabel ? (
-        <button type="button" disabled={actionDisabled} onClick={onAction}>
-          {actionLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function Badge({ status }: { status: string }) {
-  return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
 }
 
 export default RetroView;

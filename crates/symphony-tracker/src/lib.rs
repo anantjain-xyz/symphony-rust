@@ -92,12 +92,6 @@ impl LinearTracker {
         }
     }
 
-    pub fn with_resilience(mut self, request_timeout_ms: u64, max_attempts: usize) -> Self {
-        self.request_timeout_ms = request_timeout_ms;
-        self.max_attempts = max_attempts.max(1);
-        self
-    }
-
     pub async fn viewer(&self) -> Result<LinearViewer, TrackerError> {
         let data: ViewerData = self.execute(VIEWER_QUERY, None).await?;
         Ok(data.viewer)
@@ -783,9 +777,6 @@ struct LinearProject {
 #[derive(Deserialize)]
 struct LinearState {
     name: Option<String>,
-    #[allow(dead_code)]
-    #[serde(rename = "type")]
-    state_type: Option<String>,
 }
 
 #[derive(Deserialize)]

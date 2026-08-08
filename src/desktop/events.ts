@@ -5,13 +5,11 @@ import type { StorageEvent } from "../bindings";
 export type DbChanged = Extract<StorageEvent, { type: "db_changed" }>;
 export type AgentEvent = Extract<StorageEvent, { type: "agent_event" }>;
 export type RateLimitChanged = Extract<StorageEvent, { type: "rate_limit_changed" }>;
-export type WorkflowReady = Extract<StorageEvent, { type: "workflow_ready" }>;
 
 export type DesktopEventHandlers = {
   onDbChanged: (event: DbChanged) => void;
   onAgentEvent: (event: AgentEvent) => void;
   onRateLimitChanged: (event: RateLimitChanged) => void;
-  onWorkflowReady: (event: WorkflowReady) => void;
   onError: (error: unknown) => void;
 };
 
@@ -77,11 +75,6 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
   register(() =>
     listen<RateLimitChanged>("rate_limit_changed", ({ payload }) => {
       if (!disposed) handlers.onRateLimitChanged(payload);
-    }),
-  );
-  register(() =>
-    listen<WorkflowReady>("workflow_ready", ({ payload }) => {
-      if (!disposed) handlers.onWorkflowReady(payload);
     }),
   );
 

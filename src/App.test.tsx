@@ -12,7 +12,7 @@ import {
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { useDeferredUpdater } from "./App";
-import { reconcileSettingsDraft, retroRepoBatchState } from "./viewHelpers";
+import { retroRepoBatchState } from "./views/RetroView";
 import type {
   AppSettings,
   AgentEventRow,
@@ -35,6 +35,7 @@ const tauriMocks = vi.hoisted(() => ({
   listen: vi.fn(),
   openUrl: vi.fn(),
   revealItemInDir: vi.fn(),
+  renderProbe: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({
@@ -53,6 +54,13 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: tauriMocks.openUrl,
   revealItemInDir: tauriMocks.revealItemInDir,
+}));
+
+vi.mock("./desktop/runtime", () => ({
+  isDesktopRuntime: () => {
+    tauriMocks.renderProbe();
+    return tauriMocks.runtimeAvailable;
+  },
 }));
 
 function testSettings(): AppSettings {
@@ -431,6 +439,7 @@ describe("App settings", () => {
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.openUrl.mockReset();
     tauriMocks.revealItemInDir.mockReset();
+    tauriMocks.renderProbe.mockReset();
     setDocumentHidden(false);
 
     Object.defineProperty(window, "matchMedia", {
@@ -457,14 +466,6 @@ describe("App settings", () => {
         clear: vi.fn(() => localStorageItems.clear()),
       },
     });
-  });
-
-  it("keeps clean drafts synchronized with reloads and protects dirty drafts", () => {
-    const saved = testSettings();
-    const reloaded = { ...saved, prompt_template: "Reloaded" };
-    const dirty = { ...saved, prompt_template: "Unsaved" };
-    expect(reconcileSettingsDraft(reloaded, saved, false)).toBe(reloaded);
-    expect(reconcileSettingsDraft(reloaded, dirty, true)).toBe(dirty);
   });
 
   it("preserves an unsaved prompt across Settings navigation", async () => {
@@ -502,15 +503,14 @@ describe("App settings", () => {
   it("does not rerender the app shell for every prompt keystroke", async () => {
     tauriMocks.runtimeAvailable = true;
     tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
-    const onRender = vi.fn();
-    const { container } = render(<App onRender={onRender} />);
+    const { container } = render(<App />);
     await openSettings();
     const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
-    const before = onRender.mock.calls.length;
+    const before = tauriMocks.renderProbe.mock.calls.length;
     for (let index = 1; index <= 10; index += 1) {
       fireEvent.change(prompt, { target: { value: "x".repeat(index) } });
     }
-    expect(onRender.mock.calls.length - before).toBe(1);
+    expect(tauriMocks.renderProbe.mock.calls.length - before).toBe(1);
   });
 
   it("saves the exact prompt draft revision that passed validation", async () => {
@@ -1061,7 +1061,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1113,7 +1113,7 @@ describe("App settings", () => {
 
     render(<App />);
 
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     const onDatabaseChanged = tauriMocks.listen.mock.calls.find(
       ([event]) => event === "db_changed",
     )?.[1] as (event: { payload: { type: "db_changed"; table: string; op: string } }) => void;
@@ -1185,7 +1185,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1240,7 +1240,7 @@ describe("App settings", () => {
     await waitFor(() => expect(commandCount("get_retro_detail")).toBe(1));
 
     rendered.unmount();
-    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(3));
   });
 
   it("fetches the bootstrap-selected Retro detail only when Retro opens", async () => {
@@ -1293,7 +1293,7 @@ describe("App settings", () => {
     });
 
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1360,7 +1360,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     fireEvent.click(await screen.findByRole("button", { name: "Issues" }));
     fireEvent.click(await screen.findByRole("tab", { name: "List" }));
     expect(await screen.findByText("Last good issue")).toBeTruthy();
@@ -1462,7 +1462,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     const rendered = render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
 
     vi.useFakeTimers();
     try {
@@ -1514,7 +1514,7 @@ describe("App settings", () => {
     });
 
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
@@ -1699,7 +1699,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     await waitFor(() =>
       expect(document.querySelector<HTMLButtonElement>(".worker-toggle")?.disabled).toBe(false),
     );
@@ -1783,7 +1783,7 @@ describe("App settings", () => {
       return vi.fn();
     });
     render(<App />);
-    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(tauriMocks.listen).toHaveBeenCalledTimes(3));
     fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
     listeners.get("db_changed")!({
       payload: { type: "db_changed", table: "runs", op: "update" },
@@ -2185,7 +2185,6 @@ describe("App settings", () => {
         "agent_event",
         "db_changed",
         "rate_limit_changed",
-        "workflow_ready",
       ]);
 
       act(() => {
@@ -2256,7 +2255,7 @@ describe("App settings", () => {
       await act(async () => {
         await Promise.resolve();
       });
-      expect(unlisten).toHaveBeenCalledTimes(4);
+      expect(unlisten).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }

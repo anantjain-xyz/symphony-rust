@@ -1,18 +1,27 @@
-use crate::{kind_from_str, now_iso, EventBus, StorageError, StorageEvent};
+use crate::{now_iso, EventBus, StorageError, StorageEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use specta::Type;
-use sqlx::{sqlite::SqliteQueryResult, FromRow, QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::BTreeMap;
 use symphony_core::{
-    AgentEventKind, HookName, Issue, RateLimitPayload, RunStatus, SessionInfoPayload,
-    TokenCountPayload,
+    AgentEventKind, HookName, Issue, ParsedWorkflow, RateLimitPayload, RunStatus,
+    SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 500;
 const ISSUE_ROW_COLUMNS: &str =
     "id, identifier, title, description, priority, state, branch, labels, blockers, raw, last_seen_at";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+pub struct WorkflowRow {
+    pub id: String,
+    pub source_hash: String,
+    pub parsed: String,
+    pub prompt_template: String,
+    pub loaded_at: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct IssueRow {
@@ -263,8 +272,31 @@ impl Repository {
         &self.events
     }
 
-    pub fn notify_workflow_ready(&self) {
-        self.events.emit(StorageEvent::WorkflowReady);
+    pub async fn upsert_workflow(&self, workflow: &ParsedWorkflow) -> Result<(), StorageError> {
+        let parsed = serde_json::to_string(&workflow.front_matter)?;
+        sqlx::query(
+            r#"
+            insert into workflows (id, source_hash, parsed, prompt_template)
+            values (?1, ?2, ?3, ?4)
+            on conflict(source_hash) do nothing
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&workflow.source_hash)
+        .bind(parsed)
+        .bind(&workflow.prompt_template)
+        .execute(&self.pool)
+        .await?;
+        self.changed("workflows", "upsert");
+        Ok(())
+    }
+
+    pub async fn latest_workflow(&self) -> Result<Option<WorkflowRow>, StorageError> {
+        Ok(sqlx::query_as::<_, WorkflowRow>(
+            "select * from workflows order by loaded_at desc limit 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub async fn upsert_issues(&self, issues: &[Issue]) -> Result<(), StorageError> {
@@ -1886,13 +1918,6 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn issue_from_id(&self, id: &str) -> Result<Option<Issue>, StorageError> {
-        let row = self.get_issue(id).await?;
-        Ok(row
-            .map(|row| serde_json::from_str::<Issue>(&row.raw))
-            .transpose()?)
-    }
-
     async fn runs_with_issue(
         &self,
         clause: &str,
@@ -1923,16 +1948,6 @@ impl Repository {
             op: op.to_string(),
         });
     }
-}
-
-pub fn parse_agent_event_payload(row: &AgentEventRow) -> (AgentEventKind, Value) {
-    let value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
-    (kind_from_str(&row.kind), value)
-}
-
-#[allow(dead_code)]
-fn _rows_affected(result: SqliteQueryResult) -> u64 {
-    result.rows_affected()
 }
 
 #[cfg(test)]
@@ -3391,22 +3406,5 @@ mod tests {
             .find(|session| session.run_id == run.id)
             .expect("live session should be present");
         assert_eq!(session.last_event_at, event.created_at);
-    }
-
-    #[tokio::test]
-    async fn workflow_ready_emits_without_db_write() {
-        let repo = repo().await;
-        let mut rx = repo.events().subscribe();
-        repo.notify_workflow_ready();
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(event, crate::StorageEvent::WorkflowReady));
-        let count: (i64,) = sqlx::query_as("select count(*) from workflows")
-            .fetch_one(repo.pool())
-            .await
-            .unwrap();
-        assert_eq!(count.0, 0);
     }
 }

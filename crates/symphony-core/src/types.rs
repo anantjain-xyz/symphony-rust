@@ -500,32 +500,6 @@ pub struct RepoConfig {
     pub skills_marked_installed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct RetryEntry {
-    pub issue_id: String,
-    pub run_number: i64,
-    pub due_at_ms: i64,
-    pub error_class: Option<String>,
-    pub error_message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct LiveSession {
-    pub run_id: String,
-    pub session_id: String,
-    pub thread_id: String,
-    pub turn_id: String,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub total_tokens: i64,
-    pub last_event_at_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct StatusPayload {
-    pub message: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct ToolCallPayload {
     pub tool: String,
@@ -535,33 +509,10 @@ pub struct ToolCallPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct ApprovalPayload {
-    pub reason: String,
-    pub call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct TokenCountPayload {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct ErrorPayload {
-    pub class: String,
-    pub message: String,
-    pub recoverable: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct UserInputPayload {
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
-pub struct HumanizedPayload {
-    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
