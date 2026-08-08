@@ -40,7 +40,6 @@ pub struct RunRow {
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    pub worker_pid: Option<i64>,
     /// JSON-encoded `SessionInfoPayload` reported by the agent CLI at startup.
     pub session_info: Option<String>,
     /// Configured repo the run was routed to; null on pre-multi-repo rows.
@@ -59,7 +58,6 @@ pub struct RunWithIssueRow {
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    pub worker_pid: Option<i64>,
     pub session_info: Option<String>,
     pub repo_name: Option<String>,
     pub created_at: String,
@@ -533,16 +531,6 @@ impl Repository {
         .fetch_one(&self.pool)
         .await?;
         Ok(count > 0)
-    }
-
-    pub async fn set_worker_pid(&self, run_id: &str, pid: i64) -> Result<(), StorageError> {
-        sqlx::query("update runs set worker_pid = ?1 where id = ?2")
-            .bind(pid)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await?;
-        self.changed("runs", "update");
-        Ok(())
     }
 
     pub async fn set_run_session_info(

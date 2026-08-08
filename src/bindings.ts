@@ -44,7 +44,7 @@ export type WorkerState = "stopped" | "running" | "stopping"
 
 export type WorkerStatus = { state: WorkerState; started_at: string | null; last_error: string | null }
 
-export type RunWithIssueRow = { id: string; issue_id: string; run_number: number; workspace_path: string; status: string; started_at: string | null; ended_at: string | null; error_class: string | null; error_message: string | null; worker_pid: number | null; session_info: string | null; repo_name: string | null; created_at: string; issue_identifier: string; issue_title: string; issue_state: string }
+export type RunWithIssueRow = { id: string; issue_id: string; run_number: number; workspace_path: string; status: string; started_at: string | null; ended_at: string | null; error_class: string | null; error_message: string | null; session_info: string | null; repo_name: string | null; created_at: string; issue_identifier: string; issue_title: string; issue_state: string }
 
 export type RetryWithIssueRow = { issue_id: string; run_number: number; due_at: string; error_class: string | null; error_message: string | null; created_at: string; issue_identifier: string; issue_title: string }
 

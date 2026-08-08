@@ -123,7 +123,6 @@ const previewActiveRun: RunWithIssueRow = {
   ended_at: null,
   error_class: null,
   error_message: null,
-  worker_pid: 18422,
   session_info: JSON.stringify({
     model: "gpt-5",
     permission_mode: null,
@@ -149,7 +148,6 @@ const previewFailedRun: RunWithIssueRow = {
   ended_at: previewFailureEndedAt,
   error_class: "agent_failure",
   error_message: "Typecheck failed after applying the requested dashboard change.",
-  worker_pid: null,
   session_info: JSON.stringify({
     model: "claude-sonnet-4-5",
     permission_mode: "auto",
@@ -175,7 +173,6 @@ const previewSuccessRun: RunWithIssueRow = {
   ended_at: previewSuccessEndedAt,
   error_class: null,
   error_message: null,
-  worker_pid: null,
   session_info: null,
   repo_name: "widgets",
   created_at: previewSuccessCreatedAt,
