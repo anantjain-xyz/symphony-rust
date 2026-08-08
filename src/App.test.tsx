@@ -80,7 +80,6 @@ function testSettings(): AppSettings {
     hook_after_create: null,
     hook_before_run: null,
     hook_after_run: null,
-    hook_before_remove: null,
     hook_timeout_ms: 30_000,
     agent_backend: "codex",
     codex_command: null,
@@ -2483,7 +2482,6 @@ describe("App settings", () => {
       screen.getByLabelText(/^After create/, { selector: "textarea" }),
       screen.getByLabelText(/^Before run/, { selector: "textarea" }),
       screen.getByLabelText(/^After run/, { selector: "textarea" }),
-      screen.getByLabelText(/^Before remove/, { selector: "textarea" }),
     );
 
     for (const field of fields) {
@@ -2741,6 +2739,7 @@ describe("App settings", () => {
     ).toBeTruthy();
     expect(screen.getByText(/1 active run keeps the config it started with/)).toBeTruthy();
     expect(screen.getByText(/Applies to hooks that start after Save/)).toBeTruthy();
+    expect(screen.queryByText("Before remove")).toBeNull();
 
     const hookTimeout = await screen.findByLabelText(/^Hook timeout/, {
       selector: "input",

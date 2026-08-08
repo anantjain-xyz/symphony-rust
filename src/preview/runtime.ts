@@ -51,7 +51,6 @@ const previewSettings: AppSettings = {
     'git clone "$REPO_URL" .\ngit checkout -B "${ISSUE_BRANCH:-symphony/${ISSUE_IDENTIFIER}}"\neval "${SYMPHONY_INSTALL_CMD:-npm ci}"\n',
   hook_before_run: null,
   hook_after_run: null,
-  hook_before_remove: null,
   hook_timeout_ms: 60000,
   agent_backend: "codex",
   codex_command: null,

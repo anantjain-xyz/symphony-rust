@@ -135,7 +135,6 @@ pub enum HookName {
     AfterCreate,
     BeforeRun,
     AfterRun,
-    BeforeRemove,
 }
 
 impl HookName {
@@ -144,7 +143,6 @@ impl HookName {
             Self::AfterCreate => "after_create",
             Self::BeforeRun => "before_run",
             Self::AfterRun => "after_run",
-            Self::BeforeRemove => "before_remove",
         }
     }
 }
@@ -221,7 +219,6 @@ pub struct HooksConfig {
     pub after_create: Option<String>,
     pub before_run: Option<String>,
     pub after_run: Option<String>,
-    pub before_remove: Option<String>,
     #[serde(default = "default_hook_timeout_ms")]
     pub timeout_ms: u64,
 }
@@ -232,7 +229,6 @@ impl Default for HooksConfig {
             after_create: None,
             before_run: None,
             after_run: None,
-            before_remove: None,
             timeout_ms: default_hook_timeout_ms(),
         }
     }

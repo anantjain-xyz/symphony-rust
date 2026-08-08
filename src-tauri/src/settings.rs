@@ -84,7 +84,6 @@ pub fn workflow_from_settings(
             after_create: normalize_opt(&settings.hook_after_create),
             before_run: normalize_opt(&settings.hook_before_run),
             after_run: normalize_opt(&settings.hook_after_run),
-            before_remove: normalize_opt(&settings.hook_before_remove),
             timeout_ms: settings.hook_timeout_ms,
         },
         agent: AgentConfig {
@@ -440,6 +439,24 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
         assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn ignores_removed_before_remove_hook_in_existing_settings() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "hook_before_remove".to_string(),
+            serde_json::json!("legacy"),
+        );
+
+        let (settings, migrated) = parse_settings(&value.to_string()).unwrap();
+        assert!(!migrated);
+
+        let rewritten = serde_json::to_value(settings).unwrap();
+        assert!(!rewritten
+            .as_object()
+            .unwrap()
+            .contains_key("hook_before_remove"));
     }
 
     #[test]
