@@ -76,10 +76,32 @@ function stripInlineShellComment(line) {
       else if (ch === quote) quote = null;
       continue;
     }
-    if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === "#") return line.slice(0, i).trimEnd();
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    // Shell only starts a comment when `#` begins a word (after IFS whitespace).
+    if (ch === "#" && (i === 0 || /\s/u.test(line[i - 1]))) {
+      return line.slice(0, i).trimEnd();
+    }
   }
   return line;
+}
+function unescapeUnquotedShellValue(value) {
+  let out = "";
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] === "\\" && i + 1 < value.length) {
+      i += 1;
+      out += value[i];
+      continue;
+    }
+    out += value[i];
+  }
+  return out;
 }
 export function parseEnvFile(contents) {
   const env = {};
@@ -94,6 +116,8 @@ export function parseEnvFile(contents) {
       (value.startsWith("'") && value.endsWith("'"))
     ) {
       value = value.slice(1, -1);
+    } else {
+      value = unescapeUnquotedShellValue(value);
     }
     env[line.slice(0, i).trim()] = value;
   }

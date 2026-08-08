@@ -78,6 +78,11 @@ test("constants, artifacts, feed, credentials", () => {
   assert.equal(r.parseEnvFile('K="V"').K, "V");
   assert.equal(r.parseEnvFile(`APPLE_SIGNING_IDENTITY="${ID}" # note`).APPLE_SIGNING_IDENTITY, ID);
   assert.equal(r.parseEnvFile('PATH="#hash"').PATH, "#hash");
+  assert.equal(r.parseEnvFile("PASS=abc#def").PASS, "abc#def");
+  assert.equal(r.parseEnvFile("PASS=abc # trailing").PASS, "abc");
+  assert.equal(r.parseEnvFile("PASS=abc\\#def").PASS, "abc#def");
+  assert.equal(r.parseEnvFile("PASS='abc#def' # note").PASS, "abc#def");
+  assert.equal(r.parseEnvFile('PASS="abc#def" # note').PASS, "abc#def");
   assert.throws(
     () => r.requireOk({ status: 1, stdout: "", stderr: "", error: null }, "cmd"),
     /status 1/,
