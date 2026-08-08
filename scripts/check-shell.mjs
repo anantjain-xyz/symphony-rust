@@ -34,7 +34,10 @@ try {
       await handle.close();
     }
   }
-  if (shellFiles.length === 0) throw new Error("repository:1: no tracked shell scripts found");
+  if (shellFiles.length === 0) {
+    console.log("shellcheck skipped: no tracked shell scripts found.");
+    process.exit(0);
+  }
 
   const shellcheck = await resolveTool("shellcheck");
   const result = spawnSync(shellcheck, ["--format=gcc", "--severity=style", ...shellFiles], {

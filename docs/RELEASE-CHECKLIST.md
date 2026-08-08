@@ -6,9 +6,9 @@ recovery from partial failures.
 
 ## Status and release shape
 
-**Current behavior** describes checked-in scripts and configuration.
-**Proposed invariants** are release rules. Version equality is not currently
-enforced by a standalone static verifier.
+Release orchestration and its artifact/feed contract are enforced by
+unit-tested Node pure functions in `scripts/release-macos.mjs` and
+`scripts/publish-macos.mjs`.
 
 The supported publish script produces an Apple Silicon macOS release and an
 updater feed for `darwin-aarch64`. It must run on Apple Silicon macOS from a
@@ -30,7 +30,7 @@ One release version is duplicated across these checked-in surfaces:
 
 `pnpm-lock.yaml` does not currently duplicate the root package version.
 [`bump-version`](../.codex/skills/bump-version/SKILL.md) documents the
-repository's assisted bump workflow, but using that skill is not a CI check.
+repository's assisted bump workflow, 
 
 The release tag, title, artifact filenames, and updater-feed version are derived
 from `src-tauri/tauri.conf.json` at publish time.
@@ -38,20 +38,8 @@ from `src-tauri/tauri.conf.json` at publish time.
 ### Proposed invariant
 
 All checked-in version surfaces must change in one release-preparation commit.
-Do not hand-edit only the Tauri version to make a tag, or only the Cargo
-workspace version to make crates compile.
-
-After a bump:
-
-1. inspect the diff for unrelated dependency changes;
-2. ensure every local `symphony-*` package in `Cargo.lock` has the new version;
-3. ensure `package.json`, both Cargo manifests, and Tauri config agree;
-4. run Cargo metadata with the lockfile enforced;
-5. choose a version whose `v<version>` tag and GitHub release do not already
-   represent a different commit.
-
-A future version verifier should read structured JSON/TOML/lockfile data and
-compare these surfaces. No such verifier is currently wired into CI.
+Keep them aligned before publishing. Node release tests cover preflight,
+artifact names, the updater feed, and the draft-then-publish sequence.
 
 ## Release identities and secrets
 
@@ -65,7 +53,7 @@ independent trust chains:
 2. **Tauri updater signing**, proving `Symphony.app.tar.gz` to already-installed
    Symphony applications.
 
-[`scripts/release-macos.sh`](../scripts/release-macos.sh) loads a credential
+[`scripts/release-macos.mjs`](../scripts/release-macos.mjs) loads a credential
 file from `~/.symphony-release.env`, overridable with
 `SYMPHONY_RELEASE_ENV`. It requires:
 
@@ -147,8 +135,8 @@ verified. Publishing is the operation that makes the release eligible for the
 - [ ] The intended version is consistent across all version surfaces.
 - [ ] The worktree is clean on `main`.
 - [ ] `HEAD` equals `origin/main` after fetching `main` and tags.
-- [ ] The current GitHub repository equals the repository in
-      `scripts/contracts/release.json`.
+- [ ] The current GitHub repository equals the exported
+      `RELEASE_REPOSITORY` constant in `scripts/release-macos.mjs`.
 - [ ] No conflicting `v<version>` tag or GitHub release exists.
 - [ ] The host is Apple Silicon macOS.
 - [ ] Node, pnpm, stable Rust, Xcode command-line tools, and authenticated `gh`
@@ -201,8 +189,8 @@ For a full publish, run:
 pnpm release:publish
 ```
 
-This calls [`scripts/publish-macos.sh`](../scripts/publish-macos.sh), which in
-turn calls [`scripts/release-macos.sh`](../scripts/release-macos.sh).
+This calls [`scripts/publish-macos.mjs`](../scripts/publish-macos.mjs), which in
+turn calls [`scripts/release-macos.mjs`](../scripts/release-macos.mjs).
 
 The release build uses
 `pnpm tauri build --config src-tauri/tauri.updater.conf.json`. On macOS,
@@ -210,7 +198,7 @@ The release build uses
 commands unless explicitly overridden, selecting Tauri's deterministic DMG path
 instead of Finder automation.
 
-After building, `release-macos.sh` verifies:
+After building, `release-macos.mjs` verifies:
 
 - Gatekeeper acceptance with `spctl`;
 - the notarization staple with `xcrun stapler validate`;
@@ -237,7 +225,7 @@ publishing secrets.
 
 ### Current behavior
 
-`publish-macos.sh` verifies the configured GitHub repository, branch, clean
+`publish-macos.mjs` verifies the configured GitHub repository, branch, clean
 state, fetched commit, tag, and release before building. It requires exactly
 one versioned aarch64 DMG.
 

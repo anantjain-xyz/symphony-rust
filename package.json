@@ -16,9 +16,8 @@
     "check:ipc": "node scripts/check-ipc.mjs",
     "check:links": "node scripts/check-markdown-links.mjs",
     "check:projections": "node scripts/check-projections.mjs",
-    "check:release": "node scripts/check-release.mjs",
     "check:shell": "node scripts/check-shell.mjs",
-    "check:static": "pnpm check:bindings && pnpm check:ipc && pnpm check:projections && pnpm check:release",
+    "check:static": "pnpm check:bindings && pnpm check:ipc && pnpm check:projections",
     "check:workflows": "node scripts/check-workflows.mjs",
     "format:check": "biome format .",
     "generate:bindings": "cargo run -p symphony-contracts --bin export-bindings -- src/bindings.ts",
@@ -30,7 +29,7 @@
     "test:frontend-contracts": "node --test scripts/check-frontend-boundaries.node.mjs",
     "test:harness": "node --test scripts/check-agent-assets.node.mjs",
     "test:hygiene": "node --test scripts/check-hygiene-tools.node.mjs scripts/check-markdown-links.node.mjs",
-    "test:static": "node --test scripts/check-contracts.node.mjs",
+    "test:static": "node --test scripts/check-contracts.node.mjs scripts/release.node.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "pnpm build && playwright test",
@@ -38,8 +37,8 @@
     "verify:full": "node scripts/run-validation.mjs full",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.mjs",
-    "release:mac": "bash scripts/release-macos.sh",
-    "release:publish": "bash scripts/publish-macos.sh"
+    "release:mac": "node scripts/release-macos.mjs",
+    "release:publish": "node scripts/publish-macos.mjs"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",
