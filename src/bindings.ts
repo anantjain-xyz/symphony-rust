@@ -54,7 +54,7 @@ export type RateLimitStateRow = { source: string; remaining: number | null; rese
 
 export type TokenUsageRow = { source: string; input_tokens: number; output_tokens: number; total_tokens: number; run_count: number; updated_at: string }
 
-export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; failure_count: number; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
+export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
 
 export type RetroRow = { id: string; since_at: string; until_at: string; status: string; run_count: number; issue_count: number; report_json: string | null; error_message: string | null; created_at: string; completed_at: string | null }
 
