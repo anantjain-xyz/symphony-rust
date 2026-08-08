@@ -80,12 +80,7 @@ describe("format helpers", () => {
 
   it("always lists a rate-limit row per provider", () => {
     const rows = providerRateLimits([]);
-    expect(rows.map((row) => row.label)).toEqual([
-      "Claude",
-      "Codex",
-      "Cursor",
-      "opencode",
-    ]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex", "Cursor", "opencode"]);
     expect(rows.every((row) => row.limit === null)).toBe(true);
   });
 
@@ -120,12 +115,7 @@ describe("format helpers", () => {
 
   it("always lists a token-usage row per provider", () => {
     const rows = providerTokenUsage([]);
-    expect(rows.map((row) => row.label)).toEqual([
-      "Claude",
-      "Codex",
-      "Cursor",
-      "opencode",
-    ]);
+    expect(rows.map((row) => row.label)).toEqual(["Claude", "Codex", "Cursor", "opencode"]);
     expect(rows.every((row) => row.usage === null)).toBe(true);
   });
 
@@ -198,18 +188,20 @@ describe("format helpers", () => {
         '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"running"}',
       ),
     ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
-    expect(
-      describeEvent("tool_call", '{"tool":"bash","args":{"command":"pnpm test"}}'),
-    ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
+    expect(describeEvent("tool_call", '{"tool":"bash","args":{"command":"pnpm test"}}')).toEqual({
+      label: "Tool call",
+      summary: "bash: pnpm test",
+    });
     expect(
       describeEvent(
         "tool_call",
         '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"custom output"}',
       ),
     ).toEqual({ label: "Tool call", summary: "bash: custom output" });
-    expect(
-      describeEvent("token_count", '{"input_tokens":184223,"output_tokens":9281}'),
-    ).toEqual({ label: "Tokens", summary: "184k in · 9.3k out" });
+    expect(describeEvent("token_count", '{"input_tokens":184223,"output_tokens":9281}')).toEqual({
+      label: "Tokens",
+      summary: "184k in · 9.3k out",
+    });
     expect(
       describeEvent("error", '{"class":"AgentTurnTimeout","message":"turn exceeded budget"}'),
     ).toEqual({
@@ -217,9 +209,10 @@ describe("format helpers", () => {
       summary: "AgentTurnTimeout: turn exceeded budget",
       tone: "error",
     });
-    expect(
-      describeEvent("rate_limit", '{"source":"codex","remaining":12}'),
-    ).toEqual({ label: "Rate limit", summary: "codex — 12 remaining" });
+    expect(describeEvent("rate_limit", '{"source":"codex","remaining":12}')).toEqual({
+      label: "Rate limit",
+      summary: "codex — 12 remaining",
+    });
   });
 
   it("falls back gracefully for unknown or malformed events", () => {

@@ -80,16 +80,12 @@ export function createPollController<T>({
 
   const unchangedDelay = () => {
     if (unchangedCount < 3 || unchangedBackoffMs.length === 0) return baselineMs;
-    return unchangedBackoffMs[
-      Math.min(unchangedCount - 3, unchangedBackoffMs.length - 1)
-    ];
+    return unchangedBackoffMs[Math.min(unchangedCount - 3, unchangedBackoffMs.length - 1)];
   };
 
   const failureDelay = () =>
     Math.min(
-      FAILURE_DELAYS_MS[
-        Math.min(consecutiveFailures - 1, FAILURE_DELAYS_MS.length - 1)
-      ],
+      FAILURE_DELAYS_MS[Math.min(consecutiveFailures - 1, FAILURE_DELAYS_MS.length - 1)],
       failureMaxMs,
     );
 

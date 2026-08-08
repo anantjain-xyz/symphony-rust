@@ -38,7 +38,11 @@ export function createEventStressFixture(count = 5_000): AgentEventRow[] {
         payload: JSON.stringify({
           class: "StressFixtureError",
           message: `Recoverable fixture error ${index}`,
-          context: { index, retryable: true, values: Array.from({ length: 30 }, (_, value) => value) },
+          context: {
+            index,
+            retryable: true,
+            values: Array.from({ length: 30 }, (_, value) => value),
+          },
         }),
       };
     }

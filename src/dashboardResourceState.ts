@@ -48,9 +48,7 @@ export function markResourceDirty<T>(
   resource: DashboardResourceEnvelope<T>,
   now: string,
 ): DashboardResourceEnvelope<T> {
-  return resource.dirtySince
-    ? resource
-    : { ...resource, dirtySince: now };
+  return resource.dirtySince ? resource : { ...resource, dirtySince: now };
 }
 
 export function beginResourceRefresh<T>(
@@ -123,8 +121,7 @@ export function hasResourceData<T>(resource: DashboardResourceEnvelope<T>) {
 
 export function resourceIsStale<T>(resource: DashboardResourceEnvelope<T>) {
   return (
-    resource.status === "stale" ||
-    (resource.status === "refreshing" && resource.error !== null)
+    resource.status === "stale" || (resource.status === "refreshing" && resource.error !== null)
   );
 }
 

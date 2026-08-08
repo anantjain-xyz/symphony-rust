@@ -41,7 +41,12 @@ const cases: BootstrapCase[] = [
   { name: "missing storage with dark system", stored: null, mediaDark: true, expected: "dark" },
   { name: "missing storage with light system", stored: null, mediaDark: false, expected: "light" },
   { name: "invalid storage with dark system", stored: "system", mediaDark: true, expected: "dark" },
-  { name: "invalid storage with light system", stored: "invalid", mediaDark: false, expected: "light" },
+  {
+    name: "invalid storage with light system",
+    stored: "invalid",
+    mediaDark: false,
+    expected: "light",
+  },
   { name: "inaccessible storage", storageThrows: true, mediaDark: true, expected: "light" },
   { name: "unavailable matchMedia", stored: null, mediaThrows: true, expected: "light" },
 ];

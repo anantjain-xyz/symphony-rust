@@ -42,9 +42,7 @@ export type ProviderRateLimit = {
 // One display row per provider, even without signals; a provider with
 // several signal buckets (codex_primary, codex_secondary, ...) gets a row
 // per bucket. Sources from unknown providers are appended as-is.
-export function providerRateLimits(
-  limits: RateLimitStateRow[],
-): ProviderRateLimit[] {
+export function providerRateLimits(limits: RateLimitStateRow[]): ProviderRateLimit[] {
   const claimed = new Set<string>();
   const rows = PROVIDERS.flatMap(({ key, label }): ProviderRateLimit[] => {
     const matches = limits.filter(
@@ -56,10 +54,7 @@ export function providerRateLimits(
     if (matches.length === 0) return [{ id: key, label, limit: null }];
     return matches.map((limit) => ({
       id: limit.source,
-      label:
-        limit.source === key
-          ? label
-          : `${label} · ${limit.source.slice(key.length + 1)}`,
+      label: limit.source === key ? label : `${label} · ${limit.source.slice(key.length + 1)}`,
       limit,
     }));
   });
@@ -144,12 +139,16 @@ export type EventSummary = {
   tone?: "error";
 };
 
-export type ParsedEventPayload = Record<string, unknown> | unknown[] | string | number | boolean | null;
+export type ParsedEventPayload =
+  | Record<string, unknown>
+  | unknown[]
+  | string
+  | number
+  | boolean
+  | null;
 
 export const EVENT_PAYLOAD_PARSE_FAILED = Symbol("event-payload-parse-failed");
-export type EventPayloadParseResult =
-  | ParsedEventPayload
-  | typeof EVENT_PAYLOAD_PARSE_FAILED;
+export type EventPayloadParseResult = ParsedEventPayload | typeof EVENT_PAYLOAD_PARSE_FAILED;
 
 export function parseEventPayload(payload: string): EventPayloadParseResult {
   try {
@@ -203,9 +202,7 @@ export function describeEvent(
     case "error":
       return {
         label: "Error",
-        summary: data
-          ? `${text(data.class) ?? "Error"}: ${text(data.message) ?? ""}`
-          : payload,
+        summary: data ? `${text(data.class) ?? "Error"}: ${text(data.message) ?? ""}` : payload,
         tone: "error",
       };
     case "user_input":

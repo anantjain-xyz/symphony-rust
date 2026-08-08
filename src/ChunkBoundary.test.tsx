@@ -4,11 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { Suspense, useState } from "react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  ChunkErrorBoundary,
-  ViewLoading,
-  createLazyAttempts,
-} from "./ChunkBoundary";
+import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "./ChunkBoundary";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -47,11 +43,7 @@ function createHarness(loader: ViewLoader) {
           </button>
         </nav>
         {active ? (
-          <ChunkErrorBoundary
-            key={attempt}
-            view="Runs"
-            onRetry={() => setAttempt(attempts.add())}
-          >
+          <ChunkErrorBoundary key={attempt} view="Runs" onRetry={() => setAttempt(attempts.add())}>
             <Suspense fallback={<ViewLoading view="Runs" />}>
               <View />
             </Suspense>
@@ -92,8 +84,7 @@ describe("lazy view boundaries", () => {
     const importView = vi.fn(() => pending.promise);
     let cached: Promise<ViewModule> | null = null;
     let loaded: ViewModule | null = null;
-    const loader: ViewLoader = () =>
-      (cached ??= importView().then((module) => (loaded = module)));
+    const loader: ViewLoader = () => (cached ??= importView().then((module) => (loaded = module)));
     const Harness = createHarness(loader);
     render(<Harness />);
     const button = screen.getByRole("button", { name: "Runs" });
@@ -145,9 +136,7 @@ describe("lazy view boundaries", () => {
         imports[index].reject(new Error(`chunk unavailable ${index + 1}`));
         await imports[index].promise.catch(() => undefined);
       });
-      expect((await screen.findByRole("alert")).textContent).toContain(
-        "Unable to load Runs",
-      );
+      expect((await screen.findByRole("alert")).textContent).toContain("Unable to load Runs");
       expect(screen.getByRole("navigation", { name: "Primary" })).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     }

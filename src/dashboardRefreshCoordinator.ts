@@ -24,10 +24,7 @@ type DashboardRefreshRequestOptions = {
 export type DashboardRefreshCoordinator<Key extends string> = {
   activate: () => void;
   dispose: () => void;
-  request: (
-    keys: Iterable<Key>,
-    options?: DashboardRefreshRequestOptions,
-  ) => Promise<void>;
+  request: (keys: Iterable<Key>, options?: DashboardRefreshRequestOptions) => Promise<void>;
 };
 
 export function createDashboardRefreshCoordinator<Key extends string>({
@@ -70,16 +67,12 @@ export function createDashboardRefreshCoordinator<Key extends string>({
     failure: unknown,
   ) => {
     keys.forEach((key) => {
-      settledGenerations.set(
-        key,
-        Math.max(settledGenerations.get(key) ?? 0, generation),
-      );
+      settledGenerations.set(key, Math.max(settledGenerations.get(key) ?? 0, generation));
     });
 
     const completed = requestWaiters.filter((waiter) =>
       [...waiter.generations].every(
-        ([key, requestedGeneration]) =>
-          (settledGenerations.get(key) ?? 0) >= requestedGeneration,
+        ([key, requestedGeneration]) => (settledGenerations.get(key) ?? 0) >= requestedGeneration,
       ),
     );
     requestWaiters = requestWaiters.filter((waiter) => !completed.includes(waiter));
