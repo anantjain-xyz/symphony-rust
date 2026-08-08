@@ -7,7 +7,7 @@ import { compareSets, rustTokens } from "./lib/source-contracts.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-export const BACKEND_ONLY_COMMANDS = ["get_issue_detail"];
+export const BACKEND_ONLY_COMMANDS = [];
 
 function tokenSequenceAt(tokens, index, values) {
   return values.every((value, offset) => tokens[index + offset]?.value === value);

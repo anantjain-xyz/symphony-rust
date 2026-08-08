@@ -113,5 +113,3 @@ export type WorkflowTransferState = "idle" | "running" | "completed" | "failed"
 export type WorkflowTransferStatus = { state: WorkflowTransferState; repo_url: string | null; message: string | null; pr_url: string | null; error: string | null }
 
 export type RunDetail = { run: RunWithIssueRow; events: AgentEventRow[] }
-
-export type IssueDetail = { issue: IssueRow }
