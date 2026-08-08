@@ -294,6 +294,19 @@ test("requires discoveryProjection configuration", (t) => {
   );
 });
 
+test("rejects directory-valued inventoryFile before reading", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.inventoryFile = "src-tauri/src";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /bundled skill inventory at src-tauri\/src must be a regular file/,
+  );
+});
+
 test("accepts relocated topology paths from the contract", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");

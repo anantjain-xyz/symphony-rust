@@ -646,7 +646,7 @@ function requireModuleImport(tokens, moduleName, symbol, sourcePath, errors) {
 
 function validateSkillRuntimeConsumers(root, sourcePath, inventoryFunction, errors) {
   const absolute = resolveInside(root, sourcePath, errors, "bundled skill runtime source");
-  if (!absolute || !existsSync(absolute)) return;
+  if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) return;
   const tokens = rustTokens(readFileSync(absolute, "utf8"));
   const bodies = new Map();
   for (const { functionName, sequences } of skillRuntimeConsumers(inventoryFunction)) {
@@ -789,7 +789,8 @@ function validateDefaultPromptRuntimeConsumers(root, inventoryFile, returnFuncti
     !desktopAbsolute ||
     !existsSync(contractAbsolute) ||
     !existsSync(runtimeAbsolute) ||
-    !existsSync(desktopAbsolute)
+    !existsSync(desktopAbsolute) ||
+    !statSync(desktopAbsolute).isFile()
   ) {
     return;
   }
@@ -1164,6 +1165,14 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
     if (absolute) {
       errors.push(`bundled skill inventory is missing at ${inventoryFile}`);
     }
+    return {
+      ids: new Set(),
+      references: [],
+      verifiedDynamicIncludes: new Set(),
+    };
+  }
+  if (!statSync(absolute).isFile()) {
+    errors.push(`bundled skill inventory at ${inventoryFile} must be a regular file`);
     return {
       ids: new Set(),
       references: [],
