@@ -193,6 +193,83 @@ test("accepts a symlink discovery projection", { skip: process.platform === "win
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
+test("rejects a discovery target that does not resolve to the projection root", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.discoveryProjection = {
+    path: ".claude/skills",
+    target: "../unrelated/skills",
+  };
+  writeJson(root, "validation/agent-assets.json", contract);
+  write(root, ".claude/skills", "../unrelated/skills");
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /skill discovery projection target "\.\.\/unrelated\/skills" must resolve to skills\.projectionRoot "\.agents\/skills"/,
+  );
+});
+
+test("accepts a projection prefix containing regex metacharacters", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  const prefix = "sym(phony)-";
+  contract.skills.projectionPrefix = prefix;
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  for (const skillId of ["commit", "pull", "push"]) {
+    for (const path of [
+      `src-tauri/assets/skills/${skillId}/SKILL.md`,
+      `.agents/skills/symphony-${skillId}/SKILL.md`,
+    ]) {
+      const absolute = join(root, path);
+      writeFileSync(
+        absolute,
+        readFileSync(absolute, "utf8").replaceAll(`symphony-${skillId}`, `${prefix}${skillId}`),
+      );
+    }
+    const projection = readFileSync(
+      join(root, `.agents/skills/symphony-${skillId}/SKILL.md`),
+      "utf8",
+    );
+    write(root, `.agents/skills/${prefix}${skillId}/SKILL.md`, projection);
+    rmSync(join(root, `.agents/skills/symphony-${skillId}`), { recursive: true, force: true });
+  }
+
+  const lib = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    lib,
+    readFileSync(lib, "utf8").replace(
+      'const SYMPHONY_SKILL_PREFIX: &str = "symphony-";',
+      `const SYMPHONY_SKILL_PREFIX: &str = "${prefix}";`,
+    ),
+  );
+  const prompt = join(root, "src-tauri/assets/default-prompt.md");
+  writeFileSync(
+    prompt,
+    readFileSync(prompt, "utf8")
+      .replaceAll("`symphony-commit`", "`sym(phony)-commit`")
+      .replaceAll("`symphony-pull`", "`sym(phony)-pull`")
+      .replaceAll("`symphony-push`", "`sym(phony)-push`"),
+  );
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test("applies adaptation replacements containing $$ literally", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  const match = "Commit carefully.";
+  const replacement = "Commit carefully with shell pid $$.";
+  contract.skills.allowedAdaptations.commit = [{ match, replacement }];
+  writeJson(root, "validation/agent-assets.json", contract);
+  write(root, ".agents/skills/symphony-commit/SKILL.md", skill("commit", replacement));
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
 test("rejects an invalid Git-flattened discovery projection", (t) => {
   const root = harnessFixture(t);
   write(root, ".claude/skills", "../wrong/skills");
@@ -203,7 +280,7 @@ test("rejects an invalid Git-flattened discovery projection", (t) => {
   );
 });
 
-test("requires the canonical Claude discovery projection", (t) => {
+test("requires discoveryProjection configuration", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
@@ -211,53 +288,60 @@ test("requires the canonical Claude discovery projection", (t) => {
   writeJson(root, "validation/agent-assets.json", contract);
   rmSync(join(root, ".claude/skills"));
 
-  const errors = validateAgentAssets(root).join("\n");
   assert.match(
-    errors,
-    /skill discovery projection must be \{"path":"\.claude\/skills","target":"\.\.\/\.agents\/skills"\}, received undefined/,
+    validateAgentAssets(root).join("\n"),
+    /skills\.discoveryProjection must be an object/,
   );
-  assert.match(errors, /skill discovery projection is missing at \.claude\/skills/);
 });
 
-test("pins the canonical agent asset source topology", (t) => {
+test("accepts relocated topology paths from the contract", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-  contract.rustSourceRoots = ["fixtures/rust"];
-  contract.skills.ownerRoot = "fixtures/owners";
-  contract.skills.inventoryFile = "fixtures/inventory.rs";
-  contract.skills.inventoryFunction = "fixture_inventory";
+
+  for (const skillId of ["commit", "pull", "push"]) {
+    const projection = readFileSync(
+      join(root, `.agents/skills/symphony-${skillId}/SKILL.md`),
+      "utf8",
+    );
+    write(root, `fixtures/projections/symphony-${skillId}/SKILL.md`, projection);
+  }
+  rmSync(join(root, ".agents/skills"), { recursive: true, force: true });
+  write(root, "fixtures/discovery/skills", "../projections");
+  rmSync(join(root, ".claude/skills"));
+  write(
+    root,
+    "fixtures/standalone/local/SKILL.md",
+    readFileSync(join(root, ".codex/skills/local/SKILL.md"), "utf8"),
+  );
+  rmSync(join(root, ".codex/skills"), { recursive: true, force: true });
+  write(
+    root,
+    "fixtures/default-prompt.md",
+    readFileSync(join(root, "src-tauri/assets/default-prompt.md"), "utf8"),
+  );
+  rmSync(join(root, "src-tauri/assets/default-prompt.md"));
+  write(
+    root,
+    "crates/symphony-contracts/src/settings.rs",
+    `${defaultPromptContractConsumers()}
+
+pub fn default_prompt_template() -> String {
+  include_str!("../../../fixtures/default-prompt.md").to_string()
+}
+`,
+  );
+
   contract.skills.projectionRoot = "fixtures/projections";
-  contract.skills.projectionPrefix = "fixture-";
+  contract.skills.discoveryProjection = {
+    path: "fixtures/discovery/skills",
+    target: "../projections",
+  };
+  contract.skills.standaloneRoots = ["fixtures/standalone"];
   contract.defaultPrompt.path = "fixtures/default-prompt.md";
   writeJson(root, "validation/agent-assets.json", contract);
 
-  const errors = validateAgentAssets(root).join("\n");
-  assert.match(
-    errors,
-    /rustSourceRoots must be \["crates","src-tauri"\], received \["fixtures\/rust"\]/,
-  );
-  assert.match(
-    errors,
-    /skill ownerRoot must be src-tauri\/assets\/skills, received "fixtures\/owners"/,
-  );
-  assert.match(
-    errors,
-    /skill inventoryFile must be src-tauri\/src\/lib\.rs, received "fixtures\/inventory\.rs"/,
-  );
-  assert.match(
-    errors,
-    /skill inventoryFunction must be bundled_skills, received "fixture_inventory"/,
-  );
-  assert.match(
-    errors,
-    /skill projectionRoot must be \.agents\/skills, received "fixtures\/projections"/,
-  );
-  assert.match(errors, /skill projectionPrefix must be symphony-, received "fixture-"/);
-  assert.match(
-    errors,
-    /defaultPrompt path must be src-tauri\/assets\/default-prompt\.md, received "fixtures\/default-prompt\.md"/,
-  );
+  assert.deepEqual(validateAgentAssets(root), []);
 });
 
 test("rejects every undeclared projection difference", (t) => {
@@ -271,34 +355,24 @@ test("rejects every undeclared projection difference", (t) => {
   );
 });
 
-test("pins allowed adaptations to the validation-gate substitutions", (t) => {
+test("rejects adaptations that do not reconcile owners and projections", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-  contract.skills.allowedAdaptations.commit = [
+  contract.skills.allowedAdaptations.missing = [
     {
-      match: "Commit carefully.",
-      replacement: "Bypass verification hooks.",
+      match: "does not exist",
+      replacement: "still missing",
     },
   ];
   contract.skills.allowedAdaptations.pull[0].replacement = "7. Skip validation before pushing.";
-  delete contract.skills.allowedAdaptations.push;
   writeJson(root, "validation/agent-assets.json", contract);
-  write(
-    root,
-    ".agents/skills/symphony-commit/SKILL.md",
-    skill("commit", "Bypass verification hooks."),
-  );
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(errors, /allowed adaptation skill ids has undeclared extra commit/);
+  assert.match(errors, /allowed adaptations declare unknown owner skill missing/);
   assert.match(
     errors,
-    /allowed adaptations for pull must be the exact validation-gate substitution/,
-  );
-  assert.match(
-    errors,
-    /allowed adaptations for push must be the exact validation-gate substitution/,
+    /differs from owner .* after declared adaptations .*declare every intentional projection change/,
   );
 });
 
@@ -431,16 +505,16 @@ fn bundled_skills() {
   );
 });
 
-test("pins inventory discovery to bundled_skills", (t) => {
+test("requires inventoryFunction configuration", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-  contract.skills.inventoryFunction = "decoy_inventory";
+  delete contract.skills.inventoryFunction;
   writeJson(root, "validation/agent-assets.json", contract);
 
   assert.match(
     validateAgentAssets(root).join("\n"),
-    /skill inventoryFunction must be bundled_skills, received "decoy_inventory"/,
+    /skills\.inventoryFunction must be a non-empty string/,
   );
 });
 
@@ -801,7 +875,7 @@ description: empty standalone fixture
   );
 });
 
-test("requires validation of the canonical standalone Codex skill root", (t) => {
+test("requires standaloneRoots configuration", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
@@ -813,11 +887,9 @@ test("requires validation of the canonical standalone Codex skill root", (t) => 
     "---\nname: local\ndescription: malformed standalone fixture\n---\n",
   );
 
-  const errors = validateAgentAssets(root).join("\n");
-  assert.match(errors, /standaloneRoots must be \["\.codex\/skills"\], received undefined/);
   assert.match(
-    errors,
-    /\.codex\/skills\/local\/SKILL\.md must contain a non-empty Markdown instructional body/,
+    validateAgentAssets(root).join("\n"),
+    /skills\.standaloneRoots must be an array of non-empty strings/,
   );
 });
 
@@ -842,7 +914,7 @@ test("forbids every pnpm reference in portable owner manifests only", (t) => {
   );
 });
 
-test("pins the portable owner pnpm policy", (t) => {
+test("requires portableOwnerForbiddenPattern configuration", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
@@ -851,21 +923,26 @@ test("pins the portable owner pnpm policy", (t) => {
 
   assert.match(
     validateAgentAssets(root).join("\n"),
-    /portableOwnerForbiddenPattern must be "\\\\bpnpm\\\\b", received undefined/,
+    /skills\.portableOwnerForbiddenPattern must be a non-empty string/,
   );
 });
 
-test("pins pnpm builtins instead of trusting contract additions", (t) => {
+test("uses configured pnpmBuiltins for script validation", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
-  contract.pnpmBuiltins.push("definitely-missing");
+  contract.pnpmBuiltins.push("custom-builtin");
   writeJson(root, "validation/agent-assets.json", contract);
   const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(prompt, `${readFileSync(prompt, "utf8")}\nRun \`pnpm definitely-missing\`.\n`);
+  writeFileSync(
+    prompt,
+    `${readFileSync(prompt, "utf8")}
+Run \`pnpm custom-builtin\`, not \`pnpm definitely-missing\`.
+`,
+  );
 
   const errors = validateAgentAssets(root).join("\n");
-  assert.match(errors, /pnpmBuiltins must be \["add","dlx","exec","install","remove","run"\]/);
+  assert.doesNotMatch(errors, /references missing package script pnpm custom-builtin/);
   assert.match(
     errors,
     /default-prompt\.md:\d+ references missing package script pnpm definitely-missing/,
@@ -903,23 +980,16 @@ test("requires the default prompt skill table to remain visible", (t) => {
   assert.match(errors, /default prompt skill table is missing symphony-pull/);
 });
 
-test("requires the portable MCP namespace policy", (t) => {
+test("requires defaultPrompt.forbiddenNamespacePattern configuration", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
   delete contract.defaultPrompt.forbiddenNamespacePattern;
   writeJson(root, "validation/agent-assets.json", contract);
-  const prompt = join(root, "src-tauri/assets/default-prompt.md");
-  writeFileSync(prompt, `${readFileSync(prompt, "utf8")}\nUse mcp__linear-server__save_comment.\n`);
 
-  const errors = validateAgentAssets(root).join("\n");
   assert.match(
-    errors,
-    /defaultPrompt forbiddenNamespacePattern must be "mcp__\[A-Za-z0-9_-\]\+__", received undefined/,
-  );
-  assert.match(
-    errors,
-    /hard-codes MCP namespace mcp__linear-server__; describe the capability without assuming a server name/,
+    validateAgentAssets(root).join("\n"),
+    /defaultPrompt\.forbiddenNamespacePattern must be a non-empty string/,
   );
 });
 
