@@ -146,8 +146,8 @@
                 ],
                 "paths": {
                   "@tauri-apps/api/core": {
-                    "importNames": ["invoke"],
-                    "message": "invoke is restricted to src/desktop/commands.ts; use typed desktop command wrappers"
+                    "allowImportNames": ["isTauri"],
+                    "message": "runtime.ts may import only isTauri from @tauri-apps/api/core; invoke belongs in commands.ts"
                   }
                 }
               }
