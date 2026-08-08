@@ -9,8 +9,10 @@ methods, and SQL files under
 ## Status
 
 **Current behavior** describes the implementation today. **Proposed
-invariants** are rules for future schema work. The repository does not currently
-have an append-only migration or fresh-versus-upgraded schema verifier.
+invariants** are rules for future schema work. Migration contract tests enforce
+exact file inventory, registry order, and shipped SQL checksums, and they
+exercise every historical upgrade prefix through head. Fresh-versus-upgraded
+`sqlite_schema` fingerprint comparison is still a remaining gap.
 
 ## Database opening
 
@@ -72,20 +74,28 @@ predates `schema_migrations` and remains idempotent so a database created before
 version tracking can replay it and then catch up.
 
 Storage tests cover pre-versioning upgrade, repeated migration, and atomic
-rollback of a failed migration.
+rollback of a failed migration. Migration contract tests
+([`migration_contract_tests.rs`](../crates/symphony-storage/src/migration_contract_tests.rs))
+additionally assert that:
+
+- the migrations directory matches the `MIGRATIONS` registry exactly;
+- migration IDs are unique, strictly ordered, and contiguous;
+- every shipped migration SQL blob matches a frozen SHA-256 checksum;
+- every historical prefix (`0..=N`) upgrades safely to head, remains
+  idempotent, preserves seeded sentinel data, and passes
+  `PRAGMA integrity_check` / foreign-key checks.
 
 ### Current limitations
 
 - Files are not discovered automatically; a new SQL file does nothing until it
   is added to `MIGRATIONS`.
-- Applied rows contain IDs and timestamps, not SQL checksums.
-- Nothing prevents editing, renaming, deleting, reordering, or reusing an
-  already-released migration.
-- Nothing compares a fresh database schema with a database upgraded through
-  every historical migration.
+- Applied `schema_migrations` rows still store IDs and timestamps only; SQL
+  checksums live in the contract-test registry, not in the database.
+- Editing a shipped migration fails the checksum contract tests, but there is
+  no separate production-time immutability gate beyond those tests and review.
+- Nothing compares a fresh database `sqlite_schema` fingerprint with a database
+  upgraded through every historical migration.
 - The simple semicolon splitter is not a full SQLite parser.
-
-These are limitations, not claims that a verifier already exists.
 
 ### Proposed invariant
 
@@ -151,9 +161,11 @@ path.
 
 ### Current behavior
 
-The storage test suite can create temporary databases and run the migrator.
-There is no checked-in production database fixture and no automated schema
-fingerprint comparison.
+The storage test suite creates temporary databases and runs the migrator.
+Migration contract tests enforce exact inventory, order, and checksums, and
+they upgrade every historical prefix to head with sentinel data and integrity
+checks. There is no checked-in production database fixture and no automated
+fresh-versus-upgraded `sqlite_schema` fingerprint comparison.
 
 ### Proposed invariant
 
@@ -165,7 +177,9 @@ For each migration, verify both paths:
 
 Both paths should end with equivalent `sqlite_schema` definitions, required
 data, and indexes. Normalize only irrelevant SQLite formatting or object-order
-differences; do not mask real schema drift.
+differences; do not mask real schema drift. Contract tests already cover
+prefix-to-head upgrades and integrity; closing the remaining gap means adding
+an explicit fresh-versus-upgraded schema fingerprint comparison.
 
 After migration, run:
 
@@ -185,10 +199,10 @@ cargo test -p symphony-storage
 cargo test --workspace --exclude symphony-desktop
 ```
 
-A future static verifier should check registry ordering, unique IDs, exact
-file-to-registry correspondence, and immutability relative to `origin/main`.
-A future integration test should compare fresh and upgraded schema
-fingerprints. Neither check exists today.
+Registry ordering, unique IDs, exact file-to-registry correspondence, and
+shipped SQL checksums are enforced by the migration contract tests. A future
+integration test should still compare fresh and upgraded schema fingerprints;
+that fingerprint check does not exist today.
 
 ## Repository writes and invalidation
 
