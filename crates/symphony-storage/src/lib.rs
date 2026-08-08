@@ -104,9 +104,9 @@ pub async fn open_sqlite(path: impl AsRef<Path>) -> Result<SqlitePool, StorageEr
     // WAL lets readers run concurrently with a writer, and a non-zero
     // busy_timeout makes a blocked writer wait-and-retry instead of failing
     // immediately with SQLITE_BUSY. Without these, the rollback-journal default
-    // serializes every writer on a whole-database lock, so the worker's
-    // concurrent agents plus the 2s heartbeat contend and a losing write
-    // surfaces as an error that can strand a run. NORMAL synchronous is the
+    // serializes every writer on a whole-database lock, so concurrent agent
+    // writes can contend and a losing write can surface as an error that can
+    // strand a run. NORMAL synchronous is the
     // standard, crash-safe companion to WAL.
     let options = SqliteConnectOptions::new()
         .filename(path)

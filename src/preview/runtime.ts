@@ -378,12 +378,6 @@ const previewOverview: Overview = {
       started_at: previewActiveStartedAt,
     },
   ],
-  worker_heartbeat: {
-    id: "worker",
-    started_at: previewActiveStartedAt,
-    last_beat_at: previewIso(-15_000),
-    worker_pid: 18422,
-  },
   rate_limits: [
     {
       source: "codex_primary",

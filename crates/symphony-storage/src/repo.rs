@@ -226,14 +226,6 @@ pub struct TokenUsageRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
-pub struct WorkerHeartbeatRow {
-    pub id: String,
-    pub started_at: String,
-    pub last_beat_at: String,
-    pub worker_pid: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkspaceCleanupRow {
     pub id: String,
     pub repo_name: String,
@@ -257,7 +249,6 @@ pub struct Overview {
     pub failure_count: i64,
     pub workspace_cleanup_count: i64,
     pub live_sessions: Vec<LiveSessionRow>,
-    pub worker_heartbeat: Option<WorkerHeartbeatRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
     pub token_usage: Vec<TokenUsageRow>,
 }
@@ -597,39 +588,6 @@ impl Repository {
             .execute(&self.pool)
             .await?;
         self.changed("runs", "update");
-        Ok(())
-    }
-
-    pub async fn upsert_worker_heartbeat(
-        &self,
-        started_at: &str,
-        worker_pid: i64,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            insert into worker_heartbeat (id, started_at, last_beat_at, worker_pid)
-            values ('worker', ?1, ?2, ?3)
-            on conflict(id) do update set
-              started_at = excluded.started_at,
-              last_beat_at = excluded.last_beat_at,
-              worker_pid = excluded.worker_pid
-            "#,
-        )
-        .bind(started_at)
-        .bind(now_iso())
-        .bind(worker_pid)
-        .execute(&self.pool)
-        .await?;
-        self.changed("worker_heartbeat", "upsert");
-        Ok(())
-    }
-
-    pub async fn beat_worker_heartbeat(&self) -> Result<(), StorageError> {
-        sqlx::query("update worker_heartbeat set last_beat_at = ?1 where id = 'worker'")
-            .bind(now_iso())
-            .execute(&self.pool)
-            .await?;
-        self.changed("worker_heartbeat", "update");
         Ok(())
     }
 
@@ -1231,11 +1189,6 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        let worker_heartbeat = sqlx::query_as::<_, WorkerHeartbeatRow>(
-            "select * from worker_heartbeat where id = 'worker'",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
         let rate_limits = sqlx::query_as::<_, RateLimitStateRow>(
             "select * from rate_limit_state order by source",
         )
@@ -1253,7 +1206,6 @@ impl Repository {
             failure_count,
             workspace_cleanup_count,
             live_sessions,
-            worker_heartbeat,
             rate_limits,
             token_usage,
         })

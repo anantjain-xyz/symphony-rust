@@ -367,27 +367,7 @@ async fn run_worker(
     if !prepare_worker(&repo, &tracker, &initial_config, &stop).await? {
         return Ok(());
     }
-    let started_at = now_iso();
-    repo.upsert_worker_heartbeat(&started_at, std::process::id() as i64)
-        .await?;
-
-    let heartbeat_repo = repo.clone();
-    let heartbeat_stop = stop.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = heartbeat_stop.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    if heartbeat_stop.is_cancelled() {
-                        break;
-                    }
-                    let _ = heartbeat_repo.beat_worker_heartbeat().await;
-                }
-            }
-        }
-    });
-
-    // Terminal workspaces are quarantined after the heartbeat is live. The
+    // Terminal workspaces are quarantined after startup recovery. The
     // rename is fast; recursive deletion belongs to the app-owned collector
     // and never gates the first active-issue poll.
     if !recover_terminal_workspaces(&repo, &tracker, &initial_config, &stop).await? {
@@ -402,7 +382,7 @@ async fn run_worker(
 }
 
 /// Complete tracker preflight and repair persisted run ownership before the
-/// worker advertises a live heartbeat.
+/// worker recovers terminal workspaces.
 async fn prepare_worker<T: TrackerClient>(
     repo: &Repository,
     tracker: &T,

@@ -154,7 +154,6 @@ and database tables to resource keys.
   resources that have become visible.
 - An unknown database table uses a conservative broad-list fallback. It does
   not guess which selected detail changed.
-- Worker-heartbeat changes map to no rendered resource.
 
 The table-to-resource mapping is manual. It currently mirrors backend-emitted
 table names, but no static check guarantees that parity.
