@@ -371,6 +371,33 @@ test("accepts inventoryFile and rustSourceRoots through symlink aliases", {
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
+test("resolves inventory includes from a symlinked inventory file", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = harnessFixture(t);
+  symlinkSync("src-tauri/src/lib.rs", join(root, "inventory-alias.rs"));
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.inventoryFile = "inventory-alias.rs";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+test("compares discovery projection roots by canonical identity", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = harnessFixture(t);
+  mkdirSync(join(root, "fixtures"), { recursive: true });
+  symlinkSync("../.agents/skills", join(root, "fixtures/projection-alias"), "dir");
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.projectionRoot = "fixtures/projection-alias";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
 test("accepts relocated topology paths from the contract", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");

@@ -129,6 +129,20 @@ function samePath(left, right) {
   return canonicalPath(left) === canonicalPath(right);
 }
 
+function resolutionBase(path) {
+  // Only follow a final-path symlink so relative include_str! targets resolve
+  // from the real source file; keep lexical dirname otherwise so repository
+  // root spellings (e.g. /var vs /private/var) stay consistent in diagnostics.
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      return dirname(realpathSync(path));
+    }
+  } catch {
+    // Fall through to the lexical dirname.
+  }
+  return dirname(path);
+}
+
 function parseYamlStringScalar(value, path, line, key, errors) {
   const scalar = value.trim();
   if (scalar.startsWith('"')) {
@@ -1269,10 +1283,11 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
   const references = [];
   const verifiedDynamicIncludes = new Set();
   if (verifiedInclude) {
-    verifiedDynamicIncludes.add(`${canonicalPath(absolute)}\0${verifiedInclude.includeIndex}`);
+    const canonicalInventory = canonicalPath(absolute);
+    verifiedDynamicIncludes.add(`${canonicalInventory}\0${verifiedInclude.includeIndex}`);
     for (const skillId of unique) {
       const target = resolve(
-        dirname(absolute),
+        resolutionBase(absolute),
         `${verifiedInclude.dynamic[0]}${skillId}${verifiedInclude.dynamic[1]}`,
       );
       references.push({ source: absolute, target });
@@ -1316,7 +1331,7 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
 
         const literal = singleStringArgument(include.arguments);
         if (literal !== null) {
-          const target = resolve(dirname(file), literal);
+          const target = resolve(resolutionBase(file), literal);
           references.push({ source: file, target });
           if (!existsSync(target)) {
             errors.push(
@@ -1385,7 +1400,7 @@ function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, returnF
     return null;
   }
 
-  const target = resolve(dirname(file), literal);
+  const target = resolve(resolutionBase(file), literal);
   if (!samePath(target, expectedPrompt)) {
     errors.push(
       `${relativePath(root, file)} ${returnFunction} returns ${relativePath(
@@ -1652,7 +1667,7 @@ export function validateAgentAssets(
     } else if (path) {
       const resolvedTarget = resolve(dirname(path), discoveryTarget);
       const expectedProjection = resolve(root, projectionRoot);
-      if (resolvedTarget !== expectedProjection) {
+      if (!samePath(resolvedTarget, expectedProjection)) {
         errors.push(
           `skill discovery projection target ${JSON.stringify(
             discoveryTarget,
