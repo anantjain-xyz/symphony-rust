@@ -12,8 +12,8 @@ const COMMANDS = {
   "hygiene-tests": ["pnpm", "test:hygiene"],
   boundaries: ["pnpm", "check:boundaries"],
   "boundary-tests": ["pnpm", "test:boundaries"],
-  "frontend-contracts": ["pnpm", "check:frontend-contracts"],
-  "frontend-contract-tests": ["pnpm", "test:frontend-contracts"],
+  "preview-coverage": ["pnpm", "check:preview-coverage"],
+  "preview-coverage-tests": ["node", "--test", "scripts/check-preview-coverage.node.mjs"],
   "rust-format": ["cargo", "fmt", "--all", "--", "--check"],
   "rust-clippy": [
     "cargo",
@@ -40,8 +40,8 @@ const COMMANDS = {
 const FAST_PROFILE = [
   "lint",
   "format",
-  "frontend-contracts",
-  "frontend-contract-tests",
+  "preview-coverage",
+  "preview-coverage-tests",
   "rust-format",
   "rust-clippy",
   "rust-tests",
