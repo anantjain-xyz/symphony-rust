@@ -207,6 +207,8 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         tracker_workspace: legacy.tracker_workspace,
         tracker_team_keys: split_legacy_list(legacy.tracker_prefix.as_deref()),
         tracker_project_ids: split_legacy_list(legacy.tracker_project_id.as_deref()),
+        // This field did not exist in the legacy shape; preserve the old opt-out.
+        tracker_assigned_to_me: false,
         workspace_root: legacy.workspace_root,
         agent_backend: legacy.agent_backend,
         codex_command: legacy.codex_command,
@@ -384,6 +386,7 @@ mod tests {
     #[test]
     fn defaults_match_the_previously_bundled_workflow() {
         let settings = AppSettings::default();
+        assert!(settings.tracker_assigned_to_me);
         assert_eq!(
             settings.active_states,
             ["Todo", "In Progress", "Rework", "Merging"]
@@ -440,6 +443,13 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
         assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn omitted_assignee_filter_stays_disabled_for_existing_settings() {
+        let (settings, migrated) = parse_settings(r#"{"repos":[]}"#).unwrap();
+        assert!(!migrated);
+        assert!(!settings.tracker_assigned_to_me);
     }
 
     #[test]
@@ -604,6 +614,7 @@ mod tests {
         assert_eq!(settings.tracker_workspace.as_deref(), Some("acme"));
         assert_eq!(settings.tracker_team_keys, ["ENG"]);
         assert!(settings.tracker_project_ids.is_empty());
+        assert!(!settings.tracker_assigned_to_me);
         assert_eq!(settings.agent_backend, AgentBackend::Claude);
         assert_eq!(
             settings.claude_command.as_deref(),

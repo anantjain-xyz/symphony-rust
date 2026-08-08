@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub tracker_team_keys: Vec<String>,
     #[serde(default)]
     pub tracker_project_ids: Vec<String>,
+    // Fresh settings opt in; omitted fields in older settings remain off.
     #[serde(default)]
     pub tracker_assigned_to_me: bool,
     #[serde(default = "default_active_states")]
@@ -117,7 +118,7 @@ impl Default for AppSettings {
             tracker_workspace: None,
             tracker_team_keys: Vec::new(),
             tracker_project_ids: Vec::new(),
-            tracker_assigned_to_me: false,
+            tracker_assigned_to_me: true,
             active_states: default_active_states(),
             terminal_states: default_terminal_states(),
             polling_interval_ms: default_polling_interval_ms(),

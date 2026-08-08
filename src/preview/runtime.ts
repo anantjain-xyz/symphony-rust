@@ -40,7 +40,7 @@ const previewSettings: AppSettings = {
   tracker_workspace: "optimism-llc",
   tracker_team_keys: ["ENG"],
   tracker_project_ids: [],
-  tracker_assigned_to_me: false,
+  tracker_assigned_to_me: true,
   active_states: ["Todo", "In Progress", "Rework", "Merging"],
   terminal_states: ["Done", "Canceled"],
   polling_interval_ms: 30000,
