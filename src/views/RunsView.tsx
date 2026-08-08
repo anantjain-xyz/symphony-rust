@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { RunDetail, RunWithIssueRow } from "../bindings";
 import { formatTokens, parseSessionInfo, shortTime } from "../format";
 import { Badge, Empty, Panel, RunTable } from "../viewPrimitives";
 import { EventStream } from "./EventStream";
-import "./IconSelect.css";
 import "./RunsView.css";
 
 function SessionChips({ raw }: { raw: string | null }) {
@@ -93,7 +92,19 @@ function RunsView({
         </div>
         {multiRepo && repoOptions.length > 0 ? (
           <div className="actions">
-            <RepoFilterSelect value={repoFilter} repos={repoOptions} onChange={setRepoFilter} />
+            <select
+              className="repo-filter-select"
+              aria-label="Filter runs by repository"
+              value={repoFilter}
+              onChange={(event) => setRepoFilter(event.currentTarget.value)}
+            >
+              <option value="">All repos</option>
+              {repoOptions.map((repo) => (
+                <option key={repo} value={repo}>
+                  {repo}
+                </option>
+              ))}
+            </select>
           </div>
         ) : null}
       </header>
@@ -191,159 +202,6 @@ function RunsView({
         </Panel>
       </div>
     </>
-  );
-}
-
-function RepoFilterSelect({
-  value,
-  repos,
-  onChange,
-}: {
-  value: string;
-  repos: string[];
-  onChange: (next: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const optionRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const options = useMemo(
-    () => [
-      { value: "", label: "All repos" },
-      ...repos.map((repo) => ({ value: repo, label: repo })),
-    ],
-    [repos],
-  );
-  const selectedIndex = Math.max(
-    0,
-    options.findIndex((option) => option.value === value),
-  );
-  const selected = options[selectedIndex];
-
-  useEffect(() => {
-    setActiveIndex((index) => Math.min(index, options.length - 1));
-  }, [options.length]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onPointerDown(event: PointerEvent) {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    }
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    optionRefs.current[activeIndex]?.scrollIntoView({ block: "nearest" });
-  }, [activeIndex, open]);
-
-  function openList() {
-    setActiveIndex(selectedIndex);
-    setOpen(true);
-  }
-
-  function commit(index: number) {
-    const option = options[index];
-    if (!option) return;
-    onChange(option.value);
-    setOpen(false);
-  }
-
-  function handleKeyDown(event: React.KeyboardEvent) {
-    if (!open) {
-      if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) {
-        event.preventDefault();
-        openList();
-      }
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.min(options.length - 1, index + 1));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.max(0, index - 1));
-    } else if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      commit(activeIndex);
-    } else if (event.key === "Tab") {
-      setOpen(false);
-    }
-  }
-
-  return (
-    <div className="icon-select repo-filter-select" ref={rootRef}>
-      <button
-        type="button"
-        className="icon-select-trigger repo-filter-trigger"
-        role="combobox"
-        aria-label="Filter runs by repository"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={open ? "repo-filter-listbox" : undefined}
-        aria-activedescendant={open ? `repo-filter-option-${activeIndex}` : undefined}
-        onClick={() => (open ? setOpen(false) : openList())}
-        onKeyDown={handleKeyDown}
-      >
-        <span className="repo-filter-label">{selected.label}</span>
-        <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-          <path
-            d="M4 6l4 4 4-4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </button>
-      {open ? (
-        <div className="icon-select-list repo-filter-list" id="repo-filter-listbox" role="listbox">
-          {options.map((option, index) => (
-            <div
-              key={option.value || "all"}
-              id={`repo-filter-option-${index}`}
-              role="option"
-              tabIndex={-1}
-              aria-selected={option.value === value}
-              ref={(node) => {
-                optionRefs.current[index] = node;
-              }}
-              className={index === activeIndex ? "icon-select-option active" : "icon-select-option"}
-              title={option.label}
-              onPointerMove={() => setActiveIndex(index)}
-              onClick={() => commit(index)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  commit(index);
-                }
-              }}
-            >
-              <span className="icon-select-check" aria-hidden="true">
-                {option.value === value ? (
-                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-                    <path
-                      d="M3 8.5l3.5 3.5L13 4.5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : null}
-              </span>
-              <span className="repo-filter-option-label">{option.label}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
   );
 }
 

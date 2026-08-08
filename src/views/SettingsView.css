@@ -626,12 +626,6 @@ label,
   gap: 6px;
 }
 
-.backend-icon {
-  flex: 0 0 auto;
-  height: 16px;
-  width: 16px;
-}
-
 /* The full-bleed editor inside the Prompt panel. */
 .prompt-editor textarea {
   border-radius: 0;

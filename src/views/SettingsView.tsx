@@ -18,7 +18,6 @@ import { SettingsValidationController } from "../settingsValidationController";
 import type { SettingsValidationState } from "../settingsValidationController";
 import { nullable } from "../format";
 import { formSnapshot, Panel } from "../viewPrimitives";
-import "./IconSelect.css";
 import "./SettingsView.css";
 
 const SETTINGS_FORM_ID = "settings-form";
@@ -1269,19 +1268,28 @@ function SettingsView({
           >
             <section className="settings-section">
               <h3>Agent</h3>
-              {/* Not a <label>: label activation would forward option clicks back
-              to the trigger button and reopen the popup right after selecting. */}
-              <div className="field-group">
+              <label>
                 Backend
-                <BackendSelect
+                <select
                   value={settings.agent_backend}
                   disabled={!runtimeAvailable}
-                  onChange={(backend) => setSettings({ ...settings, agent_backend: backend })}
-                />
-                {validation ? (
-                  <AgentCliStatus backend={settings.agent_backend} validation={validation} />
-                ) : null}
-              </div>
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      agent_backend: event.currentTarget.value as AppSettings["agent_backend"],
+                    })
+                  }
+                >
+                  {BACKEND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {validation ? (
+                <AgentCliStatus backend={settings.agent_backend} validation={validation} />
+              ) : null}
               <label>
                 Launch command
                 <input
@@ -2163,209 +2171,6 @@ function AgentCliStatus({
           : `After installing, open ${label} CLI once to sign in and choose a default model.`}
       </small>
     </section>
-  );
-}
-
-function BackendIcon({ backend }: { backend: AppSettings["agent_backend"] }) {
-  if (backend === "claude") {
-    return (
-      <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          fill="#D97757"
-          d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.583.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.473.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"
-        />
-      </svg>
-    );
-  }
-  if (backend === "cursor") {
-    return (
-      <svg className="backend-icon" viewBox="600 300 400 400" aria-hidden="true">
-        <path
-          fill="#F7F7F4"
-          d="M999.994 554.294C999.994 559.859 999.994 565.419 999.962 570.984C999.935 575.67 999.882 580.357 999.753 585.038C999.475 595.247 998.875 605.542 997.059 615.639C995.217 625.88 992.212 635.409 987.477 644.718C982.822 653.861 976.738 662.233 969.485 669.491C962.227 676.748 953.861 682.828 944.712 687.482C935.409 692.217 925.875 695.222 915.633 697.065C905.537 698.88 895.242 699.48 885.033 699.759C880.346 699.887 875.665 699.941 870.978 699.968C865.413 700.005 859.853 700 854.288 700H745.695C740.13 700 734.571 700 729.005 699.968C724.319 699.941 719.632 699.887 714.951 699.759C704.742 699.48 694.447 698.88 684.35 697.065C674.109 695.222 664.58 692.217 655.271 687.482C646.128 682.828 637.756 676.743 630.499 669.491C623.241 662.233 617.161 653.866 612.507 644.718C607.772 635.414 604.767 625.88 602.925 615.639C601.109 605.542 600.509 595.247 600.23 585.038C600.102 580.352 600.048 575.67 600.021 570.984C600 565.419 600 559.859 600 554.294V445.701C600 440.136 600 434.576 600.032 429.011C600.059 424.324 600.112 419.637 600.241 414.956C600.52 404.747 601.119 394.452 602.935 384.356C604.778 374.115 607.783 364.586 612.518 355.277C617.172 346.133 623.257 337.762 630.509 330.504C637.767 323.246 646.133 317.167 655.282 312.512C664.586 307.777 674.12 304.772 684.361 302.93C694.458 301.114 704.752 300.514 714.961 300.236C719.648 300.107 724.329 300.054 729.016 300.027C734.576 300 740.136 300 745.701 300H854.294C859.859 300 865.419 300 870.984 300.032C875.67 300.059 880.357 300.112 885.038 300.241C895.247 300.52 905.542 301.119 915.639 302.935C925.88 304.778 935.409 307.783 944.718 312.518C953.861 317.172 962.233 323.257 969.491 330.509C976.748 337.767 982.828 346.133 987.482 355.282C992.217 364.586 995.222 374.12 997.065 384.361C998.88 394.458 999.48 404.752 999.759 414.961C999.887 419.648 999.941 424.329 999.968 429.016C1000.01 434.581 1000 440.141 1000 445.706V554.299L999.994 554.294Z"
-        />
-        <path
-          fill="#72716D"
-          d="M800.001 500L928.151 573.986C927.364 575.352 926.223 576.515 924.809 577.329L805.025 646.484C801.913 648.279 798.078 648.279 794.966 646.484L675.182 577.329C673.768 576.515 672.627 575.347 671.84 573.986L799.99 500H800.001Z"
-        />
-        <path
-          fill="#55544F"
-          d="M800 352.165V500L671.85 573.987C671.062 572.621 670.623 571.046 670.623 569.418V430.582C670.623 427.314 672.364 424.304 675.192 422.67L794.97 353.515C796.529 352.615 798.264 352.165 800 352.165Z"
-        />
-        <path
-          fill="#43413C"
-          d="M928.15 426.013C927.363 424.647 926.222 423.485 924.808 422.67L805.024 353.515C803.471 352.615 801.735 352.165 800 352.165V500L928.15 573.987C928.938 572.621 929.377 571.046 929.377 569.418V430.582C929.377 428.948 928.943 427.384 928.15 426.013Z"
-        />
-        <path
-          fill="#D6D5D2"
-          d="M919.184 431.192C919.913 432.446 920.009 434.053 919.184 435.483L802.856 636.961C802.074 638.327 799.995 637.765 799.995 636.195V503.428C799.995 502.367 799.711 501.35 799.197 500.455L919.179 431.182H919.184V431.192Z"
-        />
-        <path
-          fill="white"
-          d="M919.184 431.192L799.202 500.466C798.694 499.577 797.949 498.827 797.028 498.291L682.054 431.91C680.688 431.128 681.251 429.05 682.82 429.05H915.467C917.117 429.05 918.461 429.944 919.179 431.198H919.184V431.192Z"
-        />
-      </svg>
-    );
-  }
-  if (backend === "opencode") {
-    // Official OpenCode logomark (opencode.ai/brand). Two-tone square glyph:
-    // the inner fill uses currentColor so it adapts to light/dark like the
-    // other backend icons, with the frame in a muted currentColor. The brand
-    // paths span x:0-24, y:6-36; the viewBox crops that 24x30 content and
-    // centers it in a square so the mark sits centered in the 16x16 icon box.
-    return (
-      <svg className="backend-icon" viewBox="-3 6 30 30" aria-hidden="true">
-        <path fill="currentColor" fillOpacity="0.55" d="M18 30H6V18H18V30Z" />
-        <path fill="currentColor" d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z" />
-      </svg>
-    );
-  }
-  return (
-    <svg className="backend-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="currentColor"
-        d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.073zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997z"
-      />
-    </svg>
-  );
-}
-
-// Native <option> elements can't render icons, so the backend picker is a
-// custom trigger + listbox driven with the aria-activedescendant pattern.
-function BackendSelect({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: AppSettings["agent_backend"];
-  disabled: boolean;
-  onChange: (next: AppSettings["agent_backend"]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(0);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onPointerDown(event: PointerEvent) {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    }
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
-
-  const selected = BACKEND_OPTIONS.find((option) => option.value === value) ?? BACKEND_OPTIONS[0];
-
-  function openList() {
-    setActiveIndex(
-      Math.max(
-        0,
-        BACKEND_OPTIONS.findIndex((option) => option.value === value),
-      ),
-    );
-    setOpen(true);
-  }
-
-  function commit(index: number) {
-    onChange(BACKEND_OPTIONS[index].value);
-    setOpen(false);
-  }
-
-  function handleKeyDown(event: React.KeyboardEvent) {
-    if (!open) {
-      if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) {
-        event.preventDefault();
-        openList();
-      }
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.min(BACKEND_OPTIONS.length - 1, index + 1));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.max(0, index - 1));
-    } else if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      commit(activeIndex);
-    } else if (event.key === "Tab") {
-      setOpen(false);
-    }
-  }
-
-  return (
-    <div className="icon-select" ref={rootRef}>
-      <button
-        type="button"
-        className="icon-select-trigger"
-        disabled={disabled}
-        role="combobox"
-        aria-label="Backend"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={open ? "backend-listbox" : undefined}
-        aria-activedescendant={
-          open ? `backend-option-${BACKEND_OPTIONS[activeIndex].value}` : undefined
-        }
-        onClick={() => (open ? setOpen(false) : openList())}
-        onKeyDown={handleKeyDown}
-      >
-        <BackendIcon backend={selected.value} />
-        {selected.label}
-        <svg className="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-          <path
-            d="M4 6l4 4 4-4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </button>
-      {open ? (
-        <div className="icon-select-list" id="backend-listbox" role="listbox">
-          {BACKEND_OPTIONS.map((option, index) => (
-            <div
-              key={option.value}
-              id={`backend-option-${option.value}`}
-              role="option"
-              tabIndex={-1}
-              aria-selected={option.value === value}
-              className={index === activeIndex ? "icon-select-option active" : "icon-select-option"}
-              onPointerMove={() => setActiveIndex(index)}
-              onClick={() => commit(index)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  commit(index);
-                }
-              }}
-            >
-              <span className="icon-select-check" aria-hidden="true">
-                {option.value === value ? (
-                  <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-                    <path
-                      d="M3 8.5l3.5 3.5L13 4.5"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : null}
-              </span>
-              <BackendIcon backend={option.value} />
-              {option.label}
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
   );
 }
 

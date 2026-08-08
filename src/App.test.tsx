@@ -1497,6 +1497,66 @@ describe("App settings", () => {
     }
   });
 
+  it("filters Runs history with a labeled native repository select", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = {
+      ...testSettings(),
+      repos: [
+        {
+          name: "widgets",
+          url: "git@github.com:acme/widgets.git",
+          install_cmd: null,
+          is_default: true,
+          skills_marked_installed: false,
+        },
+        {
+          name: "api",
+          url: "git@github.com:acme/api.git",
+          install_cmd: null,
+          is_default: false,
+          skills_marked_installed: false,
+        },
+      ],
+    };
+    const widgetsRun = runRow({
+      id: "run-widgets",
+      issue_identifier: "SYM-1",
+      issue_title: "Build widgets",
+      repo_name: "widgets",
+    });
+    const apiRun = runRow({
+      id: "run-api",
+      issue_id: "issue-sym-2",
+      issue_identifier: "SYM-2",
+      issue_title: "Ship api",
+      repo_name: "api",
+      run_number: 1,
+    });
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "list_runs") return [widgetsRun, apiRun];
+      return baseInvoke(command, args);
+    });
+
+    render(<App />);
+    await openView("Runs");
+
+    const repoFilter = await screen.findByRole("combobox", { name: "Filter runs by repository" });
+    expect(
+      Array.from(repoFilter.querySelectorAll("option")).map((option) => option.textContent),
+    ).toEqual(["All repos", "api", "widgets"]);
+    expect(screen.getByRole("button", { name: "Open run SYM-1 number 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open run SYM-2 number 1" })).toBeTruthy();
+
+    fireEvent.change(repoFilter, { target: { value: "api" } });
+    expect(screen.queryByRole("button", { name: "Open run SYM-1 number 1" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open run SYM-2 number 1" })).toBeTruthy();
+
+    fireEvent.change(repoFilter, { target: { value: "" } });
+    expect(screen.getByRole("button", { name: "Open run SYM-1 number 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open run SYM-2 number 1" })).toBeTruthy();
+  });
+
   it("refreshes issue-derived run metadata only while Runs is active", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
@@ -3289,8 +3349,11 @@ describe("App settings", () => {
 
     expect(await screen.findByText("Codex CLI")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Install Cursor" })).toBeNull();
-    fireEvent.click(screen.getByRole("combobox", { name: "Backend" }));
-    fireEvent.click(screen.getByRole("option", { name: "Cursor" }));
+    const backendSelect = screen.getByRole("combobox", { name: "Backend" });
+    expect(
+      Array.from(backendSelect.querySelectorAll("option")).map((option) => option.textContent),
+    ).toEqual(["Codex", "Claude Code", "Cursor", "opencode"]);
+    fireEvent.change(backendSelect, { target: { value: "cursor" } });
 
     const installButton = await screen.findByRole("button", { name: "Install Cursor" });
     expect(
