@@ -4,8 +4,8 @@ use std::{
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
-    IssueDetail, LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult,
-    ValidationResult, WorkflowStateRow,
+    LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult, ValidationResult,
+    WorkflowStateRow,
 };
 use symphony_storage::{
     now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
@@ -519,19 +519,6 @@ async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String
         .repo
         .list_issues(200)
         .await
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-async fn get_issue_detail(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Option<IssueDetail>, String> {
-    state
-        .repo
-        .get_issue(&id)
-        .await
-        .map(|issue| issue.map(|issue| IssueDetail { issue }))
         .map_err(|err| err.to_string())
 }
 
@@ -1304,7 +1291,6 @@ pub fn run() {
             list_workflow_states,
             set_issue_state,
             list_board_issues,
-            get_issue_detail,
             get_worker_status,
             start_worker,
             stop_worker,

@@ -39,11 +39,8 @@ callable only when it also appears in the `tauri::generate_handler!` list.
 Frontend code invokes commands through literal-name wrappers in
 [`src/desktop/commands.ts`](../src/desktop/commands.ts).
 
-The checked-in handler definitions and registration list currently agree. Most
-registered commands are invoked by the frontend. `get_issue_detail` is a
-registered backend-only command at present, so exact set equality between
-registered and invoked names would need an explicit allowlist rather than
-assuming every registered command has a caller.
+The checked-in handler definitions and registration list currently agree, and
+every registered command is invoked by the frontend.
 
 Tauri serializes command arguments and results across the boundary. Rust
 parameter names, serde renames, optionality, integer ranges, and enum tags are
