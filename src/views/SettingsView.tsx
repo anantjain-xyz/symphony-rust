@@ -1788,22 +1788,6 @@ function SettingsView({
                     }
                   />
                 </label>
-                <label>
-                  Before remove
-                  <textarea
-                    {...literalInputProps}
-                    className="mono-input"
-                    rows={2}
-                    value={settings.hook_before_remove ?? ""}
-                    disabled={!runtimeAvailable}
-                    onChange={(e) =>
-                      setSettings({
-                        ...settings,
-                        hook_before_remove: nullable(e.currentTarget.value),
-                      })
-                    }
-                  />
-                </label>
               </details>
             </section>
           </div>

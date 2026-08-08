@@ -84,7 +84,6 @@ pub fn workflow_from_settings(
             after_create: normalize_opt(&settings.hook_after_create),
             before_run: normalize_opt(&settings.hook_before_run),
             after_run: normalize_opt(&settings.hook_after_run),
-            before_remove: normalize_opt(&settings.hook_before_remove),
             timeout_ms: settings.hook_timeout_ms,
         },
         agent: AgentConfig {
@@ -207,6 +206,8 @@ pub fn parse_settings(raw: &str) -> Result<(AppSettings, bool), String> {
         tracker_workspace: legacy.tracker_workspace,
         tracker_team_keys: split_legacy_list(legacy.tracker_prefix.as_deref()),
         tracker_project_ids: split_legacy_list(legacy.tracker_project_id.as_deref()),
+        // This field did not exist in the legacy shape; preserve the old opt-out.
+        tracker_assigned_to_me: false,
         workspace_root: legacy.workspace_root,
         agent_backend: legacy.agent_backend,
         codex_command: legacy.codex_command,
@@ -384,6 +385,7 @@ mod tests {
     #[test]
     fn defaults_match_the_previously_bundled_workflow() {
         let settings = AppSettings::default();
+        assert!(settings.tracker_assigned_to_me);
         assert_eq!(
             settings.active_states,
             ["Todo", "In Progress", "Rework", "Merging"]
@@ -440,6 +442,31 @@ mod tests {
         let (settings, migrated) = parse_settings(&raw).unwrap();
         assert!(!migrated);
         assert!(settings.repos.is_empty());
+    }
+
+    #[test]
+    fn ignores_removed_before_remove_hook_in_existing_settings() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "hook_before_remove".to_string(),
+            serde_json::json!("legacy"),
+        );
+
+        let (settings, migrated) = parse_settings(&value.to_string()).unwrap();
+        assert!(!migrated);
+
+        let rewritten = serde_json::to_value(settings).unwrap();
+        assert!(!rewritten
+            .as_object()
+            .unwrap()
+            .contains_key("hook_before_remove"));
+    }
+
+    #[test]
+    fn omitted_assignee_filter_stays_disabled_for_existing_settings() {
+        let (settings, migrated) = parse_settings(r#"{"repos":[]}"#).unwrap();
+        assert!(!migrated);
+        assert!(!settings.tracker_assigned_to_me);
     }
 
     #[test]
@@ -604,6 +631,7 @@ mod tests {
         assert_eq!(settings.tracker_workspace.as_deref(), Some("acme"));
         assert_eq!(settings.tracker_team_keys, ["ENG"]);
         assert!(settings.tracker_project_ids.is_empty());
+        assert!(!settings.tracker_assigned_to_me);
         assert_eq!(settings.agent_backend, AgentBackend::Claude);
         assert_eq!(
             settings.claude_command.as_deref(),

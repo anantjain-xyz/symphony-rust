@@ -26,6 +26,7 @@ pub struct AppSettings {
     pub tracker_team_keys: Vec<String>,
     #[serde(default)]
     pub tracker_project_ids: Vec<String>,
+    // Fresh settings opt in; omitted fields in older settings remain off.
     #[serde(default)]
     pub tracker_assigned_to_me: bool,
     #[serde(default = "default_active_states")]
@@ -46,8 +47,6 @@ pub struct AppSettings {
     pub hook_before_run: Option<String>,
     #[serde(default)]
     pub hook_after_run: Option<String>,
-    #[serde(default)]
-    pub hook_before_remove: Option<String>,
     #[serde(default = "default_hook_timeout_ms")]
     pub hook_timeout_ms: u64,
     // Agent
@@ -117,7 +116,7 @@ impl Default for AppSettings {
             tracker_workspace: None,
             tracker_team_keys: Vec::new(),
             tracker_project_ids: Vec::new(),
-            tracker_assigned_to_me: false,
+            tracker_assigned_to_me: true,
             active_states: default_active_states(),
             terminal_states: default_terminal_states(),
             polling_interval_ms: default_polling_interval_ms(),
@@ -126,7 +125,6 @@ impl Default for AppSettings {
             hook_after_create: default_after_create_hook(),
             hook_before_run: None,
             hook_after_run: None,
-            hook_before_remove: None,
             hook_timeout_ms: default_hook_timeout_ms(),
             agent_backend: AgentBackend::Codex,
             codex_command: None,

@@ -5678,14 +5678,11 @@ version = "0.1.25"
 dependencies = [
  "async-trait",
  "chrono",
- "futures",
- "serde",
  "serde_json",
  "symphony-core",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tracing",
  "uuid",
 ]
 
@@ -5706,22 +5703,18 @@ dependencies = [
 name = "symphony-core"
 version = "0.1.25"
 dependencies = [
- "chrono",
  "serde",
  "serde_json",
  "sha2",
  "specta",
  "tempfile",
- "uuid",
 ]
 
 [[package]]
 name = "symphony-desktop"
 version = "0.1.25"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
- "chrono",
  "keyring",
  "keyring-core",
  "minisign-verify",
@@ -5729,8 +5722,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
- "specta",
- "symphony-agents",
  "symphony-contracts",
  "symphony-core",
  "symphony-storage",
@@ -5742,7 +5733,6 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -5755,7 +5745,6 @@ dependencies = [
 name = "symphony-storage"
 version = "0.1.25"
 dependencies = [
- "async-trait",
  "chrono",
  "serde",
  "serde_json",
@@ -5789,7 +5778,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
- "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
