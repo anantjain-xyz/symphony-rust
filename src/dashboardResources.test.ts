@@ -23,7 +23,7 @@ describe("dashboard resource invalidation map", () => {
     ["retro_inputs", ["retroList", "selectedRetro"]],
     ["workpad_snapshots", ["retroList", "selectedRetro"]],
     ["retro_batches", ["retroBatches", "selectedRetro"]],
-    ["workflows", ["overview"]],
+    ["workflows", []],
   ] as const)("maps %s", (table, expected) => {
     expect(resourcesForDbChange(table)).toEqual(expected);
   });
