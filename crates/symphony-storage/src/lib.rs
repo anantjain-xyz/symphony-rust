@@ -16,16 +16,52 @@ use tokio::sync::broadcast;
 
 pub use repo::*;
 
+/// Errors returned by storage operations.
+///
+/// The SQLx-backed variant is deliberately not constructible by dependent
+/// crates. Storage code creates it through the crate-local `From<sqlx::Error>`
+/// implementation, while the other public variants remain available to the
+/// worker for recovery and validation cases.
+///
+/// ```compile_fail
+/// use symphony_storage::StorageError;
+///
+/// let _ = StorageError::Sqlx(symphony_storage::SqlxError(
+///     sqlx::Error::RowNotFound,
+/// ));
+/// ```
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Sqlx(#[source] SqlxError),
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("run {0} lost the one-running-run race")]
     AlreadyRunning(String),
     #[error("run {run_id} cannot finish with non-terminal status {status}")]
     InvalidRunTransition { run_id: String, status: String },
+}
+
+#[doc(hidden)]
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct SqlxError(#[source] sqlx::Error);
+
+impl From<sqlx::Error> for StorageError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Sqlx(SqlxError(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlx_errors_convert_inside_storage() {
+        let error: StorageError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(error, StorageError::Sqlx(_)));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
