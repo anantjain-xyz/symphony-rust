@@ -84,25 +84,11 @@ function stripInlineShellComment(line) {
       quote = ch;
       continue;
     }
-    // Shell only starts a comment when `#` begins a word (after IFS whitespace).
-    if (ch === "#" && (i === 0 || /\s/u.test(line[i - 1]))) {
-      return line.slice(0, i).trimEnd();
-    }
+    if (ch === "#" && (i === 0 || /\s/u.test(line[i - 1]))) return line.slice(0, i).trimEnd();
   }
   return line;
 }
-function unescapeUnquotedShellValue(value) {
-  let out = "";
-  for (let i = 0; i < value.length; i += 1) {
-    if (value[i] === "\\" && i + 1 < value.length) {
-      i += 1;
-      out += value[i];
-      continue;
-    }
-    out += value[i];
-  }
-  return out;
-}
+const unescapeUnquotedShellValue = (value) => value.replace(/\\([\s\S])/gu, "$1");
 export function parseEnvFile(contents) {
   const env = {};
   for (const raw of contents.split(/\r?\n/u)) {
@@ -181,7 +167,6 @@ export function createDefaultRunner() {
       encoding: "utf8",
       stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
     });
-    // spawnSync status is null when the child is killed by a signal.
     return {
       status: result.status == null ? 1 : result.status,
       stdout: result.stdout ?? "",
