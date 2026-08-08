@@ -1,4 +1,12 @@
-import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -107,6 +115,14 @@ function walkFiles(path) {
     else if (entry.isFile()) files.push(child);
   }
   return files;
+}
+
+function canonicalPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 function parseYamlStringScalar(value, path, line, key, errors) {
@@ -1249,7 +1265,7 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
   const references = [];
   const verifiedDynamicIncludes = new Set();
   if (verifiedInclude) {
-    verifiedDynamicIncludes.add(`${absolute}\0${verifiedInclude.includeIndex}`);
+    verifiedDynamicIncludes.add(`${canonicalPath(absolute)}\0${verifiedInclude.includeIndex}`);
     for (const skillId of unique) {
       const target = resolve(
         dirname(absolute),
@@ -1281,8 +1297,9 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
+      const identity = canonicalPath(file);
+      if (seenFiles.has(identity)) continue;
+      seenFiles.add(identity);
       const content = readFileSync(file, "utf8");
       const tokens = rustTokens(content);
       for (let index = 0; index < tokens.length; index += 1) {
@@ -1309,7 +1326,7 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
           continue;
         }
 
-        const includeKey = `${file}\0${tokens[index].index}`;
+        const includeKey = `${identity}\0${tokens[index].index}`;
         if (!verifiedDynamicIncludes.has(includeKey)) {
           errors.push(
             `${relativePath(root, file)} has an unsupported include_str! expression; extend the harness checker before adding it`,
@@ -1331,8 +1348,9 @@ function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, returnF
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
+      const identity = canonicalPath(file);
+      if (seenFiles.has(identity)) continue;
+      seenFiles.add(identity);
       const tokens = rustTokens(readFileSync(file, "utf8"));
       for (const body of namedFunctionBodies(tokens, returnFunction)) {
         definitions.push({ body, file, tokens });
