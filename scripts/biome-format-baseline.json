@@ -15,7 +15,6 @@
   "src/settingsValidationController.ts": "d3215e2dda07d1b5ad56bde7c81f18b6a292aaf495da95fbf6cdf1fe31ed86db",
   "src/themeBootstrap.test.tsx": "9fcae5604969e704717a9c999cef9c2ec51bdc63d42941009a3aa49a544b2e81",
   "src/viewHelpers.ts": "8f2120c03f6885e325ab364564f74e8445fe1bed643c3849a4cbe6fb7635d96f",
-  "src/views/DependencyGraphPanel.test.tsx": "522fc9bcf9f05613f15ce0d5b0004c1c8e97cbaed8398e9e3a43a66793069324",
   "src/views/EventStream.tsx": "c41c3993a9e1ec22f4445655a696a5d7b44be00c4b4434d7db43fefea6465ad7",
   "src/views/eventStreamModel.test.ts": "535c496ec5e3f3771c3acb3bd847c43cd99f19cb8d3b18dd1a06b1256f461026",
   "src/views/eventStreamModel.ts": "5e3cc32bd7bd9628e4e49c962cab06bf82642a14cb1cae71253e0bf18d545808"
