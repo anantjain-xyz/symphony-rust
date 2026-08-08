@@ -12,6 +12,7 @@ export type DesktopEventHandlers = {
   onAgentEvent: (event: AgentEvent) => void;
   onRateLimitChanged: (event: RateLimitChanged) => void;
   onWorkflowReady: (event: WorkflowReady) => void;
+  onCheckForUpdates: () => void;
   onError: (error: unknown) => void;
 };
 
@@ -82,6 +83,11 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
   register(() =>
     listen<WorkflowReady>("workflow_ready", ({ payload }) => {
       if (!disposed) handlers.onWorkflowReady(payload);
+    }),
+  );
+  register(() =>
+    listen<void>("check-for-updates-requested", () => {
+      if (!disposed) handlers.onCheckForUpdates();
     }),
   );
 

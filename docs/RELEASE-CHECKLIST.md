@@ -122,7 +122,9 @@ enables updater artifact creation for release builds.
 allows the main window to check, download, and install updates and to restart
 the process.
 
-[`AppUpdate.tsx`](../src/AppUpdate.tsx) checks immediately and every six hours.
+[`AppUpdate.tsx`](../src/AppUpdate.tsx) checks immediately and every 15 minutes.
+The native **Symphony → Check for Updates…** menu item runs the same single-flight
+check and reports checking, up-to-date, update-available, and failure states.
 It does not download until the user asks. Before installation it checks for:
 
 - active runs;

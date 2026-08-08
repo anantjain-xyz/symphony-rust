@@ -21,7 +21,7 @@
 4. **Track** — agent events, token counts, retries, failures, and provider rate-limit signals are recorded in a local SQLite database and streamed live to the dashboard.
 5. **Retry** — failed runs are retried with exponential backoff, and the retry prompt includes the previous run's error context.
 
-Everything runs on your machine. Network calls go to Linear's API, the tools your agents and hooks use, and — in packaged builds — GitHub Releases for a lightweight update check at launch and every six hours. Update bundles are downloaded only after you click **Update**.
+Everything runs on your machine. Network calls go to Linear's API, the tools your agents and hooks use, and — in packaged builds — GitHub Releases for a lightweight update check at launch and every 15 minutes. Choose **Symphony → Check for Updates…** to check immediately. Update bundles are downloaded only after you click **Update**.
 
 ## Retros
 

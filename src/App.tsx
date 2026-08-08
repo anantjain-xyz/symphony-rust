@@ -497,6 +497,7 @@ function App() {
   const selectedRun = dashboardResources.selectedRun.data ?? null;
   const selectedRetro = dashboardResources.selectedRetro.data ?? null;
   const [error, setError] = useState<string | null>(null);
+  const [manualUpdateCheckRequest, setManualUpdateCheckRequest] = useState(0);
   const [resourceAnnouncement, setResourceAnnouncement] =
     useState<ResourceFailureAnnouncement | null>(null);
   const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<Set<DashboardResourceKey>>(
@@ -1176,6 +1177,9 @@ function App() {
       onWorkflowReady: () => {
         workflowReadinessDirtyRef.current = true;
         setWorkflowReadinessEpoch((epoch) => epoch + 1);
+      },
+      onCheckForUpdates: () => {
+        setManualUpdateCheckRequest((request) => request + 1);
       },
       onError: (err) => {
         if (!cancelled) setError(formatError(err));
@@ -2065,6 +2069,7 @@ function App() {
             ) : null}
             {bootReady && AppUpdateComponent ? (
               <AppUpdateComponent
+                manualCheckRequest={manualUpdateCheckRequest}
                 overview={overview}
                 backgroundWork={updateBackgroundWork}
                 hasInProgressRetroBatches={hasInProgressRetroBatches}

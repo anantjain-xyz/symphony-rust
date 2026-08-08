@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AppUpdate } from "./AppUpdate";
+import { AppUpdate, UPDATE_CHECK_INTERVAL_MS } from "./AppUpdate";
 import type { UpdateSafety } from "./appUpdateTypes";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -45,6 +45,14 @@ function updateCandidate(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 function renderUpdate({
   safety = safe,
   verifyInstallSafety = vi.fn().mockImplementation(async () => safety),
@@ -58,21 +66,25 @@ function renderUpdate({
   onInstallLockChange?: ReturnType<typeof vi.fn>;
   onActionError?: ReturnType<typeof vi.fn>;
 } = {}) {
+  const update = (manualCheckRequest: number) => (
+    <AppUpdate
+      enabled
+      manualCheckRequest={manualCheckRequest}
+      safety={safety}
+      verifyInstallSafety={verifyInstallSafety}
+      prepareForInstall={prepareForInstall}
+      onInstallLockChange={onInstallLockChange}
+      onActionError={onActionError}
+    />
+  );
+  const rendered = render(update(0));
   return {
     prepareForInstall,
     verifyInstallSafety,
     onInstallLockChange,
     onActionError,
-    ...render(
-      <AppUpdate
-        enabled
-        safety={safety}
-        verifyInstallSafety={verifyInstallSafety}
-        prepareForInstall={prepareForInstall}
-        onInstallLockChange={onInstallLockChange}
-        onActionError={onActionError}
-      />,
-    ),
+    requestManualCheck: () => rendered.rerender(update(1)),
+    ...rendered,
   };
 }
 
@@ -91,6 +103,68 @@ describe("AppUpdate", () => {
 
     await waitFor(() => expect(tauriMocks.check).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("button", { name: /Update Symphony/ })).toBeNull();
+  });
+
+  it("checks for updates every 15 minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      tauriMocks.check.mockResolvedValue(null);
+      renderUpdate();
+
+      expect(tauriMocks.check).toHaveBeenCalledTimes(1);
+      expect(UPDATE_CHECK_INTERVAL_MS).toBe(15 * 60 * 1000);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS);
+      });
+
+      expect(tauriMocks.check).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("joins a manual request to the active check and reports when Symphony is current", async () => {
+    const check = deferred<null>();
+    tauriMocks.check.mockReturnValue(check.promise);
+    const { requestManualCheck } = renderUpdate();
+
+    act(requestManualCheck);
+    expect(screen.getByRole("status").textContent).toContain("Checking for updates");
+    expect(tauriMocks.check).toHaveBeenCalledTimes(1);
+
+    check.resolve(null);
+    expect(await screen.findByText("Symphony is up to date")).toBeTruthy();
+    expect(tauriMocks.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows and reports a manual update-check failure", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    tauriMocks.check
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("release feed unavailable"));
+    const { onActionError, requestManualCheck } = renderUpdate();
+    await waitFor(() => expect(tauriMocks.check).toHaveBeenCalledTimes(1));
+
+    act(requestManualCheck);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Update check failed: release feed unavailable",
+    );
+    expect(onActionError).toHaveBeenCalledWith("Update check failed: release feed unavailable");
+    consoleWarn.mockRestore();
+  });
+
+  it("shows the update action when a manual check finds a release", async () => {
+    const candidate = updateCandidate();
+    tauriMocks.check.mockResolvedValueOnce(null).mockResolvedValueOnce(candidate);
+    const { requestManualCheck } = renderUpdate();
+    await waitFor(() => expect(tauriMocks.check).toHaveBeenCalledTimes(1));
+
+    act(requestManualCheck);
+
+    expect(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" })).toBeTruthy();
+    expect(tauriMocks.check).toHaveBeenCalledTimes(2);
   });
 
   it("downloads, installs, and relaunches a safe update", async () => {

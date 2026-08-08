@@ -40,6 +40,8 @@ const RETRO_ACCEPTED_SET_CHANGED_MESSAGE: &str =
     "Accepted suggestions changed while the batch was starting. Review the latest decisions and retry.";
 const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
     "Symphony restarted before this change batch completed. Retry the batch.";
+#[cfg(desktop)]
+const CHECK_FOR_UPDATES_MENU_ID: &str = "check-for-updates";
 
 #[derive(Clone)]
 struct AppState {
@@ -1223,10 +1225,22 @@ pub fn run() {
     // agent processes that need user-installed tools. Overlay the login-shell
     // PATH before Tauri spawns threads that read the environment.
     let path_fix = path_env::fix();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(desktop)]
+    let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
+        if event.id() == CHECK_FOR_UPDATES_MENU_ID {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("check-for-updates-requested", ());
+        }
+    });
+    builder
         .setup(move |app| {
             let handle = app.handle().clone();
             let app_dir = app.path().app_data_dir()?;
@@ -1313,6 +1327,41 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(desktop)]
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let menu = Menu::default(app)?;
+    let check_for_updates = MenuItem::with_id(
+        app,
+        CHECK_FOR_UPDATES_MENU_ID,
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(app_menu) = menu
+        .items()?
+        .into_iter()
+        .next()
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        // Keep the conventional macOS order: About, Check for Updates, separator.
+        app_menu.insert(&check_for_updates, 1)?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(help_menu) = menu
+        .get(tauri::menu::HELP_SUBMENU_ID)
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        help_menu.append(&check_for_updates)?;
+    }
+
+    Ok(menu)
 }
 
 fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
