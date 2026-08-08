@@ -5,8 +5,7 @@ use specta::Type;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::BTreeMap;
 use symphony_core::{
-    AgentEventKind, HookName, Issue, RateLimitPayload, RunStatus, SessionInfoPayload,
-    TokenCountPayload,
+    AgentEventKind, Issue, RateLimitPayload, RunStatus, SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
 
@@ -1051,31 +1050,6 @@ impl Repository {
             .execute(&self.pool)
             .await?;
         self.changed("retry_queue", "delete");
-        Ok(())
-    }
-
-    pub async fn record_hook(
-        &self,
-        run_id: &str,
-        hook: HookName,
-        exit_code: i64,
-        duration_ms: i64,
-        stderr_tail: Option<&str>,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            insert into hook_runs (run_id, hook, exit_code, duration_ms, stderr_tail)
-            values (?1, ?2, ?3, ?4, ?5)
-            "#,
-        )
-        .bind(run_id)
-        .bind(hook.as_env_value())
-        .bind(exit_code)
-        .bind(duration_ms)
-        .bind(stderr_tail)
-        .execute(&self.pool)
-        .await?;
-        self.changed("hook_runs", "insert");
         Ok(())
     }
 
