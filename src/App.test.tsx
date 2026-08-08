@@ -353,7 +353,6 @@ function issueRow({
     branch: null,
     labels: "[]",
     blockers: JSON.stringify(blockers),
-    pr_urls: "[]",
     raw: JSON.stringify({
       id,
       identifier,
@@ -364,7 +363,6 @@ function issueRow({
       branch: null,
       labels: [],
       blockers,
-      pr_urls: [],
       project_id: null,
       project_slug_id: null,
     }),

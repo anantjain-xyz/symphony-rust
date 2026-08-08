@@ -11,6 +11,8 @@ use symphony_core::{
 use uuid::Uuid;
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 500;
+const ISSUE_ROW_COLUMNS: &str =
+    "id, identifier, title, description, priority, state, branch, labels, blockers, raw, last_seen_at";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct WorkflowRow {
@@ -32,7 +34,6 @@ pub struct IssueRow {
     pub branch: Option<String>,
     pub labels: String,
     pub blockers: String,
-    pub pr_urls: String,
     pub raw: String,
     pub last_seen_at: String,
 }
@@ -312,15 +313,14 @@ impl Repository {
         for issue in issues {
             let labels = serde_json::to_string(&issue.labels)?;
             let blockers = serde_json::to_string(&issue.blockers)?;
-            let pr_urls = serde_json::to_string(&issue.pr_urls)?;
             let raw = serde_json::to_string(issue)?;
             sqlx::query(
                 r#"
                 insert into issues (
                   id, identifier, title, description, priority, state, branch,
-                  labels, blockers, pr_urls, raw, last_seen_at
+                  labels, blockers, raw, last_seen_at
                 )
-                values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 on conflict(id) do update set
                   identifier = excluded.identifier,
                   title = excluded.title,
@@ -330,7 +330,6 @@ impl Repository {
                   branch = excluded.branch,
                   labels = excluded.labels,
                   blockers = excluded.blockers,
-                  pr_urls = excluded.pr_urls,
                   raw = excluded.raw,
                   last_seen_at = excluded.last_seen_at
                 "#,
@@ -344,7 +343,6 @@ impl Repository {
             .bind(&issue.branch)
             .bind(labels)
             .bind(blockers)
-            .bind(pr_urls)
             .bind(raw)
             .bind(now_iso())
             .execute(&mut *tx)
@@ -1267,12 +1265,12 @@ impl Repository {
     }
 
     pub async fn list_issues(&self, limit: i64) -> Result<Vec<IssueRow>, StorageError> {
-        Ok(sqlx::query_as::<_, IssueRow>(
-            "select * from issues order by last_seen_at desc limit ?1",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?)
+        let query =
+            format!("select {ISSUE_ROW_COLUMNS} from issues order by last_seen_at desc limit ?1");
+        Ok(sqlx::query_as::<_, IssueRow>(&query)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?)
     }
 
     /// Ids of issues whose stored state matches none of the given names,
@@ -1307,12 +1305,11 @@ impl Repository {
     }
 
     pub async fn get_issue(&self, id: &str) -> Result<Option<IssueRow>, StorageError> {
-        Ok(
-            sqlx::query_as::<_, IssueRow>("select * from issues where id = ?1")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+        let query = format!("select {ISSUE_ROW_COLUMNS} from issues where id = ?1");
+        Ok(sqlx::query_as::<_, IssueRow>(&query)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?)
     }
 
     pub async fn get_run_detail(
@@ -2045,7 +2042,6 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers: vec![],
-            pr_urls: vec![],
             project_id: None,
             project_slug_id: None,
         }
