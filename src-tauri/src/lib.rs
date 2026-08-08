@@ -431,7 +431,6 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
             // Serialize the raw snapshot before moving fields out of `issue`.
             let labels = serde_json::to_string(&issue.labels).map_err(|err| err.to_string())?;
             let blockers = serde_json::to_string(&issue.blockers).map_err(|err| err.to_string())?;
-            let pr_urls = serde_json::to_string(&issue.pr_urls).map_err(|err| err.to_string())?;
             let raw = serde_json::to_string(&issue).map_err(|err| err.to_string())?;
             Ok(IssueRow {
                 id: issue.id,
@@ -443,7 +442,6 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
                 branch: issue.branch,
                 labels,
                 blockers,
-                pr_urls,
                 raw,
                 last_seen_at: seen_at.clone(),
             })

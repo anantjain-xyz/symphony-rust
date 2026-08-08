@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IssueRow } from "../bindings";
-import {
-  buildDependencyGraph,
-  getDependencyGraphModel,
-} from "./DependencyGraphPanel";
+import { buildDependencyGraph, getDependencyGraphModel } from "./DependencyGraphPanel";
 
 function issue(identifier: string, blockers: unknown[] = []): IssueRow {
   return {
@@ -16,7 +13,6 @@ function issue(identifier: string, blockers: unknown[] = []): IssueRow {
     branch: null,
     labels: "[]",
     blockers: JSON.stringify(blockers),
-    pr_urls: "[]",
     raw: "{}",
     last_seen_at: "2026-01-01T00:00:00.000Z",
   };

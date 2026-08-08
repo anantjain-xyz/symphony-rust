@@ -11,7 +11,6 @@ describe("dashboard resource invalidation map", () => {
     ["rate_limit_state", ["overview"]],
     ["token_usage", ["overview"]],
     ["workspace_cleanup_queue", ["overview"]],
-    ["worker_heartbeat", []],
     ["issues", ["issues", "overview", "runs", "selectedRun"]],
     ["issue_dispatch_suppressions", ["issues", "overview"]],
     ["retry_queue", ["issues", "overview"]],

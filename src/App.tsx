@@ -197,7 +197,6 @@ const emptyOverview: Overview = {
   failure_count: 0,
   workspace_cleanup_count: 0,
   live_sessions: [],
-  worker_heartbeat: null,
   rate_limits: [],
   token_usage: [],
 };
@@ -2569,7 +2568,7 @@ function OverviewView({
   onOpenIssues: () => void;
 }) {
   // A run gets a live_sessions row only while it is actively streaming tokens.
-  // Use that to pulse streaming rows and show their last-activity heartbeat in
+  // Use that to pulse streaming rows and show their last-activity indicator in
   // the Active runs table (the panel this data used to live in on its own).
   const liveRunIds = new Set(overview.live_sessions.map((session) => session.run_id));
   const lastActivity = new Map<string, string>(

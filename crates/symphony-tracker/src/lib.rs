@@ -771,7 +771,6 @@ struct LinearIssueNode {
     assignee: Option<LinearAssignee>,
     labels: Option<LinearLabelConnection>,
     inverse_relations: Option<LinearRelationConnection>,
-    attachments: Option<LinearAttachmentConnection>,
 }
 
 #[derive(Deserialize)]
@@ -828,16 +827,6 @@ struct LinearRelationState {
     state_type: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct LinearAttachmentConnection {
-    nodes: Vec<LinearAttachment>,
-}
-
-#[derive(Deserialize)]
-struct LinearAttachment {
-    url: String,
-}
-
 fn normalize(node: LinearIssueNode) -> Issue {
     let state = node
         .state
@@ -862,17 +851,6 @@ fn normalize(node: LinearIssueNode) -> Issue {
                 .collect()
         })
         .unwrap_or_default();
-    let pr_urls = node
-        .attachments
-        .map(|attachments| {
-            attachments
-                .nodes
-                .into_iter()
-                .map(|attachment| attachment.url)
-                .filter(|url| is_github_pr_url(url))
-                .collect()
-        })
-        .unwrap_or_default();
     Issue {
         id: node.id,
         identifier: node.identifier,
@@ -886,21 +864,9 @@ fn normalize(node: LinearIssueNode) -> Issue {
             .map(|labels| labels.nodes.into_iter().map(|label| label.name).collect())
             .unwrap_or_default(),
         blockers,
-        pr_urls,
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug_id: node.project.and_then(|project| project.slug_id),
     }
-}
-
-fn is_github_pr_url(url: &str) -> bool {
-    let Some(rest) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-    else {
-        return false;
-    };
-    let parts: Vec<_> = rest.split('/').collect();
-    parts.len() >= 4 && parts[2] == "pull" && parts[3].parse::<u64>().is_ok()
 }
 
 const ISSUE_FIELDS: &str = r#"
@@ -923,7 +889,6 @@ const ISSUE_FIELDS: &str = r#"
       }
     }
   }
-  attachments(first: 25) { nodes { url } }
 "#;
 
 const VIEWER_QUERY: &str = r#"
@@ -954,7 +919,6 @@ const ISSUE_BY_ID_QUERY: &str = r#"
           }
         }
       }
-      attachments(first: 25) { nodes { url } }
     }
   }
 "#;
@@ -1037,12 +1001,6 @@ impl TrackerClient for StaticTracker {
 mod tests {
     use super::*;
 
-    #[test]
-    fn detects_github_pr_urls() {
-        assert!(is_github_pr_url("https://github.com/a/b/pull/123"));
-        assert!(!is_github_pr_url("https://github.com/a/b/issues/123"));
-    }
-
     fn tracker_with_teams(team_keys: &[&str]) -> LinearTracker {
         LinearTracker::new(TrackerConfig {
             team_keys: team_keys.iter().map(ToString::to_string).collect(),
@@ -1092,7 +1050,6 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers: vec![],
-            pr_urls: vec![],
             project_id: project_id.map(str::to_string),
             project_slug_id: None,
         }
@@ -1172,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_queries_bound_nested_connections() {
+    fn issue_queries_bound_nested_connections_without_attachments() {
         let tracker = tracker_with_teams(&[]);
         let states = vec!["Todo".to_string()];
         let prepared = tracker
@@ -1182,7 +1139,7 @@ mod tests {
         for query in [prepared.query.as_str(), ISSUE_BY_ID_QUERY] {
             assert!(query.contains("labels(first: 25)"));
             assert!(query.contains("inverseRelations(first: 25)"));
-            assert!(query.contains("attachments(first: 25)"));
+            assert!(!query.contains("attachments"));
         }
     }
 

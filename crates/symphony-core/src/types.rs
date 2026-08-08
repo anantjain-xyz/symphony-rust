@@ -470,7 +470,6 @@ pub struct Issue {
     pub branch: Option<String>,
     pub labels: Vec<String>,
     pub blockers: Vec<String>,
-    pub pr_urls: Vec<String>,
     /// Linear project the issue belongs to; retained for filtering and prompts.
     /// Default so issue snapshots stored before this field deserialize.
     #[serde(default)]
