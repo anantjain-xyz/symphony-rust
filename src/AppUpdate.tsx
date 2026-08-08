@@ -31,6 +31,7 @@ type AppUpdateFeatureProps = {
   onRetroBatchWorkChange: (active: boolean) => void;
   onInstallLockChange: (locked: boolean) => void;
   onActionError: (message: string) => void;
+  onActionErrorClear: () => void;
 };
 
 function localValueFingerprint(value: string) {
@@ -151,6 +152,7 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
       prepareForInstall={prepareForInstall}
       onInstallLockChange={props.onInstallLockChange}
       onActionError={props.onActionError}
+      onActionErrorClear={props.onActionErrorClear}
     />
   );
 }
@@ -229,6 +231,7 @@ export function AppUpdate({
   prepareForInstall,
   onInstallLockChange,
   onActionError,
+  onActionErrorClear,
   checkForUpdate = checkForDesktopUpdate,
   relaunchApp = relaunchDesktopApp,
 }: AppUpdateProps & {
@@ -255,6 +258,7 @@ export function AppUpdate({
     onInstallLockChange ?? (() => undefined),
   );
   const onActionErrorRef = useRef(onActionError);
+  const onActionErrorClearRef = useRef(onActionErrorClear ?? (() => undefined));
   const updateButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -264,6 +268,7 @@ export function AppUpdate({
   verifyInstallSafetyRef.current = verifyInstallSafety ?? (async () => safetyRef.current);
   onInstallLockChangeRef.current = onInstallLockChange ?? (() => undefined);
   onActionErrorRef.current = onActionError;
+  onActionErrorClearRef.current = onActionErrorClear ?? (() => undefined);
 
   useEffect(() => {
     candidateRef.current = candidate;
@@ -346,6 +351,7 @@ export function AppUpdate({
     };
 
     const refreshAvailableUpdate = async (manual = false) => {
+      if (manual) onActionErrorClearRef.current();
       if (candidateRef.current) {
         if (manual) setManualCheckStatus(null);
         return;

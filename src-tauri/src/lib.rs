@@ -1334,6 +1334,10 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
     use tauri::menu::{Menu, MenuItem};
 
     let menu = Menu::default(app)?;
+    if cfg!(debug_assertions) {
+        // The frontend intentionally does not load the updater in `tauri dev`.
+        return Ok(menu);
+    }
     let check_for_updates = MenuItem::with_id(
         app,
         CHECK_FOR_UPDATES_MENU_ID,

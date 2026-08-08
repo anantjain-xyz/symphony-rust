@@ -2082,6 +2082,7 @@ function App() {
                 onRetroBatchWorkChange={setHasInProgressRetroBatches}
                 onInstallLockChange={setBusy}
                 onActionError={setError}
+                onActionErrorClear={() => setError(null)}
               />
             ) : null}
           </div>

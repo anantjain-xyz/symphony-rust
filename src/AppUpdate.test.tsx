@@ -59,12 +59,14 @@ function renderUpdate({
   prepareForInstall = vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
   onInstallLockChange = vi.fn(),
   onActionError = vi.fn(),
+  onActionErrorClear = vi.fn(),
 }: {
   safety?: UpdateSafety;
   verifyInstallSafety?: ReturnType<typeof vi.fn>;
   prepareForInstall?: ReturnType<typeof vi.fn>;
   onInstallLockChange?: ReturnType<typeof vi.fn>;
   onActionError?: ReturnType<typeof vi.fn>;
+  onActionErrorClear?: ReturnType<typeof vi.fn>;
 } = {}) {
   const update = (manualCheckRequest: number) => (
     <AppUpdate
@@ -75,15 +77,18 @@ function renderUpdate({
       prepareForInstall={prepareForInstall}
       onInstallLockChange={onInstallLockChange}
       onActionError={onActionError}
+      onActionErrorClear={onActionErrorClear}
     />
   );
   const rendered = render(update(0));
+  let manualCheckRequest = 0;
   return {
     prepareForInstall,
     verifyInstallSafety,
     onInstallLockChange,
     onActionError,
-    requestManualCheck: () => rendered.rerender(update(1)),
+    onActionErrorClear,
+    requestManualCheck: () => rendered.rerender(update(++manualCheckRequest)),
     ...rendered,
   };
 }
@@ -138,12 +143,12 @@ describe("AppUpdate", () => {
     expect(tauriMocks.check).toHaveBeenCalledTimes(1);
   });
 
-  it("shows and reports a manual update-check failure", async () => {
+  it("shows a manual failure and clears it before a successful retry", async () => {
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     tauriMocks.check
       .mockResolvedValueOnce(null)
       .mockRejectedValueOnce(new Error("release feed unavailable"));
-    const { onActionError, requestManualCheck } = renderUpdate();
+    const { onActionError, onActionErrorClear, requestManualCheck } = renderUpdate();
     await waitFor(() => expect(tauriMocks.check).toHaveBeenCalledTimes(1));
 
     act(requestManualCheck);
@@ -152,6 +157,13 @@ describe("AppUpdate", () => {
       "Update check failed: release feed unavailable",
     );
     expect(onActionError).toHaveBeenCalledWith("Update check failed: release feed unavailable");
+    expect(onActionErrorClear).toHaveBeenCalledTimes(1);
+
+    tauriMocks.check.mockResolvedValueOnce(null);
+    act(requestManualCheck);
+
+    expect(await screen.findByText("Symphony is up to date")).toBeTruthy();
+    expect(onActionErrorClear).toHaveBeenCalledTimes(2);
     consoleWarn.mockRestore();
   });
 
