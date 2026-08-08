@@ -118,28 +118,6 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    pub async fn remove_if_stale(&self, path: &Path) -> Result<bool, WorkspaceError> {
-        let root = self
-            .root
-            .canonicalize()
-            .unwrap_or_else(|_| self.root.clone());
-        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if resolved == root || !resolved.starts_with(&root) {
-            return Ok(false);
-        }
-        if tokio::fs::metadata(&resolved).await.is_err() {
-            return Ok(false);
-        }
-        if tokio::fs::metadata(resolved.join(WORKSPACE_READY_SENTINEL))
-            .await
-            .is_ok()
-        {
-            return Ok(false);
-        }
-        tokio::fs::remove_dir_all(&resolved).await?;
-        Ok(true)
-    }
-
     pub fn path_for(&self, identifier: &str) -> Result<PathBuf, WorkspaceError> {
         self.assert_safe_path(&sanitize_key(identifier))
     }
