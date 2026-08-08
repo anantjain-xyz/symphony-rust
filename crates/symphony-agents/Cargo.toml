@@ -8,12 +8,9 @@ authors.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 symphony-core = { path = "../symphony-core" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 tokio-util.workspace = true
-tracing.workspace = true
 uuid.workspace = true
