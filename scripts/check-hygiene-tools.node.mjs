@@ -5,10 +5,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-  biomeBaselinePolicyProblems,
-  loadTrustedBiomeBaseline,
-} from "./check-biome-format-lib.mjs";
 import { isShellShebang, repositoryFiles } from "./hygiene-files.mjs";
 import {
   download,
@@ -85,125 +81,6 @@ test("repository files omit tracked paths deleted from the worktree", async (con
   await fs.rm(path.join(root, "deleted.md"));
 
   assert.deepEqual(repositoryFiles(root), ["kept.md"]);
-});
-
-test("Biome format baseline permits deletions but rejects additions and re-pinning", () => {
-  const trusted = {
-    "formatted-later.ts": "a".repeat(64),
-    "legacy.ts": "b".repeat(64),
-  };
-
-  assert.deepEqual(
-    biomeBaselinePolicyProblems({ "legacy.ts": "b".repeat(64) }, trusted, "abc123"),
-    [],
-  );
-  assert.deepEqual(
-    biomeBaselinePolicyProblems(
-      {
-        "legacy.ts": "c".repeat(64),
-        "new-exception.ts": "d".repeat(64),
-      },
-      trusted,
-      "abc123",
-    ),
-    [
-      "scripts/biome-format-baseline.json: legacy.ts was re-pinned after the trusted baseline at abc123; format the file instead",
-      "scripts/biome-format-baseline.json: new-exception.ts was added after the trusted baseline at abc123; format the file instead",
-    ],
-  );
-});
-
-test("Biome format baseline trusts its introduction when the branch base predates it", async (context) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-biome-baseline-"));
-  context.after(() => fs.rm(root, { force: true, recursive: true }));
-  const git = (...arguments_) => {
-    const result = spawnSync("git", arguments_, { cwd: root, encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-  };
-
-  git("init", "--quiet");
-  git("config", "user.email", "hygiene@example.com");
-  git("config", "user.name", "Hygiene Test");
-  await fs.writeFile(path.join(root, "README.md"), "# Test\n");
-  git("add", "README.md");
-  git("commit", "--quiet", "-m", "base");
-  await fs.mkdir(path.join(root, "scripts"));
-  await fs.writeFile(
-    path.join(root, "scripts", "biome-format-baseline.json"),
-    `${JSON.stringify({ "legacy.ts": "a".repeat(64) }, null, 2)}\n`,
-  );
-  git("add", "scripts/biome-format-baseline.json");
-  git("commit", "--quiet", "-m", "add baseline");
-  await fs.writeFile(path.join(root, "README.md"), "# Test\n\nLater change.\n");
-  git("add", "README.md");
-  git("commit", "--quiet", "-m", "later change");
-
-  const trusted = loadTrustedBiomeBaseline(root, { BIOME_FORMAT_BASE_REF: "HEAD~2" });
-  assert.deepEqual(trusted?.baseline, { "legacy.ts": "a".repeat(64) });
-  assert.match(trusted?.revision ?? "", /^[a-f0-9]{40}$/);
-});
-
-test("Biome format baseline compares main pushes with the previous revision", async (context) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-biome-main-push-"));
-  context.after(() => fs.rm(root, { force: true, recursive: true }));
-  const git = (...arguments_) => {
-    const result = spawnSync("git", arguments_, { cwd: root, encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-  };
-  const baselinePath = path.join(root, "scripts", "biome-format-baseline.json");
-
-  git("init", "--quiet");
-  git("config", "user.email", "hygiene@example.com");
-  git("config", "user.name", "Hygiene Test");
-  await fs.mkdir(path.dirname(baselinePath));
-  await fs.writeFile(baselinePath, `${JSON.stringify({ "legacy.ts": "a".repeat(64) }, null, 2)}\n`);
-  git("add", "scripts/biome-format-baseline.json");
-  git("commit", "--quiet", "-m", "add baseline");
-  await fs.writeFile(baselinePath, `${JSON.stringify({ "legacy.ts": "b".repeat(64) }, null, 2)}\n`);
-  git("add", "scripts/biome-format-baseline.json");
-  git("commit", "--quiet", "-m", "re-pin baseline");
-
-  const trusted = loadTrustedBiomeBaseline(root, {
-    GITHUB_EVENT_NAME: "push",
-    GITHUB_REF: "refs/heads/main",
-  });
-  assert.deepEqual(trusted?.baseline, { "legacy.ts": "a".repeat(64) });
-});
-
-test("Biome format baseline compares multi-commit main pushes with the event base", async (context) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-biome-main-event-"));
-  context.after(() => fs.rm(root, { force: true, recursive: true }));
-  const git = (...arguments_) => {
-    const result = spawnSync("git", arguments_, { cwd: root, encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    return result.stdout.trim();
-  };
-  const baselinePath = path.join(root, "scripts", "biome-format-baseline.json");
-  const eventPath = path.join(root, "push-event.json");
-
-  git("init", "--quiet");
-  git("config", "user.email", "hygiene@example.com");
-  git("config", "user.name", "Hygiene Test");
-  await fs.mkdir(path.dirname(baselinePath));
-  await fs.writeFile(baselinePath, `${JSON.stringify({ "legacy.ts": "a".repeat(64) }, null, 2)}\n`);
-  git("add", "scripts/biome-format-baseline.json");
-  git("commit", "--quiet", "-m", "add baseline");
-  const before = git("rev-parse", "HEAD");
-  await fs.writeFile(baselinePath, `${JSON.stringify({ "legacy.ts": "b".repeat(64) }, null, 2)}\n`);
-  git("add", "scripts/biome-format-baseline.json");
-  git("commit", "--quiet", "-m", "re-pin baseline");
-  await fs.writeFile(path.join(root, "README.md"), "# Later commit\n");
-  git("add", "README.md");
-  git("commit", "--quiet", "-m", "later commit in same push");
-  await fs.writeFile(eventPath, `${JSON.stringify({ before })}\n`);
-
-  const trusted = loadTrustedBiomeBaseline(root, {
-    GITHUB_EVENT_NAME: "push",
-    GITHUB_REF: "refs/heads/main",
-    GITHUB_EVENT_PATH: eventPath,
-  });
-  assert.deepEqual(trusted?.baseline, { "legacy.ts": "a".repeat(64) });
-  assert.equal(trusted?.revision, before);
 });
 
 test("archive downloads reject response stream errors and aborts", async () => {

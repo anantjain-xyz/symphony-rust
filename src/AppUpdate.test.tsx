@@ -98,9 +98,7 @@ describe("AppUpdate", () => {
     tauriMocks.check.mockResolvedValue(candidate);
     const { prepareForInstall, onInstallLockChange } = renderUpdate();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
 
     await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
     expect(prepareForInstall).toHaveBeenCalledTimes(1);
@@ -123,9 +121,7 @@ describe("AppUpdate", () => {
       },
     });
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
 
     expect(screen.getByRole("alertdialog")).toBeTruthy();
     expect(screen.getByText(/2 active runs will be interrupted/)).toBeTruthy();
@@ -165,9 +161,7 @@ describe("AppUpdate", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
     await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
 
     rerender(
@@ -194,9 +188,7 @@ describe("AppUpdate", () => {
     });
     renderUpdate({ verifyInstallSafety });
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
 
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
     expect(screen.getByText(/1 active run will be interrupted/)).toBeTruthy();
@@ -232,9 +224,7 @@ describe("AppUpdate", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
     fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
     await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
 
@@ -282,9 +272,7 @@ describe("AppUpdate", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
     await waitFor(() => expect(candidate.download).toHaveBeenCalledTimes(1));
     rerender(
       <AppUpdate
@@ -312,9 +300,7 @@ describe("AppUpdate", () => {
         onActionError={onActionError}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Update Symphony to v0.1.12" }));
     await waitFor(() => expect(verifyInstallSafety).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(candidate.install).toHaveBeenCalledTimes(1));
   });
@@ -332,13 +318,11 @@ describe("AppUpdate", () => {
       onActionError,
     });
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
 
-    await waitFor(() => expect(onActionError).toHaveBeenCalledWith(
-      "Update installation failed: signature mismatch",
-    ));
+    await waitFor(() =>
+      expect(onActionError).toHaveBeenCalledWith("Update installation failed: signature mismatch"),
+    );
     expect(restoreWorker).toHaveBeenCalledTimes(1);
     expect(onInstallLockChange).toHaveBeenLastCalledWith(false);
     expect(tauriMocks.relaunch).not.toHaveBeenCalled();
@@ -351,9 +335,7 @@ describe("AppUpdate", () => {
     const onActionError = vi.fn();
     const { rerender, prepareForInstall } = renderUpdate({ onActionError });
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
 
     const restart = await screen.findByRole("button", {
       name: "Restart to finish updating Symphony to v0.1.12",

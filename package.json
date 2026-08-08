@@ -20,7 +20,7 @@
     "check:shell": "node scripts/check-shell.mjs",
     "check:static": "pnpm check:bindings && pnpm check:ipc && pnpm check:projections && pnpm check:release",
     "check:workflows": "node scripts/check-workflows.mjs",
-    "format:check": "node scripts/check-biome-format.mjs",
+    "format:check": "biome format .",
     "generate:bindings": "cargo run -p symphony-contracts --bin export-bindings -- src/bindings.ts",
     "install:hygiene-tools": "node scripts/install-hygiene-tools.mjs",
     "setup:validation": "pnpm install:hygiene-tools && pnpm exec playwright install --with-deps chromium",
