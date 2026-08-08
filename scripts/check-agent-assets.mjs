@@ -1,9 +1,9 @@
 import {
   existsSync,
   lstatSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
-  readdirSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -123,6 +123,10 @@ function canonicalPath(path) {
   } catch {
     return path;
   }
+}
+
+function samePath(left, right) {
+  return canonicalPath(left) === canonicalPath(right);
 }
 
 function parseYamlStringScalar(value, path, line, key, errors) {
@@ -1382,7 +1386,7 @@ function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, returnF
   }
 
   const target = resolve(dirname(file), literal);
-  if (target !== expectedPrompt) {
+  if (!samePath(target, expectedPrompt)) {
     errors.push(
       `${relativePath(root, file)} ${returnFunction} returns ${relativePath(
         root,
@@ -1700,7 +1704,9 @@ export function validateAgentAssets(
   ];
   for (const owner of owners.values()) {
     const ownerFile = resolve(root, owner.manifestPath);
-    const ownerIncludes = includeReferences.filter((reference) => reference.target === ownerFile);
+    const ownerIncludes = includeReferences.filter((reference) =>
+      samePath(reference.target, ownerFile),
+    );
     if (ownerIncludes.length !== 1) {
       const includeOwners = ownerIncludes
         .map((reference) => relativePath(root, reference.source))
@@ -1728,8 +1734,8 @@ export function validateAgentAssets(
     }
     if (promptFile && returnFunction) {
       defaultPromptReturnReference(root, rustSourceRoots, promptFile, returnFunction, errors);
-      const promptIncludes = includeReferences.filter(
-        (reference) => reference.target === promptFile,
+      const promptIncludes = includeReferences.filter((reference) =>
+        samePath(reference.target, promptFile),
       );
       if (promptIncludes.length !== 1) {
         const promptOwners = promptIncludes

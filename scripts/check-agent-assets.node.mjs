@@ -357,6 +357,20 @@ test("deduplicates files reached through symlink-aliased rustSourceRoots", {
   assert.deepEqual(validateAgentAssets(root), []);
 });
 
+test("accepts inventoryFile and rustSourceRoots through symlink aliases", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = harnessFixture(t);
+  symlinkSync("src-tauri", join(root, "tauri-alias"), "dir");
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.inventoryFile = "tauri-alias/src/lib.rs";
+  contract.rustSourceRoots = ["crates", "tauri-alias"];
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
 test("accepts relocated topology paths from the contract", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");
