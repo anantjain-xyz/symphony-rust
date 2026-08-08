@@ -16,7 +16,6 @@ describe("dashboard resource invalidation map", () => {
     ["retry_queue", ["issues", "overview"]],
     ["runs", ["runs", "overview", "selectedRun"]],
     ["live_sessions", ["runs", "overview", "selectedRun"]],
-    ["hook_runs", ["runs", "overview", "selectedRun"]],
     ["agent_events", ["overview", "selectedRun"]],
     ["retros", ["retroList", "selectedRetro"]],
     ["retro_suggestions", ["retroList", "selectedRetro"]],

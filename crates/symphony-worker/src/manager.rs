@@ -993,14 +993,6 @@ where
                 cancel: &stop,
             })
             .await;
-            repo.record_hook(
-                &run.id,
-                HookName::AfterCreate,
-                i64::from(result.exit_code),
-                result.duration_ms,
-                result.stderr_tail.as_deref(),
-            )
-            .await?;
             if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
@@ -1055,7 +1047,7 @@ where
         return Ok(());
     }
     if let Some(script) = &config.workflow.front_matter.hooks.before_run {
-        let result = run_hook(HookInvocation {
+        let _ = run_hook(HookInvocation {
             hook: HookName::BeforeRun,
             script,
             issue: &issue,
@@ -1066,14 +1058,6 @@ where
             cancel: &stop,
         })
         .await;
-        repo.record_hook(
-            &run.id,
-            HookName::BeforeRun,
-            i64::from(result.exit_code),
-            result.duration_ms,
-            result.stderr_tail.as_deref(),
-        )
-        .await?;
     }
 
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
@@ -1243,7 +1227,7 @@ where
             )
             .await?;
             if let Some(script) = &config.workflow.front_matter.hooks.after_run {
-                let hook = run_hook(HookInvocation {
+                let _ = run_hook(HookInvocation {
                     hook: HookName::AfterRun,
                     script,
                     issue: &issue,
@@ -1254,14 +1238,6 @@ where
                     cancel: &stop,
                 })
                 .await;
-                repo.record_hook(
-                    &run.id,
-                    HookName::AfterRun,
-                    i64::from(hook.exit_code),
-                    hook.duration_ms,
-                    hook.stderr_tail.as_deref(),
-                )
-                .await?;
             }
             if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
@@ -2534,6 +2510,192 @@ printf cloned > hook-ran
             repo.get_run(&run.id).await.unwrap().unwrap().status,
             "success"
         );
+    }
+
+    async fn hook_runs_count(db_path: &std::path::Path) -> i64 {
+        let output = tokio::process::Command::new("sqlite3")
+            .arg(db_path)
+            .arg("select count(*) from hook_runs;")
+            .output()
+            .await
+            .expect("sqlite3 must be available for hook_runs count assertions");
+        assert!(
+            output.status.success(),
+            "sqlite3 failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("hook_runs count should be an integer")
+    }
+
+    fn drain_hook_runs_db_changes(
+        events: &mut tokio::sync::broadcast::Receiver<symphony_storage::StorageEvent>,
+    ) -> usize {
+        let mut count = 0;
+        while let Ok(event) = events.try_recv() {
+            if let symphony_storage::StorageEvent::DbChanged { table, .. } = event {
+                if table == "hook_runs" {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[tokio::test]
+    async fn after_create_failure_fails_run_without_persisting_hook_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = symphony_storage::open_sqlite(&db_path).await.unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        config.workflow.front_matter.hooks.after_create = Some(
+            r#"printf once > "$WORKSPACE_PATH/after-create-ran"
+echo after_create failed >&2
+exit 7
+"#
+            .to_string(),
+        );
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut storage_events = repo.events().subscribe();
+
+        dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+
+        let finished = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "failure");
+        assert_eq!(finished.error_class.as_deref(), Some("after_create_failed"));
+        assert_eq!(
+            tokio::fs::read_to_string(workspace_path.join("after-create-ran"))
+                .await
+                .unwrap(),
+            "once"
+        );
+        assert!(
+            tokio::fs::metadata(workspace_path.join(crate::WORKSPACE_READY_SENTINEL))
+                .await
+                .is_err(),
+            "failed after_create must not mark the workspace ready"
+        );
+        assert_eq!(hook_runs_count(&db_path).await, 0);
+        assert_eq!(drain_hook_runs_db_changes(&mut storage_events), 0);
+    }
+
+    #[tokio::test]
+    async fn before_run_and_after_run_execute_once_without_persisting_or_changing_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = symphony_storage::open_sqlite(&db_path).await.unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let workspace_root = temp.path().canonicalize().unwrap().join("workspaces");
+        let mut config = runtime_config(&workspace_root);
+        // Fresh workspace: after_create succeeds once, then before_run/after_run
+        // exit nonzero — outcome must still follow the agent result.
+        config.workflow.front_matter.hooks.after_create = Some(
+            r#"git init
+printf once > "$WORKSPACE_PATH/after-create-ran"
+"#
+            .to_string(),
+        );
+        config.workflow.front_matter.hooks.before_run = Some(
+            r#"printf once > "$WORKSPACE_PATH/before-run-ran"
+echo before_run failed >&2
+exit 11
+"#
+            .to_string(),
+        );
+        config.workflow.front_matter.hooks.after_run = Some(
+            r#"printf once > "$WORKSPACE_PATH/after-run-ran"
+echo after_run failed >&2
+exit 13
+"#
+            .to_string(),
+        );
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let repo_config = config.repos[0].clone();
+        let workspace_path = workspace_manager(&config, &repo_config)
+            .path_for(&ready.identifier)
+            .unwrap();
+        let run = repo
+            .try_reserve_run(
+                &ready.id,
+                1,
+                &workspace_path.display().to_string(),
+                Some(&repo_config.name),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut storage_events = repo.events().subscribe();
+
+        dispatch_run_with_driver(
+            repo.clone(),
+            config,
+            ready,
+            repo_config,
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            "success"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(workspace_path.join("after-create-ran"))
+                .await
+                .unwrap(),
+            "once"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(workspace_path.join("before-run-ran"))
+                .await
+                .unwrap(),
+            "once"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(workspace_path.join("after-run-ran"))
+                .await
+                .unwrap(),
+            "once"
+        );
+        assert_eq!(hook_runs_count(&db_path).await, 0);
+        assert_eq!(drain_hook_runs_db_changes(&mut storage_events), 0);
     }
 
     #[test]

@@ -119,7 +119,7 @@ A reserved run owns the following ordered sequence:
 3. Ensure bundled skill fallbacks and write the ready sentinel.
 4. Promote the row from `pending` to `running`. This transaction also removes
    the issue's retry row.
-5. Run and record `before_run`.
+5. Run `before_run`.
 6. Refresh fallback skills again so a setup hook cannot leave stale runtime
    copies.
 7. Resolve the repository workflow and render the prompt.
@@ -127,16 +127,15 @@ A reserved run owns the following ordered sequence:
    events when this is not the first attempt.
 9. Launch the selected agent driver and persist normalized events.
 10. Drain events sent immediately before the driver returned.
-11. If the driver returned an `AgentRunResult`, run and record `after_run`.
+11. If the driver returned an `AgentRunResult`, run `after_run`.
 12. Finish the run, update the retry state, and remove its live session.
 
 `after_create` returning nonzero records `after_create_failed`, finishes the
 run as failure, and schedules a retry. `before_run` and `after_run` exit codes
-are recorded for diagnostics but do not currently determine the run outcome
-by themselves. `after_run` is not invoked when the driver returns an
-`AgentError` such as a spawn, protocol, I/O, missing-result, or timeout error;
-that path goes directly through cancellation arbitration and
-`dispatch_error` handling.
+do not currently determine the run outcome by themselves. `after_run` is not
+invoked when the driver returns an `AgentError` such as a spawn, protocol, I/O,
+missing-result, or timeout error; that path goes directly through cancellation
+arbitration and `dispatch_error` handling.
 
 An empty workspace-root setting expands to `<app-data>/workspaces`. A leading
 standalone `~` path component expands to the current user's home directory, so

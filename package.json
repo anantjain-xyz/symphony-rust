@@ -12,7 +12,6 @@
     "check:frontend-boundaries": "node scripts/check-frontend-boundaries.mjs",
     "check:frontend-contracts": "pnpm check:frontend-boundaries",
     "check:harness": "node scripts/check-agent-assets.mjs",
-    "check:hygiene": "pnpm lint && pnpm format:check && pnpm check:workflows && pnpm check:shell && pnpm check:links",
     "check:ipc": "node scripts/check-ipc.mjs",
     "check:links": "node scripts/check-markdown-links.mjs",
     "check:projections": "node scripts/check-projections.mjs",

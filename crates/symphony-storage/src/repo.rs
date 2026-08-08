@@ -5,8 +5,7 @@ use specta::Type;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::BTreeMap;
 use symphony_core::{
-    AgentEventKind, HookName, Issue, RateLimitPayload, RunStatus, SessionInfoPayload,
-    TokenCountPayload,
+    AgentEventKind, Issue, RateLimitPayload, RunStatus, SessionInfoPayload, TokenCountPayload,
 };
 use uuid::Uuid;
 
@@ -40,7 +39,6 @@ pub struct RunRow {
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    pub worker_pid: Option<i64>,
     /// JSON-encoded `SessionInfoPayload` reported by the agent CLI at startup.
     pub session_info: Option<String>,
     /// Configured repo the run was routed to; null on pre-multi-repo rows.
@@ -59,7 +57,6 @@ pub struct RunWithIssueRow {
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    pub worker_pid: Option<i64>,
     pub session_info: Option<String>,
     pub repo_name: Option<String>,
     pub created_at: String,
@@ -237,7 +234,6 @@ pub struct Overview {
     pub retry_queue: Vec<RetryWithIssueRow>,
     pub retry_count: i64,
     pub recent_failures: Vec<RunWithIssueRow>,
-    pub failure_count: i64,
     pub workspace_cleanup_count: i64,
     pub live_sessions: Vec<LiveSessionRow>,
     pub rate_limits: Vec<RateLimitStateRow>,
@@ -533,16 +529,6 @@ impl Repository {
         .fetch_one(&self.pool)
         .await?;
         Ok(count > 0)
-    }
-
-    pub async fn set_worker_pid(&self, run_id: &str, pid: i64) -> Result<(), StorageError> {
-        sqlx::query("update runs set worker_pid = ?1 where id = ?2")
-            .bind(pid)
-            .bind(run_id)
-            .execute(&self.pool)
-            .await?;
-        self.changed("runs", "update");
-        Ok(())
     }
 
     pub async fn set_run_session_info(
@@ -1067,31 +1053,6 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn record_hook(
-        &self,
-        run_id: &str,
-        hook: HookName,
-        exit_code: i64,
-        duration_ms: i64,
-        stderr_tail: Option<&str>,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r#"
-            insert into hook_runs (run_id, hook, exit_code, duration_ms, stderr_tail)
-            values (?1, ?2, ?3, ?4, ?5)
-            "#,
-        )
-        .bind(run_id)
-        .bind(hook.as_env_value())
-        .bind(exit_code)
-        .bind(duration_ms)
-        .bind(stderr_tail)
-        .execute(&self.pool)
-        .await?;
-        self.changed("hook_runs", "insert");
-        Ok(())
-    }
-
     pub async fn overview(&self) -> Result<Overview, StorageError> {
         // Pending and running rows are both active from the user's perspective:
         // `try_reserve_run` commits a pending run before setup/claim work
@@ -1114,17 +1075,15 @@ impl Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        let (retry_count, failure_count, workspace_cleanup_count): (i64, i64, i64) =
-            sqlx::query_as(
-                r#"
+        let (retry_count, workspace_cleanup_count): (i64, i64) = sqlx::query_as(
+            r#"
             select
               (select count(*) from retry_queue),
-              (select count(*) from runs where status in ('failure', 'timeout')),
               (select count(*) from workspace_cleanup_queue)
             "#,
-            )
-            .fetch_one(&self.pool)
-            .await?;
+        )
+        .fetch_one(&self.pool)
+        .await?;
         let recent_failures = self
             .runs_with_issue(
                 "where r.status in ('failure', 'timeout') order by r.ended_at desc",
@@ -1171,7 +1130,6 @@ impl Repository {
             retry_queue,
             retry_count,
             recent_failures,
-            failure_count,
             workspace_cleanup_count,
             live_sessions,
             rate_limits,
@@ -2353,7 +2311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_counts_all_failures_and_retries_beyond_preview_limits() {
+    async fn overview_previews_failures_and_counts_all_retries_beyond_limits() {
         let repo = repo().await;
         let issues = (0..51)
             .map(|index| Issue {
@@ -2391,7 +2349,6 @@ mod tests {
 
         let overview = repo.overview().await.unwrap();
 
-        assert_eq!(overview.failure_count, 51);
         assert_eq!(overview.recent_failures.len(), 20);
         assert_eq!(overview.retry_count, 51);
         assert_eq!(overview.retry_queue.len(), 50);

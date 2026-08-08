@@ -14,6 +14,10 @@ The supported publish script produces an Apple Silicon macOS release and an
 updater feed for `darwin-aarch64`. It must run on Apple Silicon macOS from a
 clean `main` commit that exactly matches `origin/main`.
 
+Microsoft Store packaging is not supported. Standard Windows bundles continue
+to use `icons/icon.ico` from the Tauri bundle icon list; Store-specific logo
+assets are not kept in the repository.
+
 ## Version surfaces
 
 ### Current behavior
@@ -30,7 +34,7 @@ One release version is duplicated across these checked-in surfaces:
 
 `pnpm-lock.yaml` does not currently duplicate the root package version.
 [`bump-version`](../.codex/skills/bump-version/SKILL.md) documents the
-repository's assisted bump workflow, 
+repository's assisted bump workflow, but using that skill is not a CI check.
 
 The release tag, title, artifact filenames, and updater-feed version are derived
 from `src-tauri/tauri.conf.json` at publish time.
