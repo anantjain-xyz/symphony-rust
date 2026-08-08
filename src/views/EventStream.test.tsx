@@ -7,6 +7,19 @@ import { createEventStressFixture } from "../preview/eventStressFixture";
 import { EventRow, EventStream, measureEventElement } from "./EventStream";
 import { prepareEvent } from "./eventStreamModel";
 
+const eventRowProbes = vi.hoisted(() => ({ markdownText: vi.fn() }));
+
+vi.mock("../MarkdownText", async () => {
+  const actual = await vi.importActual<typeof import("../MarkdownText")>("../MarkdownText");
+  return {
+    ...actual,
+    MarkdownText: (props: Parameters<typeof actual.MarkdownText>[0]) => {
+      eventRowProbes.markdownText();
+      return actual.MarkdownText(props);
+    },
+  };
+});
+
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -80,6 +93,7 @@ describe("EventStream virtualization", () => {
 
   it("keeps a memoized unchanged row from rendering again", () => {
     const model = prepareEvent(event(1));
+    eventRowProbes.markdownText.mockClear();
     const props = {
       model,
       eventIndex: 0,
@@ -90,14 +104,20 @@ describe("EventStream virtualization", () => {
       needle: "",
       currentIndex: -1,
     };
-    const { container, rerender } = render(<EventRow {...props} />);
+    const row = (expanded = false) => (
+      <EventRow {...props} expanded={expanded} />
+    );
+    const { container, rerender } = render(row());
     const article = container.querySelector("article");
     expect(article).toBeTruthy();
-    rerender(<EventRow {...props} />);
+    expect(eventRowProbes.markdownText).toHaveBeenCalledTimes(1);
+    rerender(row());
     expect(container.querySelector("article")).toBe(article);
-    rerender(<EventRow {...props} expanded />);
+    expect(eventRowProbes.markdownText).toHaveBeenCalledTimes(1);
+    rerender(row(true));
     expect(container.querySelector("article")).toBe(article);
     expect(article?.querySelector("details")?.open).toBe(true);
+    expect(eventRowProbes.markdownText).toHaveBeenCalledTimes(2);
   });
 
   it("remeasures controlled payload expansion and pauses/resumes tail following", () => {

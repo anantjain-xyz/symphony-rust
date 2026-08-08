@@ -20,35 +20,44 @@ describe("prepared event model", () => {
   });
 
   it("parses each stable revision once, reuses cloned rows, deduplicates IDs, and prunes stale cache entries", () => {
-    const cache = new Map();
-    const firstRows = [
-      event(1, "status", '{"message":"first"}'),
-      event(2, "status", '{"message":"second"}'),
-      event(2, "status", '{"message":"duplicate"}'),
-      event(3, "humanized", '{"summary":"twin"}'),
-    ];
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      const cache = new Map();
+      const firstRows = [
+        event(1, "status", '{"message":"first"}'),
+        event(2, "status", '{"message":"second"}'),
+        event(2, "status", '{"message":"duplicate"}'),
+        event(3, "humanized", '{"summary":"twin"}'),
+      ];
 
-    const first = prepareEvents(firstRows, cache);
-    const replacement = prepareEvents(
-      firstRows.map((row) => ({ ...row })),
-      cache,
-    );
-    expect(replacement).toHaveLength(2);
-    expect(replacement).toEqual(first);
-    expect(replacement[0]).toBe(first[0]);
-    expect(replacement[1]).toBe(first[1]);
+      const first = prepareEvents(firstRows, cache);
+      expect(parse).toHaveBeenCalledTimes(2);
+      const replacement = prepareEvents(
+        firstRows.map((row) => ({ ...row })),
+        cache,
+      );
+      expect(replacement).toHaveLength(2);
+      expect(replacement).toEqual(first);
+      expect(replacement[0]).toBe(first[0]);
+      expect(replacement[1]).toBe(first[1]);
+      expect(parse).toHaveBeenCalledTimes(2);
 
-    const appended = prepareEvents([...firstRows, event(4, "status", "malformed {")], cache);
-    expect(appended).toHaveLength(3);
-    expect(appended.slice(0, 2)).toEqual(first);
-    expect(appended[0]).toBe(first[0]);
-    expect(appended[1]).toBe(first[1]);
-    expect(appended[2].parsedJson).toBeUndefined();
-    expect(appended[2].prettyPayload).toBe("malformed {");
+      const appended = prepareEvents([...firstRows, event(4, "status", "malformed {")], cache);
+      expect(appended).toHaveLength(3);
+      expect(appended.slice(0, 2)).toEqual(first);
+      expect(appended[0]).toBe(first[0]);
+      expect(appended[1]).toBe(first[1]);
+      expect(appended[2].parsedJson).toBeUndefined();
+      expect(appended[2].prettyPayload).toBe("malformed {");
+      expect(parse).toHaveBeenCalledTimes(3);
 
-    const pruned = prepareEvents([firstRows[1]], cache);
-    expect(cache.size).toBe(1);
-    expect(pruned[0]).toBe(first[1]);
+      const pruned = prepareEvents([firstRows[1]], cache);
+      expect(cache.size).toBe(1);
+      expect(pruned[0]).toBe(first[1]);
+      expect(parse).toHaveBeenCalledTimes(3);
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   it("returns every match across label, parsed Markdown, and payload in document order", () => {
