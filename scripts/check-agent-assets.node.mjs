@@ -307,6 +307,43 @@ test("rejects directory-valued inventoryFile before reading", (t) => {
   );
 });
 
+test("skips malformed adaptation entries after schema validation", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.skills.allowedAdaptations.pull = { match: "not", replacement: "an array" };
+  contract.skills.allowedAdaptations.push = [null, { match: "x", replacement: "y" }];
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  const errors = validateAgentAssets(root).join("\n");
+  assert.match(errors, /skills\.allowedAdaptations\.pull must be an array/);
+  assert.match(errors, /skills\.allowedAdaptations\.push\[0\] must be an object/);
+  assert.doesNotMatch(errors, /TypeError/);
+});
+
+test("rejects directory-valued defaultPrompt.path before reading", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.defaultPrompt.path = "src-tauri/assets";
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.match(
+    validateAgentAssets(root).join("\n"),
+    /default prompt at src-tauri\/assets must be a regular file/,
+  );
+});
+
+test("deduplicates files reached through overlapping rustSourceRoots", (t) => {
+  const root = harnessFixture(t);
+  const contractPath = join(root, "validation/agent-assets.json");
+  const contract = JSON.parse(readFileSync(contractPath, "utf8"));
+  contract.rustSourceRoots = ["crates", "crates/symphony-contracts", "src-tauri"];
+  writeJson(root, "validation/agent-assets.json", contract);
+
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
 test("accepts relocated topology paths from the contract", (t) => {
   const root = harnessFixture(t);
   const contractPath = join(root, "validation/agent-assets.json");

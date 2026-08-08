@@ -256,7 +256,15 @@ function firstDifference(expected, actual) {
 
 function applyAdaptations(content, skillId, adaptations, errors) {
   let expected = content;
-  for (const [index, adaptation] of (adaptations?.[skillId] ?? []).entries()) {
+  const list = adaptations?.[skillId];
+  // Schema validation already records malformed lists/entries; skip them here so
+  // check:harness returns accumulated diagnostics instead of throwing TypeError.
+  if (list === undefined) return expected;
+  if (!Array.isArray(list)) return expected;
+  for (const [index, adaptation] of list.entries()) {
+    if (!adaptation || typeof adaptation !== "object" || Array.isArray(adaptation)) {
+      continue;
+    }
     if (
       typeof adaptation.match !== "string" ||
       adaptation.match === "" ||
@@ -1263,6 +1271,7 @@ function inventoryFromRust(root, inventoryFile, functionName, runtimePrefix, err
 
 function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
   const references = [];
+  const seenFiles = new Set();
   for (const sourceRoot of sourceRoots ?? []) {
     const absoluteRoot = resolveInside(root, sourceRoot, errors, "Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) {
@@ -1272,6 +1281,8 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
+      if (seenFiles.has(file)) continue;
+      seenFiles.add(file);
       const content = readFileSync(file, "utf8");
       const tokens = rustTokens(content);
       for (let index = 0; index < tokens.length; index += 1) {
@@ -1313,12 +1324,15 @@ function checkRustIncludes(root, sourceRoots, verifiedDynamicIncludes, errors) {
 
 function defaultPromptReturnReference(root, sourceRoots, expectedPrompt, returnFunction, errors) {
   const definitions = [];
+  const seenFiles = new Set();
   for (const sourceRoot of sourceRoots ?? []) {
     const absoluteRoot = resolveInside(root, sourceRoot, errors, "default prompt Rust source root");
     if (!absoluteRoot || !existsSync(absoluteRoot)) continue;
     for (const file of walkFiles(absoluteRoot).filter(
       (candidate) => extname(candidate) === ".rs",
     )) {
+      if (seenFiles.has(file)) continue;
+      seenFiles.add(file);
       const tokens = rustTokens(readFileSync(file, "utf8"));
       for (const body of namedFunctionBodies(tokens, returnFunction)) {
         definitions.push({ body, file, tokens });
@@ -1689,6 +1703,10 @@ export function validateAgentAssets(
     promptFile = resolveInside(root, promptPath, errors, "default prompt");
     if (promptFile && !existsSync(promptFile)) {
       errors.push(`default prompt is missing at ${promptPath}`);
+      promptFile = null;
+    } else if (promptFile && !statSync(promptFile).isFile()) {
+      errors.push(`default prompt at ${promptPath} must be a regular file`);
+      promptFile = null;
     }
     if (promptFile && returnFunction) {
       defaultPromptReturnReference(root, rustSourceRoots, promptFile, returnFunction, errors);
@@ -1706,7 +1724,7 @@ export function validateAgentAssets(
         );
       }
     }
-    if (promptFile && existsSync(promptFile)) {
+    if (promptFile) {
       const prompt = readFileSync(promptFile, "utf8");
       const visiblePrompt = stripMarkdownHtmlComments(prompt);
       const promptSkills = new Set(
