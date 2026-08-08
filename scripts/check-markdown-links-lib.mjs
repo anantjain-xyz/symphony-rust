@@ -6,6 +6,10 @@ import remarkParse from "remark-parse";
 import { unified } from "unified";
 
 const EXTERNAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+const HTML_START_TAG = /<([A-Za-z][A-Za-z0-9:-]*)(?:\s[^<>]*?)?>/g;
+const HTML_ATTRIBUTE =
+  /\s([A-Za-z_:][A-Za-z0-9_.:-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+const UNRESOLVED_REFERENCE = /!?\[([^\]\r\n]*)\]\[([^\]\r\n]*)\]/g;
 const parser = unified().use(remarkParse).use(remarkGfm);
 
 function walk(node, visit) {
@@ -19,7 +23,7 @@ function normalizeReference(value) {
     .toLocaleLowerCase("en-US");
 }
 function headingText(node) {
-  return (node.children ?? []).map(renderHeadingNode).join("");
+  return (node.children ?? []).map(renderHeadingNode).join("").replace(/\s+/gu, " ").trim();
 }
 
 function renderHeadingNode(node) {
@@ -31,7 +35,7 @@ function renderHeadingNode(node) {
 }
 function markdownAnchors(tree) {
   const slugger = new GithubSlugger();
-  const anchors = new Set();
+  const anchors = htmlAnchors(tree);
   walk(tree, (node) => {
     if (node.type !== "heading") return;
     const slug = slugger.slug(headingText(node));
@@ -39,6 +43,61 @@ function markdownAnchors(tree) {
   });
   return anchors;
 }
+
+function htmlAttributeValue(tag, name) {
+  for (const match of tag.matchAll(HTML_ATTRIBUTE)) {
+    if (match[1].toLocaleLowerCase("en-US") !== name) continue;
+    return match[2] ?? match[3] ?? match[4] ?? "";
+  }
+  return null;
+}
+
+function htmlAnchors(tree) {
+  const anchors = new Set();
+  walk(tree, (node) => {
+    if (node.type !== "html") return;
+    for (const match of node.value.matchAll(HTML_START_TAG)) {
+      const tag = match[1].toLocaleLowerCase("en-US");
+      const id = htmlAttributeValue(match[0], "id");
+      if (id) anchors.add(id);
+      if (tag === "a") {
+        const name = htmlAttributeValue(match[0], "name");
+        if (name) anchors.add(name);
+      }
+    }
+  });
+  return anchors;
+}
+
+function isEscaped(value, index) {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function nodeAtOffset(node, offset) {
+  const position = node.position;
+  if (!position?.start) return node;
+  const value = String(node.value ?? "");
+  const prefix = value.slice(0, offset);
+  const lineBreaks = prefix.match(/\r\n|\r|\n/g)?.length ?? 0;
+  const lastBreak = Math.max(prefix.lastIndexOf("\n"), prefix.lastIndexOf("\r"));
+  return {
+    ...node,
+    position: {
+      ...position,
+      start: {
+        ...position.start,
+        column: lineBreaks === 0 ? position.start.column + offset : prefix.length - lastBreak,
+        line: position.start.line + lineBreaks,
+        offset: (position.start.offset ?? 0) + offset,
+      },
+    },
+  };
+}
+
 function extractTargets(tree) {
   const definitions = new Map();
   const targets = [];
@@ -61,6 +120,20 @@ function extractTargets(tree) {
     const reference = normalizeReference(node.identifier ?? node.label);
     if (!definitions.has(reference)) {
       targets.push({ node, reference, unresolvedReference: true });
+    }
+  });
+
+  walk(tree, (node) => {
+    if (node.type !== "text") return;
+    for (const match of node.value.matchAll(UNRESOLVED_REFERENCE)) {
+      if (isEscaped(node.value, match.index)) continue;
+      const reference = normalizeReference(match[2] || match[1]);
+      if (definitions.has(reference)) continue;
+      targets.push({
+        node: nodeAtOffset(node, match.index),
+        reference,
+        unresolvedReference: true,
+      });
     }
   });
 

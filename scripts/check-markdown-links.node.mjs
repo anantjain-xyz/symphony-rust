@@ -77,6 +77,20 @@ test("uses GitHub duplicate-heading semantics", async (context) => {
   assert.deepEqual(problems, ['README.md:6:1: missing heading "#repeated-heading-2" in README.md']);
 });
 
+test("normalizes Setext heading line breaks for GitHub slugs", async (context) => {
+  const problems = await checkRepository(context, {
+    "README.md": [
+      "First line",
+      "second line",
+      "-----------",
+      "",
+      "[Setext](#first-line-second-line)",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(problems, []);
+});
+
 test("decodes paths and fragments, including percent-encoded filename delimiters", async (context) => {
   const problems = await checkRepository(
     context,
@@ -120,4 +134,24 @@ test("validates GFM links while ignoring code and raw HTML nodes", async (contex
   });
 
   assert.deepEqual(problems, []);
+});
+
+test("reports unresolved references and preserves explicit HTML anchors", async (context) => {
+  const problems = await checkRepository(context, {
+    "README.md": [
+      '<div id="details"></div>',
+      "",
+      '<a name="legacy"></a>',
+      "",
+      "[Details](#details)",
+      "[Legacy](#legacy)",
+      "[Missing][unknown]",
+      "![Pixel][missing-image]",
+    ].join("\n"),
+  });
+
+  assert.deepEqual(problems, [
+    "README.md:7:1: undefined link reference [unknown]",
+    "README.md:8:1: undefined link reference [missing-image]",
+  ]);
 });
