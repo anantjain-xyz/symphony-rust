@@ -60,7 +60,6 @@ pub fn bindings_source() -> Result<String> {
     export!(symphony_storage::RetryWithIssueRow);
     export!(symphony_storage::LiveSessionRow);
     export!(symphony_storage::RateLimitStateRow);
-    export!(symphony_storage::WorkerHeartbeatRow);
     export!(symphony_storage::TokenUsageRow);
     export!(symphony_storage::Overview);
     export!(symphony_storage::RetroRow);
