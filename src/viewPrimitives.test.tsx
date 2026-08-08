@@ -16,7 +16,6 @@ function run(): RunWithIssueRow {
     ended_at: null,
     error_class: "Timeout",
     error_message: "agent stopped responding",
-    worker_pid: 42,
     session_info: null,
     repo_name: "symphony",
     created_at: "2026-01-01T00:00:00.000Z",
