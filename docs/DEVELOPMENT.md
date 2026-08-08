@@ -168,6 +168,13 @@ the production bundle before Playwright starts Vite preview.
 These tests validate the production frontend bundle and preview fixtures, not a
 native Tauri window.
 
+Executable browser and bundle checks own preview coverage. Playwright exercises
+the boot path, lazy views, lazy-chunk failures, and updater geometry through the
+browser preview; `pnpm check:bundle` and `pnpm test:bundle` enforce the built
+chunk topology and budgets. The fast frontend-contract checks cover only typed
+frontend boundaries and do not parse `App`, preview fixtures, or Playwright
+source to inventory test declarations.
+
 ## Parallel work with Git worktrees
 
 Worktrees keep each task on its own branch and index while sharing the
@@ -214,7 +221,9 @@ browser validation. Tool and browser installation are separate CI setup steps.
 `pnpm check:bundle` reads the Vite manifest and enforces eager JavaScript/CSS,
 lazy-view size, and import-boundary budgets.
 `pnpm test:bundle` tests the checker and expected chunk topology. Playwright
-also verifies lazy-chunk and theme behavior and uploads its screenshots in CI.
+also verifies lazy-chunk, updater-geometry, and theme behavior and uploads its
+screenshots in CI. These executable E2E and bundle checks are the source of
+truth for preview coverage.
 
 During development, start with the smallest package, test file, or E2E file
 that owns the behavior. Before submitting a pull request, run `pnpm verify:fast`.

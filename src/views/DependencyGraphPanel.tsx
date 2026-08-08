@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { IssueRow } from "../bindings";
-import { statusSlug } from "../format";
+import { Badge, Empty } from "../viewPrimitives";
 import "./DependencyGraphPanel.css";
 
 const DEPENDENCY_NODE_WIDTH = 216;
@@ -171,9 +171,7 @@ function DependencyNodeCard({ node }: { node: DependencyNode }) {
       <div className="dependency-node-meta">
         {node.blockedByCount > 0 ? <span>Blocked by {node.blockedByCount}</span> : null}
         {node.blocksCount > 0 ? <span>Blocks {node.blocksCount}</span> : null}
-        {node.blockedByCount === 0 && node.blocksCount === 0 ? (
-          <span>No blockers</span>
-        ) : null}
+        {node.blockedByCount === 0 && node.blocksCount === 0 ? <span>No blockers</span> : null}
       </div>
     </article>
   );
@@ -234,9 +232,7 @@ export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
     visiting.add(identifier);
     const upstream = blockersByIssue.get(identifier) ?? [];
     const layer =
-      upstream.length === 0
-        ? 0
-        : Math.max(...upstream.map((blocker) => layerFor(blocker) + 1));
+      upstream.length === 0 ? 0 : Math.max(...upstream.map((blocker) => layerFor(blocker) + 1));
     visiting.delete(identifier);
     layerCache.set(identifier, layer);
     return layer;
@@ -278,10 +274,7 @@ export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
   }
 
   const maxLayer = Math.max(0, ...positioned.map((node) => node.layer));
-  const maxRows = Math.max(
-    1,
-    ...Array.from(layers.values(), (nodes) => Math.max(1, nodes.length)),
-  );
+  const maxRows = Math.max(1, ...Array.from(layers.values(), (nodes) => Math.max(1, nodes.length)));
 
   return Object.freeze({
     nodes: Object.freeze(
@@ -376,42 +369,7 @@ function measureGraphBuild(
   }
 }
 
-function Empty({
-  title,
-  text,
-  actionLabel,
-  actionDisabled,
-  onAction,
-}: {
-  title: string;
-  text?: string;
-  actionLabel?: string;
-  actionDisabled?: boolean;
-  onAction?: () => void;
-}) {
-  return (
-    <div className="empty">
-      <strong>{title}</strong>
-      {text ? <span>{text}</span> : null}
-      {actionLabel ? (
-        <button type="button" disabled={actionDisabled} onClick={onAction}>
-          {actionLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function Badge({ status }: { status: string }) {
-  return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
-}
-
-
-export default function DependencyGraphPanel({
-  issues,
-}: {
-  issues: readonly IssueRow[];
-}) {
+export default function DependencyGraphPanel({ issues }: { issues: readonly IssueRow[] }) {
   const graph = useMemo(() => getDependencyGraphModel(issues), [issues]);
   return <DependencyGraphView graph={graph} />;
 }

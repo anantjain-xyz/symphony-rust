@@ -1,9 +1,10 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import type { IssueRow, WorkflowStateRow } from "../bindings";
-import { ChunkErrorBoundary, createLazyAttempts } from "../ChunkBoundary";
+import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "../ChunkBoundary";
 import { openExternalUrl } from "../desktop/shell";
-import { priorityLabel, statusSlug } from "../format";
+import { priorityLabel } from "../format";
 import { markRelativeTimeNow, RelativeTime } from "../RelativeTime";
+import { Badge, Empty, Panel } from "../viewPrimitives";
 import "./IssuesView.css";
 
 export type IssueViewMode = "list" | "board" | "dependencies";
@@ -194,7 +195,7 @@ function IssuesView({
               onAction={onOpenSettings}
             />
           ) : selectedMode === "dependencies" && activeMode !== "dependencies" ? (
-            <DependencyGraphLoading />
+            <ViewLoading view="Dependency graph" />
           ) : selectedMode === "dependencies" && activeMode === "dependencies" ? (
             <ChunkErrorBoundary
               key={dependencyAttempt}
@@ -204,7 +205,7 @@ function IssuesView({
                 setDependencyAttempt(DependencyGraphAttempts.add());
               }}
             >
-              <Suspense fallback={<DependencyGraphLoading />}>
+              <Suspense fallback={<ViewLoading view="Dependency graph" />}>
                 <DependencyGraphPanel issues={issues} />
               </Suspense>
             </ChunkErrorBoundary>
@@ -214,22 +215,6 @@ function IssuesView({
         </Panel>
       </section>
     </>
-  );
-}
-
-function DependencyGraphLoading() {
-  return (
-    <div className="view-loading" aria-busy="true" aria-live="polite">
-      <div className="view-loading-header">
-        <span />
-        <span />
-      </div>
-      <div className="view-loading-panels">
-        <span />
-        <span />
-      </div>
-      <span className="screen-reader-only">Preparing dependency graph…</span>
-    </div>
   );
 }
 
@@ -973,45 +958,6 @@ function IssueCard({
       </div>
     </article>
   );
-}
-
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="panel">
-      <h3>{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-function Empty({
-  title,
-  text,
-  actionLabel,
-  actionDisabled,
-  onAction,
-}: {
-  title: string;
-  text?: string;
-  actionLabel?: string;
-  actionDisabled?: boolean;
-  onAction?: () => void;
-}) {
-  return (
-    <div className="empty">
-      <strong>{title}</strong>
-      {text ? <span>{text}</span> : null}
-      {actionLabel ? (
-        <button type="button" disabled={actionDisabled} onClick={onAction}>
-          {actionLabel}
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function Badge({ status }: { status: string }) {
-  return <span className={`badge ${statusSlug(status)}`}>{status}</span>;
 }
 
 export default IssuesView;

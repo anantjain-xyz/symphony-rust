@@ -11,7 +11,5 @@
   "src/preview/eventStressFixture.ts": "aee32dd113adc19106d0116dbbb2acd80bef90ed5f7f93af2e59ae72529ffb19",
   "src/settingsValidationController.test.ts": "9c4b40be38059f8b57bf45854033a113211df25e612504d8bb22dafad1dce9af",
   "src/settingsValidationController.ts": "d3215e2dda07d1b5ad56bde7c81f18b6a292aaf495da95fbf6cdf1fe31ed86db",
-  "src/themeBootstrap.test.tsx": "9fcae5604969e704717a9c999cef9c2ec51bdc63d42941009a3aa49a544b2e81",
-  "src/views/DependencyGraphPanel.tsx": "cce365ede74f0c882b830d8938ec80119dae0c4c113dc32e323fc5cd544267c2",
-  "src/views/RunsView.tsx": "e8e43d2e885dbc2d929ff7a1302138662e5c28a11b3c2224c4b7d5e304b66d57"
+  "src/themeBootstrap.test.tsx": "9fcae5604969e704717a9c999cef9c2ec51bdc63d42941009a3aa49a544b2e81"
 }
