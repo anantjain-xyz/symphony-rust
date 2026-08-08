@@ -16,16 +16,52 @@ use tokio::sync::broadcast;
 
 pub use repo::*;
 
+/// Errors returned by storage operations.
+///
+/// The SQLx-backed variant is deliberately not constructible by dependent
+/// crates. Storage code creates it through the crate-local `From<sqlx::Error>`
+/// implementation, while the other public variants remain available to the
+/// worker for recovery and validation cases.
+///
+/// ```compile_fail
+/// use symphony_storage::StorageError;
+///
+/// let _ = StorageError::Sqlx(symphony_storage::SqlxError(
+///     sqlx::Error::RowNotFound,
+/// ));
+/// ```
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Sqlx(#[source] SqlxError),
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("run {0} lost the one-running-run race")]
     AlreadyRunning(String),
     #[error("run {run_id} cannot finish with non-terminal status {status}")]
     InvalidRunTransition { run_id: String, status: String },
+}
+
+#[doc(hidden)]
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub struct SqlxError(#[source] sqlx::Error);
+
+impl From<sqlx::Error> for StorageError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Sqlx(SqlxError(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlx_errors_convert_inside_storage() {
+        let error: StorageError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(error, StorageError::Sqlx(_)));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -68,9 +104,9 @@ pub async fn open_sqlite(path: impl AsRef<Path>) -> Result<SqlitePool, StorageEr
     // WAL lets readers run concurrently with a writer, and a non-zero
     // busy_timeout makes a blocked writer wait-and-retry instead of failing
     // immediately with SQLITE_BUSY. Without these, the rollback-journal default
-    // serializes every writer on a whole-database lock, so the worker's
-    // concurrent agents plus the 2s heartbeat contend and a losing write
-    // surfaces as an error that can strand a run. NORMAL synchronous is the
+    // serializes every writer on a whole-database lock, so concurrent agent
+    // writes can contend and a losing write can surface as an error that can
+    // strand a run. NORMAL synchronous is the
     // standard, crash-safe companion to WAL.
     let options = SqliteConnectOptions::new()
         .filename(path)

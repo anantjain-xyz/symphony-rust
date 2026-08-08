@@ -37,19 +37,5 @@
   },
   "restrictedDependencies": {
     "sqlx": ["symphony-storage"]
-  },
-  "sourceRules": [
-    {
-      "id": "direct-sqlx",
-      "pattern": "\\bsqlx\\s*::",
-      "allowedPackages": ["symphony-storage"],
-      "message": "direct sqlx use belongs in symphony-storage"
-    },
-    {
-      "id": "storage-sqlx-construction",
-      "pattern": "\\bStorageError\\s*::\\s*Sqlx\\b",
-      "allowedPackages": ["symphony-storage"],
-      "message": "constructing StorageError::Sqlx outside symphony-storage disguises a non-storage failure"
-    }
-  ]
+  }
 }

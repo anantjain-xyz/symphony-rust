@@ -52,11 +52,9 @@ export type LiveSessionRow = { run_id: string; session_id: string; thread_id: st
 
 export type RateLimitStateRow = { source: string; remaining: number | null; reset_at: string | null; updated_at: string }
 
-export type WorkerHeartbeatRow = { id: string; started_at: string; last_beat_at: string; worker_pid: number | null }
-
 export type TokenUsageRow = { source: string; input_tokens: number; output_tokens: number; total_tokens: number; run_count: number; updated_at: string }
 
-export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; failure_count: number; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; worker_heartbeat: WorkerHeartbeatRow | null; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
+export type Overview = { active_runs: RunWithIssueRow[]; retry_queue: RetryWithIssueRow[]; retry_count: number; recent_failures: RunWithIssueRow[]; failure_count: number; workspace_cleanup_count: number; live_sessions: LiveSessionRow[]; rate_limits: RateLimitStateRow[]; token_usage: TokenUsageRow[] }
 
 export type RetroRow = { id: string; since_at: string; until_at: string; status: string; run_count: number; issue_count: number; report_json: string | null; error_message: string | null; created_at: string; completed_at: string | null }
 
@@ -86,7 +84,7 @@ export type RetroSuggestionTarget = "prompt" | "skill"
 
 export type RetroConfidence = "low" | "medium" | "high"
 
-export type IssueRow = { id: string; identifier: string; title: string; description: string | null; priority: number; state: string; branch: string | null; labels: string; blockers: string; pr_urls: string; raw: string; last_seen_at: string }
+export type IssueRow = { id: string; identifier: string; title: string; description: string | null; priority: number; state: string; branch: string | null; labels: string; blockers: string; raw: string; last_seen_at: string }
 
 export type AgentEventRow = { id: number; run_id: string; kind: string; payload: string; created_at: string }
 
