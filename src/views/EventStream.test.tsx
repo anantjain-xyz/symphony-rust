@@ -104,9 +104,7 @@ describe("EventStream virtualization", () => {
       needle: "",
       currentIndex: -1,
     };
-    const row = (expanded = false) => (
-      <EventRow {...props} expanded={expanded} />
-    );
+    const row = (expanded = false) => <EventRow {...props} expanded={expanded} />;
     const { container, rerender } = render(row());
     const article = container.querySelector("article");
     expect(article).toBeTruthy();
