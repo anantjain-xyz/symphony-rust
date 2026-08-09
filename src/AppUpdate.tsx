@@ -31,7 +31,6 @@ type AppUpdateFeatureProps = {
   onRetroBatchWorkChange: (active: boolean) => void;
   onInstallLockChange: (locked: boolean) => void;
   onActionError: (message: string) => void;
-  onActionErrorClear: (message: string) => void;
 };
 
 function localValueFingerprint(value: string) {
@@ -152,7 +151,6 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
       prepareForInstall={prepareForInstall}
       onInstallLockChange={props.onInstallLockChange}
       onActionError={props.onActionError}
-      onActionErrorClear={props.onActionErrorClear}
     />
   );
 }
@@ -231,7 +229,6 @@ export function AppUpdate({
   prepareForInstall,
   onInstallLockChange,
   onActionError,
-  onActionErrorClear,
   checkForUpdate = checkForDesktopUpdate,
   relaunchApp = relaunchDesktopApp,
 }: AppUpdateProps & {
@@ -248,7 +245,6 @@ export function AppUpdate({
   const candidateRef = useRef<DesktopUpdate | null>(null);
   const requestManualCheckRef = useRef<() => void>(() => undefined);
   const handledManualCheckRequestRef = useRef(0);
-  const lastManualCheckErrorRef = useRef<string | null>(null);
   const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
   const prepareForInstallRef = useRef(prepareForInstall);
@@ -259,7 +255,6 @@ export function AppUpdate({
     onInstallLockChange ?? (() => undefined),
   );
   const onActionErrorRef = useRef(onActionError);
-  const onActionErrorClearRef = useRef(onActionErrorClear ?? (() => undefined));
   const updateButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -269,7 +264,6 @@ export function AppUpdate({
   verifyInstallSafetyRef.current = verifyInstallSafety ?? (async () => safetyRef.current);
   onInstallLockChangeRef.current = onInstallLockChange ?? (() => undefined);
   onActionErrorRef.current = onActionError;
-  onActionErrorClearRef.current = onActionErrorClear ?? (() => undefined);
 
   useEffect(() => {
     candidateRef.current = candidate;
@@ -352,10 +346,6 @@ export function AppUpdate({
     };
 
     const refreshAvailableUpdate = async (manual = false) => {
-      if (manual && lastManualCheckErrorRef.current) {
-        onActionErrorClearRef.current(lastManualCheckErrorRef.current);
-        lastManualCheckErrorRef.current = null;
-      }
       if (candidateRef.current) {
         if (manual) setManualCheckStatus(null);
         return;
@@ -374,9 +364,7 @@ export function AppUpdate({
         showManualStatus({ kind: "current", message: "Symphony is up to date" }, 5_000);
       } else {
         const message = `Update check failed: ${errorMessage(result.error)}`;
-        lastManualCheckErrorRef.current = message;
         showManualStatus({ kind: "error", message }, 8_000);
-        onActionErrorRef.current(message);
       }
     };
 

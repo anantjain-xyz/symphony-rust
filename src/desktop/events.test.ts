@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { subscribeDesktopEvents } from "./events";
 
 const eventMocks = vi.hoisted(() => ({
+  emit: vi.fn(),
   listen: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: eventMocks.emit,
   listen: eventMocks.listen,
 }));
 
@@ -25,7 +27,11 @@ async function flushRegistration() {
 }
 
 describe("desktop event subscription", () => {
-  beforeEach(() => eventMocks.listen.mockReset());
+  beforeEach(() => {
+    eventMocks.emit.mockReset();
+    eventMocks.emit.mockResolvedValue(undefined);
+    eventMocks.listen.mockReset();
+  });
 
   it("forwards the typed event family and cleans every listener exactly once", async () => {
     const unlisteners = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
@@ -43,7 +49,6 @@ describe("desktop event subscription", () => {
       onRateLimitChanged: vi.fn(),
       onWorkflowReady: vi.fn(),
       onCheckForUpdates: vi.fn(),
-      onUpdateCheckListenerReady: vi.fn(),
       onError: vi.fn(),
     };
 
@@ -77,7 +82,8 @@ describe("desktop event subscription", () => {
     expect(handlers.onRateLimitChanged).toHaveBeenCalledOnce();
     expect(handlers.onWorkflowReady).toHaveBeenCalledOnce();
     expect(handlers.onCheckForUpdates).toHaveBeenCalledOnce();
-    expect(handlers.onUpdateCheckListenerReady).toHaveBeenCalledOnce();
+    expect(eventMocks.emit).toHaveBeenCalledWith("up:r");
+    expect(eventMocks.emit).toHaveBeenCalledWith("up:a");
     expect(() => unsubscribe()).not.toThrow();
     unsubscribe();
     expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([1, 1, 1, 1, 1]);

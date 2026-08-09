@@ -1142,7 +1142,6 @@ function App() {
         }
       });
 
-    const updateCheckListenerId = IS_LOCAL_DEV ? null : crypto.randomUUID();
     const unsubscribe = subscribeDesktopEvents({
       onDbChanged: (payload) => {
         let keys = resourcesForDbChange(payload.table);
@@ -1179,20 +1178,8 @@ function App() {
         workflowReadinessDirtyRef.current = true;
         setWorkflowReadinessEpoch((epoch) => epoch + 1);
       },
-      onCheckForUpdates: (listenerId) => {
-        if (updateCheckListenerId !== null && listenerId !== updateCheckListenerId) return;
+      onCheckForUpdates: () => {
         setManualUpdateCheckRequest((request) => request + 1);
-        if (updateCheckListenerId !== null) {
-          void desktopCommands
-            .acknowledgeUpdateCheckRequest(updateCheckListenerId)
-            .catch((err) => console.warn("Could not acknowledge update check request", err));
-        }
-      },
-      onUpdateCheckListenerReady: () => {
-        if (updateCheckListenerId === null) return;
-        void desktopCommands.registerUpdateCheckListener(updateCheckListenerId).catch((err) => {
-          if (!cancelled) setError(formatError(err));
-        });
       },
       onError: (err) => {
         if (!cancelled) setError(formatError(err));
@@ -2095,9 +2082,6 @@ function App() {
                 onRetroBatchWorkChange={setHasInProgressRetroBatches}
                 onInstallLockChange={setBusy}
                 onActionError={setError}
-                onActionErrorClear={(message) =>
-                  setError((current) => (current === message ? null : current))
-                }
               />
             ) : null}
           </div>

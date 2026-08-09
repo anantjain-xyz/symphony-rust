@@ -88,7 +88,3 @@ export const applyRetroWorkflow = (retroId: string) =>
   invokeCommand<RetroBatchRow>("apply_retro_workflow", { retroId });
 export const startRetroPrs = (retroId: string) =>
   invokeCommand<RetroBatchRow[]>("start_retro_prs", { retroId });
-export const registerUpdateCheckListener = (listenerId: string) =>
-  invokeCommand<void>("register_update_check_listener", { listenerId });
-export const acknowledgeUpdateCheckRequest = (listenerId: string) =>
-  invokeCommand<void>("acknowledge_update_check_request", { listenerId });

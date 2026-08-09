@@ -14,5 +14,4 @@ export type AppUpdateProps = {
   prepareForInstall: () => Promise<() => Promise<void>>;
   onInstallLockChange?: (locked: boolean) => void;
   onActionError: (message: string) => void;
-  onActionErrorClear?: (message: string) => void;
 };

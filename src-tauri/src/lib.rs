@@ -19,7 +19,7 @@ use symphony_worker::{
     SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig,
     WorkerStatus, WorkflowTransferConfig, WorkflowTransferManager, WorkflowTransferStatus,
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Listener, Manager, State};
 
 mod path_env;
 mod retro;
@@ -51,47 +51,44 @@ struct UpdateCheckBridge {
 
 #[derive(Default)]
 struct UpdateCheckBridgeState {
-    active_listener: Option<String>,
+    listener_ready: bool,
     pending_requests: u64,
     delivery_in_flight: bool,
 }
 
 impl UpdateCheckBridgeState {
-    fn next_delivery(&mut self) -> Option<String> {
-        if self.pending_requests == 0 || self.delivery_in_flight {
-            return None;
+    fn next_delivery(&mut self) -> bool {
+        if !self.listener_ready || self.pending_requests == 0 || self.delivery_in_flight {
+            return false;
         }
-        let listener_id = self.active_listener.clone()?;
         self.delivery_in_flight = true;
-        Some(listener_id)
+        true
     }
 
-    fn queue_request(&mut self) -> Option<String> {
+    fn queue_request(&mut self) -> bool {
         self.pending_requests = self.pending_requests.saturating_add(1);
         self.next_delivery()
     }
 
-    fn register_listener(&mut self, listener_id: String) -> Option<String> {
-        self.active_listener = Some(listener_id);
+    fn register_listener(&mut self) -> bool {
+        self.listener_ready = true;
         // A previous delivery may have been lost while the webview listener was
         // being rebuilt. The pending request is redelivered to the new listener.
         self.delivery_in_flight = false;
         self.next_delivery()
     }
 
-    fn acknowledge(&mut self, listener_id: &str) -> Option<String> {
-        if self.active_listener.as_deref() != Some(listener_id) || !self.delivery_in_flight {
-            return None;
+    fn acknowledge(&mut self) -> bool {
+        if !self.delivery_in_flight {
+            return false;
         }
         self.pending_requests = self.pending_requests.saturating_sub(1);
         self.delivery_in_flight = false;
         self.next_delivery()
     }
 
-    fn delivery_failed(&mut self, listener_id: &str) {
-        if self.active_listener.as_deref() == Some(listener_id) {
-            self.delivery_in_flight = false;
-        }
+    fn delivery_failed(&mut self) {
+        self.delivery_in_flight = false;
     }
 }
 
@@ -107,20 +104,20 @@ impl UpdateCheckBridge {
         Ok(action(&mut state))
     }
 
-    fn queue_request(&self) -> Result<Option<String>, String> {
+    fn queue_request(&self) -> Result<bool, String> {
         self.with_state(UpdateCheckBridgeState::queue_request)
     }
 
-    fn register_listener(&self, listener_id: String) -> Result<Option<String>, String> {
-        self.with_state(|state| state.register_listener(listener_id))
+    fn register_listener(&self) -> Result<bool, String> {
+        self.with_state(UpdateCheckBridgeState::register_listener)
     }
 
-    fn acknowledge(&self, listener_id: &str) -> Result<Option<String>, String> {
-        self.with_state(|state| state.acknowledge(listener_id))
+    fn acknowledge(&self) -> Result<bool, String> {
+        self.with_state(UpdateCheckBridgeState::acknowledge)
     }
 
-    fn delivery_failed(&self, listener_id: &str) {
-        let _ = self.with_state(|state| state.delivery_failed(listener_id));
+    fn delivery_failed(&self) {
+        let _ = self.with_state(UpdateCheckBridgeState::delivery_failed);
     }
 }
 
@@ -1303,40 +1300,28 @@ async fn transfer_workflow_to_repo(
 fn emit_update_check_request(
     app: &tauri::AppHandle,
     bridge: &UpdateCheckBridge,
-    listener_id: String,
 ) -> Result<(), String> {
-    if let Err(error) = app.emit("check-for-updates-requested", listener_id.clone()) {
-        bridge.delivery_failed(&listener_id);
+    if let Err(error) = app.emit("check-for-updates-requested", ()) {
+        bridge.delivery_failed();
         return Err(format!("Could not deliver update check request: {error}"));
     }
     Ok(())
 }
 
-#[tauri::command]
-fn register_update_check_listener(
-    app: tauri::AppHandle,
-    bridge: State<'_, UpdateCheckBridge>,
-    listener_id: String,
-) -> Result<(), String> {
-    if listener_id.is_empty() {
-        return Err("Update check listener ID cannot be empty.".to_string());
+fn deliver_update_check_request(
+    app: &tauri::AppHandle,
+    bridge: &UpdateCheckBridge,
+    delivery: Result<bool, String>,
+) {
+    match delivery {
+        Ok(true) => {
+            if let Err(error) = emit_update_check_request(app, bridge) {
+                tracing::warn!(target: "symphony", %error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(target: "symphony", %error),
     }
-    if let Some(listener_id) = bridge.register_listener(listener_id)? {
-        emit_update_check_request(&app, &bridge, listener_id)?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn acknowledge_update_check_request(
-    app: tauri::AppHandle,
-    bridge: State<'_, UpdateCheckBridge>,
-    listener_id: String,
-) -> Result<(), String> {
-    if let Some(listener_id) = bridge.acknowledge(&listener_id)? {
-        emit_update_check_request(&app, &bridge, listener_id)?;
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1359,20 +1344,25 @@ pub fn run() {
                 let _ = window.set_focus();
             }
             let bridge = app.state::<UpdateCheckBridge>();
-            match bridge.queue_request() {
-                Ok(Some(listener_id)) => {
-                    if let Err(error) = emit_update_check_request(app, &bridge, listener_id) {
-                        tracing::warn!(target: "symphony", %error);
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(target: "symphony", %error),
-            }
+            let delivery = bridge.queue_request();
+            deliver_update_check_request(app, &bridge, delivery);
         }
     });
     builder
         .setup(move |app| {
             let handle = app.handle().clone();
+            let ready_handle = handle.clone();
+            app.listen("up:r", move |_| {
+                let bridge = ready_handle.state::<UpdateCheckBridge>();
+                let delivery = bridge.register_listener();
+                deliver_update_check_request(&ready_handle, &bridge, delivery);
+            });
+            let acknowledged_handle = handle.clone();
+            app.listen("up:a", move |_| {
+                let bridge = acknowledged_handle.state::<UpdateCheckBridge>();
+                let delivery = bridge.acknowledge();
+                deliver_update_check_request(&acknowledged_handle, &bridge, delivery);
+            });
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
             let _ = keyring::use_native_store(false);
@@ -1453,9 +1443,7 @@ pub fn run() {
             install_skills,
             get_repo_workflow_status,
             get_workflow_transfer_status,
-            transfer_workflow_to_repo,
-            register_update_check_listener,
-            acknowledge_update_check_request
+            transfer_workflow_to_repo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1613,13 +1601,10 @@ mod tests {
     fn update_check_bridge_queues_until_a_listener_is_ready() {
         let mut bridge = UpdateCheckBridgeState::default();
 
-        assert_eq!(bridge.queue_request(), None);
-        assert_eq!(
-            bridge.register_listener("webview-1".into()).as_deref(),
-            Some("webview-1")
-        );
+        assert!(!bridge.queue_request());
+        assert!(bridge.register_listener());
         assert_eq!(bridge.pending_requests, 1);
-        assert_eq!(bridge.acknowledge("webview-1"), None);
+        assert!(!bridge.acknowledge());
         assert_eq!(bridge.pending_requests, 0);
     }
 
@@ -1627,15 +1612,11 @@ mod tests {
     fn update_check_bridge_redelivers_pending_work_to_a_rebuilt_listener() {
         let mut bridge = UpdateCheckBridgeState::default();
 
-        bridge.register_listener("webview-1".into());
-        assert_eq!(bridge.queue_request().as_deref(), Some("webview-1"));
-        assert_eq!(
-            bridge.register_listener("webview-2".into()).as_deref(),
-            Some("webview-2")
-        );
-        assert_eq!(bridge.acknowledge("webview-1"), None);
+        bridge.register_listener();
+        assert!(bridge.queue_request());
+        assert!(bridge.register_listener());
         assert_eq!(bridge.pending_requests, 1);
-        assert_eq!(bridge.acknowledge("webview-2"), None);
+        assert!(!bridge.acknowledge());
         assert_eq!(bridge.pending_requests, 0);
     }
 

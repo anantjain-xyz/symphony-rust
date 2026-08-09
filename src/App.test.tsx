@@ -32,6 +32,7 @@ const tauriMocks = vi.hoisted(() => ({
   runtimeAvailable: false,
   getVersion: vi.fn(),
   invoke: vi.fn(),
+  emit: vi.fn(),
   listen: vi.fn(),
   openUrl: vi.fn(),
   revealItemInDir: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
+  emit: tauriMocks.emit,
   listen: tauriMocks.listen,
 }));
 
@@ -432,6 +434,8 @@ describe("App settings", () => {
     tauriMocks.runtimeAvailable = false;
     tauriMocks.getVersion.mockResolvedValue("0.0.0-test");
     tauriMocks.invoke.mockReset();
+    tauriMocks.emit.mockReset();
+    tauriMocks.emit.mockResolvedValue(undefined);
     tauriMocks.listen.mockReset();
     tauriMocks.listen.mockResolvedValue(vi.fn());
     tauriMocks.openUrl.mockReset();
