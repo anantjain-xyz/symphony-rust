@@ -2017,7 +2017,7 @@ function App() {
         : "Start worker";
 
   const bootReady = bootState.status === "ready";
-  const AppUpdateComponent = useDeferredUpdater(bootReady && runtimeAvailable && !IS_LOCAL_DEV);
+  const AppUpdateComponent = useDeferredUpdater(runtimeAvailable && !IS_LOCAL_DEV);
   const visibleDashboardResourceKeys = visibleResources(
     DASHBOARD_RESOURCE_KEYS,
     view,
@@ -2067,7 +2067,7 @@ function App() {
                 Dev
               </span>
             ) : null}
-            {bootReady && AppUpdateComponent ? (
+            {AppUpdateComponent ? (
               <AppUpdateComponent
                 manualCheckRequest={manualUpdateCheckRequest}
                 overview={overview}
