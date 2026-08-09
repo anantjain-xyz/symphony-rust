@@ -18,9 +18,9 @@ import type {
   SkillsStatus,
   TrackerTestResult,
   ValidationResult,
-  WorkflowTransferStatus,
   WorkerStatus,
   WorkflowStateRow,
+  WorkflowTransferStatus,
 } from "../bindings";
 
 function invokeCommand<Result>(command: string, args?: Record<string, unknown>): Promise<Result> {

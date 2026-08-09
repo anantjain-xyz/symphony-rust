@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Mutex,
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
@@ -18,7 +19,7 @@ use symphony_worker::{
     SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager, WorkerStartConfig,
     WorkerStatus, WorkflowTransferConfig, WorkflowTransferManager, WorkflowTransferStatus,
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Listener, Manager, State};
 
 mod path_env;
 mod retro;
@@ -40,6 +41,85 @@ const RETRO_ACCEPTED_SET_CHANGED_MESSAGE: &str =
     "Accepted suggestions changed while the batch was starting. Review the latest decisions and retry.";
 const INTERRUPTED_RETRO_BATCH_MESSAGE: &str =
     "Symphony restarted before this change batch completed. Retry the batch.";
+#[cfg(desktop)]
+const CHECK_FOR_UPDATES_MENU_ID: &str = "check-for-updates";
+
+#[derive(Default)]
+struct UpdateCheckBridge {
+    inner: Mutex<UpdateCheckBridgeState>,
+}
+
+#[derive(Default)]
+struct UpdateCheckBridgeState {
+    listener_ready: bool,
+    pending_requests: u64,
+    delivery_in_flight: bool,
+}
+
+impl UpdateCheckBridgeState {
+    fn next_delivery(&mut self) -> bool {
+        if !self.listener_ready || self.pending_requests == 0 || self.delivery_in_flight {
+            return false;
+        }
+        self.delivery_in_flight = true;
+        true
+    }
+
+    fn queue_request(&mut self) -> bool {
+        self.pending_requests = self.pending_requests.saturating_add(1);
+        self.next_delivery()
+    }
+
+    fn register_listener(&mut self) -> bool {
+        self.listener_ready = true;
+        // A previous delivery may have been lost while the webview listener was
+        // being rebuilt. The pending request is redelivered to the new listener.
+        self.delivery_in_flight = false;
+        self.next_delivery()
+    }
+
+    fn acknowledge(&mut self) -> bool {
+        if !self.delivery_in_flight {
+            return false;
+        }
+        self.pending_requests = self.pending_requests.saturating_sub(1);
+        self.delivery_in_flight = false;
+        self.next_delivery()
+    }
+
+    fn delivery_failed(&mut self) {
+        self.delivery_in_flight = false;
+    }
+}
+
+impl UpdateCheckBridge {
+    fn with_state<T>(
+        &self,
+        action: impl FnOnce(&mut UpdateCheckBridgeState) -> T,
+    ) -> Result<T, String> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| "Update check request state is unavailable.".to_string())?;
+        Ok(action(&mut state))
+    }
+
+    fn queue_request(&self) -> Result<bool, String> {
+        self.with_state(UpdateCheckBridgeState::queue_request)
+    }
+
+    fn register_listener(&self) -> Result<bool, String> {
+        self.with_state(UpdateCheckBridgeState::register_listener)
+    }
+
+    fn acknowledge(&self) -> Result<bool, String> {
+        self.with_state(UpdateCheckBridgeState::acknowledge)
+    }
+
+    fn delivery_failed(&self) {
+        let _ = self.with_state(UpdateCheckBridgeState::delivery_failed);
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -1217,18 +1297,72 @@ async fn transfer_workflow_to_repo(
         .await
 }
 
+fn emit_update_check_request(
+    app: &tauri::AppHandle,
+    bridge: &UpdateCheckBridge,
+) -> Result<(), String> {
+    if let Err(error) = app.emit("check-for-updates-requested", ()) {
+        bridge.delivery_failed();
+        return Err(format!("Could not deliver update check request: {error}"));
+    }
+    Ok(())
+}
+
+fn deliver_update_check_request(
+    app: &tauri::AppHandle,
+    bridge: &UpdateCheckBridge,
+    delivery: Result<bool, String>,
+) {
+    match delivery {
+        Ok(true) => {
+            if let Err(error) = emit_update_check_request(app, bridge) {
+                tracing::warn!(target: "symphony", %error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(target: "symphony", %error),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // GUI launches inherit launchd's minimal PATH, which breaks hooks and
     // agent processes that need user-installed tools. Overlay the login-shell
     // PATH before Tauri spawns threads that read the environment.
     let path_fix = path_env::fix();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(UpdateCheckBridge::default());
+    #[cfg(desktop)]
+    let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
+        if event.id() == CHECK_FOR_UPDATES_MENU_ID {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            let bridge = app.state::<UpdateCheckBridge>();
+            let delivery = bridge.queue_request();
+            deliver_update_check_request(app, &bridge, delivery);
+        }
+    });
+    builder
         .setup(move |app| {
             let handle = app.handle().clone();
+            let ready_handle = handle.clone();
+            app.listen("up:r", move |_| {
+                let bridge = ready_handle.state::<UpdateCheckBridge>();
+                let delivery = bridge.register_listener();
+                deliver_update_check_request(&ready_handle, &bridge, delivery);
+            });
+            let acknowledged_handle = handle.clone();
+            app.listen("up:a", move |_| {
+                let bridge = acknowledged_handle.state::<UpdateCheckBridge>();
+                let delivery = bridge.acknowledge();
+                deliver_update_check_request(&acknowledged_handle, &bridge, delivery);
+            });
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
             let _ = keyring::use_native_store(false);
@@ -1313,6 +1447,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(desktop)]
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let menu = Menu::default(app)?;
+    if cfg!(dev) {
+        // The frontend intentionally does not load the updater in `tauri dev`.
+        return Ok(menu);
+    }
+    let check_for_updates = MenuItem::with_id(
+        app,
+        CHECK_FOR_UPDATES_MENU_ID,
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(app_menu) = menu
+        .items()?
+        .into_iter()
+        .next()
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        // Keep the conventional macOS order: About, Check for Updates, separator.
+        app_menu.insert(&check_for_updates, 1)?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(help_menu) = menu
+        .get(tauri::menu::HELP_SUBMENU_ID)
+        .and_then(|item| item.as_submenu().cloned())
+    {
+        help_menu.append(&check_for_updates)?;
+    }
+
+    Ok(menu)
 }
 
 fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
@@ -1423,6 +1596,29 @@ fn init_tracing(app_dir: &std::path::Path) {
 mod tests {
     use super::*;
     use symphony_core::RepoConfig;
+
+    #[test]
+    fn update_check_bridge_queues_until_a_listener_is_ready() {
+        let mut bridge = UpdateCheckBridgeState::default();
+
+        assert!(!bridge.queue_request());
+        assert!(bridge.register_listener());
+        assert_eq!(bridge.pending_requests, 1);
+        assert!(!bridge.acknowledge());
+        assert_eq!(bridge.pending_requests, 0);
+    }
+
+    #[test]
+    fn update_check_bridge_redelivers_pending_work_to_a_rebuilt_listener() {
+        let mut bridge = UpdateCheckBridgeState::default();
+
+        bridge.register_listener();
+        assert!(bridge.queue_request());
+        assert!(bridge.register_listener());
+        assert_eq!(bridge.pending_requests, 1);
+        assert!(!bridge.acknowledge());
+        assert_eq!(bridge.pending_requests, 0);
+    }
 
     fn repo(name: &str) -> RepoConfig {
         RepoConfig {

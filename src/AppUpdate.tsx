@@ -4,15 +4,21 @@ import type { AppSettings, Overview, WorkerStatus } from "./bindings";
 import * as desktopCommands from "./desktop/commands";
 import {
   checkForDesktopUpdate,
-  relaunchDesktopApp,
   type DesktopDownloadEvent,
   type DesktopUpdate,
+  relaunchDesktopApp,
 } from "./desktop/updater";
 import "./AppUpdate.css";
 
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+type ManualCheckStatus =
+  | { kind: "checking"; message: string }
+  | { kind: "current"; message: string }
+  | { kind: "error"; message: string };
 
 type AppUpdateFeatureProps = {
+  manualCheckRequest: number;
   overview: Overview;
   backgroundWork: string[];
   hasInProgressRetroBatches: boolean;
@@ -129,6 +135,7 @@ export function AppUpdateFeature(props: AppUpdateFeatureProps) {
   return (
     <AppUpdate
       enabled
+      manualCheckRequest={props.manualCheckRequest}
       safety={{
         activeRunCount: props.overview.active_runs.length,
         activeRunIds: props.overview.active_runs.map((run) => run.id),
@@ -216,6 +223,7 @@ function errorMessage(error: unknown) {
 
 export function AppUpdate({
   enabled,
+  manualCheckRequest = 0,
   safety,
   verifyInstallSafety,
   prepareForInstall,
@@ -224,6 +232,7 @@ export function AppUpdate({
   checkForUpdate = checkForDesktopUpdate,
   relaunchApp = relaunchDesktopApp,
 }: AppUpdateProps & {
+  manualCheckRequest?: number;
   checkForUpdate?: () => Promise<DesktopUpdate | null>;
   relaunchApp?: () => Promise<void>;
 }) {
@@ -232,8 +241,10 @@ export function AppUpdate({
   const [progress, setProgress] = useState<number | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationStage | null>(null);
   const [confirmationSafety, setConfirmationSafety] = useState<UpdateSafety | null>(null);
+  const [manualCheckStatus, setManualCheckStatus] = useState<ManualCheckStatus | null>(null);
   const candidateRef = useRef<DesktopUpdate | null>(null);
-  const checkingRef = useRef(false);
+  const requestManualCheckRef = useRef<() => void>(() => undefined);
+  const handledManualCheckRequestRef = useRef(0);
   const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
   const prepareForInstallRef = useRef(prepareForInstall);
@@ -290,39 +301,94 @@ export function AppUpdate({
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    let activeCheck: Promise<
+      | { kind: "available" }
+      | { kind: "current" }
+      | { kind: "error"; error: unknown }
+      | { kind: "cancelled" }
+    > | null = null;
+    let statusTimer: number | null = null;
 
-    const refreshAvailableUpdate = async () => {
-      if (checkingRef.current || candidateRef.current) return;
-      checkingRef.current = true;
+    const showManualStatus = (status: ManualCheckStatus, timeoutMs?: number) => {
+      if (statusTimer !== null) window.clearTimeout(statusTimer);
+      setManualCheckStatus(status);
+      statusTimer =
+        timeoutMs === undefined
+          ? null
+          : window.setTimeout(() => {
+              statusTimer = null;
+              setManualCheckStatus(null);
+            }, timeoutMs);
+    };
+
+    const performCheck = async () => {
       try {
         const update = await checkForUpdate();
         if (cancelled) {
           await update?.close().catch(() => undefined);
-          return;
+          return { kind: "cancelled" } as const;
         }
         if (update) {
           candidateRef.current = update;
           setCandidate(update);
           setPhase("available");
+          return { kind: "available" } as const;
         } else {
           setPhase("hidden");
+          return { kind: "current" } as const;
         }
       } catch (error) {
         // Update awareness is opportunistic: offline or malformed-feed failures
         // must not distract from the worker. The next scheduled check retries.
         console.warn("Symphony update check failed", error);
-      } finally {
-        checkingRef.current = false;
+        return { kind: "error", error } as const;
       }
     };
 
+    const refreshAvailableUpdate = async (manual = false) => {
+      if (candidateRef.current) {
+        if (manual) setManualCheckStatus(null);
+        return;
+      }
+      if (manual) showManualStatus({ kind: "checking", message: "Checking for updates…" });
+
+      const check = activeCheck ?? performCheck();
+      activeCheck = check;
+      const result = await check;
+      if (activeCheck === check) activeCheck = null;
+      if (!manual || cancelled) return;
+
+      if (result.kind === "available" || result.kind === "cancelled") {
+        setManualCheckStatus(null);
+      } else if (result.kind === "current") {
+        showManualStatus({ kind: "current", message: "Symphony is up to date" }, 5_000);
+      } else {
+        const message = `Update check failed: ${errorMessage(result.error)}`;
+        showManualStatus({ kind: "error", message }, 8_000);
+      }
+    };
+
+    requestManualCheckRef.current = () => {
+      void refreshAvailableUpdate(true);
+    };
     void refreshAvailableUpdate();
-    const interval = window.setInterval(refreshAvailableUpdate, UPDATE_CHECK_INTERVAL_MS);
+    const interval = window.setInterval(
+      () => void refreshAvailableUpdate(),
+      UPDATE_CHECK_INTERVAL_MS,
+    );
     return () => {
       cancelled = true;
+      requestManualCheckRef.current = () => undefined;
       window.clearInterval(interval);
+      if (statusTimer !== null) window.clearTimeout(statusTimer);
     };
   }, [checkForUpdate, enabled]);
+
+  useEffect(() => {
+    if (!enabled || manualCheckRequest <= handledManualCheckRequestRef.current) return;
+    handledManualCheckRequestRef.current = manualCheckRequest;
+    requestManualCheckRef.current();
+  }, [enabled, manualCheckRequest]);
 
   useEffect(
     () => () => {
@@ -331,7 +397,20 @@ export function AppUpdate({
     [],
   );
 
-  if (!enabled || phase === "hidden" || !candidate) return null;
+  if (!enabled) return null;
+  if (phase === "hidden" || !candidate) {
+    if (!manualCheckStatus) return null;
+    return (
+      <span
+        className={`update-check-status ${manualCheckStatus.kind}`}
+        role={manualCheckStatus.kind === "error" ? "alert" : "status"}
+        title={manualCheckStatus.message}
+      >
+        {manualCheckStatus.kind === "checking" ? <UpdateSpinner /> : null}
+        <span className="update-check-status-message">{manualCheckStatus.message}</span>
+      </span>
+    );
+  }
 
   const requestStart = () => {
     if (safety.transientBusy) return;

@@ -1,6 +1,5 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject, SetStateAction } from "react";
-import type { IssueViewMode } from "./views/IssuesView";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -17,46 +16,47 @@ import type {
   SkillsStatus,
   TrackerTestResult,
   ValidationResult,
-  WorkflowTransferStatus,
   WorkerStatus,
+  WorkflowTransferStatus,
 } from "./bindings";
-import { formatTokens, providerRateLimits, providerTokenUsage, shortTime } from "./format";
-import { RelativeTime } from "./RelativeTime";
+import { ChunkErrorBoundary, createLazyAttempts, ViewLoading } from "./ChunkBoundary";
 import {
   createDashboardRefreshCoordinator,
   type DashboardRefreshContext,
   type DashboardRefreshCoordinator,
 } from "./dashboardRefreshCoordinator";
 import {
-  resourcesForDbChange,
-  resourcesForView,
-  visibleResources,
-  type DashboardResourceKey,
-} from "./dashboardResources";
-import * as desktopCommands from "./desktop/commands";
-import { subscribeDesktopEvents } from "./desktop/events";
-import { isDesktopRuntime } from "./desktop/runtime";
-import {
   beginResourceRefresh,
   completeResourceRefresh,
   createResourceEnvelope,
+  type DashboardResourceEnvelope,
+  type DashboardResourceError,
   failResourceRefresh,
   hasResourceData,
   markResourceDirty as markEnvelopeDirty,
   normalizeResourceError,
   resourceIsStale,
   staleDirtyResource,
-  type DashboardResourceEnvelope,
-  type DashboardResourceError,
 } from "./dashboardResourceState";
+import {
+  type DashboardResourceKey,
+  resourcesForDbChange,
+  resourcesForView,
+  visibleResources,
+} from "./dashboardResources";
+import * as desktopCommands from "./desktop/commands";
+import { subscribeDesktopEvents } from "./desktop/events";
+import { isDesktopRuntime } from "./desktop/runtime";
+import { formatTokens, providerRateLimits, providerTokenUsage, shortTime } from "./format";
 import {
   createPollController,
   type PollController,
   type PollResourceState,
 } from "./pollController";
+import { RelativeTime } from "./RelativeTime";
 import type { SettingsValidationController } from "./settingsValidationController";
-import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "./ChunkBoundary";
 import { Empty, formSnapshot, Panel, RunTable } from "./viewPrimitives";
+import type { IssueViewMode } from "./views/IssuesView";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -497,6 +497,7 @@ function App() {
   const selectedRun = dashboardResources.selectedRun.data ?? null;
   const selectedRetro = dashboardResources.selectedRetro.data ?? null;
   const [error, setError] = useState<string | null>(null);
+  const [manualUpdateCheckRequest, setManualUpdateCheckRequest] = useState(0);
   const [resourceAnnouncement, setResourceAnnouncement] =
     useState<ResourceFailureAnnouncement | null>(null);
   const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<Set<DashboardResourceKey>>(
@@ -1176,6 +1177,9 @@ function App() {
       onWorkflowReady: () => {
         workflowReadinessDirtyRef.current = true;
         setWorkflowReadinessEpoch((epoch) => epoch + 1);
+      },
+      onCheckForUpdates: () => {
+        setManualUpdateCheckRequest((request) => request + 1);
       },
       onError: (err) => {
         if (!cancelled) setError(formatError(err));
@@ -2013,7 +2017,7 @@ function App() {
         : "Start worker";
 
   const bootReady = bootState.status === "ready";
-  const AppUpdateComponent = useDeferredUpdater(bootReady && runtimeAvailable && !IS_LOCAL_DEV);
+  const AppUpdateComponent = useDeferredUpdater(runtimeAvailable && !IS_LOCAL_DEV);
   const visibleDashboardResourceKeys = visibleResources(
     DASHBOARD_RESOURCE_KEYS,
     view,
@@ -2063,8 +2067,9 @@ function App() {
                 Dev
               </span>
             ) : null}
-            {bootReady && AppUpdateComponent ? (
+            {AppUpdateComponent ? (
               <AppUpdateComponent
+                manualCheckRequest={manualUpdateCheckRequest}
                 overview={overview}
                 backgroundWork={updateBackgroundWork}
                 hasInProgressRetroBatches={hasInProgressRetroBatches}

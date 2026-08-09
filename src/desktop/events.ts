@@ -1,5 +1,5 @@
-import { listen } from "@tauri-apps/api/event";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import type { StorageEvent } from "../bindings";
 
 export type DbChanged = Extract<StorageEvent, { type: "db_changed" }>;
@@ -12,6 +12,7 @@ export type DesktopEventHandlers = {
   onAgentEvent: (event: AgentEvent) => void;
   onRateLimitChanged: (event: RateLimitChanged) => void;
   onWorkflowReady: (event: WorkflowReady) => void;
+  onCheckForUpdates: () => void;
   onError: (error: unknown) => void;
 };
 
@@ -46,7 +47,7 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
     handlers.onError(error);
   };
 
-  const register = (start: () => Promise<UnlistenFn>) => {
+  const register = (start: () => Promise<UnlistenFn>, onReady?: () => void) => {
     if (disposed) return;
     let registration: Promise<UnlistenFn>;
     try {
@@ -60,6 +61,7 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
         cleanListener(unlisten);
       } else {
         unlisteners.push(unlisten);
+        onReady?.();
       }
     }, fail);
   };
@@ -83,6 +85,18 @@ export function subscribeDesktopEvents(handlers: DesktopEventHandlers): () => vo
     listen<WorkflowReady>("workflow_ready", ({ payload }) => {
       if (!disposed) handlers.onWorkflowReady(payload);
     }),
+  );
+  register(
+    () =>
+      listen<void>("check-for-updates-requested", () => {
+        if (!disposed) {
+          handlers.onCheckForUpdates();
+          void emit("up:a").catch(handlers.onError);
+        }
+      }),
+    () => {
+      void emit("up:r").catch(handlers.onError);
+    },
   );
 
   return dispose;
