@@ -157,13 +157,16 @@ describe("AppUpdate", () => {
       "Update check failed: release feed unavailable",
     );
     expect(onActionError).toHaveBeenCalledWith("Update check failed: release feed unavailable");
-    expect(onActionErrorClear).toHaveBeenCalledTimes(1);
+    expect(onActionErrorClear).not.toHaveBeenCalled();
 
     tauriMocks.check.mockResolvedValueOnce(null);
     act(requestManualCheck);
 
     expect(await screen.findByText("Symphony is up to date")).toBeTruthy();
-    expect(onActionErrorClear).toHaveBeenCalledTimes(2);
+    expect(onActionErrorClear).toHaveBeenCalledOnce();
+    expect(onActionErrorClear).toHaveBeenCalledWith(
+      "Update check failed: release feed unavailable",
+    );
     consoleWarn.mockRestore();
   });
 

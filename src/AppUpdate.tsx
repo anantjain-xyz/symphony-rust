@@ -4,9 +4,9 @@ import type { AppSettings, Overview, WorkerStatus } from "./bindings";
 import * as desktopCommands from "./desktop/commands";
 import {
   checkForDesktopUpdate,
-  relaunchDesktopApp,
   type DesktopDownloadEvent,
   type DesktopUpdate,
+  relaunchDesktopApp,
 } from "./desktop/updater";
 import "./AppUpdate.css";
 
@@ -31,7 +31,7 @@ type AppUpdateFeatureProps = {
   onRetroBatchWorkChange: (active: boolean) => void;
   onInstallLockChange: (locked: boolean) => void;
   onActionError: (message: string) => void;
-  onActionErrorClear: () => void;
+  onActionErrorClear: (message: string) => void;
 };
 
 function localValueFingerprint(value: string) {
@@ -248,6 +248,7 @@ export function AppUpdate({
   const candidateRef = useRef<DesktopUpdate | null>(null);
   const requestManualCheckRef = useRef<() => void>(() => undefined);
   const handledManualCheckRequestRef = useRef(0);
+  const lastManualCheckErrorRef = useRef<string | null>(null);
   const approvedSafetyRef = useRef<string | null>(null);
   const safetyRef = useRef(safety);
   const prepareForInstallRef = useRef(prepareForInstall);
@@ -351,7 +352,10 @@ export function AppUpdate({
     };
 
     const refreshAvailableUpdate = async (manual = false) => {
-      if (manual) onActionErrorClearRef.current();
+      if (manual && lastManualCheckErrorRef.current) {
+        onActionErrorClearRef.current(lastManualCheckErrorRef.current);
+        lastManualCheckErrorRef.current = null;
+      }
       if (candidateRef.current) {
         if (manual) setManualCheckStatus(null);
         return;
@@ -370,6 +374,7 @@ export function AppUpdate({
         showManualStatus({ kind: "current", message: "Symphony is up to date" }, 5_000);
       } else {
         const message = `Update check failed: ${errorMessage(result.error)}`;
+        lastManualCheckErrorRef.current = message;
         showManualStatus({ kind: "error", message }, 8_000);
         onActionErrorRef.current(message);
       }
@@ -414,7 +419,7 @@ export function AppUpdate({
         title={manualCheckStatus.message}
       >
         {manualCheckStatus.kind === "checking" ? <UpdateSpinner /> : null}
-        {manualCheckStatus.message}
+        <span className="update-check-status-message">{manualCheckStatus.message}</span>
       </span>
     );
   }

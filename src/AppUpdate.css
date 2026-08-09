@@ -28,7 +28,16 @@
   font-weight: 500;
   gap: 6px;
   height: 26px;
+  max-width: min(320px, 30vw);
+  min-width: 0;
   padding: 0 9px;
+  white-space: nowrap;
+}
+
+.update-check-status-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -140,7 +149,7 @@
 .update-check-status .update-spinner {
   border-color: color-mix(in srgb, currentColor 35%, transparent);
   border-top-color: currentColor;
-  flex-basis: 12px;
+  flex: 0 0 12px;
   height: 12px;
   width: 12px;
 }

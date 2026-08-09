@@ -1,6 +1,5 @@
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject, SetStateAction } from "react";
-import type { IssueViewMode } from "./views/IssuesView";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEventRow,
   AppSettings,
@@ -17,46 +16,47 @@ import type {
   SkillsStatus,
   TrackerTestResult,
   ValidationResult,
-  WorkflowTransferStatus,
   WorkerStatus,
+  WorkflowTransferStatus,
 } from "./bindings";
-import { formatTokens, providerRateLimits, providerTokenUsage, shortTime } from "./format";
-import { RelativeTime } from "./RelativeTime";
+import { ChunkErrorBoundary, createLazyAttempts, ViewLoading } from "./ChunkBoundary";
 import {
   createDashboardRefreshCoordinator,
   type DashboardRefreshContext,
   type DashboardRefreshCoordinator,
 } from "./dashboardRefreshCoordinator";
 import {
-  resourcesForDbChange,
-  resourcesForView,
-  visibleResources,
-  type DashboardResourceKey,
-} from "./dashboardResources";
-import * as desktopCommands from "./desktop/commands";
-import { subscribeDesktopEvents } from "./desktop/events";
-import { isDesktopRuntime } from "./desktop/runtime";
-import {
   beginResourceRefresh,
   completeResourceRefresh,
   createResourceEnvelope,
+  type DashboardResourceEnvelope,
+  type DashboardResourceError,
   failResourceRefresh,
   hasResourceData,
   markResourceDirty as markEnvelopeDirty,
   normalizeResourceError,
   resourceIsStale,
   staleDirtyResource,
-  type DashboardResourceEnvelope,
-  type DashboardResourceError,
 } from "./dashboardResourceState";
+import {
+  type DashboardResourceKey,
+  resourcesForDbChange,
+  resourcesForView,
+  visibleResources,
+} from "./dashboardResources";
+import * as desktopCommands from "./desktop/commands";
+import { subscribeDesktopEvents } from "./desktop/events";
+import { isDesktopRuntime } from "./desktop/runtime";
+import { formatTokens, providerRateLimits, providerTokenUsage, shortTime } from "./format";
 import {
   createPollController,
   type PollController,
   type PollResourceState,
 } from "./pollController";
+import { RelativeTime } from "./RelativeTime";
 import type { SettingsValidationController } from "./settingsValidationController";
-import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "./ChunkBoundary";
 import { Empty, formSnapshot, Panel, RunTable } from "./viewPrimitives";
+import type { IssueViewMode } from "./views/IssuesView";
 import "./App.css";
 
 type View = "overview" | "runs" | "issues" | "retro" | "settings";
@@ -1142,6 +1142,7 @@ function App() {
         }
       });
 
+    const updateCheckListenerId = IS_LOCAL_DEV ? null : crypto.randomUUID();
     const unsubscribe = subscribeDesktopEvents({
       onDbChanged: (payload) => {
         let keys = resourcesForDbChange(payload.table);
@@ -1178,8 +1179,20 @@ function App() {
         workflowReadinessDirtyRef.current = true;
         setWorkflowReadinessEpoch((epoch) => epoch + 1);
       },
-      onCheckForUpdates: () => {
+      onCheckForUpdates: (listenerId) => {
+        if (updateCheckListenerId !== null && listenerId !== updateCheckListenerId) return;
         setManualUpdateCheckRequest((request) => request + 1);
+        if (updateCheckListenerId !== null) {
+          void desktopCommands
+            .acknowledgeUpdateCheckRequest(updateCheckListenerId)
+            .catch((err) => console.warn("Could not acknowledge update check request", err));
+        }
+      },
+      onUpdateCheckListenerReady: () => {
+        if (updateCheckListenerId === null) return;
+        void desktopCommands.registerUpdateCheckListener(updateCheckListenerId).catch((err) => {
+          if (!cancelled) setError(formatError(err));
+        });
       },
       onError: (err) => {
         if (!cancelled) setError(formatError(err));
@@ -2082,7 +2095,9 @@ function App() {
                 onRetroBatchWorkChange={setHasInProgressRetroBatches}
                 onInstallLockChange={setBusy}
                 onActionError={setError}
-                onActionErrorClear={() => setError(null)}
+                onActionErrorClear={(message) =>
+                  setError((current) => (current === message ? null : current))
+                }
               />
             ) : null}
           </div>

@@ -43,6 +43,7 @@ describe("desktop event subscription", () => {
       onRateLimitChanged: vi.fn(),
       onWorkflowReady: vi.fn(),
       onCheckForUpdates: vi.fn(),
+      onUpdateCheckListenerReady: vi.fn(),
       onError: vi.fn(),
     };
 
@@ -76,6 +77,7 @@ describe("desktop event subscription", () => {
     expect(handlers.onRateLimitChanged).toHaveBeenCalledOnce();
     expect(handlers.onWorkflowReady).toHaveBeenCalledOnce();
     expect(handlers.onCheckForUpdates).toHaveBeenCalledOnce();
+    expect(handlers.onUpdateCheckListenerReady).toHaveBeenCalledOnce();
     expect(() => unsubscribe()).not.toThrow();
     unsubscribe();
     expect(unlisteners.map((unlisten) => unlisten.mock.calls.length)).toEqual([1, 1, 1, 1, 1]);
