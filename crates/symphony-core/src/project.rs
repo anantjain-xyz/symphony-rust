@@ -13,8 +13,8 @@ impl LinearProjectRef {
         if let Some(slug_id) = project_slug_id_from_url(value) {
             return Some(Self::SlugId(slug_id.to_string()));
         }
-        if looks_like_project_slug_id(value) {
-            return Some(Self::SlugId(value.to_string()));
+        if let Some(slug_id) = project_slug_id_from_slug(value) {
+            return Some(Self::SlugId(slug_id.to_string()));
         }
         Some(Self::Id(value.to_string()))
     }
@@ -61,20 +61,21 @@ fn project_slug_id_from_url(value: &str) -> Option<&str> {
     let mut parts = path.split('/');
     while let Some(part) = parts.next() {
         if part == "project" {
-            return parts.next().filter(|slug_id| !slug_id.is_empty());
+            return parts.next().and_then(project_slug_id_from_slug);
         }
     }
     None
 }
 
-fn looks_like_project_slug_id(value: &str) -> bool {
+fn project_slug_id_from_slug(value: &str) -> Option<&str> {
     if value.contains('/') || value.contains("://") || looks_like_uuid(value) {
-        return false;
+        return None;
     }
-    let Some((name, suffix)) = value.rsplit_once('-') else {
-        return false;
-    };
-    !name.is_empty() && suffix.len() == 12 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+    let slug_id = value
+        .rsplit_once('-')
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(value);
+    (slug_id.len() == 12 && slug_id.chars().all(|ch| ch.is_ascii_hexdigit())).then_some(slug_id)
 }
 
 fn looks_like_uuid(value: &str) -> bool {
@@ -100,10 +101,7 @@ mod tests {
         ];
         for value in refs {
             let parsed = LinearProjectRef::parse(value).expect("project ref");
-            assert_eq!(
-                parsed.slug_id(),
-                Some("phase-1-pre-launch-fixes-00bdaf30dd39")
-            );
+            assert_eq!(parsed.slug_id(), Some("00bdaf30dd39"));
         }
     }
 
@@ -118,7 +116,11 @@ mod tests {
         let slug = "phase-1-pre-launch-fixes-00bdaf30dd39";
         assert_eq!(
             LinearProjectRef::parse(slug).and_then(|p| p.slug_id().map(str::to_string)),
-            Some(slug.to_string())
+            Some("00bdaf30dd39".to_string())
+        );
+        assert_eq!(
+            LinearProjectRef::parse("00bdaf30dd39").and_then(|p| p.slug_id().map(str::to_string)),
+            Some("00bdaf30dd39".to_string())
         );
     }
 
@@ -132,10 +134,7 @@ mod tests {
             "https://linear.app/acme/project/phase-1-pre-launch-fixes-00bdaf30dd39/overview",
         )
         .unwrap();
-        assert!(slug_ref.matches_project(
-            Some("proj-1"),
-            Some("phase-1-pre-launch-fixes-00bdaf30dd39")
-        ));
-        assert!(!slug_ref.matches_project(Some("proj-1"), Some("other-00bdaf30dd39")));
+        assert!(slug_ref.matches_project(Some("proj-1"), Some("00bdaf30dd39")));
+        assert!(!slug_ref.matches_project(Some("proj-1"), Some("3171f2ba1c70")));
     }
 }

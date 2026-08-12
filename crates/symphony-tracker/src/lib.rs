@@ -1017,8 +1017,7 @@ mod tests {
             project_ids: vec![
                 "https://linear.app/optimism-llc/project/symphony-3171f2ba1c70/overview"
                     .to_string(),
-                "https://linear.app/optimism-llc/project/symphony-3171f2ba1c70/overview"
-                    .to_string(),
+                "symphony-3171f2ba1c70".to_string(),
                 "0daba920-df53-4648-93da-114035afb611".to_string(),
             ],
             ..Default::default()
@@ -1026,8 +1025,22 @@ mod tests {
 
         let refs = tracker.project_refs();
         assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].slug_id(), Some("symphony-3171f2ba1c70"));
+        assert_eq!(refs[0].slug_id(), Some("3171f2ba1c70"));
         assert_eq!(refs[1].id(), Some("0daba920-df53-4648-93da-114035afb611"));
+    }
+
+    #[test]
+    fn url_project_refs_match_linear_issue_slug_ids() {
+        let tracker = LinearTracker::new(TrackerConfig {
+            project_ids: vec![
+                "https://linear.app/optimism-llc/project/slopper-755cb427d165/overview".to_string(),
+            ],
+            ..Default::default()
+        });
+        let mut issue = issue_for_filter("OP-441", Some("b93dad70-0b6f-4cd0-b536-1be57a27d15d"));
+        issue.project_slug_id = Some("755cb427d165".to_string());
+
+        assert_eq!(tracker.filter_issues(vec![issue]).len(), 1);
     }
 
     fn issue_for_filter(identifier: &str, project_id: Option<&str>) -> Issue {
@@ -1111,7 +1124,7 @@ mod tests {
         );
         assert_eq!(
             prepared.variables["projectSlugId"],
-            serde_json::json!("phase-1-00bdaf30dd39")
+            serde_json::json!("00bdaf30dd39")
         );
         assert_eq!(
             prepared.variables["assigneeId"],
