@@ -242,11 +242,18 @@ Persisted `pending` rows receive the same treatment with a message explaining
 that restart happened before the run was claimed. Orphaned placeholder live
 sessions for already-terminal runs are removed.
 
-After local run recovery, the worker fetches terminal issues, and repeats that
-sweep hourly while it remains running. A terminal workspace is preserved until
-the tracker's completion or cancellation timestamp is at least one hour old;
-missing or invalid timestamps are preserved rather than guessed. Eligible
-workspaces are atomically renamed under the repository workspace's
+After local run recovery, the worker makes a best-effort fetch of terminal
+issues; a failed cleanup fetch does not prevent active polling from starting.
+An independent loop repeats the sweep hourly, so a large terminal history never
+blocks active-issue refresh or dispatch. Candidates without a local workspace
+are skipped before per-issue tracker revalidation. Immediately before cleanup,
+the worker confirms that the issue is still terminal and that the tracker
+configuration has not changed.
+
+A terminal workspace is preserved until the tracker's latest completion or
+cancellation timestamp is at least one hour old. Missing timestamps, or any
+present malformed timestamp, preserve the workspace rather than guessing.
+Eligible workspaces are atomically renamed under the repository workspace's
 `.symphony-trash` directory and entered in `workspace_cleanup_queue`; recursive
 deletion is never awaited by startup or the hourly sweep. The original issue
 path is therefore immediately reusable if an issue reopens after cleanup.

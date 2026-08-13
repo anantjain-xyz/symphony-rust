@@ -374,14 +374,29 @@ async fn run_worker(
     // Terminal workspaces are quarantined after startup recovery. The
     // rename is fast; recursive deletion belongs to the app-owned collector
     // and never gates the first active-issue poll.
-    if !recover_terminal_workspaces(&repo, &tracker, &initial_config, None, &stop).await? {
+    if !recover_terminal_workspaces_at_startup(&repo, &tracker, &initial_config, &stop).await {
         return Ok(());
     }
 
-    run_loop(&repo, &config, &stop, tracker, tracker_config, |cfg| {
-        LinearTracker::new(cfg.clone())
-    })
-    .await;
+    let cleanup_tracker = LinearTracker::new(tracker_config.clone());
+    tokio::join!(
+        run_loop(
+            &repo,
+            &config,
+            &stop,
+            tracker,
+            tracker_config.clone(),
+            |cfg| { LinearTracker::new(cfg.clone()) }
+        ),
+        run_terminal_workspace_cleanup_loop(
+            &repo,
+            &config,
+            &stop,
+            cleanup_tracker,
+            tracker_config,
+            |cfg| LinearTracker::new(cfg.clone()),
+        ),
+    );
     Ok(())
 }
 
@@ -429,27 +444,12 @@ async fn run_loop<T, F>(
     T: TrackerClient,
     F: FnMut(&symphony_core::TrackerConfig) -> T,
 {
-    let mut next_terminal_cleanup =
-        tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
     while !stop.is_cancelled() {
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
             tracker_config = current_tracker_config;
             tracker = make_tracker(&tracker_config);
-        }
-        if tokio::time::Instant::now() >= next_terminal_cleanup {
-            if let Err(err) =
-                recover_terminal_workspaces(repo, &tracker, &current_config, Some(config), stop)
-                    .await
-            {
-                error!(error = %err, "hourly terminal workspace cleanup failed");
-            }
-            next_terminal_cleanup =
-                tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
-            if stop.is_cancelled() {
-                break;
-            }
         }
         if let Err(err) = tick(repo, &tracker, &current_config, Some(config), stop).await {
             error!(error = %err, "worker tick failed");
@@ -459,8 +459,39 @@ async fn run_loop<T, F>(
             _ = stop.cancelled() => break,
             _ = current_config.wake.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
-            _ = tokio::time::sleep_until(next_terminal_cleanup) => {}
         }
+    }
+}
+
+async fn run_terminal_workspace_cleanup_loop<T, F>(
+    repo: &Repository,
+    config: &SharedRuntimeConfig,
+    stop: &CancellationToken,
+    mut tracker: T,
+    mut tracker_config: symphony_core::TrackerConfig,
+    mut make_tracker: F,
+) where
+    T: TrackerClient,
+    F: FnMut(&symphony_core::TrackerConfig) -> T,
+{
+    let mut next_cleanup = tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
+    while !stop.is_cancelled() {
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep_until(next_cleanup) => {}
+        }
+        let current_config = config.read().await.clone();
+        let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
+        if current_tracker_config != tracker_config {
+            tracker_config = current_tracker_config;
+            tracker = make_tracker(&tracker_config);
+        }
+        if let Err(err) =
+            recover_terminal_workspaces(repo, &tracker, &current_config, Some(config), stop).await
+        {
+            error!(error = %err, "hourly terminal workspace cleanup failed");
+        }
+        next_cleanup = tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
     }
 }
 
@@ -536,28 +567,78 @@ async fn recover_terminal_workspaces<T: TrackerClient>(
     let Some(config) = latest_runtime_config_if_tracker_matches(config, latest_config).await else {
         return Ok(!stop.is_cancelled());
     };
-    let now = Utc::now();
-    for issue in terminal {
+    for candidate in terminal {
         if stop.is_cancelled() {
             return Ok(false);
         }
-        if !terminal_workspace_grace_period_elapsed(&issue, now) {
+        let Some(candidate_repo) = route_issue(&config.repos, &candidate) else {
+            continue;
+        };
+        let candidate_workspace = workspace_manager(&config, candidate_repo);
+        let candidate_path = candidate_workspace.path_for(&candidate.identifier)?;
+        match tokio::fs::symlink_metadata(candidate_path).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(crate::workspace::WorkspaceError::Io(error).into()),
+        }
+        if repo.has_active_run(&candidate.id).await? {
             continue;
         }
-        if !repo.has_active_run(&issue.id).await? {
-            if let Some(repo_config) = route_issue(&config.repos, &issue) {
-                if let Err(error) = workspace_manager(&config, repo_config).remove(&issue).await {
-                    warn!(
-                        issue = %issue.identifier,
-                        repo = %repo_config.name,
-                        %error,
-                        "could not quarantine terminal issue workspace"
-                    );
-                }
+        let Some(current_issue) = cancellable(stop, tracker.fetch_by_id(&candidate.id)).await
+        else {
+            return Ok(false);
+        };
+        let Some(current_issue) = current_issue? else {
+            warn!(
+                issue = %candidate.identifier,
+                "terminal cleanup candidate disappeared from the tracker; preserving workspace"
+            );
+            continue;
+        };
+        let Some(config) = latest_runtime_config_if_tracker_matches(&config, latest_config).await
+        else {
+            return Ok(!stop.is_cancelled());
+        };
+        let is_terminal = config
+            .workflow
+            .front_matter
+            .tracker
+            .terminal_states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case(&current_issue.state));
+        if !is_terminal || !terminal_workspace_grace_period_elapsed(&current_issue, Utc::now()) {
+            continue;
+        }
+        if let Some(repo_config) = route_issue(&config.repos, &current_issue) {
+            if let Err(error) = workspace_manager(&config, repo_config)
+                .remove(&current_issue)
+                .await
+            {
+                warn!(
+                    issue = %current_issue.identifier,
+                    repo = %repo_config.name,
+                    %error,
+                    "could not quarantine terminal issue workspace"
+                );
             }
         }
     }
     Ok(!stop.is_cancelled())
+}
+
+async fn recover_terminal_workspaces_at_startup<T: TrackerClient>(
+    repo: &Repository,
+    tracker: &T,
+    config: &RuntimeConfig,
+    stop: &CancellationToken,
+) -> bool {
+    match recover_terminal_workspaces(repo, tracker, config, None, stop).await {
+        Ok(should_continue) => should_continue,
+        Err(error) => {
+            warn!(%error, "startup terminal workspace cleanup failed; continuing worker startup");
+            !stop.is_cancelled()
+        }
+    }
 }
 
 fn terminal_workspace_grace_period_elapsed(issue: &Issue, now: DateTime<Utc>) -> bool {
@@ -569,22 +650,21 @@ fn terminal_workspace_grace_period_elapsed(issue: &Issue, now: DateTime<Utc>) ->
         );
         return false;
     }
-    let terminal_at = terminal_timestamps
-        .into_iter()
-        .flatten()
-        .filter_map(|timestamp| match DateTime::parse_from_rfc3339(timestamp) {
-            Ok(timestamp) => Some(timestamp.with_timezone(&Utc)),
+    let mut parsed_timestamps = Vec::new();
+    for timestamp in terminal_timestamps.into_iter().flatten() {
+        match DateTime::parse_from_rfc3339(timestamp) {
+            Ok(timestamp) => parsed_timestamps.push(timestamp.with_timezone(&Utc)),
             Err(_) => {
                 warn!(
                     issue = %issue.identifier,
                     terminal_at = timestamp,
-                    "terminal issue has an invalid completion or cancellation timestamp"
+                    "terminal issue has an invalid completion or cancellation timestamp; preserving workspace"
                 );
-                None
+                return false;
             }
-        })
-        .max();
-    let Some(terminal_at) = terminal_at else {
+        }
+    }
+    let Some(terminal_at) = parsed_timestamps.into_iter().max() else {
         return false;
     };
     terminal_at <= now - TERMINAL_WORKSPACE_GRACE_PERIOD
@@ -1711,6 +1791,7 @@ mod tests {
     struct CountingTerminalTracker {
         terminal: Vec<Issue>,
         terminal_fetches: Arc<AtomicUsize>,
+        by_id_fetches: Arc<AtomicUsize>,
     }
 
     struct FailingTerminalTracker;
@@ -1737,7 +1818,8 @@ mod tests {
         }
 
         async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
-            Ok(None)
+            self.by_id_fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(self.terminal.first().cloned())
         }
 
         async fn fetch_workpads(
@@ -3321,6 +3403,12 @@ exit 13
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
         let mut config = runtime_config(temp.path());
         config.workspace_cleanup = Some(WorkspaceCleanupManager::new(repo.clone()));
+        config
+            .workflow
+            .front_matter
+            .tracker
+            .terminal_states
+            .push("Canceled".to_string());
         let workspace = temp.path().join("widgets/SYM-1");
         tokio::fs::create_dir_all(&workspace).await.unwrap();
         let mut terminal_issue = issue("canceled", vec![]);
@@ -3367,6 +3455,89 @@ exit 13
             error,
             WorkerError::Tracker(TrackerError::Invalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn startup_continues_when_terminal_recovery_fetch_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+
+        assert!(
+            recover_terminal_workspaces_at_startup(
+                &repo,
+                &FailingTerminalTracker,
+                &config,
+                &CancellationToken::new(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_preserves_workspace_when_issue_reopens() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        config.workspace_cleanup = Some(WorkspaceCleanupManager::new(repo.clone()));
+        let workspace = temp.path().join("widgets/SYM-1");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let reopened = issue("todo", vec![]);
+        let mut stale_terminal = issue("done", vec![]);
+        stale_terminal.completed_at = Some((Utc::now() - ChronoDuration::minutes(61)).to_rfc3339());
+        let tracker = StaticTracker {
+            active: vec![reopened],
+            terminal: vec![stale_terminal],
+        };
+
+        assert!(recover_terminal_workspaces(
+            &repo,
+            &tracker,
+            &config,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap());
+
+        assert!(tokio::fs::metadata(&workspace).await.is_ok());
+        assert_eq!(repo.overview().await.unwrap().workspace_cleanup_count, 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_skips_remote_revalidation_for_missing_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = runtime_config(temp.path());
+        let mut terminal_issue = issue("done", vec![]);
+        terminal_issue.completed_at = Some((Utc::now() - ChronoDuration::minutes(61)).to_rfc3339());
+        let by_id_fetches = Arc::new(AtomicUsize::new(0));
+        let tracker = CountingTerminalTracker {
+            terminal: vec![terminal_issue],
+            terminal_fetches: Arc::new(AtomicUsize::new(0)),
+            by_id_fetches: by_id_fetches.clone(),
+        };
+
+        assert!(recover_terminal_workspaces(
+            &repo,
+            &tracker,
+            &config,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(by_id_fetches.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -3422,7 +3593,7 @@ exit 13
     }
 
     #[tokio::test]
-    async fn run_loop_fetches_terminal_issues_hourly() {
+    async fn terminal_cleanup_loop_fetches_terminal_issues_hourly() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
             .await
@@ -3437,6 +3608,7 @@ exit 13
         let tracker = CountingTerminalTracker {
             terminal: Vec::new(),
             terminal_fetches: terminal_fetches.clone(),
+            by_id_fetches: Arc::new(AtomicUsize::new(0)),
         };
         let tracker_config = config.read().await.workflow.front_matter.tracker.clone();
         let task_repo = repo.clone();
@@ -3444,7 +3616,7 @@ exit 13
         let task_stop = stop.clone();
         let replacement = tracker.clone();
         let handle = tokio::spawn(async move {
-            run_loop(
+            run_terminal_workspace_cleanup_loop(
                 &task_repo,
                 &task_config,
                 &task_stop,
@@ -3894,6 +4066,19 @@ exit 13
         let mut terminal_issue = issue("canceled", vec![]);
         terminal_issue.completed_at = Some((now - ChronoDuration::minutes(120)).to_rfc3339());
         terminal_issue.canceled_at = Some((now - ChronoDuration::minutes(30)).to_rfc3339());
+
+        assert!(!terminal_workspace_grace_period_elapsed(
+            &terminal_issue,
+            now
+        ));
+    }
+
+    #[test]
+    fn terminal_grace_period_rejects_any_malformed_timestamp() {
+        let now = Utc::now();
+        let mut terminal_issue = issue("canceled", vec![]);
+        terminal_issue.completed_at = Some((now - ChronoDuration::minutes(120)).to_rfc3339());
+        terminal_issue.canceled_at = Some("not-a-timestamp".to_string());
 
         assert!(!terminal_workspace_grace_period_elapsed(
             &terminal_issue,
