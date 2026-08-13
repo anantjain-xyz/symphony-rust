@@ -152,6 +152,7 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers: vec![],
+            completed_at: None,
             project_id: None,
             project_slug_id: None,
         }

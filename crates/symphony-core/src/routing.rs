@@ -84,6 +84,7 @@ mod tests {
             branch: None,
             labels: labels.iter().map(ToString::to_string).collect(),
             blockers: vec![],
+            completed_at: None,
             project_id: Some("proj-1".to_string()),
             project_slug_id: None,
         }

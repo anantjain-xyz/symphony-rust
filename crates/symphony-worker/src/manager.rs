@@ -6,6 +6,7 @@ use crate::{
     },
     HookInvocation, SkillFile, WorkspaceCleanupManager, WorkspaceManager,
 };
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
@@ -33,6 +34,9 @@ use tracing::{error, warn};
 use uuid::Uuid;
 
 const USER_CANCELLED_SUPPRESSION: &str = "user_cancelled";
+const TERMINAL_WORKSPACE_CLEANUP_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+const TERMINAL_WORKSPACE_GRACE_PERIOD: ChronoDuration = ChronoDuration::hours(1);
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -425,12 +429,26 @@ async fn run_loop<T, F>(
     T: TrackerClient,
     F: FnMut(&symphony_core::TrackerConfig) -> T,
 {
+    let mut next_terminal_cleanup =
+        tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
     while !stop.is_cancelled() {
         let current_config = config.read().await.clone();
         let current_tracker_config = current_config.workflow.front_matter.tracker.clone();
         if current_tracker_config != tracker_config {
             tracker_config = current_tracker_config;
             tracker = make_tracker(&tracker_config);
+        }
+        if tokio::time::Instant::now() >= next_terminal_cleanup {
+            if let Err(err) =
+                recover_terminal_workspaces(repo, &tracker, &current_config, stop).await
+            {
+                error!(error = %err, "hourly terminal workspace cleanup failed");
+            }
+            next_terminal_cleanup =
+                tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
+            if stop.is_cancelled() {
+                break;
+            }
         }
         if let Err(err) = tick(repo, &tracker, &current_config, Some(config), stop).await {
             error!(error = %err, "worker tick failed");
@@ -440,6 +458,7 @@ async fn run_loop<T, F>(
             _ = stop.cancelled() => break,
             _ = current_config.wake.notified() => {}
             _ = tokio::time::sleep(std::time::Duration::from_millis(interval_ms)) => {}
+            _ = tokio::time::sleep_until(next_terminal_cleanup) => {}
         }
     }
 }
@@ -512,9 +531,13 @@ async fn recover_terminal_workspaces<T: TrackerClient>(
         return Ok(false);
     };
     if let Ok(terminal) = terminal {
+        let now = Utc::now();
         for issue in terminal {
             if stop.is_cancelled() {
                 return Ok(false);
+            }
+            if !terminal_workspace_grace_period_elapsed(&issue, now) {
+                continue;
             }
             if !repo.has_active_run(&issue.id).await.unwrap_or(true) {
                 if let Some(repo_config) = route_issue(&config.repos, &issue) {
@@ -532,6 +555,25 @@ async fn recover_terminal_workspaces<T: TrackerClient>(
         }
     }
     Ok(!stop.is_cancelled())
+}
+
+fn terminal_workspace_grace_period_elapsed(issue: &Issue, now: DateTime<Utc>) -> bool {
+    let Some(completed_at) = issue.completed_at.as_deref() else {
+        warn!(
+            issue = %issue.identifier,
+            "terminal issue has no completion timestamp; preserving workspace"
+        );
+        return false;
+    };
+    let Ok(completed_at) = DateTime::parse_from_rfc3339(completed_at) else {
+        warn!(
+            issue = %issue.identifier,
+            completed_at,
+            "terminal issue has an invalid completion timestamp; preserving workspace"
+        );
+        return false;
+    };
+    completed_at <= now - TERMINAL_WORKSPACE_GRACE_PERIOD
 }
 
 /// Await `fut`, but bail the moment `stop` is cancelled, returning `None`.
@@ -1552,6 +1594,7 @@ fn agent_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use symphony_tracker::StaticTracker;
 
     fn runtime_config(root: &std::path::Path) -> RuntimeConfig {
@@ -1610,6 +1653,7 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers,
+            completed_at: None,
             project_id: None,
             project_slug_id: None,
         }
@@ -1618,6 +1662,39 @@ mod tests {
     struct DispatchFilteringTracker {
         by_id: Option<Issue>,
         by_id_for_dispatch: Option<Issue>,
+    }
+
+    #[derive(Clone)]
+    struct CountingTerminalTracker {
+        terminal: Vec<Issue>,
+        terminal_fetches: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for CountingTerminalTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            self.terminal_fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(self.terminal.clone())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
     }
 
     #[async_trait::async_trait]
@@ -3058,9 +3135,11 @@ exit 13
         tokio::fs::write(workspace.join("large/tree/marker"), "old")
             .await
             .unwrap();
+        let mut terminal_issue = issue("done", vec![]);
+        terminal_issue.completed_at = Some((Utc::now() - ChronoDuration::minutes(61)).to_rfc3339());
         let tracker = StaticTracker {
             active: vec![],
-            terminal: vec![issue("done", vec![])],
+            terminal: vec![terminal_issue],
         };
 
         assert!(
@@ -3084,6 +3163,96 @@ exit 13
             .unwrap(),
             "old"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_recovery_preserves_recently_completed_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = runtime_config(temp.path());
+        config.workspace_cleanup = Some(WorkspaceCleanupManager::new(repo.clone()));
+        let workspace = temp.path().join("widgets/SYM-1");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let mut terminal_issue = issue("done", vec![]);
+        terminal_issue.completed_at = Some((Utc::now() - ChronoDuration::minutes(59)).to_rfc3339());
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![terminal_issue],
+        };
+
+        assert!(
+            recover_terminal_workspaces(&repo, &tracker, &config, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+
+        assert!(tokio::fs::metadata(&workspace).await.is_ok());
+        assert_eq!(repo.overview().await.unwrap().workspace_cleanup_count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_loop_fetches_terminal_issues_hourly() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        tokio::time::pause();
+        let mut config = runtime_config(temp.path());
+        config.workflow.front_matter.polling.interval_ms = 10 * 60 * 60 * 1_000;
+        let config = Arc::new(RwLock::new(config));
+        let stop = CancellationToken::new();
+        let terminal_fetches = Arc::new(AtomicUsize::new(0));
+        let tracker = CountingTerminalTracker {
+            terminal: Vec::new(),
+            terminal_fetches: terminal_fetches.clone(),
+        };
+        let tracker_config = config.read().await.workflow.front_matter.tracker.clone();
+        let task_repo = repo.clone();
+        let task_config = config.clone();
+        let task_stop = stop.clone();
+        let replacement = tracker.clone();
+        let handle = tokio::spawn(async move {
+            run_loop(
+                &task_repo,
+                &task_config,
+                &task_stop,
+                tracker,
+                tracker_config,
+                |_| replacement.clone(),
+            )
+            .await;
+        });
+
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(terminal_fetches.load(Ordering::SeqCst), 0);
+        tokio::time::advance(
+            TERMINAL_WORKSPACE_CLEANUP_INTERVAL - std::time::Duration::from_secs(1),
+        )
+        .await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(terminal_fetches.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while terminal_fetches.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hourly terminal cleanup did not run");
+        assert_eq!(terminal_fetches.load(Ordering::SeqCst), 1);
+
+        stop.cancel();
+        handle.await.unwrap();
     }
 
     /// A tracker whose `fetch_active` never resolves, standing in for a Linear
