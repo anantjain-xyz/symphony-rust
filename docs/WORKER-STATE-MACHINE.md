@@ -188,25 +188,32 @@ There are two cancellation sources with different redispatch intent.
 
 ### User stops one run
 
-`stop_run()` marks the run ID as user-requested and fires its child token. At
-the next checkpoint, the worker:
+`stop_run()` marks the managed run with a fallback fingerprint and fires its
+child token before reading run storage, then resolves the `In Review` workflow
+state from the issue's own Linear team and moves the issue there. While the
+Linear mutation is in flight, cancellation finalization may install a
+`user_cancelled` dispatch suppression. A successful move removes that
+suppression when `In Review` is inactive; if a custom configuration watches
+`In Review`, Symphony retains suppression using the moved issue's normalized
+fingerprint. At the next cancellation checkpoint, the worker:
 
 1. finishes the run as `cancelled` with class `cancelled`;
-2. stores a `user_cancelled` dispatch suppression containing the issue
-   fingerprint;
+2. stores the reconciled suppression fingerprint when dispatch must remain blocked;
 3. clears the retry row; and
 4. removes the live session.
 
-The suppression prevents an unchanged active issue from being immediately
-redispatched. It is removed when the issue fingerprint changes or when the
-operator chooses "Retry now."
+If the Linear mutation fails, the stop command reports the tracker error but
+the cancellation remains in effect and the stop path explicitly installs the
+fallback suppression even if worker-wide cancellation already finalized the
+run without one. This preserves the no-immediate-redispatch invariant across
+both tracker failures and cancellation races.
 
 ### Worker stops
 
 Stopping the worker fires the root token inherited by active runs. Those runs
-also finish as `cancelled`, but they do not receive the user-cancelled
-suppression unless their individual cancellation was explicitly requested.
-Stopping orchestration and declaring an issue unwanted are different actions.
+also finish as `cancelled`, but their Linear issues remain in their current
+states and no user-cancelled suppression is installed. Stopping orchestration
+and declaring an individual run ready for review are different actions.
 
 The adapter explicitly manages its child process group on Unix: timeout or
 cancellation sends `TERM`, waits briefly, then sends `KILL` to the group.

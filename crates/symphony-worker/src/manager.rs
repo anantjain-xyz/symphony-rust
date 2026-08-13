@@ -9,11 +9,7 @@ use crate::{
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
     OpencodeRunOptions,
@@ -22,7 +18,7 @@ use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
     MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, RunStatus, TokenCountPayload,
 };
-use symphony_storage::{now_iso, Repository, RunRow, StorageError};
+use symphony_storage::{now_iso, Repository, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
@@ -33,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use uuid::Uuid;
 
+const STOPPED_ISSUE_STATE: &str = "In Review";
 const USER_CANCELLED_SUPPRESSION: &str = "user_cancelled";
 const TERMINAL_WORKSPACE_CLEANUP_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
@@ -99,34 +96,60 @@ type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 
 #[derive(Debug, Clone, Default)]
 struct RunCancellationRegistry {
-    tokens: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
-    user_requested: Arc<Mutex<BTreeSet<String>>>,
+    runs: Arc<Mutex<BTreeMap<String, ManagedRun>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedRun {
+    token: CancellationToken,
+    tracker_config: symphony_core::TrackerConfig,
+    issue: Issue,
+    lifecycle: Arc<Mutex<()>>,
+    stop_intent: Arc<Mutex<StopIntent>>,
+}
+
+#[derive(Debug, Default)]
+struct StopIntent {
+    suppression_fingerprint: Option<String>,
+    stopped_state_observed: bool,
 }
 
 impl RunCancellationRegistry {
-    async fn register(&self, run_id: &str, token: CancellationToken) {
-        self.tokens.lock().await.insert(run_id.to_string(), token);
-        self.user_requested.lock().await.remove(run_id);
+    async fn register(
+        &self,
+        run_id: &str,
+        token: CancellationToken,
+        tracker_config: symphony_core::TrackerConfig,
+        issue: Issue,
+    ) {
+        self.runs.lock().await.insert(
+            run_id.to_string(),
+            ManagedRun {
+                token,
+                tracker_config,
+                issue,
+                lifecycle: Arc::new(Mutex::new(())),
+                stop_intent: Arc::new(Mutex::new(StopIntent::default())),
+            },
+        );
     }
 
-    async fn cancel(&self, run_id: &str) -> bool {
-        let token = self.tokens.lock().await.get(run_id).cloned();
-        if let Some(token) = token {
-            self.user_requested.lock().await.insert(run_id.to_string());
-            token.cancel();
-            true
-        } else {
-            false
-        }
-    }
-
-    async fn was_user_requested(&self, run_id: &str) -> bool {
-        self.user_requested.lock().await.contains(run_id)
+    async fn get(&self, run_id: &str) -> Option<ManagedRun> {
+        self.runs.lock().await.get(run_id).cloned()
     }
 
     async fn unregister(&self, run_id: &str) {
-        self.tokens.lock().await.remove(run_id);
-        self.user_requested.lock().await.remove(run_id);
+        self.runs.lock().await.remove(run_id);
+    }
+
+    async fn for_issue(&self, issue_id: &str) -> Vec<ManagedRun> {
+        self.runs
+            .lock()
+            .await
+            .values()
+            .filter(|managed| managed.issue.id == issue_id)
+            .cloned()
+            .collect()
     }
 }
 
@@ -280,16 +303,9 @@ impl WorkerManager {
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
-        if self.run_cancellations.cancel(run_id).await {
-            self.repo
-                .append_event(
-                    run_id,
-                    symphony_core::AgentEventKind::Status,
-                    &serde_json::json!({ "message": "Run cancellation requested" }),
-                )
-                .await
-                .ok();
-            return Ok(());
+        if let Some(managed) = self.run_cancellations.get(run_id).await {
+            let tracker = LinearTracker::new(managed.tracker_config.clone());
+            return self.stop_managed_run(run_id, managed, &tracker).await;
         }
 
         let Some(run) = self.repo.get_run(run_id).await? else {
@@ -299,6 +315,120 @@ impl WorkerManager {
             return Err(WorkerError::RunNotManaged(run_id.to_string()));
         }
         Err(WorkerError::RunNotActive(run_id.to_string()))
+    }
+
+    async fn stop_managed_run<T: TrackerClient>(
+        &self,
+        run_id: &str,
+        managed: ManagedRun,
+        tracker: &T,
+    ) -> Result<(), WorkerError> {
+        // Stop the agent promptly, then move the issue out of the configured
+        // active states. Until Linear confirms the move, the cancellation
+        // checkpoint installs the local suppression as a fallback.
+        let fallback_fingerprint = issue_fingerprint(&managed.issue);
+        let lifecycle = managed.lifecycle.lock().await;
+        let mut stop_intent = managed.stop_intent.lock().await;
+        if !stop_intent.stopped_state_observed {
+            stop_intent.suppression_fingerprint = Some(fallback_fingerprint.clone());
+        }
+        managed.token.cancel();
+
+        // Final cancellation also takes this lock, so a run that completed
+        // before the stop request is visible here as terminal, while a run
+        // that was active when cancellation won cannot complete underneath
+        // this revalidation.
+        let Some(run) = self.repo.get_run(run_id).await? else {
+            stop_intent.suppression_fingerprint = None;
+            stop_intent.stopped_state_observed = true;
+            return Err(WorkerError::RunNotFound(run_id.to_string()));
+        };
+        if !matches!(run.status.as_str(), "pending" | "running") {
+            stop_intent.suppression_fingerprint = None;
+            stop_intent.stopped_state_observed = true;
+            self.repo
+                .clear_issue_dispatch_suppression(&managed.issue.id, USER_CANCELLED_SUPPRESSION)
+                .await?;
+            return Err(WorkerError::RunNotActive(run_id.to_string()));
+        }
+        drop(stop_intent);
+        drop(lifecycle);
+        self.repo
+            .append_event(
+                run_id,
+                symphony_core::AgentEventKind::Status,
+                &serde_json::json!({ "message": "Run cancellation requested" }),
+            )
+            .await
+            .ok();
+        let transition = tracker
+            .set_issue_state_by_name(&managed.issue.id, STOPPED_ISSUE_STATE)
+            .await;
+        // Serialize this with cancellation finalization so either it observes
+        // the reconciled fingerprint or this reconciliation runs after it.
+        let mut stop_intent = managed.stop_intent.lock().await;
+        match transition {
+            Ok(()) => {
+                let destination_is_active = managed
+                    .tracker_config
+                    .active_states
+                    .iter()
+                    .any(|state| state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE));
+                if destination_is_active {
+                    let stopped_issue = Issue {
+                        state: STOPPED_ISSUE_STATE.to_ascii_lowercase(),
+                        ..managed.issue.clone()
+                    };
+                    let fingerprint = issue_fingerprint(&stopped_issue);
+                    stop_intent.suppression_fingerprint = Some(fingerprint.clone());
+                    self.repo
+                        .suppress_issue_dispatch(
+                            &managed.issue.id,
+                            USER_CANCELLED_SUPPRESSION,
+                            &fingerprint,
+                        )
+                        .await?;
+                } else if !stop_intent.stopped_state_observed {
+                    // Keep the old active-state fingerprint until polling
+                    // observes In Review. This fences a fetch_active request
+                    // that began before Linear acknowledged the transition.
+                    stop_intent.suppression_fingerprint = Some(fallback_fingerprint.clone());
+                    self.repo
+                        .suppress_issue_dispatch(
+                            &managed.issue.id,
+                            USER_CANCELLED_SUPPRESSION,
+                            &fallback_fingerprint,
+                        )
+                        .await?;
+                }
+            }
+            Err(err) => {
+                // Another concurrent stop may already have reconciled the
+                // issue transition. In that case the observation flag makes
+                // this failure a no-op instead of reviving fallback state.
+                if !stop_intent.stopped_state_observed {
+                    stop_intent.suppression_fingerprint = Some(fallback_fingerprint.clone());
+                    self.repo
+                        .suppress_issue_dispatch(
+                            &managed.issue.id,
+                            USER_CANCELLED_SUPPRESSION,
+                            &fallback_fingerprint,
+                        )
+                        .await?;
+                }
+                return Err(err.into());
+            }
+        }
+        drop(stop_intent);
+        self.repo
+            .append_event(
+                run_id,
+                symphony_core::AgentEventKind::Status,
+                &serde_json::json!({ "message": format!("Issue moved to {STOPPED_ISSUE_STATE}") }),
+            )
+            .await
+            .ok();
+        Ok(())
     }
 
     pub async fn stop(&self) -> WorkerStatus {
@@ -739,7 +869,10 @@ async fn tick<T: TrackerClient>(
             return Ok(());
         };
         match fetched {
-            Ok(Some(issue)) => repo.upsert_issues(&[issue]).await?,
+            Ok(Some(issue)) => {
+                repo.upsert_issues(std::slice::from_ref(&issue)).await?;
+                acknowledge_stopped_state(repo, config, &issue).await?;
+            }
             Ok(None) => warn!(
                 issue_id = %issue_id,
                 "issue left the active set and is gone from the tracker; keeping last known state"
@@ -833,7 +966,34 @@ async fn tick<T: TrackerClient>(
                 Some(result) => result?,
                 None => return Ok(()),
             };
-        if let Some(issue) = fetched {
+        if let Some(mut issue) = fetched {
+            if retry.error_class.as_deref() == Some(USER_REQUESTED_RETRY_CLASS)
+                && issue.state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE)
+            {
+                // A stopped run deliberately moved the issue out of the
+                // active set. An explicit retry reverses that transition
+                // before dispatch so the workflow prompt can act on it.
+                let active_states = &dispatch_config.workflow.front_matter.tracker.active_states;
+                let resume_state = active_states
+                    .iter()
+                    .find(|state| !state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE))
+                    .or_else(|| active_states.first());
+                let Some(resume_state) = resume_state else {
+                    repo.clear_retry(&retry.issue_id).await?;
+                    continue;
+                };
+                match cancellable(
+                    stop,
+                    tracker.set_issue_state_by_name(&issue.id, resume_state),
+                )
+                .await
+                {
+                    Some(result) => result?,
+                    None => return Ok(()),
+                }
+                issue.state = resume_state.to_lowercase();
+                repo.upsert_issues(std::slice::from_ref(&issue)).await?;
+            }
             // The issue may have left the active set since the failed run
             // (e.g. moved to Done); drop the retry rather than keep it queued
             // or dispatch a run nobody asked for.
@@ -876,6 +1036,42 @@ async fn tick<T: TrackerClient>(
         } else {
             repo.clear_retry(&retry.issue_id).await?;
         }
+    }
+    Ok(())
+}
+
+async fn acknowledge_stopped_state(
+    repo: &Repository,
+    config: &RuntimeConfig,
+    issue: &Issue,
+) -> Result<(), WorkerError> {
+    if !issue.state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE)
+        || config
+            .workflow
+            .front_matter
+            .tracker
+            .active_states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE))
+    {
+        return Ok(());
+    }
+
+    let managed_runs = config.run_cancellations.for_issue(&issue.id).await;
+    if managed_runs.is_empty() {
+        repo.clear_issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
+            .await?;
+        return Ok(());
+    }
+
+    for managed in managed_runs {
+        let mut stop_intent = managed.stop_intent.lock().await;
+        stop_intent.stopped_state_observed = true;
+        stop_intent.suppression_fingerprint = None;
+        // Keep the intent lock through the delete so cancellation finalization
+        // cannot reinsert the old fingerprint after this observation.
+        repo.clear_issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
+            .await?;
     }
     Ok(())
 }
@@ -939,7 +1135,12 @@ async fn reserve_and_dispatch(
     let run_stop = stop.child_token();
     config
         .run_cancellations
-        .register(&run.id, run_stop.clone())
+        .register(
+            &run.id,
+            run_stop.clone(),
+            config.workflow.front_matter.tracker.clone(),
+            issue.clone(),
+        )
         .await;
     let run_cancellations = config.run_cancellations.clone();
     tokio::spawn(async move {
@@ -1375,6 +1576,11 @@ where
                 })
                 .await;
             }
+            let managed = config.run_cancellations.get(&run.id).await;
+            let _lifecycle = match managed.as_ref() {
+                Some(managed) => Some(managed.lifecycle.lock().await),
+                None => None,
+            };
             if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
@@ -1417,6 +1623,11 @@ where
             }
         }
         Err(err) => {
+            let managed = config.run_cancellations.get(&run.id).await;
+            let _lifecycle = match managed.as_ref() {
+                Some(managed) => Some(managed.lifecycle.lock().await),
+                None => None,
+            };
             if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
             }
@@ -1442,8 +1653,23 @@ async fn finish_if_cancelled_for_run(
     issue: &Issue,
     stop: &CancellationToken,
 ) -> Result<bool, WorkerError> {
-    let suppress_dispatch = config.run_cancellations.was_user_requested(&run.id).await;
-    finish_if_cancelled(repo, run, issue, stop, suppress_dispatch).await
+    let cancelled = match config.run_cancellations.get(&run.id).await {
+        Some(managed) => {
+            let stop_intent = managed.stop_intent.lock().await;
+            // Keep the per-run lock through finalization so tracker-result
+            // reconciliation cannot race this suppression write.
+            finish_if_cancelled_with_suppression(
+                repo,
+                run,
+                issue,
+                stop,
+                stop_intent.suppression_fingerprint.as_deref(),
+            )
+            .await
+        }
+        None => finish_if_cancelled(repo, run, issue, stop, false).await,
+    }?;
+    Ok(cancelled)
 }
 
 async fn finish_if_cancelled(
@@ -1452,6 +1678,17 @@ async fn finish_if_cancelled(
     issue: &Issue,
     stop: &CancellationToken,
     suppress_dispatch: bool,
+) -> Result<bool, WorkerError> {
+    let fingerprint = suppress_dispatch.then(|| issue_fingerprint(issue));
+    finish_if_cancelled_with_suppression(repo, run, issue, stop, fingerprint.as_deref()).await
+}
+
+async fn finish_if_cancelled_with_suppression(
+    repo: &Repository,
+    run: &RunRow,
+    issue: &Issue,
+    stop: &CancellationToken,
+    suppression_fingerprint: Option<&str>,
 ) -> Result<bool, WorkerError> {
     if !stop.is_cancelled() {
         return Ok(false);
@@ -1465,13 +1702,9 @@ async fn finish_if_cancelled(
         )
         .await?;
     if transitioned {
-        if suppress_dispatch {
-            repo.suppress_issue_dispatch(
-                &issue.id,
-                USER_CANCELLED_SUPPRESSION,
-                &issue_fingerprint(issue),
-            )
-            .await?;
+        if let Some(fingerprint) = suppression_fingerprint {
+            repo.suppress_issue_dispatch(&issue.id, USER_CANCELLED_SUPPRESSION, fingerprint)
+                .await?;
         }
         repo.clear_retry(&issue.id).await?;
         repo.delete_live_session(&run.id).await.ok();
@@ -1779,6 +2012,104 @@ mod tests {
             canceled_at: None,
             project_id: None,
             project_slug_id: None,
+        }
+    }
+
+    struct StateMovingTracker {
+        moved: Arc<Mutex<Vec<(String, String)>>>,
+        fail: bool,
+        expected_cancelled: CancellationToken,
+    }
+
+    struct RetryReactivatingTracker {
+        current: Arc<Mutex<Issue>>,
+        moved: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for RetryReactivatingTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            let current = self.current.lock().await;
+            Ok((current.id == id).then(|| current.clone()))
+        }
+
+        async fn fetch_by_id_for_dispatch(&self, id: &str) -> Result<Option<Issue>, TrackerError> {
+            let current = self.current.lock().await;
+            Ok((current.id == id).then(|| current.clone()))
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn set_issue_state_by_name(
+            &self,
+            issue_id: &str,
+            state_name: &str,
+        ) -> Result<(), TrackerError> {
+            self.moved
+                .lock()
+                .await
+                .push((issue_id.to_string(), state_name.to_string()));
+            self.current.lock().await.state = state_name.to_lowercase();
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrackerClient for StateMovingTracker {
+        async fn preflight(&self) -> Result<(), TrackerError> {
+            Ok(())
+        }
+
+        async fn fetch_active(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_terminal(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_by_id(&self, _id: &str) -> Result<Option<Issue>, TrackerError> {
+            Ok(None)
+        }
+
+        async fn fetch_workpads(
+            &self,
+            _issue_ids: &[String],
+        ) -> Result<Vec<symphony_tracker::WorkpadComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn set_issue_state_by_name(
+            &self,
+            issue_id: &str,
+            state_name: &str,
+        ) -> Result<(), TrackerError> {
+            assert!(self.expected_cancelled.is_cancelled());
+            if self.fail {
+                return Err(TrackerError::Invalid("state move failed".to_string()));
+            }
+            self.moved
+                .lock()
+                .await
+                .push((issue_id.to_string(), state_name.to_string()));
+            Ok(())
         }
     }
 
@@ -3739,29 +4070,359 @@ exit 13
     }
 
     #[tokio::test]
-    async fn stop_run_cancels_only_the_requested_run() {
+    async fn stop_run_moves_issue_to_in_review_after_cancelling_only_requested_run() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
             .await
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let first_issue = issue("todo", vec![]);
+        let second_issue = Issue {
+            id: "lin-2".to_string(),
+            identifier: "SYM-2".to_string(),
+            ..first_issue.clone()
+        };
+        repo.upsert_issues(&[first_issue.clone(), second_issue.clone()])
+            .await
+            .unwrap();
+        let first_run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws-1", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        let second_run = repo
+            .try_reserve_run("lin-2", 1, "/tmp/ws-2", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
         let manager = WorkerManager::new(repo);
         let first = CancellationToken::new();
         let second = CancellationToken::new();
+        let tracker_config = runtime_config(temp.path()).workflow.front_matter.tracker;
 
         manager
             .run_cancellations
-            .register("run-1", first.clone())
+            .register(
+                &first_run.id,
+                first.clone(),
+                tracker_config.clone(),
+                first_issue,
+            )
             .await;
         manager
             .run_cancellations
-            .register("run-2", second.clone())
+            .register(&second_run.id, second.clone(), tracker_config, second_issue)
             .await;
+        let moved = Arc::new(Mutex::new(Vec::new()));
+        let tracker = StateMovingTracker {
+            moved: moved.clone(),
+            fail: false,
+            expected_cancelled: first.clone(),
+        };
+        manager
+            .repo
+            .suppress_issue_dispatch(&first_run.issue_id, USER_CANCELLED_SUPPRESSION, "fallback")
+            .await
+            .unwrap();
 
-        manager.stop_run("run-1").await.unwrap();
+        manager
+            .stop_managed_run(
+                &first_run.id,
+                manager.run_cancellations.get(&first_run.id).await.unwrap(),
+                &tracker,
+            )
+            .await
+            .unwrap();
 
         assert!(first.is_cancelled());
         assert!(!second.is_cancelled());
+        assert_eq!(
+            *moved.lock().await,
+            vec![("lin-1".to_string(), "In Review".to_string())]
+        );
+        let stop_intent = manager
+            .run_cancellations
+            .get(&first_run.id)
+            .await
+            .unwrap()
+            .stop_intent;
+        assert!(stop_intent.lock().await.suppression_fingerprint.is_some());
+        assert!(manager
+            .repo
+            .issue_dispatch_suppression(&first_run.issue_id, USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn active_in_review_keeps_post_transition_suppression() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        let manager = WorkerManager::new(repo);
+        let token = CancellationToken::new();
+        let moved = Arc::new(Mutex::new(Vec::new()));
+        let tracker = StateMovingTracker {
+            moved,
+            fail: false,
+            expected_cancelled: token.clone(),
+        };
+        let mut tracker_config = runtime_config(temp.path()).workflow.front_matter.tracker;
+        tracker_config.active_states.push("In Review".to_string());
+        let managed = ManagedRun {
+            token: token.clone(),
+            tracker_config,
+            issue: ready.clone(),
+            lifecycle: Arc::new(Mutex::new(())),
+            stop_intent: Arc::new(Mutex::new(StopIntent::default())),
+        };
+
+        manager
+            .stop_managed_run(&run.id, managed, &tracker)
+            .await
+            .unwrap();
+
+        assert!(token.is_cancelled());
+        let stopped_issue = Issue {
+            state: "in review".to_string(),
+            ..ready
+        };
+        assert_eq!(
+            manager
+                .repo
+                .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(issue_fingerprint(&stopped_issue).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_in_review_clears_the_old_state_suppression() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        repo.suppress_issue_dispatch(
+            &ready.id,
+            USER_CANCELLED_SUPPRESSION,
+            &issue_fingerprint(&ready),
+        )
+        .await
+        .unwrap();
+        let in_review = Issue {
+            state: "in review".to_string(),
+            ..ready
+        };
+        let tracker = StaticTracker {
+            active: vec![],
+            terminal: vec![in_review],
+        };
+
+        tick(
+            &repo,
+            &tracker,
+            &runtime_config(temp.path()),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "in review"
+        );
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_retry_moves_a_stopped_issue_back_to_an_active_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let in_review = issue("in review", vec!["SYM-0".to_string()]);
+        repo.upsert_issues(std::slice::from_ref(&in_review))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(
+            &run.id,
+            RunStatus::Cancelled,
+            Some("cancelled"),
+            Some("run cancelled"),
+        )
+        .await
+        .unwrap();
+        repo.trigger_retry_now("lin-1").await.unwrap();
+        let current = Arc::new(Mutex::new(in_review));
+        let moved = Arc::new(Mutex::new(Vec::new()));
+        let tracker = RetryReactivatingTracker {
+            current,
+            moved: moved.clone(),
+        };
+
+        tick(
+            &repo,
+            &tracker,
+            &runtime_config(temp.path()),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *moved.lock().await,
+            vec![("lin-1".to_string(), "Todo".to_string())]
+        );
+        assert_eq!(
+            repo.get_issue("lin-1").await.unwrap().unwrap().state,
+            "todo"
+        );
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            vec!["lin-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_stop_revalidates_before_mutating_a_finished_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        repo.finish_run(&run.id, RunStatus::Success, None, None)
+            .await
+            .unwrap();
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
+        let manager = WorkerManager::new(repo);
+        let token = CancellationToken::new();
+        let tracker = StateMovingTracker {
+            moved: Arc::new(Mutex::new(Vec::new())),
+            fail: true,
+            expected_cancelled: token.clone(),
+        };
+        let stop_intent = Arc::new(Mutex::new(StopIntent::default()));
+        let managed = ManagedRun {
+            token: token.clone(),
+            tracker_config: runtime_config(temp.path()).workflow.front_matter.tracker,
+            issue: ready,
+            lifecycle: Arc::new(Mutex::new(())),
+            stop_intent: stop_intent.clone(),
+        };
+
+        let err = manager
+            .stop_managed_run(&run.id, managed, &tracker)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), format!("run {} is not active", run.id));
+        assert!(token.is_cancelled());
+        let stop_intent = stop_intent.lock().await;
+        assert!(stop_intent.suppression_fingerprint.is_none());
+        assert!(stop_intent.stopped_state_observed);
+        drop(stop_intent);
+        assert!(manager
+            .repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_stop_failure_after_observation_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
+            .await
+            .unwrap()
+            .unwrap();
+        let manager = WorkerManager::new(repo);
+        let token = CancellationToken::new();
+        let stop_intent = Arc::new(Mutex::new(StopIntent {
+            suppression_fingerprint: None,
+            stopped_state_observed: true,
+        }));
+        let managed = ManagedRun {
+            token: token.clone(),
+            tracker_config: runtime_config(temp.path()).workflow.front_matter.tracker,
+            issue: ready,
+            lifecycle: Arc::new(Mutex::new(())),
+            stop_intent,
+        };
+        let tracker = StateMovingTracker {
+            moved: Arc::new(Mutex::new(Vec::new())),
+            fail: true,
+            expected_cancelled: token,
+        };
+
+        let err = manager
+            .stop_managed_run(&run.id, managed, &tracker)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "tracker error: invalid Linear response: state move failed"
+        );
+        assert!(manager
+            .repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -4087,7 +4748,7 @@ exit 13
     }
 
     #[tokio::test]
-    async fn user_cancelled_active_issue_is_not_immediately_redispatched() {
+    async fn failed_review_move_suppresses_immediate_redispatch() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
             .await
@@ -4108,11 +4769,6 @@ exit 13
         finish_if_cancelled(&repo, &run, &ready, &stop, true)
             .await
             .unwrap();
-        assert!(repo
-            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
-            .await
-            .unwrap()
-            .is_some());
         let tracker = StaticTracker {
             active: vec![ready.clone()],
             terminal: vec![],

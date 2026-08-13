@@ -10,6 +10,7 @@ use symphony_core::{
 use uuid::Uuid;
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 500;
+pub const USER_REQUESTED_RETRY_CLASS: &str = "user_requested_retry";
 const ISSUE_ROW_COLUMNS: &str =
     "id, identifier, title, description, priority, state, branch, labels, blockers, raw, last_seen_at";
 
@@ -1000,8 +1001,14 @@ impl Repository {
         self.clear_all_issue_dispatch_suppressions(issue_id).await?;
         let last_run_number = self.last_run_number(issue_id).await?;
         let run_number = std::cmp::max(latest_cancelled_run_number, last_run_number) + 1;
-        self.schedule_retry(issue_id, run_number, &now_iso(), None, None)
-            .await?;
+        self.schedule_retry(
+            issue_id,
+            run_number,
+            &now_iso(),
+            Some(USER_REQUESTED_RETRY_CLASS),
+            None,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -2112,7 +2119,12 @@ mod tests {
             repo.pending_retry_issue_ids().await.unwrap(),
             vec!["lin-1".to_string()]
         );
-        assert_eq!(repo.due_retries(&now_iso()).await.unwrap()[0].run_number, 2);
+        let retry = &repo.due_retries(&now_iso()).await.unwrap()[0];
+        assert_eq!(retry.run_number, 2);
+        assert_eq!(
+            retry.error_class.as_deref(),
+            Some(USER_REQUESTED_RETRY_CLASS)
+        );
     }
 
     // A cancelled run recorded without a suppression row still needs to be
