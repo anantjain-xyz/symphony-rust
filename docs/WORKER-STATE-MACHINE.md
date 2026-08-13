@@ -188,25 +188,29 @@ There are two cancellation sources with different redispatch intent.
 
 ### User stops one run
 
-`stop_run()` marks the run ID as user-requested and fires its child token. At
-the next checkpoint, the worker:
+`stop_run()` fires the run's child token promptly, then resolves the `In
+Review` workflow state from the issue's own Linear team and moves the issue
+there. While the Linear mutation is in flight, cancellation finalization may
+install a `user_cancelled` dispatch suppression as a race-safe fallback. A
+successful state move removes that suppression; the issue's new Linear state
+then keeps it out of the active query. At the next cancellation checkpoint,
+the worker:
 
 1. finishes the run as `cancelled` with class `cancelled`;
-2. stores a `user_cancelled` dispatch suppression containing the issue
-   fingerprint;
+2. stores the fallback suppression if Linear has not confirmed the move;
 3. clears the retry row; and
 4. removes the live session.
 
-The suppression prevents an unchanged active issue from being immediately
-redispatched. It is removed when the issue fingerprint changes or when the
-operator chooses "Retry now."
+If the Linear mutation fails, the stop command reports the tracker error but
+the cancellation remains in effect and the issue is locally suppressed,
+preserving the no-immediate-redispatch invariant.
 
 ### Worker stops
 
 Stopping the worker fires the root token inherited by active runs. Those runs
-also finish as `cancelled`, but they do not receive the user-cancelled
-suppression unless their individual cancellation was explicitly requested.
-Stopping orchestration and declaring an issue unwanted are different actions.
+also finish as `cancelled`, but their Linear issues remain in their current
+states and no user-cancelled suppression is installed. Stopping orchestration
+and declaring an individual run ready for review are different actions.
 
 The adapter explicitly manages its child process group on Unix: timeout or
 cancellation sends `TERM`, waits briefly, then sends `KILL` to the group.

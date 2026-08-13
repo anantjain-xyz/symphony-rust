@@ -59,6 +59,17 @@ pub trait TrackerClient: Send + Sync {
             "changing issue state is not supported by this tracker".to_string(),
         ))
     }
+    /// Move an issue to a workflow state resolved by name from its own team.
+    /// Defaults to unsupported.
+    async fn set_issue_state_by_name(
+        &self,
+        _issue_id: &str,
+        _state_name: &str,
+    ) -> Result<(), TrackerError> {
+        Err(TrackerError::Invalid(
+            "changing issue state by name is not supported by this tracker".to_string(),
+        ))
+    }
     /// All issues for the configured team/project across every state (board view).
     async fn fetch_board_issues(&self) -> Result<Vec<Issue>, TrackerError> {
         Ok(Vec::new())
@@ -487,6 +498,30 @@ impl TrackerClient for LinearTracker {
         Ok(())
     }
 
+    async fn set_issue_state_by_name(
+        &self,
+        issue_id: &str,
+        state_name: &str,
+    ) -> Result<(), TrackerError> {
+        let variables = serde_json::json!({ "id": issue_id });
+        let data: IssueWorkflowStatesData = self
+            .execute(ISSUE_WORKFLOW_STATES_QUERY, Some(variables))
+            .await?;
+        let issue = data.issue.ok_or(TrackerError::NotFound)?;
+        let state = issue
+            .team
+            .states
+            .nodes
+            .into_iter()
+            .find(|state| state.name.eq_ignore_ascii_case(state_name))
+            .ok_or_else(|| {
+                TrackerError::Invalid(format!(
+                    "workflow state `{state_name}` was not found for issue {issue_id}"
+                ))
+            })?;
+        self.set_issue_state(issue_id, &state.id).await
+    }
+
     async fn fetch_board_issues(&self) -> Result<Vec<Issue>, TrackerError> {
         // Never fetch the entire workspace: require a team or project scope.
         if self.team_keys().is_empty() && self.project_refs().is_empty() {
@@ -683,6 +718,21 @@ struct WorkflowStatesData {
 #[derive(Deserialize)]
 struct WorkflowStateConnection {
     nodes: Vec<WorkflowState>,
+}
+
+#[derive(Deserialize)]
+struct IssueWorkflowStatesData {
+    issue: Option<LinearIssueWorkflowStatesNode>,
+}
+
+#[derive(Deserialize)]
+struct LinearIssueWorkflowStatesNode {
+    team: LinearIssueWorkflowStatesTeam,
+}
+
+#[derive(Deserialize)]
+struct LinearIssueWorkflowStatesTeam {
+    states: WorkflowStateConnection,
 }
 
 #[derive(Deserialize)]
@@ -943,6 +993,23 @@ const WORKFLOW_STATES_QUERY: &str = r#"
   }
 "#;
 
+const ISSUE_WORKFLOW_STATES_QUERY: &str = r#"
+  query SymphonyIssueWorkflowStates($id: String!) {
+    issue(id: $id) {
+      team {
+        states(first: 100) {
+          nodes {
+            id
+            name
+            type
+            position
+          }
+        }
+      }
+    }
+  }
+"#;
+
 const SET_ISSUE_STATE_MUTATION: &str = r#"
   mutation SymphonySetIssueState($id: String!, $stateId: String!) {
     issueUpdate(id: $id, input: { stateId: $stateId }) {
@@ -1152,6 +1219,9 @@ mod tests {
         assert!(WORKFLOW_STATES_QUERY
             .contains("workflowStates(filter: { team: { key: { eq: $teamKey } } }"));
         assert!(WORKFLOW_STATES_QUERY.contains("position"));
+        assert!(ISSUE_WORKFLOW_STATES_QUERY.contains("issue(id: $id)"));
+        assert!(ISSUE_WORKFLOW_STATES_QUERY.contains("team"));
+        assert!(ISSUE_WORKFLOW_STATES_QUERY.contains("states(first: 100)"));
         assert!(
             SET_ISSUE_STATE_MUTATION.contains("issueUpdate(id: $id, input: { stateId: $stateId })")
         );
@@ -1174,6 +1244,34 @@ mod tests {
         assert_eq!(states[0].name, "Todo");
         assert_eq!(states[0].state_type, "unstarted");
         assert_eq!(states[1].id, "s2");
+    }
+
+    #[test]
+    fn issue_workflow_states_deserialize_for_issue_team_lookup() {
+        let payload = serde_json::json!({
+            "issue": {
+                "team": {
+                    "states": {
+                        "nodes": [
+                            { "id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0 },
+                            { "id": "s2", "name": "In Review", "type": "started", "position": 2.0 }
+                        ]
+                    }
+                }
+            }
+        });
+        let data: IssueWorkflowStatesData = serde_json::from_value(payload).expect("deserialize");
+        let state = data
+            .issue
+            .unwrap()
+            .team
+            .states
+            .nodes
+            .into_iter()
+            .find(|state| state.name.eq_ignore_ascii_case("in review"))
+            .unwrap();
+
+        assert_eq!(state.id, "s2");
     }
 
     #[test]
