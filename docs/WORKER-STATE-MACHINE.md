@@ -188,22 +188,25 @@ There are two cancellation sources with different redispatch intent.
 
 ### User stops one run
 
-`stop_run()` fires the run's child token promptly, then resolves the `In
-Review` workflow state from the issue's own Linear team and moves the issue
-there. While the Linear mutation is in flight, cancellation finalization may
-install a `user_cancelled` dispatch suppression as a race-safe fallback. A
-successful state move removes that suppression; the issue's new Linear state
-then keeps it out of the active query. At the next cancellation checkpoint,
-the worker:
+`stop_run()` marks the managed run with a fallback fingerprint and fires its
+child token before reading run storage, then resolves the `In Review` workflow
+state from the issue's own Linear team and moves the issue there. While the
+Linear mutation is in flight, cancellation finalization may install a
+`user_cancelled` dispatch suppression. A successful move removes that
+suppression when `In Review` is inactive; if a custom configuration watches
+`In Review`, Symphony retains suppression using the moved issue's normalized
+fingerprint. At the next cancellation checkpoint, the worker:
 
 1. finishes the run as `cancelled` with class `cancelled`;
-2. stores the fallback suppression if Linear has not confirmed the move;
+2. stores the reconciled suppression fingerprint when dispatch must remain blocked;
 3. clears the retry row; and
 4. removes the live session.
 
 If the Linear mutation fails, the stop command reports the tracker error but
-the cancellation remains in effect and the issue is locally suppressed,
-preserving the no-immediate-redispatch invariant.
+the cancellation remains in effect and the stop path explicitly installs the
+fallback suppression even if worker-wide cancellation already finalized the
+run without one. This preserves the no-immediate-redispatch invariant across
+both tracker failures and cancellation races.
 
 ### Worker stops
 

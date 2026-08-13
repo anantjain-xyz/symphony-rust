@@ -99,13 +99,13 @@ struct RunCancellationRegistry {
 struct ManagedRun {
     token: CancellationToken,
     tracker_config: symphony_core::TrackerConfig,
+    issue: Issue,
     stop_intent: Arc<Mutex<StopIntent>>,
 }
 
 #[derive(Debug, Default)]
 struct StopIntent {
-    user_requested: bool,
-    moved_to_review: bool,
+    suppression_fingerprint: Option<String>,
 }
 
 impl RunCancellationRegistry {
@@ -114,12 +114,14 @@ impl RunCancellationRegistry {
         run_id: &str,
         token: CancellationToken,
         tracker_config: symphony_core::TrackerConfig,
+        issue: Issue,
     ) {
         self.runs.lock().await.insert(
             run_id.to_string(),
             ManagedRun {
                 token,
                 tracker_config,
+                issue,
                 stop_intent: Arc::new(Mutex::new(StopIntent::default())),
             },
         );
@@ -284,53 +286,96 @@ impl WorkerManager {
     }
 
     pub async fn stop_run(&self, run_id: &str) -> Result<(), WorkerError> {
+        if let Some(managed) = self.run_cancellations.get(run_id).await {
+            let tracker = LinearTracker::new(managed.tracker_config.clone());
+            return self.stop_managed_run(run_id, managed, &tracker).await;
+        }
+
         let Some(run) = self.repo.get_run(run_id).await? else {
             return Err(WorkerError::RunNotFound(run_id.to_string()));
         };
-        if !matches!(run.status.as_str(), "pending" | "running") {
-            return Err(WorkerError::RunNotActive(run_id.to_string()));
-        }
-        let Some(managed) = self.run_cancellations.get(run_id).await else {
+        if matches!(run.status.as_str(), "pending" | "running") {
             return Err(WorkerError::RunNotManaged(run_id.to_string()));
-        };
-        let tracker = LinearTracker::new(managed.tracker_config.clone());
-        self.stop_managed_run(&run, managed, &tracker).await
+        }
+        Err(WorkerError::RunNotActive(run_id.to_string()))
     }
 
     async fn stop_managed_run<T: TrackerClient>(
         &self,
-        run: &RunRow,
+        run_id: &str,
         managed: ManagedRun,
         tracker: &T,
     ) -> Result<(), WorkerError> {
         // Stop the agent promptly, then move the issue out of the configured
         // active states. Until Linear confirms the move, the cancellation
         // checkpoint installs the local suppression as a fallback.
-        managed.stop_intent.lock().await.user_requested = true;
+        managed.stop_intent.lock().await.suppression_fingerprint =
+            Some(issue_fingerprint(&managed.issue));
         managed.token.cancel();
         self.repo
             .append_event(
-                &run.id,
+                run_id,
                 symphony_core::AgentEventKind::Status,
                 &serde_json::json!({ "message": "Run cancellation requested" }),
             )
             .await
             .ok();
-        tracker
-            .set_issue_state_by_name(&run.issue_id, STOPPED_ISSUE_STATE)
-            .await?;
+        let transition = tracker
+            .set_issue_state_by_name(&managed.issue.id, STOPPED_ISSUE_STATE)
+            .await;
         // Serialize this with cancellation finalization so either it observes
-        // the successful move and skips suppression, or we remove the fallback
-        // suppression after it was written.
+        // the reconciled fingerprint or this reconciliation runs after it.
         let mut stop_intent = managed.stop_intent.lock().await;
-        stop_intent.moved_to_review = true;
-        self.repo
-            .clear_issue_dispatch_suppression(&run.issue_id, USER_CANCELLED_SUPPRESSION)
-            .await?;
+        match transition {
+            Ok(()) => {
+                let destination_is_active = managed
+                    .tracker_config
+                    .active_states
+                    .iter()
+                    .any(|state| state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE));
+                if destination_is_active {
+                    let stopped_issue = Issue {
+                        state: STOPPED_ISSUE_STATE.to_ascii_lowercase(),
+                        ..managed.issue.clone()
+                    };
+                    let fingerprint = issue_fingerprint(&stopped_issue);
+                    stop_intent.suppression_fingerprint = Some(fingerprint.clone());
+                    self.repo
+                        .suppress_issue_dispatch(
+                            &managed.issue.id,
+                            USER_CANCELLED_SUPPRESSION,
+                            &fingerprint,
+                        )
+                        .await?;
+                } else {
+                    stop_intent.suppression_fingerprint = None;
+                    self.repo
+                        .clear_issue_dispatch_suppression(
+                            &managed.issue.id,
+                            USER_CANCELLED_SUPPRESSION,
+                        )
+                        .await?;
+                }
+            }
+            Err(err) => {
+                let fingerprint = stop_intent
+                    .suppression_fingerprint
+                    .as_deref()
+                    .expect("user stop installs a fallback fingerprint");
+                self.repo
+                    .suppress_issue_dispatch(
+                        &managed.issue.id,
+                        USER_CANCELLED_SUPPRESSION,
+                        fingerprint,
+                    )
+                    .await?;
+                return Err(err.into());
+            }
+        }
         drop(stop_intent);
         self.repo
             .append_event(
-                &run.id,
+                run_id,
                 symphony_core::AgentEventKind::Status,
                 &serde_json::json!({ "message": format!("Issue moved to {STOPPED_ISSUE_STATE}") }),
             )
@@ -849,6 +894,7 @@ async fn reserve_and_dispatch(
             &run.id,
             run_stop.clone(),
             config.workflow.front_matter.tracker.clone(),
+            issue.clone(),
         )
         .await;
     let run_cancellations = config.run_cancellations.clone();
@@ -1355,15 +1401,16 @@ async fn finish_if_cancelled_for_run(
     let cancelled = match config.run_cancellations.get(&run.id).await {
         Some(managed) => {
             let stop_intent = managed.stop_intent.lock().await;
-            let suppress = stop_intent.user_requested && !stop_intent.moved_to_review;
-            if suppress {
-                // Keep the per-run lock through the write so a successful
-                // Linear move cannot race its cleanup against this insert.
-                finish_if_cancelled(repo, run, issue, stop, true).await
-            } else {
-                drop(stop_intent);
-                finish_if_cancelled(repo, run, issue, stop, false).await
-            }
+            // Keep the per-run lock through finalization so tracker-result
+            // reconciliation cannot race this suppression write.
+            finish_if_cancelled_with_suppression(
+                repo,
+                run,
+                issue,
+                stop,
+                stop_intent.suppression_fingerprint.as_deref(),
+            )
+            .await
         }
         None => finish_if_cancelled(repo, run, issue, stop, false).await,
     }?;
@@ -1377,6 +1424,17 @@ async fn finish_if_cancelled(
     stop: &CancellationToken,
     suppress_dispatch: bool,
 ) -> Result<bool, WorkerError> {
+    let fingerprint = suppress_dispatch.then(|| issue_fingerprint(issue));
+    finish_if_cancelled_with_suppression(repo, run, issue, stop, fingerprint.as_deref()).await
+}
+
+async fn finish_if_cancelled_with_suppression(
+    repo: &Repository,
+    run: &RunRow,
+    issue: &Issue,
+    stop: &CancellationToken,
+    suppression_fingerprint: Option<&str>,
+) -> Result<bool, WorkerError> {
     if !stop.is_cancelled() {
         return Ok(false);
     }
@@ -1389,13 +1447,9 @@ async fn finish_if_cancelled(
         )
         .await?;
     if transitioned {
-        if suppress_dispatch {
-            repo.suppress_issue_dispatch(
-                &issue.id,
-                USER_CANCELLED_SUPPRESSION,
-                &issue_fingerprint(issue),
-            )
-            .await?;
+        if let Some(fingerprint) = suppression_fingerprint {
+            repo.suppress_issue_dispatch(&issue.id, USER_CANCELLED_SUPPRESSION, fingerprint)
+                .await?;
         }
         repo.clear_retry(&issue.id).await?;
         repo.delete_live_session(&run.id).await.ok();
@@ -3290,7 +3344,7 @@ exit 13
             identifier: "SYM-2".to_string(),
             ..first_issue.clone()
         };
-        repo.upsert_issues(&[first_issue, second_issue])
+        repo.upsert_issues(&[first_issue.clone(), second_issue.clone()])
             .await
             .unwrap();
         let first_run = repo
@@ -3310,11 +3364,16 @@ exit 13
 
         manager
             .run_cancellations
-            .register(&first_run.id, first.clone(), tracker_config.clone())
+            .register(
+                &first_run.id,
+                first.clone(),
+                tracker_config.clone(),
+                first_issue,
+            )
             .await;
         manager
             .run_cancellations
-            .register(&second_run.id, second.clone(), tracker_config)
+            .register(&second_run.id, second.clone(), tracker_config, second_issue)
             .await;
         let moved = Arc::new(Mutex::new(Vec::new()));
         let tracker = StateMovingTracker {
@@ -3330,7 +3389,7 @@ exit 13
 
         manager
             .stop_managed_run(
-                &first_run,
+                &first_run.id,
                 manager.run_cancellations.get(&first_run.id).await.unwrap(),
                 &tracker,
             )
@@ -3349,7 +3408,7 @@ exit 13
             .await
             .unwrap()
             .stop_intent;
-        assert!(stop_intent.lock().await.moved_to_review);
+        assert!(stop_intent.lock().await.suppression_fingerprint.is_none());
         assert!(manager
             .repo
             .issue_dispatch_suppression(&first_run.issue_id, USER_CANCELLED_SUPPRESSION)
@@ -3359,18 +3418,82 @@ exit 13
     }
 
     #[tokio::test]
-    async fn stop_run_keeps_fallback_suppression_intent_when_linear_state_move_fails() {
+    async fn active_in_review_keeps_post_transition_suppression_without_a_run_read() {
         let temp = tempfile::tempdir().unwrap();
         let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
             .await
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
-        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let manager = WorkerManager::new(repo);
+        let token = CancellationToken::new();
+        let moved = Arc::new(Mutex::new(Vec::new()));
+        let tracker = StateMovingTracker {
+            moved,
+            fail: false,
+            expected_cancelled: token.clone(),
+        };
+        let mut tracker_config = runtime_config(temp.path()).workflow.front_matter.tracker;
+        tracker_config.active_states.push("In Review".to_string());
+        let managed = ManagedRun {
+            token: token.clone(),
+            tracker_config,
+            issue: ready.clone(),
+            stop_intent: Arc::new(Mutex::new(StopIntent::default())),
+        };
+
+        // There is deliberately no run row for this id: a managed stop must
+        // cancel and reconcile Linear without first depending on SQLite.
+        manager
+            .stop_managed_run("managed-without-row", managed, &tracker)
+            .await
+            .unwrap();
+
+        assert!(token.is_cancelled());
+        let stopped_issue = Issue {
+            state: "in review".to_string(),
+            ..ready
+        };
+        assert_eq!(
+            manager
+                .repo
+                .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(issue_fingerprint(&stopped_issue).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn late_stop_failure_installs_fallback_after_unsuppressed_finalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
         let run = repo
             .try_reserve_run("lin-1", 1, "/tmp/ws", Some("widgets"))
             .await
             .unwrap()
             .unwrap();
+        let worker_stop = CancellationToken::new();
+        worker_stop.cancel();
+        finish_if_cancelled(&repo, &run, &ready, &worker_stop, false)
+            .await
+            .unwrap();
+        assert!(repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_none());
         let manager = WorkerManager::new(repo);
         let token = CancellationToken::new();
         let tracker = StateMovingTracker {
@@ -3382,11 +3505,12 @@ exit 13
         let managed = ManagedRun {
             token: token.clone(),
             tracker_config: runtime_config(temp.path()).workflow.front_matter.tracker,
+            issue: ready,
             stop_intent: stop_intent.clone(),
         };
 
         let err = manager
-            .stop_managed_run(&run, managed, &tracker)
+            .stop_managed_run(&run.id, managed, &tracker)
             .await
             .unwrap_err();
 
@@ -3396,8 +3520,14 @@ exit 13
         );
         assert!(token.is_cancelled());
         let stop_intent = stop_intent.lock().await;
-        assert!(stop_intent.user_requested);
-        assert!(!stop_intent.moved_to_review);
+        assert!(stop_intent.suppression_fingerprint.is_some());
+        drop(stop_intent);
+        assert!(manager
+            .repo
+            .issue_dispatch_suppression("lin-1", USER_CANCELLED_SUPPRESSION)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
