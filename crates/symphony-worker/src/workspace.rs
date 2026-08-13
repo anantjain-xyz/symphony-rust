@@ -205,6 +205,7 @@ mod tests {
             labels: vec![],
             blockers: vec![],
             completed_at: None,
+            canceled_at: None,
             project_id: None,
             project_slug_id: None,
         }

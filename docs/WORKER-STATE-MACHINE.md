@@ -244,12 +244,12 @@ sessions for already-terminal runs are removed.
 
 After local run recovery, the worker fetches terminal issues, and repeats that
 sweep hourly while it remains running. A terminal workspace is preserved until
-the tracker's completion timestamp is at least one hour old; missing or invalid
-timestamps are preserved rather than guessed. Eligible workspaces are atomically
-renamed under the repository workspace's `.symphony-trash` directory and entered
-in `workspace_cleanup_queue`; recursive deletion is never awaited by startup or
-the hourly sweep. The original issue path is therefore immediately reusable if
-an issue reopens after cleanup.
+the tracker's completion or cancellation timestamp is at least one hour old;
+missing or invalid timestamps are preserved rather than guessed. Eligible
+workspaces are atomically renamed under the repository workspace's
+`.symphony-trash` directory and entered in `workspace_cleanup_queue`; recursive
+deletion is never awaited by startup or the hourly sweep. The original issue
+path is therefore immediately reusable if an issue reopens after cleanup.
 
 One app-owned collector processes cleanup jobs sequentially even when issue
 orchestration is stopped. Before deleting a quarantined tree it terminates
