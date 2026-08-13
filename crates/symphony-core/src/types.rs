@@ -470,6 +470,14 @@ pub struct Issue {
     pub branch: Option<String>,
     pub labels: Vec<String>,
     pub blockers: Vec<String>,
+    /// When the tracker recorded the issue as completed. Used to keep finished
+    /// workspaces available for a grace period before cleanup.
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// When the tracker recorded the issue as canceled. Linear keeps this
+    /// separate from `completed_at` for canceled terminal states.
+    #[serde(default)]
+    pub canceled_at: Option<String>,
     /// Linear project the issue belongs to; retained for filtering and prompts.
     /// Default so issue snapshots stored before this field deserialize.
     #[serde(default)]

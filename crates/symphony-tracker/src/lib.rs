@@ -760,6 +760,8 @@ struct LinearIssueNode {
     description: Option<String>,
     priority: i16,
     branch_name: Option<String>,
+    completed_at: Option<String>,
+    canceled_at: Option<String>,
     state: Option<LinearState>,
     project: Option<LinearProject>,
     assignee: Option<LinearAssignee>,
@@ -855,6 +857,8 @@ fn normalize(node: LinearIssueNode) -> Issue {
             .map(|labels| labels.nodes.into_iter().map(|label| label.name).collect())
             .unwrap_or_default(),
         blockers,
+        completed_at: node.completed_at,
+        canceled_at: node.canceled_at,
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug_id: node.project.and_then(|project| project.slug_id),
     }
@@ -867,6 +871,8 @@ const ISSUE_FIELDS: &str = r#"
   description
   priority
   branchName
+  completedAt
+  canceledAt
   state { name }
   project { id slugId }
   assignee { id }
@@ -897,6 +903,8 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       description
       priority
       branchName
+      completedAt
+      canceledAt
       state { name }
       project { id slugId }
       assignee { id }
@@ -1054,6 +1062,8 @@ mod tests {
             branch: None,
             labels: vec![],
             blockers: vec![],
+            completed_at: None,
+            canceled_at: None,
             project_id: project_id.map(str::to_string),
             project_slug_id: None,
         }
@@ -1143,6 +1153,8 @@ mod tests {
         for query in [prepared.query.as_str(), ISSUE_BY_ID_QUERY] {
             assert!(query.contains("labels(first: 25)"));
             assert!(query.contains("inverseRelations(first: 25)"));
+            assert!(query.contains("completedAt"));
+            assert!(query.contains("canceledAt"));
             assert!(!query.contains("attachments"));
         }
     }
