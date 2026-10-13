@@ -56,10 +56,13 @@ All native adapters share these process rules:
    shell-quoted adapter arguments. A configured command may therefore be a
    wrapper plus its own fixed arguments.
 2. The working directory is the issue workspace.
-3. The prompt is written through stdin, not placed in argv. This supports
-   large issue prompts and keeps prompt text out of process listings.
-4. Stdout is the structured event channel. A missing stdout pipe is a missing
-   result.
+3. The prompt is written through stdin, not placed in argv. The shared
+   supervisor pumps stdin, stdout, and stderr concurrently, so large prompts
+   and verbose diagnostics cannot deadlock each other.
+4. Stdout is the structured event channel. A missing pipe is a missing result.
+   Records exceeding 8 MiB fail with an I/O protocol error. Stderr is drained
+   as bytes with an 8 KiB tail; nonzero exit fallbacks include that tail with
+   lossy UTF-8 decoding, without retaining the full stream.
 5. The process inherits the app environment plus the request overlay.
    `LINEAR_API_KEY`, repository coordinates, supported GitHub credentials,
    and configured session variables are injected by the worker.
@@ -67,15 +70,19 @@ All native adapters share these process rules:
    token variants are removed before the request values are applied. This
    prevents stale inherited credentials from winning by provider-specific
    precedence.
-7. On Unix, the shell leads a dedicated process group. Timeout and
-   cancellation signal the entire group with `TERM`, wait briefly, then use
-   `KILL` for survivors.
-8. Child processes use Tokio kill-on-drop as a last resort, but that mechanism
-   kills only the immediate shell. Unlike the explicit timeout and
-   cancellation paths, it does not signal the process group, so dropping a
-   driver future can currently leave an agent descendant, tool server, or
-   language server alive. The proposed invariant is for drop to terminate the
-   whole group as well.
+7. On Unix, the shell leads a dedicated process group. Every return path,
+   including protocol/I/O errors and successful completion, stops that group
+   with `TERM`, allows a 500 ms grace, then sends `KILL` to survivors. The
+   direct child is reaped before returning. macOS exit/signaling races receive
+   a bounded reap-and-retry; genuine signal failures remain errors.
+8. Dropping a driver future synchronously signals the group with `KILL`.
+   Tokio's child kill-on-drop and reaper remain the direct-child fallback.
+   No detached pipe-reader tasks survive the run future. Descendants that
+   deliberately leave the process group are outside this Unix group contract.
+9. One execution budget covers prompt delivery, stream parsing, event-channel
+   backpressure, EOF-to-exit waiting, and final usage delivery. Cancellation
+   covers the same operations. Mandatory cleanup uses its bounded grace
+   outside that budget; finalization retains the remaining execution budget.
 
 Cancellation returns `AgentOutcome::Cancelled` with class `cancelled`.
 Timeout is an `AgentError::Timeout`, not a provider-reported result. Spawn,
@@ -87,7 +94,7 @@ I/O, JSON parsing, and missing-result failures are also `AgentError` variants.
 | --- | --- | --- | --- | --- |
 | Codex | `exec --json` | `turn.completed` or `turn.failed` selects a result; stdout EOF and process exit complete the run | Symphony fallback IDs; provider thread ID is surfaced in status | Normalized Codex thread/turn sandbox |
 | Claude Code | print mode with `stream-json --verbose` | `result` selects a result; stdout EOF and process exit complete the run | Preallocated session ID | Claude permission mode plus allowed/disallowed tools and additional directories |
-| Cursor | print mode with `stream-json` | `result` completes the run and triggers process-group cleanup; stdout EOF enters an unbounded process-exit fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
+| Cursor | print mode with `stream-json` | `result` completes the run and triggers process-group cleanup; stdout EOF enters a cancellable, bounded process-exit fallback | `system/init` session ID or Symphony fallback | Cursor mode, `--force`, trust, MCP approval, and sandbox |
 | OpenCode | `run --format json` | Process exit; error events record failure | Event `sessionID` or Symphony fallback | `--dangerously-skip-permissions` and optional agent/model |
 
 Codex and Claude protocol result records are not early process-termination
@@ -223,13 +230,10 @@ returns the parsed result. This prevents a completed turn from being
 misclassified as a timeout.
 
 If stdout closes without a result, the process exit status is the fallback.
-The current implementation leaves the timeout/cancellation `select!` as soon
-as stdout closes and then awaits `child.wait()` outside that arbitration. A
-wrapper that closes stdout but keeps the shell alive can therefore hold the
-run and its concurrency slot indefinitely; turn timeout and later Stop
-requests do not interrupt this wait. Keeping the exit fallback inside the
-same timeout/cancellation arbitration is an intended invariant, not current
-behavior. Malformed JSON is an adapter protocol error.
+Waiting for process exit stays inside the shared deadline/cancellation
+scope. A wrapper that closes stdout and remains alive is stopped by either
+its turn timeout or a Stop request. Malformed JSON is an adapter protocol error
+and triggers process-group cleanup before the driver returns.
 
 ## OpenCode
 
@@ -244,8 +248,8 @@ It optionally adds `--model` and `--agent`. By default it also adds
 auto-rejects permission requests and cannot perform an unattended writable
 run.
 
-OpenCode's verbose log mode is intentionally not enabled. The adapter drains
-stderr so a chatty provider or plugin cannot fill the pipe and block stdout.
+OpenCode's verbose log mode is intentionally not enabled. The shared
+supervisor drains stderr for every provider, including OpenCode.
 
 OpenCode may print human-readable warnings to stdout despite JSON mode. The
 adapter ignores non-JSON lines except an "agent not found; falling back"
@@ -315,3 +319,18 @@ An adapter change is incomplete until it demonstrates:
     an explicit session credential.
 13. Tests use synthetic provider events and sanitized fixtures rather than
     copied private transcripts.
+
+## Process regression coverage
+
+`src/process_tests.rs` runs real shell fixtures through `NativeAgentDriver`.
+It requires no native provider CLI and runs on Unix CI without skipping the
+process-group cases.
+
+| Invariant | Fixture |
+| --- | --- |
+| Concurrent pipe pumping | 2 MiB stderr before reading a 2 MiB prompt, for all providers |
+| Cancellation and deadlines | Unread stdin and stdout EOF followed by a live process, for all providers |
+| Group ownership | Malformed JSON, abandoned futures, and stubborn descendants |
+| Event delivery | Cancellation with a full event channel; bounded OpenCode final usage delivery |
+| Bounded diagnostics | Oversized stdout rejection; bounded stderr tail on nonzero exits |
+| Provider completion | Cursor terminal success and Claude/OpenCode requested aborts stop lingering groups |

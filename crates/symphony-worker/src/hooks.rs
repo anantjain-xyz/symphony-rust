@@ -90,9 +90,17 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
     let process_group_id = child.id();
     let stderr = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes).await;
-            bytes
+            let mut retained = std::collections::VecDeque::with_capacity(4096);
+            let mut chunk = [0_u8; 4096];
+            while let Ok(read) = stderr.read(&mut chunk).await {
+                if read == 0 {
+                    break;
+                }
+                let excess = retained.len().saturating_add(read).saturating_sub(4096);
+                retained.drain(..excess);
+                retained.extend(&chunk[..read]);
+            }
+            retained.into_iter().collect()
         })
     });
     let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));
@@ -341,7 +349,11 @@ fn tail(value: &str, max: usize) -> Option<String> {
     } else if value.len() <= max {
         Some(value.to_string())
     } else {
-        Some(value[value.len() - max..].to_string())
+        let mut start = value.len() - max;
+        while !value.is_char_boundary(start) {
+            start += 1;
+        }
+        Some(value[start..].to_string())
     }
 }
 
@@ -561,5 +573,33 @@ printf '%s' "$!" > "$WORKSPACE_PATH/background-pid"
         );
         unrelated.kill().await.unwrap();
         unrelated.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hook_stderr_is_bounded_and_utf8_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let hook_issue = issue();
+        let env = BTreeMap::new();
+        let cancel = CancellationToken::new();
+        let unicode_script = format!("printf '%s' '{}' >&2", "é".repeat(2048) + "a");
+        let large_script =
+            "for ((i=0; i<1024; i++)); do printf '%04096d' 0 >&2; done; printf '終わり' >&2";
+        for script in [unicode_script.as_str(), large_script] {
+            let result = run_hook(HookInvocation {
+                hook: HookName::AfterCreate,
+                script,
+                issue: &hook_issue,
+                workspace_path: temp.path(),
+                run_number: 1,
+                timeout_ms: 10_000,
+                env: &env,
+                cancel: &cancel,
+            })
+            .await;
+            assert_eq!(result.exit_code, 0);
+            let tail = result.stderr_tail.unwrap();
+            assert!(tail.len() <= 4096);
+            assert!(tail.ends_with('a') || tail.ends_with("終わり"));
+        }
     }
 }

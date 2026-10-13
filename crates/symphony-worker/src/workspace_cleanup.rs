@@ -507,13 +507,13 @@ mod tests {
     }
 
     async fn wait_for_cleanup(repo: &Repository) {
-        for _ in 0..500 {
-            if repo.overview().await.unwrap().workspace_cleanup_count == 0 {
-                return;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while repo.overview().await.unwrap().workspace_cleanup_count != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("workspace cleanup did not finish");
+        })
+        .await
+        .expect("workspace cleanup did not finish");
     }
 
     #[test]
