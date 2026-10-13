@@ -21,11 +21,15 @@ use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
     OpencodeRunOptions,
 };
+#[cfg(test)]
+use symphony_core::RunStatus;
 use symphony_core::{
     render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue, ParsedWorkflow,
-    RepoConfig, RetryContext, RunStatus, TokenCountPayload,
+    RepoConfig, RetryContext, TokenCountPayload,
 };
-use symphony_storage::{now_iso, Repository, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS};
+use symphony_storage::{
+    now_iso, Repository, RunCompletion, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS,
+};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
@@ -777,55 +781,23 @@ async fn recover_stranded_runs(
     repo: &Repository,
     config: &RuntimeConfig,
 ) -> Result<(), WorkerError> {
-    for run in repo.list_running().await? {
+    let mut stranded = repo.list_running().await?;
+    stranded.extend(repo.list_pending().await?);
+    for run in stranded {
         warn!(run_id = %run.id, issue_id = %run.issue_id, "orphan run marked crashed");
-        repo.delete_live_session(&run.id).await.ok();
-        if repo
-            .finish_run(
-                &run.id,
-                RunStatus::Failure,
-                Some("process_crashed"),
-                Some("worker restarted while run was in-flight"),
-            )
-            .await?
-        {
-            let due = due_after(backoff_ms(
-                run.run_number,
-                config.workflow.front_matter.agent.max_retry_backoff_ms,
-            ));
-            repo.schedule_retry(
-                &run.issue_id,
-                run.run_number + 1,
-                &due,
-                Some("process_crashed"),
-                Some("worker restart"),
-            )
-            .await?;
-        }
-    }
-    for run in repo.list_pending().await? {
-        if repo
-            .finish_run(
-                &run.id,
-                RunStatus::Failure,
-                Some("process_crashed"),
-                Some("worker restarted before run was claimed"),
-            )
-            .await?
-        {
-            let due = due_after(backoff_ms(
-                run.run_number,
-                config.workflow.front_matter.agent.max_retry_backoff_ms,
-            ));
-            repo.schedule_retry(
-                &run.issue_id,
-                run.run_number + 1,
-                &due,
-                Some("process_crashed"),
-                Some("worker restart"),
-            )
-            .await?;
-        }
+        let due = due_after(backoff_ms(
+            run.run_number,
+            config.workflow.front_matter.agent.max_retry_backoff_ms,
+        ));
+        repo.complete_run(
+            &run.id,
+            RunCompletion::Failure {
+                error_class: "process_crashed",
+                error_message: "worker restarted before run completed",
+                retry_due_at: &due,
+            },
+        )
+        .await?;
     }
     repo.delete_orphaned_pending_sessions().await.ok();
     Ok(())
@@ -1435,7 +1407,7 @@ async fn handle_dispatch_result(
 /// and queue a retry — the safety net for the reserve → running → finish path.
 ///
 /// `dispatch_run` may have already reached a terminal state before the error
-/// escaped (e.g. `fail()` finished the run but its retry insert then errored),
+/// escaped. Its outcome, retry, and live-session cleanup commit together,
 /// so only rescue rows still stuck `pending`/`running`. That keeps this
 /// idempotent: we never re-stamp `ended_at` or double-queue a retry for a run
 /// that already finished. Every step is best-effort — we are already on the
@@ -1443,20 +1415,13 @@ async fn handle_dispatch_result(
 /// caught by the worker-restart `recover()` sweep.
 async fn recover_stranded_run(
     repo: &Repository,
-    issue_id: &str,
+    _issue_id: &str,
     run: &RunRow,
     retry_backoff_cap: u64,
     class: &str,
     message: &str,
     sanitizer: &OutputSanitizer,
 ) {
-    // dispatch_run's normal end-of-run delete_live_session is skipped when it
-    // returns early via `?`, so clean it up here regardless of the run's
-    // status: overview() surfaces every live_sessions row and the restart
-    // cleanup only prunes `pending-*` ones, so a leftover would keep a failed
-    // run showing as live indefinitely.
-    repo.delete_live_session(&run.id).await.ok();
-
     match repo.get_run(&run.id).await {
         Ok(Some(current)) if matches!(current.status.as_str(), "pending" | "running") => {}
         Ok(_) => return,
@@ -1471,7 +1436,7 @@ async fn recover_stranded_run(
     }
     let due = due_after(backoff_ms(run.run_number, retry_backoff_cap));
     if let Err(err) = RunOutput::new(repo, sanitizer)
-        .failure(issue_id, run, &due, class, message)
+        .failure(&run.id, &due, class, message)
         .await
     {
         error!(error = %sanitizer.error(&err.to_string()), run_id = %run.id,
@@ -1558,11 +1523,13 @@ where
     match repo.mark_running(&run.id).await {
         Ok(()) => {}
         Err(StorageError::AlreadyRunning(_)) => {
-            repo.finish_run(
+            repo.complete_run(
                 &run.id,
-                RunStatus::Cancelled,
-                Some("reconciled"),
-                Some("lost race to a concurrent run for the same issue"),
+                RunCompletion::Cancelled {
+                    error_class: Some("reconciled"),
+                    error_message: Some("lost race to a concurrent run for the same issue"),
+                    suppression: None,
+                },
             )
             .await?;
             return Ok(());
@@ -1768,24 +1735,16 @@ where
             }
             match result.outcome {
                 AgentOutcome::Success => {
-                    if repo
-                        .finish_run(&run.id, RunStatus::Success, None, None)
-                        .await?
-                    {
-                        repo.clear_retry(&issue.id).await?;
-                    }
+                    repo.complete_run(&run.id, RunCompletion::Success).await?;
                 }
                 AgentOutcome::Cancelled => {
-                    if output
+                    output
                         .cancelled(
                             &run.id,
                             result.error_class.as_deref(),
                             result.error_message.as_deref(),
                         )
-                        .await?
-                    {
-                        repo.clear_retry(&issue.id).await?;
-                    }
+                        .await?;
                 }
                 AgentOutcome::Failure => {
                     fail(
@@ -1823,7 +1782,6 @@ where
             .await?;
         }
     }
-    repo.delete_live_session(&run.id).await.ok();
     Ok(())
 }
 
@@ -1867,29 +1825,23 @@ async fn finish_if_cancelled(
 async fn finish_if_cancelled_with_suppression(
     repo: &Repository,
     run: &RunRow,
-    issue: &Issue,
+    _issue: &Issue,
     stop: &CancellationToken,
     suppression_fingerprint: Option<&str>,
 ) -> Result<bool, WorkerError> {
     if !stop.is_cancelled() {
         return Ok(false);
     }
-    let transitioned = repo
-        .finish_run(
-            &run.id,
-            RunStatus::Cancelled,
-            Some("cancelled"),
-            Some("run cancelled"),
-        )
-        .await?;
-    if transitioned {
-        if let Some(fingerprint) = suppression_fingerprint {
-            repo.suppress_issue_dispatch(&issue.id, USER_CANCELLED_SUPPRESSION, fingerprint)
-                .await?;
-        }
-        repo.clear_retry(&issue.id).await?;
-        repo.delete_live_session(&run.id).await.ok();
-    }
+    repo.complete_run(
+        &run.id,
+        RunCompletion::Cancelled {
+            error_class: Some("cancelled"),
+            error_message: Some("run cancelled"),
+            suppression: suppression_fingerprint
+                .map(|fingerprint| (USER_CANCELLED_SUPPRESSION, fingerprint)),
+        },
+    )
+    .await?;
     Ok(true)
 }
 
@@ -1929,7 +1881,7 @@ async fn fail(
     repo: &Repository,
     config: &RuntimeConfig,
     run: &RunRow,
-    issue: &Issue,
+    _issue: &Issue,
     class: &str,
     message: &str,
 ) -> Result<(), WorkerError> {
@@ -1938,7 +1890,7 @@ async fn fail(
         config.workflow.front_matter.agent.max_retry_backoff_ms,
     ));
     RunOutput::new(repo, &config.output_sanitizer())
-        .failure(&issue.id, run, &due, class, message)
+        .failure(&run.id, &due, class, message)
         .await?;
     Ok(())
 }
@@ -2599,10 +2551,12 @@ mod tests {
             .await
             .unwrap();
         output.status(&run.id, &combined).await.unwrap();
+        // Identity must already be safe while the run is live, before atomic
+        // completion removes it from overview.
+        assert_no_canaries(&serde_json::to_string(&repo.overview().await.unwrap()).unwrap());
         output
             .failure(
-                "lin-1",
-                &run,
+                &run.id,
                 "2099-01-01T00:00:00Z",
                 SESSION_CANARY,
                 &format!("{combined}{}", "界".repeat(10_000)),

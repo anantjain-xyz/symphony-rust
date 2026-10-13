@@ -95,10 +95,11 @@ while the workspace is prepared. The database has a partial unique index for
 one `running` row per issue; the worker also checks for any active run before
 reserving.
 
-Terminal rows are immutable: `finish_run()` accepts only terminal targets,
-predicates its update on `pending` or `running`, and reports whether it changed
-the row. The stranded-run recovery path also checks the current status before
-repairing it.
+Terminal rows are immutable: `complete_run()` predicates its update on
+`pending` or `running` and reports whether it changed the row. Outcome, retry
+creation or clearing, optional cancellation suppression, and live-session
+removal commit in one transaction. The stranded-run recovery path also checks
+the current status before repairing it.
 
 Although `timeout` remains a supported persisted status for compatibility,
 the native adapters currently return a timeout as `AgentError::Timeout`.
@@ -293,9 +294,9 @@ Each dispatch also has an in-process safety net. The outer task catches:
 - a task panic as `dispatch_panic`; and
 - a task join cancellation as `dispatch_cancelled`.
 
-It removes the live session, checks that the row is still non-terminal,
-finishes it as failure, and best-effort schedules the retry. Anything that
-cannot be repaired there remains visible to startup recovery.
+It checks that the row is still non-terminal, then atomically records failure,
+schedules the retry, and removes the live session through `complete_run()`.
+A failed transaction leaves the run active for startup recovery.
 
 This two-level recovery is required because errors may occur after reservation
 but before normal cleanup, including while persisting an event.

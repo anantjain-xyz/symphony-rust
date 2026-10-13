@@ -14,6 +14,14 @@ exact file inventory, registry order, and shipped SQL checksums, and they
 exercise every historical upgrade prefix through head. Fresh-versus-upgraded
 `sqlite_schema` fingerprint comparison is still a remaining gap.
 
+## Atomic run transitions
+
+- `complete_run` commits the guarded terminal status, retry/backoff or cancellation suppression, retry removal, and live-session cleanup in one transaction.
+- Repeated completion is a no-op; the first terminal outcome owns its consequences.
+- `trigger_retry_now` holds a SQLite write transaction while checking active runs, creating or advancing retry intent, and clearing suppression.
+- Database invalidations publish after commit. A failed transaction publishes none.
+- Failure-injection tests abort retry, suppression, and cleanup writes, reopen the database, and verify that the complete prior state survives.
+
 ## Database opening
 
 ### Current behavior

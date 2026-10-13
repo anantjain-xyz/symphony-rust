@@ -9,9 +9,10 @@ export const MANIFEST_PATH = resolve(DIST_DIR, ".vite/manifest.json");
 
 export const BUDGETS = {
   // The eager primitive extraction preserves raw size but changes Rollup's
-  // module ordering; retain a small gzip cushion for the resulting runner
+  // module ordering; lost-event recovery adds selected-detail invalidation.
+  // Retain a small gzip cushion for the resulting runner
   // variance without allowing a new chunk or view payload into the shell.
-  eagerJavaScript: 80_700,
+  eagerJavaScript: 80_800,
   eagerCss: 7_000,
   lazyViewJavaScript: 50_000,
 };

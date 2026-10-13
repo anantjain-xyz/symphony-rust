@@ -39,6 +39,7 @@ const UNKNOWN_TABLE_FALLBACK: readonly DashboardResourceKey[] = [
 ];
 
 export function resourcesForDbChange(table: string): readonly DashboardResourceKey[] {
+  if (table === "*") return [...UNKNOWN_TABLE_FALLBACK, "selectedRun", "selectedRetro"];
   return TABLE_INVALIDATIONS[table] ?? UNKNOWN_TABLE_FALLBACK;
 }
 

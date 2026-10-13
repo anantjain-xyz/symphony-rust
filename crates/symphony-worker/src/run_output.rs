@@ -2,8 +2,8 @@
 //! session and terminal strings behind this adapter before storage emits UI
 //! invalidations or makes them available to future retry prompts.
 use crate::output::{OutputSanitizer, ID_LIMIT};
-use symphony_core::{AgentEventKind, MappedAgentEvent, RunStatus, TokenCountPayload};
-use symphony_storage::{Repository, RunRow, StorageError};
+use symphony_core::{AgentEventKind, MappedAgentEvent, TokenCountPayload};
+use symphony_storage::{Repository, RunCompletion, StorageError};
 
 pub(crate) struct RunOutput<'a> {
     repo: &'a Repository,
@@ -89,30 +89,23 @@ impl<'a> RunOutput<'a> {
 
     pub(crate) async fn failure(
         &self,
-        issue_id: &str,
-        run: &RunRow,
+        run_id: &str,
         due: &str,
         class: &str,
         message: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let class = self.sanitizer.text(class, ID_LIMIT);
         let message = self.sanitizer.error(message);
-        if self
-            .repo
-            .finish_run(&run.id, RunStatus::Failure, Some(&class), Some(&message))
-            .await?
-        {
-            self.repo
-                .schedule_retry(
-                    issue_id,
-                    run.run_number + 1,
-                    due,
-                    Some(&class),
-                    Some(&message),
-                )
-                .await?;
-        }
-        Ok(())
+        self.repo
+            .complete_run(
+                run_id,
+                RunCompletion::Failure {
+                    error_class: &class,
+                    error_message: &message,
+                    retry_due_at: due,
+                },
+            )
+            .await
     }
 
     pub(crate) async fn cancelled(
@@ -124,11 +117,13 @@ impl<'a> RunOutput<'a> {
         let class = class.map(|s| self.sanitizer.text(s, ID_LIMIT));
         let message = message.map(|s| self.sanitizer.error(s));
         self.repo
-            .finish_run(
+            .complete_run(
                 run_id,
-                RunStatus::Cancelled,
-                class.as_deref(),
-                message.as_deref(),
+                RunCompletion::Cancelled {
+                    error_class: class.as_deref(),
+                    error_message: message.as_deref(),
+                    suppression: None,
+                },
             )
             .await
     }
