@@ -114,7 +114,10 @@ export function createSettingsSession(
     },
     acceptSaved(next: AppSettings) {
       if (!recordSaved(next)) return false;
-      if (!dirty) adoptSaved(next);
+      if (!dirty || (draft && formSnapshot(draft) === formSnapshot(next))) {
+        adoptSaved(next);
+        setDirty(key.trim() !== "");
+      }
       return true;
     },
   };

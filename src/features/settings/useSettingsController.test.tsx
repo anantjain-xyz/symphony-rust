@@ -90,11 +90,15 @@ it.each(["healthy reconfiguration", "worker restart"])(
   },
 );
 
-it("keeps an incomplete-workflow reason when healthy polls cannot prove an update", async () => {
+it("clears an incomplete-workflow reason after a later healthy reconfiguration", async () => {
   const saved = { ...previewRuntime.settings, tracker_assigned_to_me: false, repos: [] };
   const healthy: WorkerStatus = { state: "running", started_at: null, last_error: null };
   commands.saveSettings.mockResolvedValue(saved);
-  commands.getWorkerStatus.mockResolvedValue(healthy);
+  const skipped: WorkerStatus = {
+    ...healthy,
+    last_error: "Settings saved, but incomplete configuration prevented worker update.",
+  };
+  commands.getWorkerStatus.mockResolvedValue(skipped);
   const { result, rerender } = renderHook(
     ({ worker }: { worker: WorkerStatus }) =>
       useSettingsController({
@@ -117,8 +121,10 @@ it("keeps an incomplete-workflow reason when healthy polls cannot prove an updat
     } as ValidationResult);
   });
   expect(result.current.savedLiveConfigKeptReason).toBe("workflow");
-  rerender({ worker: { ...healthy } });
+  rerender({ worker: skipped });
   expect(result.current.savedLiveConfigKeptReason).toBe("workflow");
-  rerender({ worker: { ...healthy, state: "stopped" } });
+  rerender({ worker: { ...skipped } });
+  expect(result.current.savedLiveConfigKeptReason).toBe("workflow");
+  rerender({ worker: { ...healthy } });
   expect(result.current.savedLiveConfigKeptReason).toBeNull();
 });

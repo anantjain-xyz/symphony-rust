@@ -49,7 +49,6 @@ export function useSettingsController(options: Options) {
     if (
       worker.state !== "running" ||
       (skipped &&
-        savedLiveConfigKeptReason !== "workflow" &&
         worker !== skipped.observed &&
         worker !== skipped.refreshed &&
         worker.last_error === null)
@@ -57,7 +56,7 @@ export function useSettingsController(options: Options) {
       keptWorkerSnapshots.current = null;
       setSavedLiveConfigKeptReason(null);
     }
-  }, [options.readWorkerStatus, savedLiveConfigKeptReason]);
+  }, [options.readWorkerStatus]);
   const refreshLinearViewer = useCallback(
     (exactSettings: AppSettings, exactKey: string) => {
       if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
