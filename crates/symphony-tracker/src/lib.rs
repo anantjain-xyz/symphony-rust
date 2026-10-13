@@ -1,4 +1,9 @@
+mod pagination;
+#[cfg(test)]
+mod transport_tests;
+
 use async_trait::async_trait;
+use pagination::Pagination;
 use reqwest::{header::RETRY_AFTER, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -35,6 +40,10 @@ pub enum TrackerError {
     Invalid(String),
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must_use on a boxed future"
+)]
 #[async_trait]
 pub trait TrackerClient: Send + Sync {
     async fn preflight(&self) -> Result<(), TrackerError>;
@@ -207,31 +216,95 @@ impl LinearTracker {
             return Ok(Vec::new());
         };
 
-        let mut nodes = Vec::new();
+        self.fetch_issues(prepared).await
+    }
+
+    async fn fetch_issues(
+        &self,
+        prepared: PreparedIssuesQuery,
+    ) -> Result<Vec<Issue>, TrackerError> {
+        let mut issues = Vec::new();
         let mut cursor: Option<String> = None;
-        for _ in 0..50 {
+        let mut pagination = Pagination::default();
+        loop {
             let mut variables = prepared.variables.clone();
-            if let serde_json::Value::Object(map) = &mut variables {
-                map.insert(
-                    "cursor".to_string(),
-                    cursor
-                        .as_deref()
-                        .map(|value| serde_json::Value::String(value.to_string()))
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
+            variables["cursor"] = serde_json::json!(cursor);
             let data: IssuesByStateData = self.execute(&prepared.query, Some(variables)).await?;
-            let page = data.issues.page_info;
-            nodes.extend(data.issues.nodes);
-            match page {
-                Some(page) if page.has_next_page => {
-                    let Some(next) = page.end_cursor else { break };
-                    cursor = Some(next);
-                }
-                _ => break,
+            cursor =
+                pagination.advance(&data.issues.page_info, data.issues.nodes.len(), "issues")?;
+            for node in data.issues.nodes {
+                issues.push(self.complete_issue(node).await?);
+            }
+            if cursor.is_none() {
+                return Ok(issues);
             }
         }
-        Ok(nodes.into_iter().map(normalize).collect())
+    }
+
+    /// Only truncated nested connections incur follow-up requests. Both can
+    /// advance in one request, and completed connections are omitted entirely.
+    async fn complete_issue(&self, mut node: LinearIssueNode) -> Result<Issue, TrackerError> {
+        let mut labels_pages = Pagination::default();
+        let mut relations_pages = Pagination::default();
+        let labels_context = format!("labels for {}", node.identifier);
+        let relations_context = format!("inverse relations for {}", node.identifier);
+        let mut labels_cursor = labels_pages.advance(
+            &node.labels.page_info,
+            node.labels.nodes.len(),
+            &labels_context,
+        )?;
+        let mut relations_cursor = relations_pages.advance(
+            &node.inverse_relations.page_info,
+            node.inverse_relations.nodes.len(),
+            &relations_context,
+        )?;
+        while labels_cursor.is_some() || relations_cursor.is_some() {
+            let variables = serde_json::json!({
+                "id": node.id,
+                "labelsCursor": labels_cursor,
+                "relationsCursor": relations_cursor,
+                "fetchLabels": labels_cursor.is_some(),
+                "fetchRelations": relations_cursor.is_some(),
+            });
+            let data: IssueCollectionsData = self
+                .execute(ISSUE_COLLECTIONS_QUERY, Some(variables))
+                .await?;
+            let page = data.issue.ok_or_else(|| {
+                TrackerError::Invalid(format!(
+                    "issue {} disappeared during pagination",
+                    node.identifier
+                ))
+            })?;
+            if page.id != node.id {
+                return Err(TrackerError::Invalid(
+                    "issue identity changed during pagination".to_string(),
+                ));
+            }
+            if labels_cursor.is_some() {
+                let labels = page.labels.ok_or_else(|| {
+                    TrackerError::Invalid(format!(
+                        "incomplete {labels_context}: missing requested connection"
+                    ))
+                })?;
+                labels_cursor =
+                    labels_pages.advance(&labels.page_info, labels.nodes.len(), &labels_context)?;
+                node.labels.nodes.extend(labels.nodes);
+            }
+            if relations_cursor.is_some() {
+                let relations = page.inverse_relations.ok_or_else(|| {
+                    TrackerError::Invalid(format!(
+                        "incomplete {relations_context}: missing requested connection"
+                    ))
+                })?;
+                relations_cursor = relations_pages.advance(
+                    &relations.page_info,
+                    relations.nodes.len(),
+                    &relations_context,
+                )?;
+                node.inverse_relations.nodes.extend(relations.nodes);
+            }
+        }
+        Ok(normalize(node))
     }
 
     async fn build_issues_by_state_query(
@@ -354,7 +427,7 @@ impl LinearTracker {
                 return Ok(None);
             }
         }
-        let issue = normalize(node);
+        let issue = self.complete_issue(node).await?;
         Ok(self.filter_issues(vec![issue]).into_iter().next())
     }
 
@@ -416,7 +489,15 @@ impl LinearTracker {
             return Err(TrackerError::Http { status, message });
         }
 
-        let payload: GraphqlResponse<T> = response.json().await?;
+        let payload: GraphqlResponse<T> = response.json().await.map_err(|error| {
+            if error.is_decode() {
+                TrackerError::Invalid(format!("malformed GraphQL response: {error}"))
+            } else if error.is_timeout() {
+                TrackerError::Timeout(self.request_timeout_ms)
+            } else {
+                TrackerError::Transport(error)
+            }
+        })?;
         if let Some(errors) = payload.errors {
             if errors.iter().any(GraphqlError::is_not_found) {
                 return Err(TrackerError::NotFound);
@@ -527,34 +608,8 @@ impl TrackerClient for LinearTracker {
         if self.team_keys().is_empty() && self.project_refs().is_empty() {
             return Ok(Vec::new());
         }
-        let prepared = self.build_board_issues_query();
-        let mut nodes = Vec::new();
-        let mut cursor: Option<String> = None;
-        // Page through the whole board (250/page) so large teams aren't truncated.
-        // Cap the page count defensively against a pathological pageInfo loop.
-        for _ in 0..50 {
-            let mut variables = prepared.variables.clone();
-            if let serde_json::Value::Object(map) = &mut variables {
-                map.insert(
-                    "cursor".to_string(),
-                    cursor
-                        .as_deref()
-                        .map(|value| serde_json::Value::String(value.to_string()))
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
-            let data: IssuesByStateData = self.execute(&prepared.query, Some(variables)).await?;
-            let page = data.issues.page_info;
-            nodes.extend(data.issues.nodes);
-            match page {
-                Some(page) if page.has_next_page => {
-                    let Some(next) = page.end_cursor else { break };
-                    cursor = Some(next);
-                }
-                _ => break,
-            }
-        }
-        let mut issues = self.filter_issues(nodes.into_iter().map(normalize).collect());
+        let mut issues =
+            self.filter_issues(self.fetch_issues(self.build_board_issues_query()).await?);
         issues.sort_by(by_priority_then_identifier);
         Ok(issues)
     }
@@ -782,6 +837,8 @@ struct LinearCommentConnection {
 #[serde(rename_all = "camelCase")]
 struct PageInfo {
     has_next_page: bool,
+    // Nullable in an empty connection, but the selected field must be present.
+    #[serde(deserialize_with = "Option::deserialize")]
     end_cursor: Option<String>,
 }
 
@@ -795,10 +852,28 @@ struct LinearComment {
 }
 
 #[derive(Deserialize)]
-struct LinearIssueConnection {
-    nodes: Vec<LinearIssueNode>,
-    #[serde(default, rename = "pageInfo")]
-    page_info: Option<PageInfo>,
+#[serde(rename_all = "camelCase")]
+struct Connection<T> {
+    nodes: Vec<T>,
+    page_info: PageInfo,
+}
+
+type LinearIssueConnection = Connection<LinearIssueNode>;
+type LinearLabelConnection = Connection<LinearLabel>;
+type LinearRelationConnection = Connection<LinearRelation>;
+
+#[derive(Deserialize)]
+struct IssueCollectionsData {
+    issue: Option<LinearIssueCollections>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinearIssueCollections {
+    id: String,
+    // These are optional only because @include omits completed connections.
+    labels: Option<LinearLabelConnection>,
+    inverse_relations: Option<LinearRelationConnection>,
 }
 
 #[derive(Deserialize)]
@@ -812,11 +887,11 @@ struct LinearIssueNode {
     branch_name: Option<String>,
     completed_at: Option<String>,
     canceled_at: Option<String>,
-    state: Option<LinearState>,
+    state: LinearState,
     project: Option<LinearProject>,
     assignee: Option<LinearAssignee>,
-    labels: Option<LinearLabelConnection>,
-    inverse_relations: Option<LinearRelationConnection>,
+    labels: LinearLabelConnection,
+    inverse_relations: LinearRelationConnection,
 }
 
 #[derive(Deserialize)]
@@ -828,7 +903,7 @@ struct LinearProject {
 
 #[derive(Deserialize)]
 struct LinearState {
-    name: Option<String>,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -837,63 +912,40 @@ struct LinearAssignee {
 }
 
 #[derive(Deserialize)]
-struct LinearLabelConnection {
-    nodes: Vec<LinearLabel>,
-}
-
-#[derive(Deserialize)]
 struct LinearLabel {
     name: String,
-}
-
-#[derive(Deserialize)]
-struct LinearRelationConnection {
-    nodes: Vec<LinearRelation>,
 }
 
 #[derive(Deserialize)]
 struct LinearRelation {
     #[serde(rename = "type")]
     relation_type: String,
-    issue: Option<LinearRelationIssue>,
+    issue: LinearRelationIssue,
 }
 
 #[derive(Deserialize)]
 struct LinearRelationIssue {
     identifier: String,
-    state: Option<LinearRelationState>,
+    state: LinearRelationState,
 }
 
 #[derive(Deserialize)]
 struct LinearRelationState {
     #[serde(rename = "type")]
-    state_type: Option<String>,
+    state_type: String,
 }
 
 fn normalize(node: LinearIssueNode) -> Issue {
-    let state = node
-        .state
-        .and_then(|state| state.name)
-        .unwrap_or_else(|| "unknown".to_string())
-        .to_lowercase();
+    let state = node.state.name.to_lowercase();
     let blockers = node
         .inverse_relations
-        .map(|relations| {
-            relations
-                .nodes
-                .into_iter()
-                .filter(|rel| rel.relation_type == "blocks")
-                .filter_map(|rel| rel.issue)
-                .filter(|issue| {
-                    !matches!(
-                        issue.state.as_ref().and_then(|s| s.state_type.as_deref()),
-                        Some("completed" | "canceled")
-                    )
-                })
-                .map(|issue| issue.identifier)
-                .collect()
-        })
-        .unwrap_or_default();
+        .nodes
+        .into_iter()
+        .filter(|relation| relation.relation_type == "blocks")
+        .map(|relation| relation.issue)
+        .filter(|issue| !matches!(issue.state.state_type.as_str(), "completed" | "canceled"))
+        .map(|issue| issue.identifier)
+        .collect();
     Issue {
         id: node.id,
         identifier: node.identifier,
@@ -904,8 +956,10 @@ fn normalize(node: LinearIssueNode) -> Issue {
         branch: node.branch_name,
         labels: node
             .labels
-            .map(|labels| labels.nodes.into_iter().map(|label| label.name).collect())
-            .unwrap_or_default(),
+            .nodes
+            .into_iter()
+            .map(|label| label.name)
+            .collect(),
         blockers,
         completed_at: node.completed_at,
         canceled_at: node.canceled_at,
@@ -926,8 +980,9 @@ const ISSUE_FIELDS: &str = r#"
   state { name }
   project { id slugId }
   assignee { id }
-  labels(first: 25) { nodes { name } }
+  labels(first: 25) { nodes { name } pageInfo { hasNextPage endCursor } }
   inverseRelations(first: 25) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       type
       issue {
@@ -958,8 +1013,9 @@ const ISSUE_BY_ID_QUERY: &str = r#"
       state { name }
       project { id slugId }
       assignee { id }
-      labels(first: 25) { nodes { name } }
+      labels(first: 25) { nodes { name } pageInfo { hasNextPage endCursor } }
       inverseRelations(first: 25) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           type
           issue {
@@ -967,6 +1023,25 @@ const ISSUE_BY_ID_QUERY: &str = r#"
             state { type }
           }
         }
+      }
+    }
+  }
+"#;
+
+const ISSUE_COLLECTIONS_QUERY: &str = r#"
+  query SymphonyIssueCollections(
+    $id: String!, $labelsCursor: String, $relationsCursor: String,
+    $fetchLabels: Boolean!, $fetchRelations: Boolean!
+  ) {
+    issue(id: $id) {
+      id
+      labels(first: 100, after: $labelsCursor) @include(if: $fetchLabels) {
+        nodes { name }
+        pageInfo { hasNextPage endCursor }
+      }
+      inverseRelations(first: 100, after: $relationsCursor) @include(if: $fetchRelations) {
+        nodes { type issue { identifier state { type } } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
