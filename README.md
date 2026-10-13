@@ -68,6 +68,8 @@ On first launch the Overview shows a setup checklist:
 
 Optional Linear team and project filter lists narrow which issues Symphony picks up. Values within a list are ORed; when both lists are set, an issue must match at least one team and at least one project. Use **Validate** in Settings to check your configuration and confirm the agent CLIs are discoverable before starting.
 
+On the Issues board, drag a card or use its **Move to** selector. Both paths share the confirmation rules; canceling leaves the issue unchanged.
+
 ## Settings and workflows
 
 Symphony's operational behavior is configured in *Settings*:
@@ -78,6 +80,10 @@ Symphony's operational behavior is configured in *Settings*:
 - **Worker** — polling interval, max concurrent agents, retry backoff cap, and the lifecycle hooks (under *Hooks (advanced)*): `after_create`, `before_run`, and `after_run`. Hooks are shell scripts that run in the workspace with `$REPO_URL`, `$REPO_NAME`, `$ISSUE_ID`, `$ISSUE_IDENTIFIER`, `$ISSUE_TITLE`, `$ISSUE_STATE`, `$ISSUE_BRANCH`, `$RUN_NUMBER`, `$SYMPHONY_INSTALL_CMD`, and `$SYMPHONY_HOOK` in their environment; the repo variables reflect the repo the issue routed to. Hook process groups are cleaned after the hook returns, so a hook must not leave background services for a later lifecycle phase.
 
 The **default workflow** at the bottom of Settings is the instruction document sent to the agent for each issue. A repository can override those instructions by checking a regular UTF-8 file named `SYMPHONY-WORKFLOW.md` or `symphony-workflow.md` into its root. The uppercase name wins if both exist. Empty files, unsupported placeholders, symlinks, and other invalid files fall back to the saved default workflow.
+
+- Save checks the revision loaded by your draft. If another Save or retro changes settings, reload the latest settings before retrying.
+- Ordinary settings edits can be saved while the keychain is locked. If the live worker keeps its previous configuration, Symphony reports that state; unlock the keychain and restart the worker to apply the saved settings.
+- Removing the Linear key stops the worker. Interrupted credential updates are checked on the next settings access; recovery may stop the worker until the credential store is available.
 
 For every dispatch, Symphony fetches the repository's latest default branch without checking it out over the issue branch. A valid repository workflow from that branch is used; if the refresh fails, Symphony tries its cached default-branch copy before falling back to the saved default. Repository cards in Settings show the detected source. When the default is active, GitHub.com and supported GitHub Enterprise repositories can create a `symphony/install-workflow` PR that copies the saved default into canonical `SYMPHONY-WORKFLOW.md`.
 

@@ -3,11 +3,12 @@
 **Keep the existing crate architecture. Prioritize ownership, cancellation, and atomic state changes before further feature work.**
 
 - **Revision:** `f612d67da1645ddfda00da6ee12eb9ac787a2724` · version 0.1.28.
+- **Point-in-time report:** findings describe that revision. See [the refactor acceptance record](REFACTOR-WAVES.md) for subsequent changes and validation.
 - **Scope:** core/domain, worker, storage, tracker, agent adapters, Tauri commands/settings/retros, React, IPC, tests, CI, architecture documentation.
 - **Method:** four parallel code reviews, baseline validation, targeted failure probes, and cross-checking findings against current implementation.
 - **Evidence labels:** **Reproduced** = executed probe; **Inspected** = concrete code path/interleaving; **Design** = recommended structural improvement.
 - **Priority:** P1 = address before expanding unattended execution; P2 = next reliability/architecture work; P3 = subsequent measured improvement.
-- This is a source audit with focused runtime checks, not an exhaustive security assessment or native-provider certification. No production code was changed.
+- This is a source audit with focused runtime checks, not an exhaustive security assessment or native-provider certification. No production code was changed during the audit itself.
 
 ## Basis
 

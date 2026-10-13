@@ -82,6 +82,8 @@ Independent PRs may be developed concurrently. Integrate and revalidate dependen
 | 210 | Remote operations used unresolved saved credentials | Admit one locked settings/credential snapshot and reject recovery diagnostics before remote I/O |
 | 210 | A skipped runtime update was presented as applied | Return admission diagnostics and retain the skipped status through unlock/reload until reconfiguration or restart |
 | 210 | Reverting a draft during Save left it incorrectly clean | Recompute dirtiness against the acknowledged saved baseline |
+| 210 | Unlock/reload changed the explanation of a skipped update | Retain the skip reason and expose the server-side diagnostic until reconfiguration or restart |
+| 210 | Ordinary atomic replacement lacked rename durability | Sync the file and parent directory before acknowledging Save, prompt updates, or migrations |
 | 212 | Text redaction changed quota policy inputs | Canonical operational metadata; sanitized display payloads; opaque unknown bucket identities |
 | 214 | Incomplete drafts did not fence delayed starts | Observe every committed/loaded revision and invalidate older preflight continuations |
 | 214 | A newer failed reconfiguration suppressed credential-removal shutdown | Stop on known credential absence; only an adopted newer runtime supersedes delayed removal |
