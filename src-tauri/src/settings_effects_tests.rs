@@ -2,7 +2,7 @@
 //! tracker preflight is held at a local socket. No OS credentials are read.
 use super::*;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc,
 };
 use tokio::{sync::oneshot, task::JoinHandle, time::Duration};
@@ -14,6 +14,8 @@ type ReadBarrier = (oneshot::Sender<()>, mpsc::Receiver<()>);
 struct FixtureCredentials {
     key: Mutex<Option<String>>,
     unavailable: AtomicBool,
+    reads: AtomicUsize,
+    unavailable_at_read: AtomicUsize,
     fail_removal_after_mutation: AtomicBool,
     read_barrier: Mutex<Option<ReadBarrier>>,
 }
@@ -23,6 +25,8 @@ impl FixtureCredentials {
         Self {
             key: Mutex::new(Some(OLD_KEY.into())),
             unavailable: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+            unavailable_at_read: AtomicUsize::new(usize::MAX),
             fail_removal_after_mutation: AtomicBool::new(false),
             read_barrier: Mutex::new(None),
         }
@@ -45,7 +49,10 @@ impl settings_store::Credentials for FixtureCredentials {
                 .recv_timeout(Duration::from_secs(10))
                 .map_err(|_| "Synthetic credential barrier was not released.")?;
         }
-        if self.unavailable.load(Ordering::SeqCst) {
+        let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.unavailable.load(Ordering::SeqCst)
+            || read >= self.unavailable_at_read.load(Ordering::SeqCst)
+        {
             Err("Synthetic credential store is locked.".into())
         } else {
             Ok(self.key.lock().unwrap().clone())
@@ -264,4 +271,177 @@ async fn failed_removal_with_locked_rollback_stops_before_returning_the_error() 
         assert!(settings_transaction::has_pending(&fixture.settings_path));
         assert_eq!(std::fs::read(&fixture.settings_path).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn superseded_credential_journal_still_stops_the_worker() {
+    let fixture = Fixture::running().await;
+    fixture.interrupt_removal();
+    let mut newer = fixture.settings.clone();
+    newer.settings_revision = 12;
+    newer.prompt_template = "A newer writer's prompt must survive recovery.".into();
+    let durable = serde_json::to_vec_pretty(&newer).unwrap();
+    std::fs::write(&fixture.settings_path, &durable).unwrap();
+    // Availability is unknown, so only the superseded journal can require stop.
+    fixture
+        .credentials
+        .unavailable
+        .store(true, Ordering::SeqCst);
+
+    let loaded = load_settings_from_disk(&fixture.state).await.unwrap();
+    assert_eq!(loaded.settings_revision, 12);
+    assert_eq!(loaded.prompt_template, newer.prompt_template);
+    assert!(loaded.linear_api_key_error.is_some());
+    fixture.assert_stopped().await;
+    assert!(!settings_transaction::has_pending(&fixture.settings_path));
+    assert_eq!(std::fs::read(&fixture.settings_path).unwrap(), durable);
+}
+
+#[tokio::test]
+async fn operational_snapshot_recovers_removal_before_admitting_a_saved_key() {
+    let fixture = Fixture::running().await;
+    fixture.interrupt_removal();
+
+    let snapshot = load_runtime_settings(&fixture.state).await.unwrap();
+    assert_eq!(snapshot.settings.settings_revision, 11);
+    assert!(snapshot.credential.is_none());
+    fixture.assert_stopped().await;
+    assert!(request_linear_api_key(&fixture.state, None)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn unresolved_journal_blocks_operational_saved_keys_but_settings_stay_readable() {
+    let fixture = Fixture::running().await;
+    let marker = fixture.settings_path.with_extension("json.transaction");
+    std::fs::write(&marker, b"malformed pending transaction").unwrap();
+    assert!(settings_transaction::has_pending(&fixture.settings_path));
+
+    // This is the shared admission path for board reads/moves and Retro start.
+    let error = load_runtime_settings(&fixture.state)
+        .await
+        .err()
+        .expect("operational snapshot must reject unresolved recovery");
+    assert!(error.contains("unreadable"));
+    fixture.assert_stopped().await;
+    // Viewer and connection checks must reject the same saved-key fallback.
+    assert!(request_linear_api_key(&fixture.state, None).await.is_err());
+    assert!(request_linear_api_key(&fixture.state, Some("  ".into()))
+        .await
+        .is_err());
+    // A deliberately supplied draft credential is independent of saved state.
+    assert_eq!(
+        request_linear_api_key(&fixture.state, Some("lin_api_unsaved_fixture".into()))
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("lin_api_unsaved_fixture")
+    );
+    let loaded = load_settings_from_disk(&fixture.state).await.unwrap();
+    assert_eq!(loaded.settings_revision, fixture.settings.settings_revision);
+    assert_eq!(loaded.prompt_template, fixture.settings.prompt_template);
+    assert!(!loaded.linear_api_key_set);
+    assert!(loaded.linear_api_key_error.unwrap().contains("unreadable"));
+    assert_eq!(
+        std::fs::read(marker).unwrap(),
+        b"malformed pending transaction"
+    );
+    assert_eq!(
+        fixture.credentials.key.lock().unwrap().as_deref(),
+        Some(OLD_KEY)
+    );
+}
+
+#[tokio::test]
+async fn unavailable_saved_credential_blocks_operational_use_without_stopping_live_worker() {
+    let fixture = Fixture::running().await;
+    fixture
+        .credentials
+        .unavailable
+        .store(true, Ordering::SeqCst);
+    let error = load_runtime_settings(&fixture.state)
+        .await
+        .err()
+        .expect("unknown credential availability must block saved-key operations");
+    assert!(error.contains("unavailable"));
+    assert_eq!(
+        fixture.state.worker.status().await.state,
+        symphony_worker::WorkerState::Running
+    );
+    let loaded = load_settings_from_disk(&fixture.state).await.unwrap();
+    assert!(loaded.linear_api_key_error.is_some());
+    fixture.state.worker.stop().await;
+    fixture.assert_stopped().await;
+}
+
+#[tokio::test]
+async fn cancelled_operational_read_still_drains_credential_recovery() {
+    let fixture = Fixture::running().await;
+    fixture.interrupt_removal();
+    let (entered, release) = fixture.credentials.block_next_read();
+    let state = fixture.state.clone();
+    let access = tokio::spawn(async move { load_runtime_settings(&state).await });
+    tokio::time::timeout(Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    access.abort();
+    assert!(access.await.err().unwrap().is_cancelled());
+    release.send(()).unwrap();
+    let _effects = fixture.state.settings_store.commit_effects().await;
+    fixture.assert_stopped().await;
+    assert!(!settings_transaction::has_pending(&fixture.settings_path));
+}
+
+#[tokio::test]
+async fn save_receipt_reports_unavailable_runtime_admission_without_losing_its_commit() {
+    let fixture = Fixture::running().await;
+    // The commit's availability read succeeds; the fresh runtime admission fails.
+    fixture
+        .credentials
+        .unavailable_at_read
+        .store(2, Ordering::SeqCst);
+    let mut draft = fixture.settings.clone();
+    draft.prompt_template = "Keep this exact committed prompt.".into();
+    draft.repos = vec![symphony_core::RepoConfig {
+        name: "widgets".into(),
+        url: "https://example.invalid/widgets.git".into(),
+        install_cmd: None,
+        is_default: true,
+        skills_marked_installed: false,
+    }];
+    assert!(live_reconfigure_allowed(&draft));
+    let saved = save_settings_owned(
+        fixture.state.clone(),
+        SaveSettingsRequest {
+            settings: draft.clone(),
+            linear_api_key: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.settings_revision, 11);
+    assert_eq!(saved.prompt_template, draft.prompt_template);
+    assert_eq!(saved.repos[0].url, draft.repos[0].url);
+    assert!(!saved.linear_api_key_set);
+    assert!(saved
+        .linear_api_key_error
+        .as_deref()
+        .unwrap()
+        .contains("unavailable"));
+    assert_eq!(fixture.credentials.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.state.worker.status().await.state,
+        symphony_worker::WorkerState::Running
+    );
+    let durable: AppSettings =
+        serde_json::from_slice(&std::fs::read(&fixture.settings_path).unwrap()).unwrap();
+    assert_eq!(durable.settings_revision, 11);
+    assert_eq!(durable.prompt_template, draft.prompt_template);
+    assert!(durable.linear_api_key_set);
+    assert!(durable.linear_api_key_error.is_none());
+    fixture.state.worker.stop().await;
+    fixture.assert_stopped().await;
 }

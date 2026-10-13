@@ -19,6 +19,7 @@ const PENDING: &str = "A Linear credential update needs recovery before settings
 pub(crate) enum RecoveryOutcome {
     Ready,
     Recovered { settings_revision: u64 },
+    Superseded,
     Deferred,
 }
 
@@ -165,6 +166,8 @@ fn commit_with_hooks(
 /// Resolve a prior interrupted commit. No marker means no credential access.
 /// `Recovered` identifies the credential revision whose runtime effects must
 /// finish, including when the new settings file was already installed.
+/// `Superseded` still requires a conservative runtime stop: the old credential
+/// may already have changed even though a newer file won the commit race.
 /// `Deferred` leaves all durable state untouched while the OS store is locked.
 /// Unexpected file/key combinations return an error and retain the evidence.
 pub(crate) fn recover(
@@ -184,7 +187,7 @@ pub(crate) fn recover(
         // old file or credentials, even if the stale marker survived deletion.
         sync_current(path)?;
         clear_journal(path)?;
-        return Ok(RecoveryOutcome::Ready);
+        return Ok(RecoveryOutcome::Superseded);
     }
     let intended = settings_body(&journal.settings)?;
     let is_committed = current.as_deref() == Some(intended.as_slice());
