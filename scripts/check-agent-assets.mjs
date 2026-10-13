@@ -814,16 +814,52 @@ function validateRetroServiceSkills(
   }
   // Bindings and mutations must not replace the inventory between injection
   // and consumption. Comments/string literals cannot satisfy these token checks.
-  const replacements = [
+  const runtimeBindings = countTokenSequence(
+    serviceTokens,
     ["let", "runtime"],
+    body.start,
+    body.end,
+  );
+  if (runtimeBindings !== 0) {
+    const credentialRefresh = rustTokens(
+      "let runtime = runtime.with_credential(snapshot.credential);",
+    ).map((token) => token.value);
+    if (
+      runtimeBindings !== 1 ||
+      countTokenSequence(serviceTokens, credentialRefresh, body.start, body.end) !== 1
+    ) {
+      errors.push(
+        `${RETRO_SERVICE_SOURCE} start_inner may rebind runtime only through the verified credential refresh`,
+      );
+    } else {
+      const refreshBody = requireFunctionSequences(
+        serviceTokens,
+        "with_credential",
+        [],
+        RETRO_SERVICE_SOURCE,
+        errors,
+      );
+      requireExactFunctionBody(
+        serviceTokens,
+        refreshBody,
+        `self.env.remove("LINEAR_API_KEY");
+        if let Some(key) = &credential { self.env.insert("LINEAR_API_KEY".into(), key.clone()); }
+        self.api_key = credential;
+        self`,
+        `${RETRO_SERVICE_SOURCE} with_credential`,
+        errors,
+      );
+    }
+  }
+  const replacements = [
     ["let", "mut", "runtime"],
-    ["runtime", "="],
     ["&", "mut", "runtime"],
   ];
   if (
     replacements.some(
       (sequence) => countTokenSequence(serviceTokens, sequence, body.start, body.end) > 0,
     ) ||
+    countTokenSequence(serviceTokens, ["runtime", "="], body.start, body.end) !== runtimeBindings ||
     countTokenSequence(serviceTokens, ["runtime", ".", "skills"], body.start, body.end) !== 1
   ) {
     errors.push(

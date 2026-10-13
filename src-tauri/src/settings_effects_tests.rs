@@ -276,3 +276,50 @@ async fn failed_removal_with_locked_rollback_stops_before_returning_the_error() 
         assert_eq!(std::fs::read(&fixture.settings_path).unwrap(), before);
     }
 }
+
+#[tokio::test]
+async fn retro_admission_drains_recovery_even_on_error_and_caller_cancellation() {
+    for (cancel_caller, keyring_locked) in [(false, false), (true, false), (false, true)] {
+        let fixture = Fixture::running().await;
+        fixture.interrupt_removal();
+        fixture
+            .credentials
+            .unavailable
+            .store(keyring_locked, Ordering::SeqCst);
+        let (entered, release) = fixture.credentials.block_next_read();
+        let service = fixture.state.retro.clone();
+        let runtime = retro_service::RetroRuntime {
+            app_data_dir: fixture.state.app_data_dir.clone(),
+            api_key: Some(OLD_KEY.into()),
+            env: BTreeMap::from([("LINEAR_API_KEY".into(), OLD_KEY.into())]),
+            skills: vec![],
+        };
+        let caller =
+            tokio::spawn(
+                async move { service.start_prs("no-reviewed-retro".into(), runtime).await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel_caller {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+        } else {
+            release.send(()).unwrap();
+            let error = caller.await.unwrap().unwrap_err();
+            assert!(error.contains(if keyring_locked {
+                "recovery"
+            } else {
+                "Accept at least"
+            }));
+        }
+        let _effects = fixture.state.settings_store.commit_effects().await;
+        fixture.assert_stopped().await;
+        assert_eq!(
+            settings_transaction::has_pending(&fixture.settings_path),
+            keyring_locked
+        );
+    }
+}

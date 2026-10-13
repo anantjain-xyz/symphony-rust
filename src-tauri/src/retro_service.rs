@@ -7,7 +7,7 @@ use crate::{
         uses_legacy_retro_section, RetroManager, RetroProposalConfig, RetroReport, RetroStatus,
     },
     settings::workflow_from_settings,
-    settings_store::SettingsStore,
+    settings_store::{SettingsSnapshot, SettingsStore},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -16,10 +16,12 @@ use std::{
 };
 use symphony_contracts::AppSettings;
 use symphony_core::{
+    validation::{validate_repositories, validate_session_environment},
     BatchKind, BatchState, ProposalState, RunnableConfig, SuggestionDecision, SuggestionTarget,
 };
 use symphony_storage::{
-    now_iso, Repository, RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow,
+    now_iso, Repository, RetroBatchReservation, RetroBatchRow, RetroRepoBatchPlan,
+    RetroRepoBatchReservation, RetroRow, RetroSuggestionRow,
 };
 use symphony_tracker::LinearTracker;
 use symphony_worker::{
@@ -43,6 +45,17 @@ pub struct RetroRuntime {
 }
 
 impl RetroRuntime {
+    fn with_credential(mut self, credential: Option<String>) -> Self {
+        // Command-time environment may predate a saved replacement/removal.
+        // Only the credential captured with admitted settings may reach a run.
+        self.env.remove("LINEAR_API_KEY");
+        if let Some(key) = &credential {
+            self.env.insert("LINEAR_API_KEY".into(), key.clone());
+        }
+        self.api_key = credential;
+        self
+    }
+
     fn worker_config(&self, settings: &AppSettings) -> Result<WorkerStartConfig, String> {
         Ok(WorkerStartConfig {
             runtime: RunnableConfig::new(
@@ -211,13 +224,19 @@ impl RetroService {
     }
 
     async fn start_inner(&self, runtime: RetroRuntime) -> Result<RetroStatus, String> {
+        let _effects = self.settings.commit_effects().await;
+        let snapshot = self.runtime_snapshot().await?;
+        if let Some(error) = &snapshot.settings.linear_api_key_error {
+            return Err(error.clone());
+        }
+        let runtime = runtime.with_credential(snapshot.credential);
         let Some(api_key) = runtime.api_key.clone() else {
             return Err(
                 "No Linear API key configured. Add one under Settings → Linear, then run a retro."
                     .to_string(),
             );
         };
-        let settings = self.settings.load().await?;
+        let settings = snapshot.settings;
         let workflow = workflow_from_settings(&settings, Some(&api_key));
         let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
         let workspace_root = resolve_workspace_root_dir(
@@ -292,6 +311,13 @@ impl RetroService {
     }
 
     pub async fn delete(&self, id: String) -> Result<(), String> {
+        let service = self.clone();
+        tokio::spawn(async move { service.delete_inner(id).await })
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
+    async fn delete_inner(&self, id: String) -> Result<(), String> {
         let deleted = self
             .repo
             .delete_retro(&id)
@@ -330,7 +356,12 @@ impl RetroService {
                 .await
                 .map_err(|error| error.to_string())?,
         )?;
-        let settings = self.settings.load().await?;
+        let snapshot = {
+            let _effects = self.settings.commit_effects().await;
+            self.runtime_snapshot().await?
+        };
+        let runtime = runtime.with_credential(snapshot.credential);
+        let settings = snapshot.settings;
         let WorkflowPlan {
             suggestions,
             expected_ref,
@@ -444,15 +475,34 @@ impl RetroService {
                 .map_err(|err| err.to_string())?;
             return Err(error);
         }
-        let updated = match self
+        // Slow source validation happens outside the settings effects gate.
+        // Recheck the exact revision and refresh credentials at admission.
+        let _effects = self.settings.commit_effects().await;
+        let snapshot = self.runtime_snapshot().await;
+        let snapshot = match snapshot {
+            Ok(snapshot) if snapshot.settings.settings_revision == updated.settings_revision => {
+                snapshot
+            }
+            result => {
+                let error = result.err().unwrap_or_else(|| "Settings changed while the workflow update was being prepared. Review the latest settings and retry.".into());
+                self.repo
+                    .update_retro_batch(&batch.id, BatchState::Failed, None, Some(&error), None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Err(error);
+            }
+        };
+        let runtime = runtime.with_credential(snapshot.credential);
+        let result = self
             .settings
             .apply_prompt(
                 updated.settings_revision,
                 expected_prompt_hash,
                 updated.prompt_template.clone(),
             )
-            .await
-        {
+            .await;
+        self.finish_recovery().await;
+        let updated = match result {
             Ok(updated) => updated,
             Err(error) => {
                 self.repo
@@ -463,8 +513,19 @@ impl RetroService {
             }
         };
         self.worker
-            .reconfigure(runtime.worker_config(&updated)?)
+            .observe_settings_revision(updated.settings_revision)
             .await;
+        if updated.linear_api_key_error.is_none() && !updated.linear_api_key_set {
+            self.worker
+                .stop_for_settings_revision(updated.settings_revision)
+                .await;
+        } else if updated.linear_api_key_error.is_none() && runtime.api_key.is_some() {
+            // Post-commit availability can change independently of the admitted
+            // snapshot. Never infer a captured key from newer response metadata.
+            self.worker
+                .reconfigure(runtime.worker_config(&updated)?)
+                .await;
+        }
         self.repo
             .update_retro_batch(
                 &batch.id,
@@ -493,7 +554,20 @@ impl RetroService {
         retro_id: String,
         runtime: RetroRuntime,
     ) -> Result<Vec<RetroBatchRow>, String> {
-        let settings = self.settings.load().await?;
+        // Settings saves and credential removal share this admission gate. Read
+        // the durable snapshot only after acquiring it, then retain ownership
+        // until the complete repository plan is reserved and its jobs launched.
+        let _effects = self.settings.commit_effects().await;
+        let snapshot = self.runtime_snapshot().await?;
+        let settings = snapshot.settings;
+        let runtime = runtime.with_credential(snapshot.credential);
+        if let Some(issue) = validate_repositories(&settings.repos)
+            .into_iter()
+            .chain(validate_session_environment(&settings.session_env))
+            .find(|issue| issue.blocking)
+        {
+            return Err(issue.message);
+        }
         let reviewed = ReviewedSuggestions::select(
             self.repo
                 .list_retro_suggestions(&retro_id)
@@ -501,52 +575,26 @@ impl RetroService {
                 .map_err(|error| error.to_string())?,
             ReviewTarget::Repository,
         )?;
-        let by_repo = reviewed.by_repository();
-        let blocked_repos = self
-            .repo
-            .list_retro_batches(&retro_id)
-            .await
-            .map_err(|err| err.to_string())?
-            .into_iter()
-            .filter(|batch| {
-                batch.kind == BatchKind::RepoPr
-                    && matches!(
-                        batch.state,
-                        BatchState::Queued
-                            | BatchState::Running
-                            | BatchState::Completed
-                            | BatchState::Stale
-                    )
-            })
-            .filter_map(|batch| batch.repo_name)
-            .collect::<BTreeSet<_>>();
         let workspace_root = resolve_workspace_root_dir(
-            &workflow_from_settings(&settings, runtime.api_key.clone().as_deref())
+            &workflow_from_settings(&settings, runtime.api_key.as_deref())
                 .front_matter
                 .workspace
                 .root,
             &runtime.app_data_dir,
         );
-        for (repo_name, suggestions) in by_repo {
-            if blocked_repos.contains(&repo_name) {
-                continue;
-            }
+        let mut plans = Vec::new();
+        for (repo_name, suggestions) in reviewed.by_repository() {
             let stored_url = suggestions
                 .first()
                 .and_then(|suggestion| suggestion.repo_url.as_deref());
             let repo_url = current_retro_repo_url(&settings, &repo_name, stored_url);
             let legacy_proposal = suggestions.iter().any(uses_legacy_retro_section);
             let stale_error = if legacy_proposal {
-                Some(
-                "The proposal format changed. Generate a new retro and review the updated in-place diff."
-                    .to_string(),
-            )
+                Some("The proposal format changed. Generate a new retro and review the updated in-place diff.".to_string())
             } else {
-                repo_url.is_none().then(|| {
-                format!(
+                repo_url.is_none().then(|| format!(
                     "Repository `{repo_name}` was removed or its URL changed after this retro was generated. Generate a new retro before opening a PR."
-                )
-            })
+                ))
             };
             let batch = RetroBatchRow {
                 id: Uuid::new_v4().to_string(),
@@ -560,62 +608,99 @@ impl RetroService {
                 } else {
                     BatchState::Queued
                 },
-                progress: stale_error
-                    .as_ref()
-                    .map(|_| {
+                progress: Some(
+                    if stale_error.is_some() {
                         if legacy_proposal {
-                            "Proposal format changed.".to_string()
+                            "Proposal format changed."
                         } else {
-                            "Repository configuration changed.".to_string()
+                            "Repository configuration changed."
                         }
-                    })
-                    .or_else(|| Some("Queued for PR creation…".to_string())),
+                    } else {
+                        "Queued for PR creation…"
+                    }
+                    .to_string(),
+                ),
                 error: stale_error.clone(),
                 pr_url: None,
                 created_at: now_iso(),
                 completed_at: stale_error.as_ref().map(|_| now_iso()),
             };
-            let ids = suggestions
-                .iter()
-                .map(|item| item.id.clone())
-                .collect::<Vec<_>>();
-            let reservation = self
-                .repo
-                .reserve_retro_batch(&batch, &ids)
-                .await
-                .map_err(|err| err.to_string())?;
-            match reservation {
-                RetroBatchReservation::Created => {}
-                RetroBatchReservation::ReviewIncomplete => {
-                    return Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string());
-                }
-                RetroBatchReservation::AcceptedSetChanged => {
-                    return Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.to_string());
-                }
-                RetroBatchReservation::AlreadyReserved => continue,
-            }
-            if stale_error.is_some() {
-                continue;
-            }
-            let repository = self.repo.clone();
-            let session_env = settings.session_env.clone();
             let workspace = workspace_root
                 .join("_retro-actions")
                 .join(&retro_id)
                 .join(sanitize_key(&repo_name));
-            let effects = self.effects.clone();
+            plans.push((batch, suggestions, workspace));
+        }
+        let reservations = plans
+            .iter()
+            .map(|(batch, suggestions, _)| RetroRepoBatchPlan {
+                batch: batch.clone(),
+                suggestion_ids: suggestions
+                    .iter()
+                    .map(|suggestion| suggestion.id.clone())
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let created = match self
+            .repo
+            .reserve_retro_repo_batches(&retro_id, &reservations)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            RetroRepoBatchReservation::Reserved { created_batch_ids } => {
+                created_batch_ids.into_iter().collect::<BTreeSet<_>>()
+            }
+            RetroRepoBatchReservation::ReviewIncomplete => {
+                return Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.into())
+            }
+            RetroRepoBatchReservation::AcceptedSetChanged => {
+                return Err(RETRO_ACCEPTED_SET_CHANGED_MESSAGE.into())
+            }
+        };
+        {
             let mut jobs = self.jobs.lock().await;
             while jobs.try_join_next().is_some() {}
-            jobs.spawn(async move {
-                effects
-                    .run_pr_batch(repository, batch, suggestions, workspace, session_env)
-                    .await;
-            });
+            for (batch, suggestions, workspace) in plans {
+                if !created.contains(&batch.id) || batch.state != BatchState::Queued {
+                    continue;
+                }
+                let repository = self.repo.clone();
+                let session_env = settings.session_env.clone();
+                let effects = self.effects.clone();
+                jobs.spawn(async move {
+                    effects
+                        .run_pr_batch(repository, batch, suggestions, workspace, session_env)
+                        .await;
+                });
+            }
         }
         self.repo
             .list_retro_batches(&retro_id)
             .await
             .map_err(|err| err.to_string())
+    }
+
+    /// Called only inside an owned continuation with the settings effects gate.
+    async fn runtime_snapshot(&self) -> Result<SettingsSnapshot, String> {
+        let result = self.settings.runtime_snapshot().await;
+        self.finish_recovery().await;
+        if let Ok(snapshot) = &result {
+            self.worker
+                .observe_settings_revision(snapshot.settings.settings_revision)
+                .await;
+            if snapshot.settings.linear_api_key_error.is_none() && snapshot.credential.is_none() {
+                self.worker
+                    .stop_for_settings_revision(snapshot.settings.settings_revision)
+                    .await;
+            }
+        }
+        result
+    }
+
+    async fn finish_recovery(&self) {
+        if self.settings.take_recovery_stop() {
+            self.worker.stop().await;
+        }
     }
 }
 

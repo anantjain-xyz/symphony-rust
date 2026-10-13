@@ -4,12 +4,27 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use symphony_core::RepoConfig;
 use tokio::sync::Notify;
 
-struct FakeCredentials;
+struct FakeCredentials(
+    std::sync::Mutex<Option<String>>,
+    AtomicBool,
+    std::sync::Mutex<std::collections::VecDeque<bool>>,
+);
 impl Credentials for FakeCredentials {
     fn read(&self) -> Result<Option<String>, String> {
-        Ok(Some("synthetic-test-key".into()))
+        let unavailable = self
+            .2
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| self.1.load(Ordering::SeqCst));
+        if unavailable {
+            Err("Synthetic keyring unavailable".into())
+        } else {
+            Ok(self.0.lock().unwrap().clone())
+        }
     }
-    fn set(&self, _value: Option<&str>) -> Result<(), String> {
+    fn set(&self, value: Option<&str>) -> Result<(), String> {
+        *self.0.lock().unwrap() = value.map(str::to_owned);
         Ok(())
     }
 }
@@ -24,6 +39,8 @@ struct FakeEffects {
     pr_entered: Notify,
     pr_release: Notify,
     jobs: Mutex<Vec<(String, Vec<String>)>>,
+    environments: Mutex<Vec<BTreeMap<String, String>>>,
+    admitted_batch_counts: Mutex<Vec<usize>>,
 }
 
 #[async_trait::async_trait]
@@ -47,8 +64,16 @@ impl RetroEffects for FakeEffects {
         batch: RetroBatchRow,
         suggestions: Vec<RetroSuggestionRow>,
         _workspace: PathBuf,
-        _env: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
     ) {
+        self.environments.lock().await.push(env);
+        self.admitted_batch_counts.lock().await.push(
+            repository
+                .list_retro_batches(&batch.retro_id)
+                .await
+                .unwrap()
+                .len(),
+        );
         self.jobs.lock().await.push((
             batch.repo_name.clone().unwrap(),
             suggestions.into_iter().map(|s| s.id).collect(),
@@ -87,6 +112,7 @@ struct Fixture {
     directory: tempfile::TempDir,
     service: RetroService,
     effects: Arc<FakeEffects>,
+    credentials: Arc<FakeCredentials>,
     retro: RetroRow,
 }
 impl Fixture {
@@ -96,10 +122,13 @@ impl Fixture {
             .await
             .unwrap();
         let repo = Repository::new(pool, symphony_storage::EventBus::default());
-        let settings = SettingsStore::new(
-            directory.path().join("settings.json"),
-            Arc::new(FakeCredentials),
-        );
+        let credentials = Arc::new(FakeCredentials(
+            std::sync::Mutex::new(Some("synthetic-test-key".into())),
+            AtomicBool::new(false),
+            std::sync::Mutex::default(),
+        ));
+        let settings =
+            SettingsStore::new(directory.path().join("settings.json"), credentials.clone());
         settings.save(configured_settings(), None).await.unwrap();
         let worker = WorkerManager::new(repo.clone());
         let mut service = RetroService::new(repo.clone(), settings, worker);
@@ -126,6 +155,7 @@ impl Fixture {
             directory,
             service,
             effects,
+            credentials,
             retro,
         }
     }
@@ -445,8 +475,8 @@ async fn repository_source_change_marks_prompt_batch_stale_without_writing_setti
 async fn generation_without_credentials_does_not_create_a_retro() {
     let fixture = Fixture::new().await;
     let before = fixture.service.list().await.unwrap().len();
-    let mut runtime = fixture.runtime();
-    runtime.api_key = None;
+    let runtime = fixture.runtime();
+    *fixture.credentials.0.lock().unwrap() = None;
     assert!(fixture
         .service
         .start(runtime)
@@ -497,6 +527,303 @@ async fn detail_reports_corrupt_stored_report_instead_of_hiding_it() {
         .err()
         .unwrap();
     assert!(error.contains("invalid stored retro report"));
+}
+
+#[tokio::test]
+async fn pr_admission_uses_settings_committed_while_waiting_for_the_effects_gate() {
+    for replace_url in [false, true] {
+        let fixture = Fixture::new().await;
+        fixture.suggestion("skill", "skill", "accepted").await;
+        let gate = fixture.service.settings.commit_effects().await;
+        let service = fixture.service.clone();
+        let retro_id = fixture.retro.id.clone();
+        let runtime = fixture.runtime();
+        let mut request = tokio::spawn(async move { service.start_prs(retro_id, runtime).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut request)
+                .await
+                .is_err(),
+            "PR admission waits for the in-flight settings operation"
+        );
+        let mut changed = fixture.service.settings.load().await.unwrap();
+        changed
+            .session_env
+            .insert("CURRENT_CONFIG".into(), "new-value".into());
+        if replace_url {
+            changed.repos[0].url = "git@github.com:acme/replacement.git".into();
+        }
+        fixture.service.settings.save(changed, None).await.unwrap();
+        drop(gate);
+        let batches = request.await.unwrap().unwrap();
+        fixture.join_jobs().await;
+        if replace_url {
+            assert_eq!(batches[0].state, BatchState::Stale);
+            assert!(fixture.effects.jobs.lock().await.is_empty());
+        } else {
+            assert_eq!(fixture.effects.jobs.lock().await.len(), 1);
+            assert_eq!(
+                fixture.effects.environments.lock().await[0]["CURRENT_CONFIG"],
+                "new-value"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn all_repository_batches_are_durable_before_the_first_job_starts() {
+    let fixture = Fixture::new().await;
+    let mut settings = fixture.service.settings.load().await.unwrap();
+    settings.repos.push(RepoConfig {
+        name: "gadgets".into(),
+        url: "git@github.com:acme/gadgets.git".into(),
+        ..Default::default()
+    });
+    fixture.service.settings.save(settings, None).await.unwrap();
+    let mut second = fixture
+        .suggestion("widgets-skill", "skill", "accepted")
+        .await;
+    second.id = "gadgets-skill".into();
+    second.repo_name = "gadgets".into();
+    second.repo_url = Some("git@github.com:acme/gadgets.git".into());
+    fixture
+        .service
+        .repo
+        .insert_retro_suggestions(&[second])
+        .await
+        .unwrap();
+    let batches = fixture
+        .service
+        .start_prs(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 2);
+    fixture.join_jobs().await;
+    assert_eq!(
+        *fixture.effects.admitted_batch_counts.lock().await,
+        vec![2, 2]
+    );
+    let again = fixture
+        .service
+        .start_prs(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap();
+    assert_eq!(again.len(), 2);
+    fixture.join_jobs().await;
+    assert_eq!(fixture.effects.jobs.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn colliding_saved_repository_drafts_cannot_reserve_or_launch_prs() {
+    let fixture = Fixture::new().await;
+    fixture.suggestion("skill", "skill", "accepted").await;
+    let mut settings = fixture.service.settings.load().await.unwrap();
+    for name in ["team/app", "team_app"] {
+        settings.repos.push(RepoConfig {
+            name: name.into(),
+            url: format!("git@github.com:acme/{name}.git"),
+            ..Default::default()
+        });
+    }
+    fixture.service.settings.save(settings, None).await.unwrap();
+    let error = fixture
+        .service
+        .start_prs(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap_err();
+    assert!(error.contains("collide"));
+    assert!(fixture.effects.jobs.lock().await.is_empty());
+    assert!(fixture
+        .service
+        .repo
+        .list_retro_batches(&fixture.retro.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn disconnected_delete_finishes_forgetting_the_deleted_status() {
+    let fixture = Fixture::new().await;
+    let status = RetroStatus {
+        state: crate::retro::RetroRunState::Completed,
+        retro_id: Some(fixture.retro.id.clone()),
+        message: None,
+        report: fixture
+            .service
+            .detail(fixture.retro.id.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .report,
+        error: None,
+    };
+    let status_guard = fixture
+        .service
+        .generation
+        .hold_status_for_test(status)
+        .await;
+    let service = fixture.service.clone();
+    let id = fixture.retro.id.clone();
+    let caller = tokio::spawn(async move { service.delete(id).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while fixture
+            .service
+            .repo
+            .get_retro(&fixture.retro.id)
+            .await
+            .unwrap()
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(status_guard.as_ref().unwrap().retro_id.is_some());
+    drop(status_guard);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while fixture.service.status().await.unwrap().retro_id.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.service.status().await.unwrap().state,
+        crate::retro::RetroRunState::Idle
+    );
+}
+
+#[tokio::test]
+async fn admitted_credential_replaces_or_removes_stale_command_values() {
+    let fixture = Fixture::new().await;
+    for credential in [Some("fresh-snapshot-canary"), None] {
+        *fixture.credentials.0.lock().unwrap() = credential.map(str::to_owned);
+        let mut runtime = fixture.runtime();
+        runtime.api_key = Some("obsolete-captured-canary".into());
+        runtime
+            .env
+            .insert("LINEAR_API_KEY".into(), "obsolete-captured-canary".into());
+        let _effects = fixture.service.settings.commit_effects().await;
+        let snapshot = fixture.service.runtime_snapshot().await.unwrap();
+        let runtime = runtime.with_credential(snapshot.credential);
+        let config = runtime.worker_config(&snapshot.settings).unwrap();
+        assert_eq!(runtime.api_key.as_deref(), credential);
+        assert_eq!(
+            runtime.env.get("LINEAR_API_KEY").map(String::as_str),
+            credential
+        );
+        assert_eq!(
+            config.runtime.workflow().front_matter.tracker.api_key,
+            credential.unwrap_or_default()
+        );
+    }
+}
+
+#[tokio::test]
+async fn unavailable_linear_keyring_blocks_generation_but_not_git_or_prompt_changes() {
+    let fixture = Fixture::new().await;
+    fixture.suggestion("skill", "skill", "accepted").await;
+    fixture.suggestion("prompt", "prompt", "accepted").await;
+    fixture.credentials.1.store(true, Ordering::SeqCst);
+    assert!(fixture
+        .service
+        .start(fixture.runtime())
+        .await
+        .unwrap_err()
+        .contains("unavailable"));
+    let batches = fixture
+        .service
+        .start_prs(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 1);
+    fixture.join_jobs().await;
+    assert_eq!(fixture.effects.jobs.lock().await.len(), 1);
+    let batch = fixture
+        .service
+        .apply_workflow(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap();
+    assert_eq!(batch.state, BatchState::Completed);
+    let settings = fixture.service.settings.load().await.unwrap();
+    assert_eq!(settings.settings_revision, 2);
+    assert!(settings
+        .prompt_template
+        .contains("Validate changes before pushing."));
+    assert!(settings.linear_api_key_error.is_some());
+    let _effects = fixture.service.settings.commit_effects().await;
+    let snapshot = fixture.service.runtime_snapshot().await.unwrap();
+    let mut captured = fixture.runtime();
+    captured
+        .env
+        .insert("LINEAR_API_KEY".into(), "stale-command-key".into());
+    let refreshed = captured.with_credential(snapshot.credential);
+    assert!(refreshed.api_key.is_none());
+    assert!(!refreshed.env.contains_key("LINEAR_API_KEY"));
+}
+
+#[tokio::test]
+async fn keyring_unlock_during_commit_does_not_reconfigure_with_an_uncaptured_key() {
+    let fixture = Fixture::new().await;
+    fixture.suggestion("prompt", "prompt", "accepted").await;
+    let settings = fixture.service.settings.load().await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (connected, observed) = tokio::sync::oneshot::channel();
+    let tracker = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.unwrap();
+        connected.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let mut workflow = workflow_from_settings(&settings, Some("synthetic-test-key"));
+    workflow.front_matter.tracker.endpoint = format!("http://{address}/graphql");
+    fixture
+        .service
+        .worker
+        .start(WorkerStartConfig {
+            runtime: RunnableConfig::new(
+                settings.settings_revision,
+                workflow,
+                settings.repos,
+                settings.session_env,
+            )
+            .unwrap(),
+            env: BTreeMap::new(),
+            app_data_dir: fixture.directory.path().into(),
+            skills: vec![],
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    // Both admitted snapshots cannot read the key. The response-only metadata
+    // read after the prompt commit succeeds because the keyring was unlocked.
+    *fixture.credentials.2.lock().unwrap() = [true, true, false].into();
+    let batch = fixture
+        .service
+        .apply_workflow(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap();
+    assert_eq!(batch.state, BatchState::Completed);
+    assert!(fixture.credentials.2.lock().unwrap().is_empty());
+    assert_eq!(
+        fixture.service.worker.status().await.state,
+        symphony_worker::WorkerState::Running
+    );
+    fixture.service.worker.stop().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while fixture.service.worker.status().await.state != symphony_worker::WorkerState::Stopped {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tracker.abort();
 }
 #[test]
 fn retro_prs_require_the_saved_repo_name_and_url_to_match() {

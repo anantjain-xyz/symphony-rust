@@ -227,13 +227,19 @@ Tauri command ──> RetroService ──> pure reviewed selection / workflow pl
 
 | Owner | Guarantee |
 | --- | --- |
-| Command adapter | Supplies a fresh runtime snapshot; delegates and projects results |
+| Command adapter | Supplies environment, paths, and bundled skills; delegates and projects results |
 | Reviewed selection | Every available suggestion is reviewed before selecting accepted targets |
-| Repository reservation | Rechecks review and accepted IDs atomically; admits one batch per target |
+| Settings admission | Holds the local effects gate; reads settings and credentials under one OS lock; replaces captured credential values and drains recovery effects |
+| Repository reservation | Rechecks the complete accepted repository plan and inserts all new batches in one transaction; returns only newly admitted IDs |
 | Workflow application | Uses core runtime validation; rejects changed prompt/source; saves through settings CAS before revision-fenced reconfiguration |
-| PR batch owner | Groups accepted targets by repository; tracks background jobs in a `JoinSet` |
+| PR batch owner | Validates repository workspace names before reservation; launches admitted IDs only; tracks background jobs in a `JoinSet` |
 
-- Application and launch operations survive an IPC caller dropping its future.
+- Application, launch, and delete operations survive an IPC caller dropping its
+  future; deletion owns both the durable removal and status cleanup.
+- Source validation runs outside the settings gate; workflow application rechecks
+  the revision and captures credentials again immediately before CAS.
+- An unavailable Linear key blocks generation, while Git PR work and prompt
+  changes remain available. Ambiguous credential recovery blocks admission.
 - Delete and review use storage guards so reserved work cannot lose its inputs.
 - Commands accept closed decision enums and project service snapshots into IPC
   DTOs; malformed stored reports surface as errors rather than missing reports.

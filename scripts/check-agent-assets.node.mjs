@@ -99,6 +99,7 @@ function useRetroService(root) {
   retro_service::RetroRuntime { skills: bundled_skills() }
 }
 
+
 async fn start_retro(state: State<'_, AppState>) {
   state.retro.start(retro_runtime(&state)).await
 }`,
@@ -119,6 +120,28 @@ async fn start_retro(state: State<'_, AppState>) {
       skills: runtime.skills.clone().into_iter().map(|skill| (skill.name, skill.content)).collect(),
     };
     self.generation.start(self.repo.clone(), tracker, proposal_config).await
+  }
+}
+`,
+  );
+}
+
+function refreshRetroServiceCredentials(root) {
+  const source = join(root, "src-tauri/src/retro_service.rs");
+  writeFileSync(
+    source,
+    `${readFileSync(source, "utf8").replace(
+      "let proposal_config = RetroProposalConfig {",
+      "let runtime = runtime.with_credential(snapshot.credential);\n    let proposal_config = RetroProposalConfig {",
+    )}
+impl RetroRuntime {
+  fn with_credential(mut self, credential: Option<String>) -> Self {
+    self.env.remove("LINEAR_API_KEY");
+    if let Some(key) = &credential {
+      self.env.insert("LINEAR_API_KEY".into(), key.clone());
+    }
+    self.api_key = credential;
+    self
   }
 }
 `,
@@ -927,6 +950,51 @@ test("requires the delegated RetroService skill consumer source", (t) => {
   rmSync(join(root, "src-tauri/src/retro_service.rs"));
   assert.match(validateAgentAssets(root).join("\n"), /retro skill consumer source is missing/);
 });
+
+test("allows credential refresh only through a helper that preserves runtime skills", (t) => {
+  const root = harnessFixture(t);
+  useRetroService(root);
+  refreshRetroServiceCredentials(root);
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+for (const [name, original, replacement, diagnostic] of [
+  [
+    "cleared skills",
+    "self.api_key = credential;",
+    "self.skills.clear(); self.api_key = credential;",
+    /with_credential must forward the validated runtime without replacing it/,
+  ],
+  [
+    "replaced runtime",
+    "self.api_key = credential;\n    self",
+    "self.api_key = credential;\n    replacement_runtime()",
+    /with_credential must forward the validated runtime without replacing it/,
+  ],
+  [
+    "unverified rebind",
+    "let runtime = runtime.with_credential(snapshot.credential);",
+    "let runtime = replacement_runtime();",
+    /may rebind runtime only through the verified credential refresh/,
+  ],
+  [
+    "transformed credential refresh",
+    "let runtime = runtime.with_credential(snapshot.credential);",
+    "let runtime = replace_skills(runtime.with_credential(snapshot.credential));",
+    /may rebind runtime only through the verified credential refresh/,
+  ],
+]) {
+  test(`rejects ${name} in credential-refresh skill flow`, (t) => {
+    const root = harnessFixture(t);
+    useRetroService(root);
+    refreshRetroServiceCredentials(root);
+    const target = join(root, "src-tauri/src/retro_service.rs");
+    const source = readFileSync(target, "utf8");
+    assert.ok(source.includes(original));
+    writeFileSync(target, source.replace(original, replacement));
+    assert.match(validateAgentAssets(root).join("\n"), diagnostic);
+  });
+}
 
 test("rejects conditional compilation inside bundled inventory", (t) => {
   const root = harnessFixture(t);

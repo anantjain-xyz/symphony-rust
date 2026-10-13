@@ -64,6 +64,16 @@ impl RetroManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_status_for_test(
+        &self,
+        status: RetroStatus,
+    ) -> tokio::sync::OwnedMutexGuard<Option<RetroStatus>> {
+        let mut guard = self.inner.clone().lock_owned().await;
+        *guard = Some(status);
+        guard
+    }
+
     pub async fn start<T>(
         &self,
         repo: Repository,
