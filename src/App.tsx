@@ -54,6 +54,7 @@ import {
   type PollResourceState,
 } from "./pollController";
 import { RelativeTime } from "./RelativeTime";
+import { usePendingOperations } from "./usePendingOperations";
 import type { SettingsValidationController } from "./settingsValidationController";
 import { Empty, formSnapshot, Panel, RunTable } from "./viewPrimitives";
 import type { IssueViewMode } from "./views/IssuesView";
@@ -503,7 +504,9 @@ function App() {
   const [slowRefreshingKeys, setSlowRefreshingKeys] = useState<Set<DashboardResourceKey>>(
     () => new Set(),
   );
-  const [busy, setBusy] = useState(false);
+  const { pending: operationsPending, beginOperation } = usePendingOperations();
+  const [installLocked, setInstallLocked] = useState(false);
+  const busy = operationsPending || installLocked;
   const [bootState, setBootState] = useState<BootState>({ status: "loading" });
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const [bootstrapSettled, setBootstrapSettled] = useState(false);
@@ -1350,7 +1353,7 @@ function App() {
       setError("Connect through the Symphony desktop app to run this action.");
       return undefined as T;
     }
-    setBusy(true);
+    const finishOperation = beginOperation();
     setError(null);
     try {
       return await fn();
@@ -1358,7 +1361,7 @@ function App() {
       setError(formatError(err));
       throw err;
     } finally {
-      setBusy(false);
+      finishOperation();
     }
   }
 
@@ -2086,7 +2089,7 @@ function App() {
                 onWorkerChange={setWorker}
                 onOverviewChange={setOverview}
                 onRetroBatchWorkChange={setHasInProgressRetroBatches}
-                onInstallLockChange={setBusy}
+                onInstallLockChange={setInstallLocked}
                 onActionError={setError}
               />
             ) : null}
