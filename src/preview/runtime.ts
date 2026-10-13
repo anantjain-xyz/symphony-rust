@@ -12,6 +12,7 @@ import type {
   RunWithIssueRow,
   SkillsStatus,
 } from "../bindings";
+import { cancelRun, decideSuggestion } from "./dashboardActions";
 import { createEventStressFixture } from "./eventStressFixture";
 
 const BUNDLED_SKILL_NAMES = [
@@ -660,6 +661,8 @@ function previewRetroDetailForId(id: string): RetroDetail | null {
 }
 
 export const previewRuntime = {
+  cancelRun,
+  decideSuggestion,
   settings: previewSettings,
   skillsStatuses: previewSkillsStatuses,
   workflowStatuses: previewWorkflowStatuses,

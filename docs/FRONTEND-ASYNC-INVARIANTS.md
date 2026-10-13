@@ -25,7 +25,19 @@ The main implementation is split between
 [`dashboardResources.ts`](../src/dashboardResources.ts),
 [`pollController.ts`](../src/pollController.ts), and
 [`settingsValidationController.ts`](../src/settingsValidationController.ts).
-[`App.tsx`](../src/App.tsx) owns their integration.
+Feature owners integrate these primitives; [`App.tsx`](../src/App.tsx) composes
+snapshots and commands.
+
+| Lifecycle | Owner |
+| --- | --- |
+| Bootstrap, refresh authority, selections, events, stale timers, worker/retro polls | [`useDashboardController.ts`](../src/features/dashboard/useDashboardController.ts) |
+| Saved settings and persistence, viewer checks, save feedback | [`useSettingsController.ts`](../src/features/settings/useSettingsController.ts) |
+| Draft/key revision and Save ownership across navigation | [`settingsSession.ts`](../src/features/settings/settingsSession.ts) |
+| Lazy editor validation and exact Save validation | [`useSettingsEditor.ts`](../src/features/settings/useSettingsEditor.ts) |
+| URL/auth request identity, readiness invalidation, install/transfer polls | [`useRepositoryReadiness.ts`](../src/features/repositories/useRepositoryReadiness.ts) |
+
+The shell never clears another feature's request, revision, or save-owner reference.
+Owner callbacks read current cross-feature context without restarting subscriptions.
 
 ## Refresh generations
 
@@ -102,7 +114,7 @@ error UI. No path may leave a waiter unresolved after unmount or disposal.
 
 ### Current behavior
 
-- Each command started through `App.call` acquires an operation token from
+- Each command started through `useDesktopActions.run` acquires an operation token from
   [`usePendingOperations.ts`](../src/usePendingOperations.ts). Its `finally`
   releases only that token, on success or failure.
 - Global action controls remain busy until every command token is released.
@@ -195,8 +207,9 @@ and database tables to resource keys.
 - An unknown database table uses a conservative broad-list fallback. It does
   not guess which selected detail changed.
 
-The table-to-resource mapping is manual. It currently mirrors backend-emitted
-table names, but no static check guarantees that parity.
+The table-to-resource mapping is explicit. `pnpm check:projections` verifies
+emitted table names against the frontend mapping; the unknown-table fallback
+remains conservative.
 
 ### Proposed invariant
 
@@ -214,25 +227,20 @@ selected-detail correctness.
 
 ### Current behavior
 
-`App.tsx` listens for `db_changed`, `agent_event`, and `rate_limit_changed`.
-Database changes are coalesced for 300 ms. A typed `agent_event` for the visible
-selected run is appended immediately and deduplicated by event ID; its matching
-database change still refreshes overview data but skips an unnecessary immediate
-detail fetch.
+The dashboard owner subscribes through
+[`desktop/events.ts`](../src/desktop/events.ts) to database, agent, rate-limit,
+workflow-readiness, and update-check events. Database changes are coalesced for
+300 ms. A typed agent event for the visible selected run appends immediately
+and deduplicates by event ID; its matching database change refreshes overview
+without an unnecessary immediate detail fetch.
 
-Listener registration itself is asynchronous. Cleanup:
-
-1. marks the effect cancelled;
-2. clears the coalescing timer;
-3. waits for the aggregate registration promise;
-4. calls every unlisten function only when all three registrations succeeded.
-
-When all registrations succeed, this covers React Strict Mode remounts and
-registration that completes after unmount. There is a partial-registration gap:
-`Promise.all(...).catch(() => [])` is fail-fast, so one rejected registration
-discards the unlisten functions from sibling registrations that already
-succeeded or succeed later. Those listeners are not removed by the current
-cleanup.
+- Dashboard cleanup cancels publication, clears the coalescing timer, and
+  releases the subscription.
+- The adapter tracks each successful registration independently. Cleanup
+  removes active listeners immediately and removes late registrations when
+  they resolve, even if a sibling registration rejects.
+- Workflow readiness invalidation is handed to the repository owner; it never
+  replaces the settings draft.
 
 ### Proposed invariant
 
@@ -290,6 +298,13 @@ outcome instead of borrowing another revision's result. Preview mode,
 disposal, and validation failure also produce explicit unavailable outcomes.
 Disposal does not invalidate a Save waiter whose already-active revision is
 still authoritative.
+
+The persistent settings session survives lazy-editor unmounts. `beginSave`
+acquires one validation-controller owner and `finishSave` releases only that
+owner. A remounted editor defers speculative validation while another editor's
+Save owns the session. Successful Save clears draft/key/dirty state only when
+the captured edit revision still matches; edits made while saving remain intact.
+
 
 ### Proposed invariant
 
