@@ -6,6 +6,7 @@ export function createSettingsSession(
   notifySaving: (saving: boolean) => void,
 ) {
   let draft: AppSettings | null = null;
+  let lineage = {};
   let key = "";
   let revision = 0;
   let dirty = false;
@@ -15,6 +16,24 @@ export function createSettingsSession(
     readDraft: () => draft,
     replaceDraft(next: AppSettings) {
       draft = next;
+    },
+    captureDraftLineage(source: AppSettings) {
+      return { lineage, settingsRevision: source.settings_revision };
+    },
+    acknowledgeSave(source: { lineage: object; settingsRevision: number }, saved: AppSettings) {
+      if (
+        !draft ||
+        source.lineage !== lineage ||
+        draft.settings_revision !== source.settingsRevision
+      ) {
+        return false;
+      }
+      draft = {
+        ...draft,
+        settings_revision: saved.settings_revision,
+        linear_api_key_set: saved.linear_api_key_set,
+      };
+      return true;
     },
     readKey: () => key,
     replaceKey(next: string) {
@@ -44,7 +63,10 @@ export function createSettingsSession(
       notifySaving(false);
     },
     acceptSaved(next: AppSettings) {
-      if (!dirty) draft = next;
+      if (!dirty) {
+        draft = next;
+        lineage = {};
+      }
     },
   };
 }

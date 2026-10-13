@@ -66,6 +66,16 @@ impl SettingsStore {
                 .gate
                 .lock()
                 .map_err(|_| "Settings state is unavailable.")?;
+            // Lock a stable sidecar, not the file replaced by rename. Every
+            // settings owner, including another application process, uses it.
+            let lock = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(store.path.with_extension("json.lock"))
+                .map_err(|error| error.to_string())?;
+            lock.lock().map_err(|error| error.to_string())?;
             action(&store.path, store.credentials.as_ref())
         })
         .await
@@ -124,6 +134,16 @@ impl SettingsStore {
         })
         .await
     }
+}
+
+/// Own the complete mutation, including asynchronous post-commit actions.
+/// Dropping an IPC caller's future only detaches its wait; this task continues.
+pub async fn finish_operation<T: Send + 'static>(
+    operation: impl std::future::Future<Output = Result<T, String>> + Send + 'static,
+) -> Result<T, String> {
+    tokio::spawn(operation)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn next_revision(revision: u64) -> Result<u64, String> {
@@ -344,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropped_save_future_retains_commit_ownership() {
+    async fn dropped_save_future_retains_commit_and_continuation_ownership() {
         struct BlockingCredentials {
             entered: tokio::sync::Notify,
             gate: (Mutex<bool>, std::sync::Condvar),
@@ -370,10 +390,18 @@ mod tests {
         });
         let store = SettingsStore::new(directory.path().join("settings.json"), credentials.clone());
         let writer = store.clone();
+        let continued = Arc::new(tokio::sync::Notify::new());
+        let notify = continued.clone();
+        let continuation = continued.notified();
         let first = tokio::spawn(async move {
-            writer
-                .save(AppSettings::default(), Some("key".to_string()))
-                .await
+            finish_operation(async move {
+                let saved = writer
+                    .save(AppSettings::default(), Some("key".to_string()))
+                    .await?;
+                notify.notify_one();
+                Ok(saved)
+            })
+            .await
         });
         credentials.entered.notified().await;
         first.abort();
@@ -384,9 +412,99 @@ mod tests {
         *credentials.gate.0.lock().unwrap() = true;
         credentials.gate.1.notify_all();
         let second_result = second.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), continuation)
+            .await
+            .expect("caller cancellation skipped the post-commit continuation");
         assert!(!completed_early);
         assert!(second_result.is_err());
         assert_eq!(store.load().await.unwrap().settings_revision, 1);
+    }
+
+    // Child entry point for the independent-process lock test. Environment is
+    // scoped to child Commands, so parallel tests never mutate process env.
+    #[tokio::test]
+    async fn settings_writer_process_fixture() {
+        let Some(path) = std::env::var_os("SYMPHONY_SETTINGS_TEST_PATH") else {
+            return;
+        };
+        let output = PathBuf::from(std::env::var_os("SYMPHONY_SETTINGS_TEST_OUTPUT").unwrap());
+        std::fs::write(output.with_extension("ready"), "ready").unwrap();
+        let result = store(PathBuf::from(path))
+            .save(AppSettings::default(), None)
+            .await;
+        let outcome = match result {
+            Ok(_) => "saved",
+            Err(error) => {
+                assert!(error.starts_with("Settings changed since"), "{error}");
+                "stale"
+            }
+        };
+        std::fs::write(output, outcome).unwrap();
+    }
+
+    #[tokio::test]
+    async fn independent_processes_cannot_commit_the_same_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("json.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let mut children = Vec::new();
+        let outputs = [
+            directory.path().join("one.out"),
+            directory.path().join("two.out"),
+        ];
+        for output in &outputs {
+            children.push(
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "settings_store::tests::settings_writer_process_fixture",
+                    ])
+                    .env("SYMPHONY_SETTINGS_TEST_PATH", &path)
+                    .env("SYMPHONY_SETTINGS_TEST_OUTPUT", output)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !outputs
+                .iter()
+                .all(|output| output.with_extension("ready").exists())
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        drop(lock);
+        ready.expect("settings writer children never became ready");
+        for child in children {
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let mut outcomes = outputs
+            .iter()
+            .map(|output| std::fs::read_to_string(output).unwrap())
+            .collect::<Vec<_>>();
+        outcomes.sort();
+        assert_eq!(outcomes, ["saved", "stale"]);
+        assert_eq!(store(path).load().await.unwrap().settings_revision, 1);
     }
 
     #[test]

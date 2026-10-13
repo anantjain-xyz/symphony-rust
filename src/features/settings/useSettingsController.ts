@@ -112,12 +112,15 @@ export function useSettingsController(options: Options) {
   ) {
     setValidation(result);
     if (result.workflow_blocking) return;
+    const source = session.captureDraftLineage(exactSettings);
     const saved = await call(() =>
       desktopCommands.saveSettings({
         settings: exactSettings,
         linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
       }),
     );
+    // Only this operation may advance a descendant draft's concurrency token.
+    const acknowledged = session.acknowledgeSave(source, saved);
     setSettings(saved);
     let refreshedWorker: WorkerStatus | null = null;
     try {
@@ -146,7 +149,7 @@ export function useSettingsController(options: Options) {
       setSavedFlash(false);
       setSavedLiveConfigKept(false);
     }, 2500);
-    return saved;
+    return acknowledged ? saved : undefined;
   }
 
   async function testConnection(exactSettings: AppSettings, exactLinearKey: string) {
@@ -160,16 +163,16 @@ export function useSettingsController(options: Options) {
   }
 
   async function removeLinearKey() {
+    const draft = session.readDraft() ?? settings;
+    const source = draft ? session.captureDraftLineage(draft) : null;
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
-    setSettings((current) =>
-      current
-        ? {
-            ...current,
-            settings_revision: fromDisk.settings_revision,
-            linear_api_key_set: fromDisk.linear_api_key_set,
-          }
-        : current,
-    );
+    // Key removal has no snapshot CAS. Adopt its revision only if it directly
+    // follows this draft; a skipped revision means another write changed its base.
+    if (source && fromDisk.settings_revision === source.settingsRevision + 1) {
+      session.acknowledgeSave(source, fromDisk);
+    }
+    session.acceptSaved(fromDisk);
+    setSettings(fromDisk);
     session.replaceKey("");
     setTrackerTest(null);
     return fromDisk.linear_api_key_set;

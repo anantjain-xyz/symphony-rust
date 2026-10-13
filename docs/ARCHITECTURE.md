@@ -179,9 +179,13 @@ API key is stored separately in the OS keychain.
 credential change. Saved revisions reject stale drafts and retro applications.
 File updates use a synced temporary file followed by atomic replacement;
 credential changes are restored if replacement fails. Removing the Linear key
-advances the revision and stops the worker. The blocking operation owns its
-lock through completion even if its caller drops the future.
- The Tauri layer builds runtime
+advances the revision and stops the worker. A stable sidecar OS lock serializes
+separate application processes. The blocking operation owns both locks through
+commit; an owned asynchronous task also completes reconfiguration, key-removal
+shutdown, and retro batch finalization when an IPC caller disconnects. Drafts
+adopt a newer revision only from their own Save operation; unrelated updates
+retain the old revision and produce a conflict.
+The Tauri layer builds runtime
 configuration and environment maps. Repository install and workflow-transfer
 agents start with the repaired `PATH`. For `github.com` and
 `ghe.com`/`*.ghe.com` repositories, they also allowlist the host process

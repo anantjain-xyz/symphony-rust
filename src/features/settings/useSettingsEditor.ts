@@ -175,14 +175,10 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   }, [session, ensureController, savePending, savedSettings]);
 
   useEffect(() => {
-    const preserved = dirtyRef.current ? (session.readDraft() ?? draft) : savedSettings;
-    const next =
-      preserved.settings_revision === savedSettings.settings_revision
-        ? preserved
-        : { ...preserved, settings_revision: savedSettings.settings_revision };
-    if (next === session.readDraft()) return;
-    session.replaceDraft(next);
-    setDraft(next);
+    // The session preserves draft provenance. External saved settings never
+    // advance a dirty draft; acknowledgements of its own operations do.
+    const next = session.readDraft() ?? savedSettings;
+    if (next !== draft) setDraft(next);
   }, [draft, session, savedSettings]);
 
   useEffect(() => {
@@ -220,7 +216,14 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
         setFocusInvalidSummary(true);
         return;
       }
-      const saved = await onSave(exactSettings, exactLinearKey, result);
+      let saved: AppSettings | undefined;
+      try {
+        saved = await onSave(exactSettings, exactLinearKey, result);
+      } catch {
+        // The desktop action reports the conflict; keep this draft and token
+        // intact so a rejected save never becomes an unhandled form promise.
+        return;
+      }
       if (!saved || session.revision() !== exactRevision.id) return;
       session.replaceDraft(saved);
       setDraft(saved);

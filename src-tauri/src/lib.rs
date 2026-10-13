@@ -171,17 +171,21 @@ async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<AppSettings, String> {
-    let settings = state
-        .settings_store
-        .save(request.settings, request.linear_api_key)
-        .await?;
-    if live_reconfigure_allowed(&settings) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &settings))
-            .await;
-    }
-    Ok(settings)
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state
+            .settings_store
+            .save(request.settings, request.linear_api_key)
+            .await?;
+        if live_reconfigure_allowed(&settings) {
+            state
+                .worker
+                .reconfigure(worker_start_config(&state, &settings))
+                .await;
+        }
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -522,9 +526,13 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let settings = state.settings_store.remove_key().await?;
-    state.worker.stop().await;
-    Ok(settings)
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state.settings_store.remove_key().await?;
+        state.worker.stop().await;
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -770,6 +778,14 @@ fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<()
 #[tauri::command]
 async fn apply_retro_workflow(
     state: State<'_, AppState>,
+    retro_id: String,
+) -> Result<RetroBatchRow, String> {
+    let state = state.inner().clone();
+    settings_store::finish_operation(apply_retro_workflow_inner(state, retro_id)).await
+}
+
+async fn apply_retro_workflow_inner(
+    state: AppState,
     retro_id: String,
 ) -> Result<RetroBatchRow, String> {
     let all_suggestions = state
