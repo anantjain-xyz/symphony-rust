@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
@@ -212,9 +212,11 @@ const STORAGE_NOTIFICATION_EXCEPTIONS = new Set([
   // retro_batch_items is an internal join table. The retro_batches event owns
   // the frontend invalidation for a newly reserved batch.
   "reserve_retro_batch:retro_batch_items",
+  "reserve_retro_repo_batches:retro_batch_items",
   // This self-assignment acquires SQLite's write lock before review-state
   // validation. It does not change observable retro state.
   "reserve_retro_batch:retros",
+  "reserve_retro_repo_batches:retros",
 ]);
 
 function matchingDelimiter(tokens, start, open, close) {
@@ -265,6 +267,29 @@ function repositoryMethods(tokens) {
   return methods;
 }
 
+// Shared transaction helpers retain the caller's notification obligation.
+// Only top-level functions are followed; test-module fixtures are not owners.
+function topLevelFunctions(tokens) {
+  const functions = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index].value === "fn" && tokens[index + 1]?.kind === "ident") {
+      const name = tokens[index + 1].value;
+      let open = index + 2;
+      while (open < tokens.length && !["{", ";"].includes(tokens[open].value)) open += 1;
+      if (tokens[open]?.value === "{") {
+        const close = matchingDelimiter(tokens, open, "{", "}");
+        if (close < 0) throw new Error(`Storage helper ${name} has an unclosed body`);
+        functions.push({ name, tokens: tokens.slice(open + 1, close) });
+        index = close;
+      }
+    } else if (tokens[index].value === "{") {
+      index = matchingDelimiter(tokens, index, "{", "}");
+      if (index < 0) throw new Error("Storage source has an unclosed body");
+    }
+  }
+  return functions;
+}
+
 function callOpen(tokens, start) {
   for (let index = start; index < Math.min(tokens.length, start + 40); index += 1) {
     if (tokens[index].value === "(") return index;
@@ -286,12 +311,25 @@ function sqlMutationTable(sql) {
   return match?.[1]?.toLowerCase() ?? null;
 }
 
-function methodSqlMutations(method) {
+function methodSqlMutations(method, helpers, visited = new Set()) {
   const tables = [];
   const dynamicQueries = [];
   const unclassifiedQueries = [];
   const tokens = method.tokens;
+  visited = new Set([...visited, method.name]);
   for (let index = 0; index < tokens.length; index += 1) {
+    const helper = helpers.get(tokens[index].value);
+    if (
+      helper &&
+      tokens[index + 1]?.value === "(" &&
+      tokens[index - 1]?.value !== "." &&
+      !visited.has(helper.name)
+    ) {
+      const nested = methodSqlMutations(helper, helpers, visited);
+      tables.push(...nested.tables);
+      dynamicQueries.push(...nested.dynamicQueries);
+      unclassifiedQueries.push(...nested.unclassifiedQueries);
+    }
     const sqlxQuery =
       sequenceAt(tokens, index, ["sqlx", "::"]) &&
       /^query(?:_as|_scalar)?$/u.test(tokens[index + 2]?.value ?? "");
@@ -349,9 +387,11 @@ function methodChangedTables(method) {
 
 export function storageMutationDiagnostics(source) {
   const diagnostics = [];
-  const methods = repositoryMethods(rustTokens(source));
+  const tokens = rustTokens(source);
+  const methods = repositoryMethods(tokens);
+  const helpers = new Map(topLevelFunctions(tokens).map((helper) => [helper.name, helper]));
   for (const method of methods) {
-    const mutations = methodSqlMutations(method);
+    const mutations = methodSqlMutations(method, helpers);
     const changed = new Set(methodChangedTables(method));
     const missing = [
       ...new Set(

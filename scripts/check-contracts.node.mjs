@@ -511,6 +511,38 @@ test("projection checker rejects opaque sqlx::query ownership", () => {
   );
 });
 
+test("projection checker follows shared reservation writes without hiding notification loss", () => {
+  const source = `
+    async fn insert_reserved_retro_batch() {
+      sqlx::query("insert into retro_batches (id) values (?1)");
+      sqlx::query("insert into retro_batch_items (batch_id) values (?1)");
+    }
+    impl Repository {
+      async fn reserve_retro_repo_batches(&self) {
+        sqlx::query("update retros set id = id where id = ?1");
+        insert_reserved_retro_batch().await;
+        self.changed("retro_batches", "insert");
+      }
+    }
+  `;
+  assert.deepEqual(storageMutationDiagnostics(source), []);
+  assert.ok(
+    storageMutationDiagnostics(source.replace('self.changed("retro_batches", "insert");', "")).some(
+      (message) =>
+        message.includes("Repository::reserve_retro_repo_batches") &&
+        message.includes("mutates [retro_batches]"),
+    ),
+  );
+  assert.ok(
+    storageMutationDiagnostics(
+      source.replace(
+        'sqlx::query("insert into retro_batches (id) values (?1)");',
+        'sqlx::query("delete from runs where issue_id = ?1");',
+      ),
+    ).some((message) => message.includes("mutates [runs]")),
+  );
+});
+
 test("projection checker rejects unclassified literal SQL forms", () => {
   assert.ok(
     storageMutationDiagnostics(`
