@@ -2251,7 +2251,9 @@ describe("App settings", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("dashboard failed");
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry" })),
+    );
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
     expect(commandCount("start_worker")).toBe(0);
     expect(commandCount("load_settings")).toBe(1);
