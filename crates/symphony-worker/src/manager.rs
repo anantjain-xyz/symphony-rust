@@ -15,11 +15,15 @@ use symphony_agents::{
     AgentDriver, AgentRunRequest, ClaudeRunOptions, CursorRunOptions, NativeAgentDriver,
     OpencodeRunOptions,
 };
+#[cfg(test)]
+use symphony_core::RunStatus;
 use symphony_core::{
     append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
-    MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, RunStatus, TokenCountPayload,
+    MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, TokenCountPayload,
 };
-use symphony_storage::{now_iso, Repository, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS};
+use symphony_storage::{
+    now_iso, Repository, RunCompletion, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS,
+};
 use symphony_tracker::{LinearTracker, TrackerClient, TrackerError};
 use thiserror::Error;
 use tokio::{
@@ -715,55 +719,23 @@ async fn recover_stranded_runs(
     repo: &Repository,
     config: &RuntimeConfig,
 ) -> Result<(), WorkerError> {
-    for run in repo.list_running().await? {
+    let mut stranded = repo.list_running().await?;
+    stranded.extend(repo.list_pending().await?);
+    for run in stranded {
         warn!(run_id = %run.id, issue_id = %run.issue_id, "orphan run marked crashed");
-        repo.delete_live_session(&run.id).await.ok();
-        if repo
-            .finish_run(
-                &run.id,
-                RunStatus::Failure,
-                Some("process_crashed"),
-                Some("worker restarted while run was in-flight"),
-            )
-            .await?
-        {
-            let due = due_after(backoff_ms(
-                run.run_number,
-                config.workflow.front_matter.agent.max_retry_backoff_ms,
-            ));
-            repo.schedule_retry(
-                &run.issue_id,
-                run.run_number + 1,
-                &due,
-                Some("process_crashed"),
-                Some("worker restart"),
-            )
-            .await?;
-        }
-    }
-    for run in repo.list_pending().await? {
-        if repo
-            .finish_run(
-                &run.id,
-                RunStatus::Failure,
-                Some("process_crashed"),
-                Some("worker restarted before run was claimed"),
-            )
-            .await?
-        {
-            let due = due_after(backoff_ms(
-                run.run_number,
-                config.workflow.front_matter.agent.max_retry_backoff_ms,
-            ));
-            repo.schedule_retry(
-                &run.issue_id,
-                run.run_number + 1,
-                &due,
-                Some("process_crashed"),
-                Some("worker restart"),
-            )
-            .await?;
-        }
+        let due = due_after(backoff_ms(
+            run.run_number,
+            config.workflow.front_matter.agent.max_retry_backoff_ms,
+        ));
+        repo.complete_run(
+            &run.id,
+            RunCompletion::Failure {
+                error_class: "process_crashed",
+                error_message: "worker restarted before run completed",
+                retry_due_at: &due,
+            },
+        )
+        .await?;
     }
     repo.delete_orphaned_pending_sessions().await.ok();
     Ok(())
@@ -1367,19 +1339,12 @@ async fn handle_dispatch_result(
 /// caught by the worker-restart `recover()` sweep.
 async fn recover_stranded_run(
     repo: &Repository,
-    issue_id: &str,
+    _issue_id: &str,
     run: &RunRow,
     retry_backoff_cap: u64,
     class: &str,
     message: &str,
 ) {
-    // dispatch_run's normal end-of-run delete_live_session is skipped when it
-    // returns early via `?`, so clean it up here regardless of the run's
-    // status: overview() surfaces every live_sessions row and the restart
-    // cleanup only prunes `pending-*` ones, so a leftover would keep a failed
-    // run showing as live indefinitely.
-    repo.delete_live_session(&run.id).await.ok();
-
     match repo.get_run(&run.id).await {
         Ok(Some(current)) if matches!(current.status.as_str(), "pending" | "running") => {}
         Ok(_) => return,
@@ -1392,39 +1357,20 @@ async fn recover_stranded_run(
             return;
         }
     }
-    let transitioned = match repo
-        .finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
-        .await
-    {
-        Ok(transitioned) => transitioned,
-        Err(finish_err) => {
-            error!(
-                error = %finish_err,
-                run_id = %run.id,
-                "could not finish stranded run; leaving it for worker-restart recovery"
-            );
-            return;
-        }
-    };
-    if !transitioned {
-        return;
-    }
     let due = due_after(backoff_ms(run.run_number, retry_backoff_cap));
-    if let Err(retry_err) = repo
-        .schedule_retry(
-            issue_id,
-            run.run_number + 1,
-            &due,
-            Some(class),
-            Some(message),
+    if let Err(finish_err) = repo
+        .complete_run(
+            &run.id,
+            RunCompletion::Failure {
+                error_class: class,
+                error_message: message,
+                retry_due_at: &due,
+            },
         )
         .await
     {
-        error!(
-            error = %retry_err,
-            run_id = %run.id,
-            "finished stranded run but could not schedule its retry"
-        );
+        error!(error = %finish_err, run_id = %run.id,
+            "could not finish stranded run; leaving it for worker-restart recovery");
     }
 }
 
@@ -1502,11 +1448,13 @@ where
     match repo.mark_running(&run.id).await {
         Ok(()) => {}
         Err(StorageError::AlreadyRunning(_)) => {
-            repo.finish_run(
+            repo.complete_run(
                 &run.id,
-                RunStatus::Cancelled,
-                Some("reconciled"),
-                Some("lost race to a concurrent run for the same issue"),
+                RunCompletion::Cancelled {
+                    error_class: Some("reconciled"),
+                    error_message: Some("lost race to a concurrent run for the same issue"),
+                    suppression: None,
+                },
             )
             .await?;
             return Ok(());
@@ -1720,25 +1668,18 @@ where
             }
             match result.outcome {
                 AgentOutcome::Success => {
-                    if repo
-                        .finish_run(&run.id, RunStatus::Success, None, None)
-                        .await?
-                    {
-                        repo.clear_retry(&issue.id).await?;
-                    }
+                    repo.complete_run(&run.id, RunCompletion::Success).await?;
                 }
                 AgentOutcome::Cancelled => {
-                    if repo
-                        .finish_run(
-                            &run.id,
-                            RunStatus::Cancelled,
-                            result.error_class.as_deref(),
-                            result.error_message.as_deref(),
-                        )
-                        .await?
-                    {
-                        repo.clear_retry(&issue.id).await?;
-                    }
+                    repo.complete_run(
+                        &run.id,
+                        RunCompletion::Cancelled {
+                            error_class: result.error_class.as_deref(),
+                            error_message: result.error_message.as_deref(),
+                            suppression: None,
+                        },
+                    )
+                    .await?;
                 }
                 AgentOutcome::Failure => {
                     fail(
@@ -1776,7 +1717,6 @@ where
             .await?;
         }
     }
-    repo.delete_live_session(&run.id).await.ok();
     Ok(())
 }
 
@@ -1820,29 +1760,23 @@ async fn finish_if_cancelled(
 async fn finish_if_cancelled_with_suppression(
     repo: &Repository,
     run: &RunRow,
-    issue: &Issue,
+    _issue: &Issue,
     stop: &CancellationToken,
     suppression_fingerprint: Option<&str>,
 ) -> Result<bool, WorkerError> {
     if !stop.is_cancelled() {
         return Ok(false);
     }
-    let transitioned = repo
-        .finish_run(
-            &run.id,
-            RunStatus::Cancelled,
-            Some("cancelled"),
-            Some("run cancelled"),
-        )
-        .await?;
-    if transitioned {
-        if let Some(fingerprint) = suppression_fingerprint {
-            repo.suppress_issue_dispatch(&issue.id, USER_CANCELLED_SUPPRESSION, fingerprint)
-                .await?;
-        }
-        repo.clear_retry(&issue.id).await?;
-        repo.delete_live_session(&run.id).await.ok();
-    }
+    repo.complete_run(
+        &run.id,
+        RunCompletion::Cancelled {
+            error_class: Some("cancelled"),
+            error_message: Some("run cancelled"),
+            suppression: suppression_fingerprint
+                .map(|fingerprint| (USER_CANCELLED_SUPPRESSION, fingerprint)),
+        },
+    )
+    .await?;
     Ok(true)
 }
 
@@ -1917,26 +1851,21 @@ async fn fail(
     repo: &Repository,
     config: &RuntimeConfig,
     run: &RunRow,
-    issue: &Issue,
+    _issue: &Issue,
     class: &str,
     message: &str,
 ) -> Result<(), WorkerError> {
-    if !repo
-        .finish_run(&run.id, RunStatus::Failure, Some(class), Some(message))
-        .await?
-    {
-        return Ok(());
-    }
     let due = due_after(backoff_ms(
         run.run_number,
         config.workflow.front_matter.agent.max_retry_backoff_ms,
     ));
-    repo.schedule_retry(
-        &issue.id,
-        run.run_number + 1,
-        &due,
-        Some(class),
-        Some(message),
+    repo.complete_run(
+        &run.id,
+        RunCompletion::Failure {
+            error_class: class,
+            error_message: message,
+            retry_due_at: &due,
+        },
     )
     .await?;
     Ok(())
