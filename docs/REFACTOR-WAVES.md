@@ -78,6 +78,10 @@ Independent PRs may be developed concurrently. Integrate and revalidate dependen
 | 210 | Key removal discarded input entered during its request | Capture key edit generation; clear only the original input and preserve later edits |
 | 210 | Older post-commit effects could overwrite newer runtime settings | Serialize commit and worker continuation together; capture Start under the same gate; fence runtime effects by revision |
 | 210 | Process interruption left credential/file state partially committed | Durable journal with salted credential fingerprints; recover old/new state under the OS lock and reconcile recovered runtime effects |
+| 210 | Superseded journal lost its runtime-stop obligation | Stop a potentially stale worker before discarding superseded recovery evidence |
+| 210 | Remote operations used unresolved saved credentials | Admit one locked settings/credential snapshot and reject recovery diagnostics before remote I/O |
+| 210 | A skipped runtime update was presented as applied | Return admission diagnostics and retain the skipped status through unlock/reload until reconfiguration or restart |
+| 210 | Reverting a draft during Save left it incorrectly clean | Recompute dirtiness against the acknowledged saved baseline |
 | 212 | Text redaction changed quota policy inputs | Canonical operational metadata; sanitized display payloads; opaque unknown bucket identities |
 | 214 | Incomplete drafts did not fence delayed starts | Observe every committed/loaded revision and invalidate older preflight continuations |
 | 214 | A newer failed reconfiguration suppressed credential-removal shutdown | Stop on known credential absence; only an adopted newer runtime supersedes delayed removal |
