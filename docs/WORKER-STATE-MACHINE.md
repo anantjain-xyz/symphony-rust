@@ -5,6 +5,22 @@ run rows, retries, cancellation, and restart recovery. The implementation is
 split between `symphony-worker`, `symphony-storage`, and the selected agent
 adapter; changes must preserve the combined invariants described here.
 
+## Desktop process admission
+
+- One process owns `application.lock` in each app-data directory before keychain,
+  database, settings, or worker setup. Keep the file stable and the lease until
+  process exit; settings transactions retain their separate interprocess locks.
+- macOS and Windows register Tauri's activation plugin first. Repeated launches
+  restore, show, and focus the existing main window. Linux uses the file lease
+  directly, without requiring a session D-Bus; focus its existing window manually.
+- Lease contention waits at most five seconds before the duplicate exits.
+  [Tauri's restart implementation](https://github.com/tauri-apps/tauri/blob/tauri-v2.11.2/crates/tauri/src/process.rs)
+  spawns the replacement before exiting; this wait admits it only after the old
+  process releases the lease. The old runtime never unlocks early for restart.
+- The lease also prevents a second runtime when activation IPC fails. Child-process
+  tests cover exclusion, bounded waiting, delayed owner exit, and crash release
+  using temporary directories without starting Symphony or reading credentials.
+
 ## Worker lifecycle
 
 The in-memory worker has three states:

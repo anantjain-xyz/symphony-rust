@@ -1443,9 +1443,9 @@ pub fn run() {
     // PATH before Tauri spawns threads that read the environment.
     let path_fix = path_env::fix();
     let builder = tauri::Builder::default();
-    // Register first: a normal duplicate launch activates the existing window
-    // and exits before application setup can touch shared runtime state.
-    #[cfg(desktop)]
+    // Register first where plugin IPC is available. Linux relies on the file
+    // lease below: this plugin version panics without a working session D-Bus.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         application_instance::activate_main_window(app);
     }));
