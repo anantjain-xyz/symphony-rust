@@ -1,19 +1,20 @@
 import type { RefObject, SetStateAction } from "react";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  AgentEventRow,
+  AgentEvent,
   AppSettings,
-  IssueRow,
+  DashboardOverview,
+  IssueSummary,
   LinearViewerProfile,
-  Overview,
   RepoWorkflowStatus,
   RetroDetail,
-  RetroRow,
   RetroStatus,
+  RetroSummary,
   RunDetail,
-  RunWithIssueRow,
+  RunSummary,
   SkillsInstallStatus,
   SkillsStatus,
+  SuggestionDecision,
   TrackerTestResult,
   ValidationResult,
   WorkerStatus,
@@ -189,7 +190,7 @@ function useTheme(): [Theme, () => void] {
   return [theme, toggle];
 }
 
-const emptyOverview: Overview = {
+const emptyOverview: DashboardOverview = {
   active_runs: [],
   retry_queue: [],
   retry_count: 0,
@@ -213,12 +214,12 @@ function anyRepoConfigured(settings: AppSettings): boolean {
 }
 
 type DashboardSnapshot = {
-  overview: Overview;
-  runs: RunWithIssueRow[];
-  issues: IssueRow[];
+  overview: DashboardOverview;
+  runs: RunSummary[];
+  issues: IssueSummary[];
   worker: WorkerStatus;
   retroStatus: RetroStatus;
-  retros: RetroRow[];
+  retros: RetroSummary[];
   hasInProgressRetroBatches: boolean;
   requestedRunId: string | null;
   selectedRun: RunDetail | null;
@@ -234,13 +235,13 @@ type DashboardSnapshotSelection = {
 
 type RetroListResource = {
   retroStatus: RetroStatus;
-  retros: RetroRow[];
+  retros: RetroSummary[];
 };
 
 type DashboardResourceData = {
-  overview: Overview;
-  runs: RunWithIssueRow[];
-  issues: IssueRow[];
+  overview: DashboardOverview;
+  runs: RunSummary[];
+  issues: IssueSummary[];
   worker: WorkerStatus;
   retroList: RetroListResource;
   retroBatches: boolean;
@@ -265,9 +266,9 @@ const RESOURCE_LABELS: Record<DashboardResourceKey, string> = {
 
 function createInitialDashboardResources(): DashboardResourceEnvelopes {
   return {
-    overview: createResourceEnvelope<Overview>(),
-    runs: createResourceEnvelope<RunWithIssueRow[]>(),
-    issues: createResourceEnvelope<IssueRow[]>(),
+    overview: createResourceEnvelope<DashboardOverview>(),
+    runs: createResourceEnvelope<RunSummary[]>(),
+    issues: createResourceEnvelope<IssueSummary[]>(),
     worker: createResourceEnvelope<WorkerStatus>(),
     retroList: createResourceEnvelope<RetroListResource>(),
     retroBatches: createResourceEnvelope<boolean>(),
@@ -393,7 +394,7 @@ function configuredRepoUrls(settings: AppSettings): string[] {
   );
 }
 
-function retroRowRenderedFields(row: RetroRow) {
+function retroRowRenderedFields(row: RetroSummary) {
   return {
     id: row.id,
     sinceAt: row.since_at,
@@ -610,15 +611,16 @@ function App() {
     }));
   }
 
-  const setOverview = (update: SetStateAction<Overview>) => setResourceData("overview", update);
-  const setRuns = (update: SetStateAction<RunWithIssueRow[]>) => setResourceData("runs", update);
+  const setOverview = (update: SetStateAction<DashboardOverview>) =>
+    setResourceData("overview", update);
+  const setRuns = (update: SetStateAction<RunSummary[]>) => setResourceData("runs", update);
   const setWorker = (update: SetStateAction<WorkerStatus>) => setResourceData("worker", update);
   const setRetroStatus = (update: SetStateAction<RetroStatus>) =>
     setResourceData("retroList", (current) => ({
       ...current,
       retroStatus: typeof update === "function" ? update(current.retroStatus) : update,
     }));
-  const setRetros = (update: SetStateAction<RetroRow[]>) =>
+  const setRetros = (update: SetStateAction<RetroSummary[]>) =>
     setResourceData("retroList", (current) => ({
       ...current,
       retros: typeof update === "function" ? update(current.retros) : update,
@@ -795,7 +797,7 @@ function App() {
               if (isAuthoritative(key)) {
                 commitResourceSuccess("issues", next);
                 const byId = new Map(next.map((issue) => [issue.id, issue]));
-                const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
+                const updateRunIssue = (run: RunSummary): RunSummary => {
                   const issue = byId.get(run.issue_id);
                   return issue
                     ? { ...run, issue_title: issue.title, issue_state: issue.state }
@@ -1669,7 +1671,13 @@ function App() {
   async function removeLinearKey() {
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
     setSettings((current) =>
-      current ? { ...current, linear_api_key_set: fromDisk.linear_api_key_set } : current,
+      current
+        ? {
+            ...current,
+            linear_api_key_set: fromDisk.linear_api_key_set,
+            settings_revision: fromDisk.settings_revision,
+          }
+        : current,
     );
     linearKeyDraftRef.current = "";
     setTrackerTest(null);
@@ -1714,7 +1722,7 @@ function App() {
     if (!runtimeAvailable) {
       window.setTimeout(() => {
         const endedAt = new Date().toISOString();
-        const cancelRun = (run: RunWithIssueRow): RunWithIssueRow =>
+        const cancelRun = (run: RunSummary): RunSummary =>
           run.id === id
             ? {
                 ...run,
@@ -1724,11 +1732,11 @@ function App() {
                 error_message: "run cancelled",
               }
             : run;
-        const event: AgentEventRow = {
+        const event: AgentEvent = {
           id: Date.now(),
           run_id: id,
           kind: "status",
-          payload: JSON.stringify({ message: "Run cancellation requested" }),
+          payload: { message: "Run cancellation requested" },
           created_at: endedAt,
         };
         setRuns((prev) => prev.map(cancelRun));
@@ -1840,7 +1848,7 @@ function App() {
     await refreshDashboard();
   }
 
-  async function decideRetroSuggestion(id: string, decision: string) {
+  async function decideRetroSuggestion(id: string, decision: SuggestionDecision) {
     if (!runtimeAvailable) {
       setSelectedRetro((current) =>
         current
@@ -1909,7 +1917,7 @@ function App() {
       poll: () => pollDashboardResources(keys),
       fingerprint: (resources) => {
         const retroList = resources.retroList as
-          | { retroStatus: RetroStatus; retros: RetroRow[] }
+          | { retroStatus: RetroStatus; retros: RetroSummary[] }
           | undefined;
         return JSON.stringify({
           status: (() => {
@@ -1936,7 +1944,7 @@ function App() {
       pauseWhenHidden: true,
       onResult: (resources) => {
         const retroList = resources.retroList as
-          | { retroStatus: RetroStatus; retros: RetroRow[] }
+          | { retroStatus: RetroStatus; retros: RetroSummary[] }
           | undefined;
         return retroList?.retroStatus?.state === "running" || resources.retroBatches === true;
       },
@@ -2557,7 +2565,7 @@ function OverviewView({
   onOpenSettings,
   onOpenIssues,
 }: {
-  overview: Overview;
+  overview: DashboardOverview;
   canStartWorker: boolean;
   canTriggerRetry: boolean;
   workerRunning: boolean;

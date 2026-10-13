@@ -1,17 +1,10 @@
-import type { AgentEventRow } from "../bindings";
+import type { AgentEvent } from "../bindings";
+import { describeEvent, prettyPayload } from "../format";
 import { type MarkdownBlock, parseMarkdownBlocks } from "../MarkdownText";
-import {
-  describeEvent,
-  EVENT_PAYLOAD_PARSE_FAILED,
-  parseEventPayload,
-  prettyPayload,
-  type ParsedEventPayload,
-} from "../format";
 
 export type PreparedEvent = {
-  event: AgentEventRow;
+  event: AgentEvent;
   key: string;
-  parsedJson: ParsedEventPayload | undefined;
   label: string;
   tone?: "error";
   summary: string;
@@ -37,12 +30,7 @@ export type EventMatchStarts = {
   payload: number;
 };
 
-type PreparedEventCacheEntry = {
-  kind: string;
-  payload: string;
-  createdAt: string;
-  model: PreparedEvent;
-};
+type PreparedEventCacheEntry = { key: string; model: PreparedEvent };
 
 export type PreparedEventCache = Map<number, PreparedEventCacheEntry>;
 
@@ -53,8 +41,8 @@ type EventMatchSpan = {
   count: number;
 };
 
-export function eventRevisionKey(event: AgentEventRow) {
-  return `${event.id}\u0000${event.kind}\u0000${event.payload}\u0000${event.created_at}`;
+export function eventRevisionKey(event: AgentEvent) {
+  return `${event.id}\u0000${event.kind}\u0000${JSON.stringify(event.payload)}\u0000${event.created_at}`;
 }
 
 function markdownSegments(blocks: MarkdownBlock[]) {
@@ -65,10 +53,9 @@ function markdownSegments(blocks: MarkdownBlock[]) {
   });
 }
 
-export function prepareEvent(event: AgentEventRow): PreparedEvent {
-  const parsedJson = parseEventPayload(event.payload);
-  const { label, summary, tone } = describeEvent(event.kind, event.payload, parsedJson);
-  const pretty = prettyPayload(event.payload, parsedJson);
+export function prepareEvent(event: AgentEvent, key = eventRevisionKey(event)): PreparedEvent {
+  const { label, summary, tone } = describeEvent(event.kind, event.payload);
+  const pretty = prettyPayload(event.payload);
   const summaryBlocks = parseMarkdownBlocks(summary);
   const normalizedSections = {
     label: label.toLowerCase(),
@@ -77,8 +64,7 @@ export function prepareEvent(event: AgentEventRow): PreparedEvent {
   };
   return {
     event,
-    key: eventRevisionKey(event),
-    parsedJson: parsedJson === EVENT_PAYLOAD_PARSE_FAILED ? undefined : parsedJson,
+    key,
     label,
     tone,
     summary,
@@ -93,27 +79,22 @@ export function prepareEvent(event: AgentEventRow): PreparedEvent {
   };
 }
 
-export function prepareEvents(events: AgentEventRow[], cache: PreparedEventCache) {
+export function prepareEvents(events: AgentEvent[], cache: PreparedEventCache) {
   const seenIds = new Set<number>();
   const prepared: PreparedEvent[] = [];
   for (const event of events) {
     if (event.kind === "humanized" || seenIds.has(event.id)) continue;
     seenIds.add(event.id);
     const cached = cache.get(event.id);
-    const unchanged =
-      cached &&
-      cached.kind === event.kind &&
-      cached.payload === event.payload &&
-      cached.createdAt === event.created_at;
+    const key = eventRevisionKey(event);
+    const unchanged = cached?.key === key;
     let model: PreparedEvent;
     if (unchanged) {
       model = cached.model;
     } else {
-      model = prepareEvent(event);
+      model = prepareEvent(event, key);
       cache.set(event.id, {
-        kind: event.kind,
-        payload: event.payload,
-        createdAt: event.created_at,
+        key,
         model,
       });
     }

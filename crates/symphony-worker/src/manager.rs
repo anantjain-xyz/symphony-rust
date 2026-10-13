@@ -59,17 +59,24 @@ pub enum WorkerError {
     Storage(#[from] StorageError),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Clone)]
 pub struct WorkerStartConfig {
-    pub workflow: ParsedWorkflow,
-    /// Configured repositories; each issue is routed to one of them.
-    pub repos: Vec<RepoConfig>,
+    pub runtime: symphony_core::RunnableConfig,
     /// Bundled Symphony skills copied into issue workspaces when missing.
     pub skills: Vec<SkillFile>,
     pub env: BTreeMap<String, String>,
-    /// User-configured variables explicitly injected into each agent session.
-    pub session_env: BTreeMap<String, String>,
     pub app_data_dir: PathBuf,
+}
+
+impl std::fmt::Debug for WorkerStartConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerStartConfig")
+            .field("runtime", &self.runtime)
+            .field("skill_count", &self.skills.len())
+            .field("environment_entry_count", &self.env.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -94,6 +101,7 @@ struct InnerState {
     handle: Option<JoinHandle<()>>,
     runtime_config: Option<SharedRuntimeConfig>,
     reconfigure_generation: u64,
+    latest_settings_revision: u64,
 }
 
 type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
@@ -181,6 +189,7 @@ impl WorkerManager {
                 handle: None,
                 runtime_config: None,
                 reconfigure_generation: 0,
+                latest_settings_revision: 0,
             })),
             run_cancellations: RunCancellationRegistry::default(),
             wake: Arc::new(Notify::new()),
@@ -203,6 +212,7 @@ impl WorkerManager {
             if inner.status.state == WorkerState::Running {
                 return Err(WorkerError::AlreadyRunning);
             }
+            inner.latest_settings_revision = config.runtime.settings_revision();
             let stop = CancellationToken::new();
             let repo = self.repo.clone();
             let manager = self.clone();
@@ -261,9 +271,14 @@ impl WorkerManager {
         );
         let (runtime_config, generation) = {
             let mut inner = self.inner.lock().await;
-            if inner.status.state != WorkerState::Running {
+            if inner.status.state != WorkerState::Running
+                || runtime.settings_revision < inner.latest_settings_revision
+            {
                 return inner.status.clone();
             }
+            // Fence by committed settings order before asynchronous preflight.
+            // Even a failed newer preflight must not permit a delayed older save.
+            inner.latest_settings_revision = runtime.settings_revision;
             inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             (inner.runtime_config.clone(), inner.reconfigure_generation)
         };
@@ -455,6 +470,7 @@ impl WorkerManager {
 
 #[derive(Debug, Clone)]
 struct RuntimeConfig {
+    settings_revision: u64,
     workflow: ParsedWorkflow,
     repos: Vec<RepoConfig>,
     skills: Vec<SkillFile>,
@@ -472,12 +488,15 @@ fn runtime_config_from_start(
     wake: Arc<Notify>,
     workspace_cleanup: Option<WorkspaceCleanupManager>,
 ) -> RuntimeConfig {
+    let settings_revision = config.runtime.settings_revision();
+    let (workflow, repos, session_env) = config.runtime.into_parts();
     RuntimeConfig {
-        workflow: config.workflow,
-        repos: config.repos,
+        settings_revision,
+        workflow,
+        repos,
         skills: config.skills,
         env: config.env,
-        session_env: config.session_env,
+        session_env,
         app_data_dir: config.app_data_dir,
         run_cancellations,
         wake,
@@ -1416,9 +1435,9 @@ where
     if let Some(session) = &pre_session {
         repo.upsert_live_session(
             &run.id,
-            &format!("{session}-{session}"),
-            session,
-            session,
+            &symphony_core::AgentSessionId::new(format!("{session}-{session}")),
+            &symphony_core::AgentThreadId::new(session),
+            &symphony_core::AgentTurnId::new(session),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1501,9 +1520,12 @@ where
         Ok(result) => {
             repo.upsert_live_session(
                 &run.id,
-                &format!("{}-{}", result.thread_id, result.turn_id),
-                &result.thread_id,
-                &result.turn_id,
+                &symphony_core::AgentSessionId::new(format!(
+                    "{}-{}",
+                    result.thread_id, result.turn_id
+                )),
+                &symphony_core::AgentThreadId::new(&result.thread_id),
+                &symphony_core::AgentTurnId::new(&result.turn_id),
                 &TokenCountPayload {
                     input_tokens: 0,
                     output_tokens: 0,
@@ -1684,31 +1706,40 @@ async fn persist_run_event(
     provider: &str,
     event: &MappedAgentEvent,
 ) -> Result<(), WorkerError> {
-    // A null payload marks a metadata-only event (e.g. a thinking-token
-    // update): persist the side channels but keep it out of the visible
-    // event log.
-    if !event.payload.is_null() {
-        repo.append_event(run_id, event.kind.clone(), &event.payload)
+    let metadata = event.metadata();
+    if let MappedAgentEvent::Visible {
+        kind,
+        payload,
+        humanized,
+        ..
+    } = event
+    {
+        repo.append_event(run_id, kind.clone(), payload).await?;
+        if let Some(summary) = humanized {
+            repo.append_event(
+                run_id,
+                symphony_core::AgentEventKind::Humanized,
+                &serde_json::json!({ "summary": summary }),
+            )
             .await?;
+        }
     }
-    if let Some(info) = &event.session_info {
+    if let Some(info) = &metadata.session_info {
         repo.set_run_session_info(run_id, info).await?;
     }
-    if let Some(tokens) = &event.tokens {
-        repo.upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
-            .await?;
-        repo.record_token_usage(provider, tokens).await?;
-    }
-    if let Some(rate_limit) = &event.rate_limit {
-        repo.upsert_rate_limit(rate_limit).await?;
-    }
-    if let Some(summary) = &event.humanized {
-        repo.append_event(
+    if let Some(tokens) = &metadata.tokens {
+        repo.upsert_live_session(
             run_id,
-            symphony_core::AgentEventKind::Humanized,
-            &serde_json::json!({ "summary": summary }),
+            &symphony_core::AgentSessionId::new(format!("pending-{run_id}")),
+            &symphony_core::AgentThreadId::new(""),
+            &symphony_core::AgentTurnId::new(""),
+            tokens,
         )
         .await?;
+        repo.record_token_usage(provider, tokens).await?;
+    }
+    if let Some(rate_limit) = &metadata.rate_limit {
+        repo.upsert_rate_limit(rate_limit).await?;
     }
     Ok(())
 }
@@ -1895,6 +1926,7 @@ mod tests {
             ..Default::default()
         };
         RuntimeConfig {
+            settings_revision: 0,
             workflow: symphony_core::build_parsed_workflow(
                 front_matter,
                 "Prompt {{issue.identifier}}".to_string(),
@@ -1917,11 +1949,15 @@ mod tests {
 
     fn start_config(config: RuntimeConfig) -> WorkerStartConfig {
         WorkerStartConfig {
-            workflow: config.workflow,
-            repos: config.repos,
+            runtime: symphony_core::RunnableConfig::new(
+                config.settings_revision,
+                config.workflow,
+                config.repos,
+                config.session_env,
+            )
+            .unwrap(),
             skills: config.skills,
             env: config.env,
-            session_env: config.session_env,
             app_data_dir: config.app_data_dir,
         }
     }
@@ -2212,7 +2248,7 @@ mod tests {
             &repo,
             &run.id,
             "codex",
-            &MappedAgentEvent {
+            &MappedAgentEvent::Visible {
                 kind: symphony_core::AgentEventKind::TokenCount,
                 payload: serde_json::json!({
                     "input_tokens": 120,
@@ -2220,13 +2256,15 @@ mod tests {
                     "total_tokens": 154,
                 }),
                 humanized: None,
-                tokens: Some(TokenCountPayload {
-                    input_tokens: 120,
-                    output_tokens: 34,
-                    total_tokens: 154,
-                }),
-                rate_limit: None,
-                session_info: None,
+                metadata: symphony_core::AgentEventMetadata {
+                    tokens: Some(TokenCountPayload {
+                        input_tokens: 120,
+                        output_tokens: 34,
+                        total_tokens: 154,
+                    }),
+                    rate_limit: None,
+                    session_info: None,
+                },
             },
         )
         .await
@@ -2262,9 +2300,9 @@ mod tests {
 
         repo.upsert_live_session(
             &run.id,
-            "final-session",
-            "thread-1",
-            "turn-1",
+            &symphony_core::AgentSessionId::new("final-session"),
+            &symphony_core::AgentThreadId::new("thread-1"),
+            &symphony_core::AgentTurnId::new("turn-1"),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2328,9 +2366,9 @@ mod tests {
         // normal cleanup is skipped on the error path.
         repo.upsert_live_session(
             &run.id,
-            "sess-sess",
-            "sess",
-            "sess",
+            &symphony_core::AgentSessionId::new("sess-sess"),
+            &symphony_core::AgentThreadId::new("sess"),
+            &symphony_core::AgentTurnId::new("sess"),
             &symphony_core::TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2352,7 +2390,12 @@ mod tests {
 
         // The row is now terminal and a retry is queued, freeing its slot.
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "failure"
         );
         assert_eq!(
@@ -2405,7 +2448,7 @@ mod tests {
             handle_dispatch_result(Ok(Err(failure)), &repo, "lin-1", &run, 60_000).await;
 
             let row = repo.get_run(&run.id).await.unwrap().unwrap();
-            assert_eq!(row.status, "failure");
+            assert_eq!(row.status.as_str(), "failure");
             assert_eq!(row.error_class.as_deref(), Some("dispatch_error"));
             assert_eq!(
                 row.error_message.as_deref(),
@@ -2432,9 +2475,9 @@ mod tests {
         repo.mark_running(&run.id).await.unwrap();
         repo.upsert_live_session(
             &run.id,
-            "sess-sess",
-            "sess",
-            "sess",
+            &symphony_core::AgentSessionId::new("sess-sess"),
+            &symphony_core::AgentThreadId::new("sess"),
+            &symphony_core::AgentTurnId::new("sess"),
             &symphony_core::TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2453,7 +2496,7 @@ mod tests {
         handle_dispatch_result(result, &repo, "lin-1", &run, 60_000).await;
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "failure");
+        assert_eq!(row.status.as_str(), "failure");
         assert_eq!(row.error_class.as_deref(), Some("dispatch_panic"));
         assert!(row
             .error_message
@@ -2499,7 +2542,12 @@ mod tests {
 
         // The success stands: no spurious failure overwrite, no retry queued.
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
         assert!(repo.all_retry_issue_ids().await.unwrap().is_empty());
@@ -2949,7 +2997,12 @@ printf cloned > hook-ran
             .unwrap();
         assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
     }
@@ -3031,7 +3084,12 @@ printf cloned > hook-ran
             .unwrap();
         assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
     }
@@ -3116,7 +3174,7 @@ exit 7
         .unwrap();
 
         let finished = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(finished.status, "failure");
+        assert_eq!(finished.status.as_str(), "failure");
         assert_eq!(finished.error_class.as_deref(), Some("after_create_failed"));
         assert_eq!(
             tokio::fs::read_to_string(workspace_path.join("after-create-ran"))
@@ -3197,7 +3255,12 @@ exit 13
         .unwrap();
 
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
         assert_eq!(
@@ -3416,6 +3479,63 @@ exit 13
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "test-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make get"));
+    }
+
+    #[tokio::test]
+    async fn delayed_lower_revision_never_replaces_a_newer_settings_request() {
+        for fail_newer_preflight in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+                .await
+                .unwrap();
+            let manager =
+                WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+            let initial = runtime_config(temp.path());
+            let shared = Arc::new(RwLock::new(initial));
+            {
+                let mut inner = manager.inner.lock().await;
+                inner.status.state = WorkerState::Running;
+                inner.runtime_config = Some(shared.clone());
+            }
+            let mut newer = runtime_config(temp.path());
+            newer.settings_revision = 2;
+            newer.workflow.front_matter.tracker.api_key = "newer-key".into();
+            manager
+                .reconfigure_with_tracker_preflight(start_config(newer), |_| async {
+                    if fail_newer_preflight {
+                        Err(TrackerError::Auth("bad key".into()).into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+            let generation = manager.inner.lock().await.reconfigure_generation;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let mut older = runtime_config(temp.path());
+            older.settings_revision = 1;
+            older.workflow.front_matter.tracker.api_key = "older-key".into();
+            manager
+                .reconfigure_with_tracker_preflight(start_config(older), move |_| async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                manager.inner.lock().await.reconfigure_generation,
+                generation
+            );
+            let expected = if fail_newer_preflight {
+                "test-key"
+            } else {
+                "newer-key"
+            };
+            assert_eq!(
+                shared.read().await.workflow.front_matter.tracker.api_key,
+                expected
+            );
+        }
     }
 
     #[tokio::test]
@@ -4510,7 +4630,12 @@ exit 13
 
         assert!(cancelled);
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "cancelled"
         );
         assert!(repo
@@ -4602,7 +4727,7 @@ exit 13
             .unwrap());
 
         let terminal = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(terminal.status, "cancelled");
+        assert_eq!(terminal.status.as_str(), "cancelled");
         assert_eq!(terminal.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
         assert!(repo
@@ -4793,7 +4918,7 @@ exit 1
             .unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.status.as_str(), "cancelled");
         assert_eq!(row.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
@@ -4855,7 +4980,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
             .unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.status.as_str(), "cancelled");
         assert_eq!(row.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
@@ -4926,7 +5051,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
         let repo = Repository::new(pool, bus);
         let manager = WorkerManager::new(repo.clone());
         let config = start_config(runtime_config(temp.path()));
-        let expected_hash = config.workflow.source_hash.clone();
+        let expected_hash = config.runtime.workflow().source_hash.clone();
 
         // Start worker – run_worker emits workflow_ready before any tracker I/O.
         let _status = manager.start(config).await.unwrap();

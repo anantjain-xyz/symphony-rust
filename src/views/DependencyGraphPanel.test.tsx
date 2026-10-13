@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import type { IssueRow } from "../bindings";
+import type { IssueSummary } from "../bindings";
 import { buildDependencyGraph, getDependencyGraphModel } from "./DependencyGraphPanel";
 
-function issue(identifier: string, blockers: unknown[] = []): IssueRow {
+function issue(identifier: string, blockers: string[] = []): IssueSummary {
   return {
     id: `issue-${identifier}`,
     identifier,
@@ -11,9 +11,9 @@ function issue(identifier: string, blockers: unknown[] = []): IssueRow {
     priority: 2,
     state: "Todo",
     branch: null,
-    labels: "[]",
-    blockers: JSON.stringify(blockers),
-    raw: "{}",
+    labels: [],
+    blockers: blockers,
+
     last_seen_at: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -121,7 +121,7 @@ describe("buildDependencyGraph", () => {
 
   it("omits malformed relation targets while retaining every watched issue node", () => {
     const malformed = issue("SYM-2");
-    malformed.blockers = JSON.stringify([null, 42, "", "missing", "SYM-1", "OPS-9"]);
+    malformed.blockers = ["", "missing", "SYM-1", "OPS-9"];
     const graph = buildDependencyGraph([issue("SYM-1"), malformed]);
 
     expect(graph.nodes.map((node) => node.identifier)).toEqual(["OPS-9", "SYM-1", "SYM-2"]);
@@ -157,7 +157,7 @@ describe("getDependencyGraphModel", () => {
   it("reuses one build for the identical snapshot and builds once for a new array", () => {
     const snapshot = [issue("SYM-1")];
     const expected = buildDependencyGraph(snapshot);
-    const builder = vi.fn((_: readonly IssueRow[]) => expected);
+    const builder = vi.fn((_: readonly IssueSummary[]) => expected);
 
     expect(getDependencyGraphModel(snapshot, builder)).toBe(expected);
     expect(getDependencyGraphModel(snapshot, builder)).toBe(expected);

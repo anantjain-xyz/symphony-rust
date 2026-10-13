@@ -1,15 +1,15 @@
 import type {
-  AgentEventRow,
+  AgentEvent,
   AppSettings,
-  IssueRow,
-  Overview,
+  DashboardOverview,
+  IssueSummary,
   RepoWorkflowStatus,
   RetroDetail,
   RetroReport,
-  RetroRow,
   RetroStatus,
-  RetroSuggestionRow,
-  RunWithIssueRow,
+  RetroSuggestionReview,
+  RetroSummary,
+  RunSummary,
   SkillsStatus,
 } from "../bindings";
 import { createEventStressFixture } from "./eventStressFixture";
@@ -25,6 +25,7 @@ const BUNDLED_SKILL_NAMES = [
 ];
 
 const previewSettings: AppSettings = {
+  settings_revision: 0,
   prompt_template:
     "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved default workflow.",
   repos: [
@@ -113,7 +114,7 @@ const previewRetryDueAt = previewIso(12 * 60_000);
 const previewRateLimitResetAt = previewIso(38 * 60_000);
 const previewUsageUpdatedAt = previewIso(-8 * 60_000);
 
-const previewActiveRun: RunWithIssueRow = {
+const previewActiveRun: RunSummary = {
   id: "preview-run-active",
   issue_id: "preview-issue-sym-58",
   run_number: 4,
@@ -123,14 +124,14 @@ const previewActiveRun: RunWithIssueRow = {
   ended_at: null,
   error_class: null,
   error_message: null,
-  session_info: JSON.stringify({
+  session_info: {
     model: "gpt-5",
     permission_mode: null,
     agent_version: null,
     output_style: null,
     fast_mode: null,
     thinking_tokens: 16400,
-  }),
+  },
   repo_name: "widgets",
   created_at: previewActiveStartedAt,
   issue_identifier: "SYM-58",
@@ -138,7 +139,7 @@ const previewActiveRun: RunWithIssueRow = {
   issue_state: "In Progress",
 };
 
-const previewFailedRun: RunWithIssueRow = {
+const previewFailedRun: RunSummary = {
   id: "preview-run-failed",
   issue_id: "preview-issue-sym-61",
   run_number: 2,
@@ -148,14 +149,14 @@ const previewFailedRun: RunWithIssueRow = {
   ended_at: previewFailureEndedAt,
   error_class: "agent_failure",
   error_message: "Typecheck failed after applying the requested dashboard change.",
-  session_info: JSON.stringify({
+  session_info: {
     model: "claude-sonnet-4-5",
     permission_mode: "auto",
     agent_version: "2.1.2",
     output_style: null,
     fast_mode: "on",
     thinking_tokens: 8200,
-  }),
+  },
   repo_name: "widgets",
   created_at: previewFailureCreatedAt,
   issue_identifier: "SYM-61",
@@ -163,7 +164,7 @@ const previewFailedRun: RunWithIssueRow = {
   issue_state: "Rework",
 };
 
-const previewSuccessRun: RunWithIssueRow = {
+const previewSuccessRun: RunSummary = {
   id: "preview-run-success",
   issue_id: "preview-issue-sym-57",
   run_number: 1,
@@ -181,7 +182,7 @@ const previewSuccessRun: RunWithIssueRow = {
   issue_state: "Done",
 };
 
-const previewStressRun: RunWithIssueRow = {
+const previewStressRun: RunSummary = {
   ...previewSuccessRun,
   id: "preview-run-stress",
   issue_id: "preview-issue-stress",
@@ -196,14 +197,14 @@ const previewStressRun: RunWithIssueRow = {
   issue_state: "In Review",
 };
 
-const previewRuns: RunWithIssueRow[] = [
+const previewRuns: RunSummary[] = [
   previewActiveRun,
   previewStressRun,
   previewFailedRun,
   previewSuccessRun,
 ];
 
-const previewIssues: IssueRow[] = [
+const previewIssues: IssueSummary[] = [
   {
     id: "preview-issue-sym-58",
     identifier: "SYM-58",
@@ -212,20 +213,9 @@ const previewIssues: IssueRow[] = [
     priority: 2,
     state: "In Progress",
     branch: "codex/sym-58-stop-run",
-    labels: JSON.stringify(["symphony", "ui"]),
-    blockers: JSON.stringify([]),
-    raw: JSON.stringify({
-      id: "preview-issue-sym-58",
-      identifier: "SYM-58",
-      title: "Ability to stop an individual run",
-      description: "Add a per-run stop action while keeping the worker running.",
-      priority: 2,
-      state: "In Progress",
-      branch: "codex/sym-58-stop-run",
-      labels: ["symphony", "ui"],
-      blockers: [],
-      project_id: null,
-    }),
+    labels: ["symphony", "ui"],
+    blockers: [],
+
     last_seen_at: previewIso(-45_000),
   },
   {
@@ -236,20 +226,9 @@ const previewIssues: IssueRow[] = [
     priority: 3,
     state: "Rework",
     branch: "codex/sym-61-skills-install-ux",
-    labels: JSON.stringify(["ui", "skills"]),
-    blockers: JSON.stringify(["SYM-60"]),
-    raw: JSON.stringify({
-      id: "preview-issue-sym-61",
-      identifier: "SYM-61",
-      title: "Agent skills installation UX",
-      description: "Make the agent skills installation state clearer in Settings.",
-      priority: 3,
-      state: "Rework",
-      branch: "codex/sym-61-skills-install-ux",
-      labels: ["ui", "skills"],
-      blockers: ["SYM-60"],
-      project_id: null,
-    }),
+    labels: ["ui", "skills"],
+    blockers: ["SYM-60"],
+
     last_seen_at: previewIso(-4 * 60_000),
   },
   {
@@ -260,64 +239,53 @@ const previewIssues: IssueRow[] = [
     priority: 4,
     state: "Done",
     branch: "codex/sym-57-skills",
-    labels: JSON.stringify(["skills"]),
-    blockers: JSON.stringify([]),
-    raw: JSON.stringify({
-      id: "preview-issue-sym-57",
-      identifier: "SYM-57",
-      title: "Install Symphony skills for routed repos",
-      description: null,
-      priority: 4,
-      state: "Done",
-      branch: "codex/sym-57-skills",
-      labels: ["skills"],
-      blockers: [],
-      project_id: null,
-    }),
+    labels: ["skills"],
+    blockers: [],
+
     last_seen_at: previewIso(-25 * 60 * 60_000),
   },
 ];
 
-const previewEventsByRunId: Record<string, AgentEventRow[]> = {
+const previewEventsByRunId: Record<string, AgentEvent[]> = {
   "preview-run-stress": createEventStressFixture(),
   "preview-run-active": [
     {
       id: 1,
       run_id: "preview-run-active",
       kind: "status",
-      payload: JSON.stringify({ message: "Codex thread th_preview started" }),
+      payload: { message: "Codex thread th_preview started" },
       created_at: previewActiveStartedAt,
     },
     {
       id: 2,
       run_id: "preview-run-active",
       kind: "tool_call",
-      payload: JSON.stringify({
+      payload: {
         tool: "bash",
         args: { command: 'rg -n "stop_run|CancellationToken"' },
         call_id: "call-preview-search",
         result_summary: "exit 0",
-      }),
+      },
       created_at: previewIso(-12 * 60_000),
     },
     {
       id: 3,
       run_id: "preview-run-active",
       kind: "humanized",
-      payload: JSON.stringify({
+      payload: {
         summary: "Wiring run-scoped cancellation through the worker manager.",
-      }),
+      },
       created_at: previewIso(-7 * 60_000),
     },
     {
       id: 4,
       run_id: "preview-run-active",
       kind: "token_count",
-      payload: JSON.stringify({
+      payload: {
         input_tokens: 24800,
         output_tokens: 1900,
         total_tokens: 26700,
-      }),
+      },
       created_at: previewActiveLastEventAt,
     },
   ],
@@ -326,10 +294,10 @@ const previewEventsByRunId: Record<string, AgentEventRow[]> = {
       id: 5,
       run_id: "preview-run-failed",
       kind: "error",
-      payload: JSON.stringify({
+      payload: {
         class: "agent_failure",
         message: "Typecheck failed after applying the requested dashboard change.",
-      }),
+      },
       created_at: previewFailureEndedAt,
     },
   ],
@@ -338,13 +306,13 @@ const previewEventsByRunId: Record<string, AgentEventRow[]> = {
       id: 6,
       run_id: "preview-run-success",
       kind: "status",
-      payload: JSON.stringify({ message: "Run completed successfully" }),
+      payload: { message: "Run completed successfully" },
       created_at: previewSuccessEndedAt,
     },
   ],
 };
 
-const previewOverview: Overview = {
+const previewOverview: DashboardOverview = {
   active_runs: [previewActiveRun],
   retry_queue: [
     {
@@ -553,7 +521,7 @@ const previewRetroReport: RetroReport = {
   ],
 };
 
-const previewRetros: RetroRow[] = [
+const previewRetros: RetroSummary[] = [
   {
     id: previewRetroReport.id,
     since_at: previewRetroReport.since_at,
@@ -561,7 +529,7 @@ const previewRetros: RetroRow[] = [
     status: "completed",
     run_count: previewRetroReport.run_count,
     issue_count: previewRetroReport.issue_count,
-    report_json: JSON.stringify(previewRetroReport),
+
     error_message: null,
     created_at: previewRetroReport.generated_at,
     completed_at: previewRetroReport.generated_at,
@@ -573,7 +541,7 @@ const previewRetros: RetroRow[] = [
     status: "completed",
     run_count: 8,
     issue_count: 5,
-    report_json: null,
+
     error_message: null,
     created_at: previewIso(-7 * 24 * 60 * 60_000),
     completed_at: previewIso(-7 * 24 * 60 * 60_000),
@@ -588,7 +556,7 @@ const previewRetroStatus: RetroStatus = {
   error: null,
 };
 
-const previewRetroSuggestions: RetroSuggestionRow[] = previewRetroReport.repos.flatMap(
+const previewRetroSuggestions: RetroSuggestionReview[] = previewRetroReport.repos.flatMap(
   (repo, repoIndex) =>
     repo.suggestions.map((suggestion, findingIndex) => {
       const isPrompt = suggestion.target_type === "prompt";

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppUpdateProps, UpdateSafety } from "./appUpdateTypes";
-import type { AppSettings, Overview, WorkerStatus } from "./bindings";
+import type { AppSettings, DashboardOverview, WorkerStatus } from "./bindings";
 import * as desktopCommands from "./desktop/commands";
 import {
   checkForDesktopUpdate,
@@ -19,7 +19,7 @@ type ManualCheckStatus =
 
 type AppUpdateFeatureProps = {
   manualCheckRequest: number;
-  overview: Overview;
+  overview: DashboardOverview;
   backgroundWork: string[];
   hasInProgressRetroBatches: boolean;
   hasUnsavedSettings: boolean;
@@ -27,7 +27,7 @@ type AppUpdateFeatureProps = {
   pendingLinearKey: string;
   transientBusy: boolean;
   onWorkerChange: (worker: WorkerStatus) => void;
-  onOverviewChange: (overview: Overview) => void;
+  onOverviewChange: (overview: DashboardOverview) => void;
   onRetroBatchWorkChange: (active: boolean) => void;
   onInstallLockChange: (locked: boolean) => void;
   onActionError: (message: string) => void;

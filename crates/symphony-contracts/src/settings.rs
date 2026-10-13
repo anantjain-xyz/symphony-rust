@@ -11,6 +11,8 @@ use symphony_core::{
 /// ship as a YAML front matter (states, hooks, sandbox/permission options).
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub settings_revision: u64,
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
     // Repositories; each issue routes to one by repo:<name> or bare repo-name
@@ -110,6 +112,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            settings_revision: 0,
             prompt_template: default_prompt_template(),
             repos: Vec::new(),
             workspace_root: None,

@@ -235,6 +235,19 @@ Backoff is reset only by the state transition the controller defines as
 progress. Do not treat a transport success with unchanged data as user-visible
 progress.
 
+## Typed desktop projections
+
+- Run session metadata and issue labels/blockers arrive as typed objects and arrays.
+  React does not decode SQL JSON columns.
+- Event payloads arrive as `JsonValue`. Strings remain opaque strings; renderers narrow
+  object fields and format other JSON values directly.
+- Event cache keys include payload content, so cloned IPC objects reuse prepared
+  rows while changed payloads invalidate their Markdown and search models.
+- Validation navigation uses `issues[].field`, preferring the first blocking issue.
+  Display messages never determine the target field.
+- `settings_revision` is server metadata, excluded from dirty form snapshots. A save
+  carries its new revision into a newer unsaved draft before the next submission.
+
 ## Debounced validation and exact Save semantics
 
 ### Current behavior
