@@ -3057,9 +3057,13 @@ describe("App settings", () => {
         },
       }),
     );
-    render(<App />);
+    const { container } = render(<App />);
     await openSettings();
-    expect(await screen.findByText(/Restart the worker after unlocking/)).toBeTruthy();
+    await waitFor(() =>
+      expect(container.querySelector(".settings-form .banner.info")?.textContent).toContain(
+        "Restart the worker after unlocking",
+      ),
+    );
     expect(
       screen.queryByText(/Saved settings apply to future dispatches without restarting/),
     ).toBeNull();
