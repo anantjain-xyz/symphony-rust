@@ -109,12 +109,12 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
         next.prompt_template === draft.prompt_template
           ? { ...next, prompt_template: previous.prompt_template }
           : next;
-      setDraft(normalized);
-      session.replaceDraft(normalized);
-      onDraftChange(normalized, session.readKey(), previous);
-      const revision = { id: session.advanceRevision(), settings: normalized };
+      const updated = session.replaceDraft(normalized);
+      setDraft(updated);
+      onDraftChange(updated, session.readKey(), previous);
+      const revision = { id: session.advanceRevision(), settings: updated };
       scheduleValidation(revision);
-      updateDirty(normalized, session.readKey());
+      updateDirty(updated, session.readKey());
     },
     [draft, session, onDraftChange, scheduleValidation, updateDirty],
   );
@@ -122,8 +122,7 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   const setPromptDraft = useCallback(
     (prompt: string) => {
       const previous = session.readDraft() ?? draft;
-      const next = { ...previous, prompt_template: prompt };
-      session.replaceDraft(next);
+      const next = session.replaceDraft({ ...previous, prompt_template: prompt });
       // Keep feature draft aligned without urgent shell work so a PromptEditor
       // remount reseeds from the latest prompt, not a stale parent value.
       startTransition(() => setDraft(next));
@@ -175,10 +174,10 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   }, [session, ensureController, savePending, savedSettings]);
 
   useEffect(() => {
-    const next = dirtyRef.current ? (session.readDraft() ?? draft) : savedSettings;
-    if (next === session.readDraft()) return;
-    session.replaceDraft(next);
-    setDraft(next);
+    // The session advances a draft only for its own completed operation or a
+    // saved form that exactly matches it; unrelated edits retain their base.
+    const next = session.readDraft() ?? savedSettings;
+    if (next !== draft) setDraft(next);
   }, [draft, session, savedSettings]);
 
   useEffect(() => {
@@ -216,7 +215,14 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
         setFocusInvalidSummary(true);
         return;
       }
-      const saved = await onSave(exactSettings, exactLinearKey, result);
+      let saved: AppSettings | undefined;
+      try {
+        saved = await onSave(exactSettings, exactLinearKey, result);
+      } catch {
+        // The desktop action reports the conflict; keep this draft and token
+        // intact so a rejected save never becomes an unhandled form promise.
+        return;
+      }
       if (!saved || session.revision() !== exactRevision.id) return;
       session.replaceDraft(saved);
       setDraft(saved);
@@ -230,17 +236,22 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   }, [draft, session, ensureController, onSave]);
 
   const handleRemoveKey = useCallback(async () => {
-    const linearApiKeySet = await onRemoveKey();
-    if (linearApiKeySet === undefined) return;
-    setLinearKey("");
-    setSettingsDraft({ ...(session.readDraft() ?? draft), linear_api_key_set: linearApiKeySet });
-  }, [draft, session, onRemoveKey, setLinearKey, setSettingsDraft]);
+    if (!(await onRemoveKey())) return;
+    // Read the reconciled session after the await, without replaying a captured
+    // draft or comparing it to the editor's old saved-settings closure.
+    const next = session.readDraft();
+    if (!next) return;
+    setDraft(next);
+    setLinearKeyState(session.readKey());
+    dirtyRef.current = session.isDirty();
+    onDraftChange(next, session.readKey(), next);
+    scheduleValidation({ id: session.advanceRevision(), settings: next });
+  }, [session, onRemoveKey, onDraftChange, scheduleValidation]);
 
   const handleResetPrompt = useCallback(async () => {
     const prompt = await onResetPrompt();
     const previous = session.readDraft() ?? draft;
-    const next = { ...previous, prompt_template: prompt };
-    session.replaceDraft(next);
+    const next = session.replaceDraft({ ...previous, prompt_template: prompt });
     setDraft(next);
     setPromptSeedRevision((revision) => revision + 1);
     onDraftChange(next, session.readKey(), previous);
