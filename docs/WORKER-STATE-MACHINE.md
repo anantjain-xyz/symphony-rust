@@ -11,9 +11,9 @@ The in-memory worker has three states:
 
 | State | Meaning | Allowed next states |
 | --- | --- | --- |
-| `stopped` | No poll loop is owned by this manager. | `running` |
-| `running` | Startup, polling, or issue dispatch is active. | `stopping`, `stopped` after the task exits |
-| `stopping` | The root cancellation token has fired and the worker task is unwinding. | `stopped`; the current `start()` implementation also accepts a restart here, which is an unsafe known gap |
+| `stopped` | The previous generation's poll loop and all owned run tasks have exited. | `running` |
+| `running` | A generation owns startup, polling, configuration, and its run tasks. | `stopping` |
+| `stopping` | The root token is cancelled; the supervisor is joining polling and run tasks. | `stopped` |
 
 `start()` publishes `running` before the spawned task finishes tracker
 preflight and restart recovery. This lets the UI show startup immediately.
@@ -30,15 +30,12 @@ worker task owns the final transition to `stopped`. Tracker requests do not
 accept cancellation tokens, so startup and tick wrap each network wait and
 abandon that wait when stop fires.
 
-There is currently a stop-to-start race. `start()` rejects `running` but not
-`stopping`, so a caller can start another task while the previous task is
-unwinding. That replaces the manager's token, handle, and runtime-config
-references; when the old task exits, its unconditional cleanup can then mark
-the manager stopped and clear the new task's references even though the new
-poll loop is still alive. Callers must wait until status is `stopped` before
-restarting. The intended invariant is one manager-owned poll loop: `start()`
-must reject or serialize while `stopping`, and task cleanup must only clear
-state owned by the same task generation.
+`start()` rejects both `running` and `stopping`. Running and stopping state
+variants own their token, runtime configuration, and supervisor handle together.
+Each generation owns a `JoinSet` of run supervisors; shutdown waits for dispatch,
+cancellation finalization, recovery, and workspace-claim release before publishing
+`stopped`. A polling panic also cancels and joins children. Cleanup is fenced by
+the generation that owns it, so a prior generation cannot clear a newer one.
 
 The worker deliberately does not race an entire tick against cancellation. A
 tick may have committed a `pending` run but not yet spawned the task that owns
@@ -59,7 +56,7 @@ An issue can enter normal dispatch only when all of these are true:
 - no unchanged user-cancellation suppression applies;
 - it has no `pending` or `running` run;
 - it routes to a configured repository;
-- no active provider rate limit blocks dispatch; and
+- no active rate limit for the selected provider blocks dispatch; and
 - `pending + running` is below `max_concurrent_agents`.
 
 Linear team and project lists determine which issues enter the active query:
@@ -98,10 +95,10 @@ while the workspace is prepared. The database has a partial unique index for
 one `running` row per issue; the worker also checks for any active run before
 reserving.
 
-Terminal rows are logically immutable. `finish_run()` is a low-level storage
-operation and does not itself predicate the update on a non-terminal status,
-so callers must not finish the same run twice. The stranded-run recovery path
-reads the row first and only repairs `pending` or `running`.
+Terminal rows are immutable: `finish_run()` accepts only terminal targets,
+predicates its update on `pending` or `running`, and reports whether it changed
+the row. The stranded-run recovery path also checks the current status before
+repairing it.
 
 Although `timeout` remains a supported persisted status for compatibility,
 the native adapters currently return a timeout as `AgentError::Timeout`.
@@ -172,7 +169,9 @@ Retry behavior follows these rules:
 - A retry stays queued while the issue is blocked.
 - A retry is cleared when the issue is no longer active, no longer exists, or
   can no longer route to a repository.
-- Provider rate limits pause both normal and retry dispatch.
+- Provider rate limits pause normal and retry dispatch only for the selected
+  backend, including provider-specific buckets such as `codex_primary`.
+  Switching to an available backend does not inherit another provider's pause.
 - "Retry now" moves an existing retry due time to now and wakes the worker.
 - If no retry row exists but the latest run is `cancelled`, "Retry now"
   creates the next run number immediately.
@@ -224,6 +223,10 @@ driver cannot leave any descendant mutating the workspace; satisfying it
 requires explicit cancellation before drop or a process-group guard whose
 drop path kills the group.
 
+Hook stderr is continuously drained into a 4 KiB tail buffer; decoding and
+truncation preserve valid UTF-8 even when the retained bytes begin inside a
+multibyte character.
+
 Lifecycle hooks are also launched in dedicated process groups. After every
 hook result, including success, Symphony terminates descendants that outlived
 the hook shell (`TERM`, then `KILL` after a short grace period). Hooks must not
@@ -251,11 +254,20 @@ sessions for already-terminal runs are removed.
 
 After local run recovery, the worker makes a best-effort fetch of terminal
 issues; a failed cleanup fetch does not prevent active polling from starting.
-An independent loop repeats the sweep hourly, so a large terminal history never
-blocks active-issue refresh or dispatch. Candidates without a local workspace
-are skipped before per-issue tracker revalidation. Immediately before cleanup,
+An independent loop repeats the sweep hourly without blocking active-issue
+refresh or dispatch. The initial terminal fetch still precedes the first poll.
+Candidates without a local workspace are skipped before per-issue tracker revalidation. Immediately before cleanup,
 the worker confirms that the issue is still terminal and that the tracker
 configuration has not changed.
+
+Dispatch and terminal cleanup acquire the same per-workspace claim. Dispatch
+acquires it before reserving a database run and retains it through setup, agent
+execution, finalization, and recovery. Cleanup acquires it before checking active
+runs and awaiting tracker revalidation, then retains it through quarantine.
+Contended work is skipped until a later poll/sweep. A route or root change during
+revalidation must still resolve to the claimed path; otherwise cleanup skips it.
+If an issue reopens after a terminal snapshot, its next run can reserve only after
+the old workspace is quarantined, so cleanup cannot rename a live run's checkout.
 
 A terminal workspace is preserved until the tracker's latest completion or
 cancellation timestamp is at least one hour old. Missing timestamps, or any
@@ -349,8 +361,13 @@ When changing worker lifecycle code:
 5. Make terminal writes single-shot or explicitly idempotent.
 6. Update retry creation, clearing, suppression, and "Retry now" together.
 7. Test worker stop and individual run stop separately.
-8. Test that start cannot race a worker still in `stopping`.
+8. Test that start rejects `stopping` until owned children finish and release
+   workspace claims, including when polling panics.
 9. Test restart with both `pending` and `running` rows.
 10. Test failures before promotion, during event persistence, and after an
    adapter result.
 11. Keep tracker, storage, adapter, and domain error classes distinct.
+
+Workspace and output regression coverage includes barrier-controlled reopening
+versus quarantine, workspace aliases before/after creation, provider switching
+for normal and retry dispatch, and large multibyte hook stderr.
