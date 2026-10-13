@@ -611,6 +611,25 @@ function rustStructFieldExpressions(struct, fieldName) {
     .map((field) => field.slice(2));
 }
 
+function returnedRustStruct(tokens, body, structName) {
+  // Inspect only the function's tail expression. An earlier constructor can be
+  // a decoy, and arbitrary wrappers could transform or replace its skills.
+  const statements = splitTopLevel(tokens.slice(body.start, body.end), ";");
+  let expression = statements?.at(-1) ?? [];
+  if (
+    expression[0]?.value === "Ok" &&
+    expression[1]?.value === "(" &&
+    matchingRustDelimiter(expression, 1) === expression.length - 1
+  ) {
+    expression = expression.slice(2, -1);
+    if (expression.at(-1)?.value === ",") expression = expression.slice(0, -1);
+  }
+  const structs = rustStructExpressions(expression, 0, expression.length, structName).filter(
+    (struct) => struct.start === 0 && struct.end === expression.length,
+  );
+  return structs.length === 1 ? structs[0] : null;
+}
+
 function requireStructField(
   struct,
   fieldName,
@@ -698,17 +717,14 @@ function validateSkillRuntimeConsumers(root, sourcePath, inventoryFunction, erro
 
   const workerBody = bodies.get("worker_start_config");
   if (workerBody) {
-    const returned = rustStructExpressions(
-      tokens,
-      workerBody.start,
-      workerBody.end,
-      "WorkerStartConfig",
-    ).filter((struct) => struct.end === workerBody.end);
-    if (returned.length !== 1) {
-      errors.push(`${sourcePath} worker_start_config must directly return one WorkerStartConfig`);
+    const returned = returnedRustStruct(tokens, workerBody, "WorkerStartConfig");
+    if (!returned) {
+      errors.push(
+        `${sourcePath} worker_start_config must directly return one WorkerStartConfig, optionally wrapped in Ok(...)`,
+      );
     } else {
       requireStructField(
-        returned[0],
+        returned,
         "skills",
         [inventoryFunction, "(", ")"],
         sourcePath,
