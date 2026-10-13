@@ -99,9 +99,9 @@ The main files are deliberately split by operational concern:
 The `symphony-desktop` package is the composition and OS boundary.
 `src-tauri/src/lib.rs` opens storage, constructs managers, registers Tauri
 commands, projects typed storage records into UI DTOs, forwards events, and
-initializes logging. `settings.rs` owns settings serialization/defaults and their
-translation into core workflow configuration; secrets are read through the OS
-keychain. `retro_service.rs` owns retro review and change application without
+initializes logging. Settings schemas/defaults live in `symphony-contracts`;
+desktop `settings.rs` normalizes them and translates them into core workflow
+configuration. Secrets are read through the OS keychain. `retro_service.rs` owns retro review and change application without
 Tauri types, application state, or direct credential/environment access.
 `retro.rs` supplies generation, diff materialization, and native Git/PR effects.
 
@@ -142,8 +142,9 @@ Feature owners ──> desktop commands/events ──> generated IPC contracts
 
 Feature-owner extraction bundle baseline: eager JavaScript changed from
 254.36 kB raw / 80.63 kB normalized gzip to 256.67 kB raw / 81.28 kB gzip.
-The startup budget is 81.50 kB; existing view boundaries, lazy budgets, and
-forbidden eager entries are unchanged. This retains immediate Overview rendering.
+The current eager JavaScript budget is 82,000 normalized gzip bytes; existing
+view boundaries, lazy budgets, and forbidden eager entries are unchanged.
+This retains immediate Overview rendering.
 
 `src/bindings.ts` is reproducible generated IPC output. The Tauri-free
 `symphony-contracts` crate owns deliberate UI DTOs without storage or worker
@@ -155,13 +156,17 @@ regenerates it in a temporary directory and rejects drift.
 
 ### Startup and dashboard reads
 
-1. Tauri repairs the GUI process `PATH`, creates the app-data directory, opens
-   and migrates SQLite, and constructs `Repository`, `WorkerManager`, and the
-   long-running install/retro managers.
-2. The desktop registers commands and forwards storage-bus messages as Tauri
-   events. Binding generation is an explicit development/CI step, not a
-   startup side effect.
-3. React loads settings and an initial dashboard snapshot through commands.
+1. Tauri repairs the GUI process `PATH`. macOS and Windows register the
+   activation plugin first so repeated launches restore and focus the existing
+   window. Linux uses the OS lease directly; window focus remains manual.
+2. Every desktop platform acquires a stable app-data OS lease before keychain,
+   database, settings, or worker initialization. The lease lasts until actual
+   process exit. A replacement waits at most five seconds and starts only after
+   the previous owner exits; restart never releases the old lease early.
+3. The admitted process opens and migrates SQLite, constructs its managers,
+   registers commands, and forwards storage-bus messages as Tauri events.
+   Binding generation remains an explicit development/CI step.
+4. React loads settings and an initial dashboard snapshot through commands.
    Later storage events mark the affected resource keys dirty and schedule
    selective refreshes.
 
@@ -195,9 +200,21 @@ effects. Start acquires it before capturing settings; Retro acquires it after
 network validation and before its revision check. Owned tasks retain this gate
 through reconfiguration, key-removal shutdown, and retro batch finalization when
 an IPC caller disconnects. Removing the key advances the revision and stops the
-worker before a newer Save can reconfigure it. Drafts
-adopt a newer revision only from their own Save operation; unrelated updates
-retain the old revision and produce a conflict.
+worker before a newer Save can reconfigure it.
+
+`save_settings` returns `SettingsSaveResult`: `settings` acknowledges the
+committed values and revision; `runtime_update_error` reports a subsequent
+runtime failure. The UI accepts the durable Save and presents the runtime
+warning separately.
+
+- A completed Save advances its draft lineage to the saved revision while
+  preserving edits made during that operation.
+- When draft form values equal the latest saved values, the draft adopts the
+  complete saved snapshot and revision, including when later edits create that
+  equivalence. Pending key input retains its separate edit ownership.
+- An unrelated update cannot advance a differing dirty draft's revision;
+  its next Save reports a conflict.
+
 Readable settings remain available when the credential service fails; derived
 credential-error metadata explains the unavailable key. Ordinary configuration
 and prompt edits preserve durable credential metadata and remain saveable while

@@ -60,6 +60,8 @@ pnpm tauri dev      # or: pnpm tauri build
 
 See [Building](#building) for production bundles and signed releases.
 
+Symphony allows one runtime per app-data directory. A second launch focuses the existing window on macOS and Windows. Linux enforces the same exclusion through an OS file lease; focus the existing window manually.
+
 On first launch the Overview shows a setup checklist:
 
 1. **Connect Linear** — paste your API key in *Settings → Linear*. It is stored in the macOS keychain, never on disk.
@@ -82,6 +84,7 @@ Symphony's operational behavior is configured in *Settings*:
 The **default workflow** at the bottom of Settings is the instruction document sent to the agent for each issue. A repository can override those instructions by checking a regular UTF-8 file named `SYMPHONY-WORKFLOW.md` or `symphony-workflow.md` into its root. The uppercase name wins if both exist. Empty files, unsupported placeholders, symlinks, and other invalid files fall back to the saved default workflow.
 
 - Save checks the revision loaded by your draft. If another Save or retro changes settings, reload the latest settings before retrying.
+- A completed Save acknowledges the settings written to disk even if the worker update fails. A separate warning explains the runtime failure; saving does not imply that the live worker applied the changes.
 - Ordinary settings edits can be saved while the keychain is locked. If the live worker keeps its previous configuration, Symphony reports that state; unlock the keychain and restart the worker to apply the saved settings.
 - Removing the Linear key stops the worker. Interrupted credential updates are checked on the next settings access; recovery may stop the worker until the credential store is available.
 
