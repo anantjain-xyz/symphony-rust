@@ -240,6 +240,8 @@ Tauri command ──> RetroService ──> pure reviewed selection / workflow pl
   the revision and captures credentials again immediately before CAS.
 - An unavailable Linear key blocks generation, while Git PR work and prompt
   changes remain available. Ambiguous credential recovery blocks admission.
+- A prompt saved while credential access prevents runtime update leaves a
+  restart instruction in worker status, including after a webview reload.
 - Delete and review use storage guards so reserved work cannot lose its inputs.
 - Commands accept closed decision enums and project service snapshots into IPC
   DTOs; malformed stored reports surface as errors rather than missing reports.

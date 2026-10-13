@@ -252,11 +252,14 @@ function SettingsFeature({
       settingsDirty={controller.dirty}
       workerRunning={worker.state === "running"}
       workerConfigError={worker.state === "running" && worker.last_error !== null}
+      workerConfigMessage={worker.last_error}
+      liveCredentialSkipped={controller.savedLiveConfigKeptReason === "credential"}
       liveReconfigureSkipped={
         worker.state === "running" &&
         ((controller.validation?.workflow_ok === false &&
           !controller.validation.workflow_blocking) ||
-          (controller.savedFlash && controller.savedLiveConfigKept))
+          controller.savedLiveConfigKept ||
+          controller.saved?.linear_api_key_error != null)
       }
       activeRunCount={activeRunCount}
       busy={busy}
@@ -293,7 +296,9 @@ function SettingsView({
   settingsDirty,
   workerRunning,
   workerConfigError,
+  workerConfigMessage,
   liveReconfigureSkipped,
+  liveCredentialSkipped,
   activeRunCount,
   busy,
   runtimeAvailable,
@@ -329,7 +334,9 @@ function SettingsView({
   settingsDirty: boolean;
   workerRunning: boolean;
   workerConfigError: boolean;
+  workerConfigMessage: string | null;
   liveReconfigureSkipped: boolean;
+  liveCredentialSkipped: boolean;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -502,17 +509,19 @@ function SettingsView({
             {workerConfigError || liveReconfigureSkipped ? "Worker configuration" : "Live worker"}
           </strong>
           <span>
-            {workerConfigError
-              ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
-              : liveReconfigureSkipped
-                ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
-                : `Saved settings apply to future dispatches without restarting the worker. ${
-                    activeRunCount > 0
-                      ? `${activeRunCount} active ${
-                          activeRunCount === 1 ? "run keeps" : "runs keep"
-                        } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
-                      : "No active runs are using an older config."
-                  }`}
+            {liveCredentialSkipped || (liveReconfigureSkipped && credentialError)
+              ? "Settings are saved, but credential access prevented the live worker from updating. Unlock the credential store if needed, then restart the worker to apply the saved settings."
+              : workerConfigError
+                ? `Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed. ${workerConfigMessage ?? ""}`
+                : liveReconfigureSkipped
+                  ? "Settings save to disk, but the worker keeps its previous configuration. Finish any incomplete setup, then restart the worker to apply the saved settings."
+                  : `Saved settings apply to future dispatches without restarting the worker. ${
+                      activeRunCount > 0
+                        ? `${activeRunCount} active ${
+                            activeRunCount === 1 ? "run keeps" : "runs keep"
+                          } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                        : "No active runs are using an older config."
+                    }`}
           </span>
         </div>
       ) : null}

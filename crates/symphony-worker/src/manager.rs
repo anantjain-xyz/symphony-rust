@@ -272,6 +272,17 @@ impl WorkerManager {
         self.inner.lock().await.status()
     }
 
+    /// Keep a rejected configuration update visible until a successful update
+    /// or restart, without changing the currently running worker.
+    pub async fn report_configuration_error(&self, error: &str) {
+        let mut inner = self.inner.lock().await;
+        let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+            return;
+        };
+        let error = worker.output_credentials.lock().unwrap().error(error);
+        inner.last_error = Some(error);
+    }
+
     pub async fn start(&self, config: WorkerStartConfig) -> Result<WorkerStatus, WorkerError> {
         self.start_with_runner(config, run_worker).await
     }
@@ -4270,6 +4281,49 @@ exit 13
             assert!(!error.to_string().contains("storage error"));
             assert!(!error.to_string().contains("database error"));
         }
+    }
+
+    #[tokio::test]
+    async fn reported_configuration_error_is_sanitized_and_cleared_by_reconfigure() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut runtime = runtime_config(temp.path());
+        let credential = "configuration-error-test-credential";
+        runtime.workflow.front_matter.tracker.api_key = credential.into();
+        manager
+            .start_with_runner(start_config(runtime.clone()), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        manager
+            .report_configuration_error(&format!("Update failed with {credential}"))
+            .await;
+        let status = manager.status().await;
+        assert_eq!(status.state, WorkerState::Running);
+        let message = status.last_error.unwrap();
+        assert!(message.starts_with("Update failed with "));
+        assert!(!message.contains(credential));
+        assert_eq!(
+            manager.status().await.last_error.as_deref(),
+            Some(message.as_str())
+        );
+
+        let updated = manager
+            .reconfigure_with_tracker_preflight(start_config(runtime), |_| async { Ok(()) })
+            .await;
+        assert_eq!(updated.state, WorkerState::Running);
+        assert!(updated.last_error.is_none());
+        manager.stop().await;
+        wait_until_stopped(&manager).await;
+        manager.report_configuration_error("No active worker").await;
+        assert!(manager.status().await.last_error.is_none());
     }
 
     #[tokio::test]

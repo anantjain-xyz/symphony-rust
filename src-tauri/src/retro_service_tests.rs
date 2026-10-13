@@ -811,9 +811,16 @@ async fn keyring_unlock_during_commit_does_not_reconfigure_with_an_uncaptured_ke
         .unwrap();
     assert_eq!(batch.state, BatchState::Completed);
     assert!(fixture.credentials.2.lock().unwrap().is_empty());
+    let status = fixture.service.worker.status().await;
+    assert_eq!(status.state, symphony_worker::WorkerState::Running);
+    let diagnostic = status
+        .last_error
+        .expect("skipped runtime update stays observable");
+    assert!(diagnostic.contains("credential access prevented worker update"));
+    assert!(diagnostic.contains("Restart worker"));
     assert_eq!(
-        fixture.service.worker.status().await.state,
-        symphony_worker::WorkerState::Running
+        fixture.service.worker.status().await.last_error.as_deref(),
+        Some(diagnostic.as_str())
     );
     fixture.service.worker.stop().await;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {

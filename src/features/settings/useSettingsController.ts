@@ -33,10 +33,15 @@ export function useSettingsController(options: Options) {
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
+  const [savedLiveConfigKeptReason, setSavedLiveConfigKeptReason] = useState<
+    "credential" | "workflow" | "worker" | null
+  >(null);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const linearViewerSeq = useRef(0);
+  useEffect(() => {
+    if (options.readWorkerState() !== "running") setSavedLiveConfigKeptReason(null);
+  }, [options.readWorkerState]);
   const refreshLinearViewer = useCallback(
     (exactSettings: AppSettings, exactKey: string) => {
       if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
@@ -132,9 +137,16 @@ export function useSettingsController(options: Options) {
       // refresh will reconcile worker state.
     }
     const liveWorkerState = refreshedWorker?.state ?? context.current.readWorkerState();
-    setSavedLiveConfigKept(
-      liveWorkerState === "running" &&
-        (!result.workflow_ok || refreshedWorker?.last_error !== null),
+    setSavedLiveConfigKeptReason(
+      liveWorkerState !== "running"
+        ? null
+        : saved.linear_api_key_error !== null
+          ? "credential"
+          : !result.workflow_ok
+            ? "workflow"
+            : refreshedWorker?.last_error !== null
+              ? "worker"
+              : null,
     );
     const currentDraft = session.readDraft();
     const refreshTarget =
@@ -148,7 +160,6 @@ export function useSettingsController(options: Options) {
     }
     savedFlashTimer.current = window.setTimeout(() => {
       setSavedFlash(false);
-      setSavedLiveConfigKept(false);
     }, 2500);
     return acknowledged && session.readSaved() === saved ? saved : undefined;
   }
@@ -190,7 +201,8 @@ export function useSettingsController(options: Options) {
     savePending,
     validation,
     savedFlash,
-    savedLiveConfigKept,
+    savedLiveConfigKept: savedLiveConfigKeptReason !== null,
+    savedLiveConfigKeptReason,
     viewer: { linearViewer, linearViewerLoading, linearViewerError, trackerTest },
     session,
     acceptSaved(next: AppSettings) {

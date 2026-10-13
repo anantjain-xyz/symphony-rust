@@ -525,6 +525,12 @@ impl RetroService {
             self.worker
                 .reconfigure(runtime.worker_config(&updated)?)
                 .await;
+        } else {
+            self.worker
+                .report_configuration_error(
+                    "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.",
+                )
+                .await;
         }
         self.repo
             .update_retro_batch(

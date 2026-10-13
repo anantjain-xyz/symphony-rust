@@ -10,6 +10,8 @@ use std::{
 };
 use symphony_contracts::AppSettings;
 
+type ParentSync = fn(&Path) -> Result<(), String>;
+
 enum AccessMode {
     Load,
     Commit,
@@ -53,6 +55,7 @@ pub struct SettingsStore {
     effects_gate: Arc<tokio::sync::Mutex<()>>,
     recovery_stop: Arc<AtomicBool>,
     credentials: Arc<dyn Credentials>,
+    parent_sync: ParentSync,
 }
 
 /// Private runtime input captured under the same durable lock. Never serialize
@@ -70,7 +73,14 @@ impl SettingsStore {
             effects_gate: Arc::new(tokio::sync::Mutex::new(())),
             recovery_stop: Arc::new(AtomicBool::new(false)),
             credentials,
+            parent_sync: crate::settings_transaction::sync_parent,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_parent_sync(mut self, parent_sync: ParentSync) -> Self {
+        self.parent_sync = parent_sync;
+        self
     }
 
     /// Keep a local settings commit and its worker effects in the same order.
@@ -91,7 +101,12 @@ impl SettingsStore {
     async fn access<T: Send + 'static>(
         &self,
         mode: AccessMode,
-        action: impl FnOnce(&Path, &dyn Credentials, Option<String>) -> Result<T, String>
+        action: impl FnOnce(
+                &Path,
+                &dyn Credentials,
+                Option<String>,
+                &SettingsWriter<'_>,
+            ) -> Result<T, String>
             + Send
             + 'static,
     ) -> Result<T, String> {
@@ -116,7 +131,8 @@ impl SettingsStore {
                 store.credentials.as_ref(),
             ) {
                 Ok(crate::settings_transaction::RecoveryOutcome::Ready) => None,
-                Ok(crate::settings_transaction::RecoveryOutcome::Recovered { .. }) => {
+                Ok(crate::settings_transaction::RecoveryOutcome::Recovered { .. })
+                | Ok(crate::settings_transaction::RecoveryOutcome::Superseded) => {
                     // Record before releasing the blocking task's ownership.
                     // Cancellation of its async waiter cannot erase this effect.
                     store.recovery_stop.store(true, Ordering::Release);
@@ -135,7 +151,11 @@ impl SettingsStore {
                     return Err(error);
                 }
             }
-            let result = action(&store.path, store.credentials.as_ref(), recovery_error);
+            let writer = SettingsWriter {
+                recovery_stop: &store.recovery_stop,
+                sync_parent: store.parent_sync,
+            };
+            let result = action(&store.path, store.credentials.as_ref(), recovery_error, &writer);
             if result.is_err() && crate::settings_transaction::has_pending(&store.path) {
                 store.recovery_stop.store(true, Ordering::Release);
             }
@@ -146,47 +166,55 @@ impl SettingsStore {
     }
 
     pub async fn load(&self) -> Result<AppSettings, String> {
-        self.access(AccessMode::Load, |path, credentials, recovery_error| {
-            // An unresolved credential journal owns the existing file bytes;
-            // even an automatic migration must wait until recovery can finish.
-            let mut settings = read_settings_with_migration(path, recovery_error.is_none())?;
-            if let Some(error) = recovery_error {
-                settings.linear_api_key_set = false;
-                settings.linear_api_key_error = Some(error);
-            } else {
-                credential_availability(&mut settings, credentials);
-            }
-            Ok(settings)
-        })
+        self.access(
+            AccessMode::Load,
+            |path, credentials, recovery_error, writer| {
+                // An unresolved credential journal owns the existing file bytes;
+                // even an automatic migration must wait until recovery can finish.
+                let mut settings =
+                    read_settings_with_migration(path, recovery_error.is_none(), writer)?;
+                if let Some(error) = recovery_error {
+                    settings.linear_api_key_set = false;
+                    settings.linear_api_key_error = Some(error);
+                } else {
+                    credential_availability(&mut settings, credentials);
+                }
+                Ok(settings)
+            },
+        )
         .await
     }
 
     /// The caller owns `commit_effects` and drains recovery before using this
     /// snapshot. Settings and the injected credential are read under one lock.
     pub(crate) async fn runtime_snapshot(&self) -> Result<SettingsSnapshot, String> {
-        self.access(AccessMode::Load, |path, credentials, recovery_error| {
-            if let Some(error) = recovery_error {
-                return Err(error);
-            }
-            let mut settings = read_settings_with_migration(path, true)?;
-            let credential = match credentials.read() {
-                Ok(credential) => {
-                    settings.linear_api_key_set = credential.is_some();
-                    settings.linear_api_key_error = None;
-                    credential
+        self.access(
+            AccessMode::Load,
+            |path, credentials, recovery_error, writer| {
+                if let Some(error) = recovery_error {
+                    return Err(error);
                 }
-                Err(_) => {
-                    settings.linear_api_key_set = false;
-                    settings.linear_api_key_error =
-                        Some("The OS credential store is unavailable. Unlock it and retry.".into());
-                    None
-                }
-            };
-            Ok(SettingsSnapshot {
-                settings,
-                credential,
-            })
-        })
+                let mut settings = read_settings_with_migration(path, true, writer)?;
+                let credential = match credentials.read() {
+                    Ok(credential) => {
+                        settings.linear_api_key_set = credential.is_some();
+                        settings.linear_api_key_error = None;
+                        credential
+                    }
+                    Err(_) => {
+                        settings.linear_api_key_set = false;
+                        settings.linear_api_key_error = Some(
+                            "The OS credential store is unavailable. Unlock it and retry.".into(),
+                        );
+                        None
+                    }
+                };
+                Ok(SettingsSnapshot {
+                    settings,
+                    credential,
+                })
+            },
+        )
         .await
     }
 
@@ -195,9 +223,8 @@ impl SettingsStore {
         mut settings: AppSettings,
         key: Option<String>,
     ) -> Result<AppSettings, String> {
-        let recovery_stop = self.recovery_stop.clone();
-        self.access(AccessMode::Commit, move |path, credentials, _| {
-            let current = read_settings(path)?;
+        self.access(AccessMode::Commit, move |path, credentials, _, writer| {
+            let current = read_settings(path, writer)?;
             if current.settings_revision != settings.settings_revision {
                 return Err("Settings changed since this draft was loaded. Reload the latest settings before saving.".to_string());
             }
@@ -206,7 +233,7 @@ impl SettingsStore {
             settings.linear_api_key_set = current.linear_api_key_set;
             settings.settings_revision = next_revision(current.settings_revision)?;
             let key = key.filter(|value| !value.trim().is_empty());
-            commit_settings(path, settings, credentials, key.as_deref().map(Some), &recovery_stop)
+            commit_settings(path, settings, credentials, key.as_deref().map(Some), writer)
         }).await
     }
 
@@ -216,25 +243,23 @@ impl SettingsStore {
         expected_hash: String,
         prompt: String,
     ) -> Result<AppSettings, String> {
-        let recovery_stop = self.recovery_stop.clone();
-        self.access(AccessMode::Commit, move |path, credentials, _| {
-            let mut settings = read_settings(path)?;
+        self.access(AccessMode::Commit, move |path, credentials, _, writer| {
+            let mut settings = read_settings(path, writer)?;
             let current_hash = format!("{:x}", Sha256::digest(settings.prompt_template.as_bytes()));
             if settings.settings_revision != expected_revision || current_hash != expected_hash {
                 return Err("Settings changed while the workflow update was being prepared. Review the latest settings and retry.".to_string());
             }
             settings.prompt_template = prompt;
             settings.settings_revision = next_revision(settings.settings_revision)?;
-            commit_settings(path, settings, credentials, None, &recovery_stop)
+            commit_settings(path, settings, credentials, None, writer)
         }).await
     }
 
     pub async fn remove_key(&self) -> Result<AppSettings, String> {
-        let recovery_stop = self.recovery_stop.clone();
-        self.access(AccessMode::Commit, move |path, credentials, _| {
-            let mut settings = read_settings(path)?;
+        self.access(AccessMode::Commit, move |path, credentials, _, writer| {
+            let mut settings = read_settings(path, writer)?;
             settings.settings_revision = next_revision(settings.settings_revision)?;
-            commit_settings(path, settings, credentials, Some(None), &recovery_stop)
+            commit_settings(path, settings, credentials, Some(None), writer)
         })
         .await
     }
@@ -262,11 +287,11 @@ fn commit_settings(
     mut settings: AppSettings,
     credentials: &dyn Credentials,
     key_change: Option<Option<&str>>,
-    recovery_stop: &AtomicBool,
+    writer: &SettingsWriter<'_>,
 ) -> Result<AppSettings, String> {
     settings.linear_api_key_error = None;
     if key_change.is_none() {
-        write_atomic(
+        writer.write(
             path,
             &serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?,
         )?;
@@ -288,7 +313,7 @@ fn commit_settings(
     if result.is_err() {
         // Even a final journal-cleanup sync failure can follow a durable key
         // change. Stop before returning an ambiguous credential mutation result.
-        recovery_stop.store(true, Ordering::Release);
+        writer.recovery_stop.store(true, Ordering::Release);
     }
     result?;
     Ok(settings)
@@ -309,13 +334,14 @@ fn credential_availability(settings: &mut AppSettings, credentials: &dyn Credent
     }
 }
 
-fn read_settings(path: &Path) -> Result<AppSettings, String> {
-    read_settings_with_migration(path, true)
+fn read_settings(path: &Path, writer: &SettingsWriter<'_>) -> Result<AppSettings, String> {
+    read_settings_with_migration(path, true, writer)
 }
 
 fn read_settings_with_migration(
     path: &Path,
     persist_migration: bool,
+    writer: &SettingsWriter<'_>,
 ) -> Result<AppSettings, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -327,9 +353,9 @@ fn read_settings_with_migration(
     let (mut settings, migrated) = parse_settings(&raw)?;
     settings.linear_api_key_error = None;
     if migrated && persist_migration {
-        write_atomic(&path.with_extension("json.bak"), &raw)?;
+        writer.write(&path.with_extension("json.bak"), &raw)?;
         settings.settings_revision = next_revision(settings.settings_revision)?;
-        write_atomic(
+        writer.write(
             path,
             &serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?,
         )?;
@@ -350,16 +376,50 @@ fn prepare(path: &Path, body: &str) -> Result<tempfile::NamedTempFile, String> {
     Ok(file)
 }
 
-fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
-    prepare(path, body)?
-        .persist(path)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
+/// A successful return includes directory durability. After replacement, an
+/// error is ambiguous: the new file is visible but may not survive power loss.
+struct SettingsWriter<'a> {
+    recovery_stop: &'a AtomicBool,
+    sync_parent: ParentSync,
+}
+
+impl SettingsWriter<'_> {
+    fn write(&self, path: &Path, body: &str) -> Result<(), String> {
+        let file = prepare(path, body)?
+            .persist(path)
+            .map_err(|error| error.error.to_string())?;
+        let result = file
+            .sync_all()
+            .map_err(|error| error.to_string())
+            .and_then(|()| (self.sync_parent)(path));
+        if result.is_err() {
+            // Record inside the blocking owner's task, before an async caller
+            // can lose the obligation to stop a runtime using the old file.
+            self.recovery_stop.store(true, Ordering::Release);
+        }
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read_settings(path: &Path) -> Result<AppSettings, String> {
+        super::read_settings(
+            path,
+            &SettingsWriter {
+                recovery_stop: &AtomicBool::new(false),
+                sync_parent: crate::settings_transaction::sync_parent,
+            },
+        )
+    }
+    fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
+        SettingsWriter {
+            recovery_stop: &AtomicBool::new(false),
+            sync_parent: crate::settings_transaction::sync_parent,
+        }
+        .write(path, body)
+    }
     #[derive(Default)]
     struct FakeCredentials {
         value: Mutex<Option<String>>,
@@ -791,7 +851,10 @@ mod tests {
             AppSettings::default(),
             &credentials,
             Some(Some("new-key")),
-            &AtomicBool::new(false),
+            &SettingsWriter {
+                recovery_stop: &AtomicBool::new(false),
+                sync_parent: crate::settings_transaction::sync_parent,
+            },
         )
         .is_err());
         assert_eq!(credentials.read().unwrap().as_deref(), Some("old-key"));
@@ -971,5 +1034,83 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"old\":true}");
         write_atomic(&path, "{\"new\":true}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":true}");
+    }
+
+    fn fail_parent_sync(path: &Path) -> Result<(), String> {
+        assert!(
+            path.is_file(),
+            "replacement must be visible before parent sync"
+        );
+        Err("Synthetic parent-directory sync failure.".into())
+    }
+
+    #[tokio::test]
+    async fn ordinary_save_and_prompt_sync_failure_report_error_after_replacement() {
+        for prompt_update in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("settings.json");
+            let original = AppSettings {
+                settings_revision: 7,
+                ..Default::default()
+            };
+            write_atomic(&path, &serde_json::to_string(&original).unwrap()).unwrap();
+            let store = store(path.clone()).with_parent_sync(fail_parent_sync);
+            let result = if prompt_update {
+                let hash = format!("{:x}", Sha256::digest(original.prompt_template.as_bytes()));
+                store
+                    .apply_prompt(7, hash, "Replacement prompt".into())
+                    .await
+            } else {
+                let mut draft = original;
+                draft.prompt_template = "Replacement prompt".into();
+                store.save(draft, None).await
+            };
+            assert!(result.unwrap_err().contains("parent-directory sync"));
+            let visible = read_settings(&path).unwrap();
+            assert_eq!(visible.settings_revision, 8);
+            assert_eq!(visible.prompt_template, "Replacement prompt");
+            assert!(store.take_recovery_stop());
+            assert!(!crate::settings_transaction::has_pending(&path));
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_backup_sync_failure_preserves_the_original_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_permission_mode");
+        legacy["codex_approval_policy"] = serde_json::json!("never");
+        let raw = serde_json::to_string(&legacy).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let store = store(path.clone()).with_parent_sync(fail_parent_sync);
+        assert!(store
+            .load()
+            .await
+            .unwrap_err()
+            .contains("parent-directory sync"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("json.bak")).unwrap(),
+            raw
+        );
+        assert!(store.take_recovery_stop());
+    }
+
+    #[test]
+    fn preparation_failure_does_not_schedule_a_post_commit_stop() {
+        let directory = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        let writer = SettingsWriter {
+            recovery_stop: &stop,
+            sync_parent: fail_parent_sync,
+        };
+        assert!(writer
+            .write(&directory.path().join("missing/settings.json"), "{}")
+            .is_err());
+        assert!(!stop.load(Ordering::Acquire));
     }
 }
