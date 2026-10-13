@@ -433,7 +433,11 @@ function SettingsFeature({
   }, [draftRef, ensureController, revisionRef, saveControllerRef, savePending, savedSettings]);
 
   useEffect(() => {
-    const next = dirtyRef.current ? (draftRef.current ?? draft) : savedSettings;
+    const preserved = dirtyRef.current ? (draftRef.current ?? draft) : savedSettings;
+    const next =
+      preserved.settings_revision === savedSettings.settings_revision
+        ? preserved
+        : { ...preserved, settings_revision: savedSettings.settings_revision };
     if (next === draftRef.current) return;
     draftRef.current = next;
     setDraft(next);

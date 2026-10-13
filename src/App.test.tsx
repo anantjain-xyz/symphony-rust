@@ -67,6 +67,7 @@ vi.mock("./desktop/runtime", () => ({
 
 function testSettings(): AppSettings {
   return {
+    settings_revision: 0,
     prompt_template: "Prompt",
     repos: [
       {
@@ -796,7 +797,7 @@ describe("App settings", () => {
     );
 
     fireEvent.change(prompt, { target: { value: "Newer unsaved revision" } });
-    save.resolve({ ...settings, prompt_template: "Revision being saved" });
+    save.resolve({ ...settings, settings_revision: 1, prompt_template: "Revision being saved" });
     await act(async () => {
       await save.promise;
       await Promise.resolve();
@@ -811,6 +812,13 @@ describe("App settings", () => {
     expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
       "Newer unsaved revision",
     );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(2));
+    const saveCalls = tauriMocks.invoke.mock.calls.filter(
+      ([command]) => command === "save_settings",
+    );
+    expect(saveCalls[1][1].request.settings.settings_revision).toBe(1);
+    expect(saveCalls[1][1].request.settings.prompt_template).toBe("Newer unsaved revision");
   });
 
   it("does not save when the Linear key changes during authoritative validation", async () => {

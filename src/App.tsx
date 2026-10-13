@@ -1669,7 +1669,13 @@ function App() {
   async function removeLinearKey() {
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
     setSettings((current) =>
-      current ? { ...current, linear_api_key_set: fromDisk.linear_api_key_set } : current,
+      current
+        ? {
+            ...current,
+            settings_revision: fromDisk.settings_revision,
+            linear_api_key_set: fromDisk.linear_api_key_set,
+          }
+        : current,
     );
     linearKeyDraftRef.current = "";
     setTrackerTest(null);

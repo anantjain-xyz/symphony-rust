@@ -25,6 +25,7 @@ const BUNDLED_SKILL_NAMES = [
 ];
 
 const previewSettings: AppSettings = {
+  settings_revision: 0,
   prompt_template:
     "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved default workflow.",
   repos: [
