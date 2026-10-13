@@ -434,6 +434,8 @@ async fn save_receipt_reports_unavailable_runtime_admission_without_losing_its_c
     )
     .await
     .unwrap();
+    assert!(saved.runtime_update_error.is_none());
+    let saved = saved.settings;
     assert_eq!(saved.settings_revision, 11);
     assert_eq!(saved.prompt_template, draft.prompt_template);
     assert_eq!(saved.repos[0].url, draft.repos[0].url);
@@ -780,6 +782,8 @@ async fn incomplete_workflow_save_reports_skipped_update_until_successful_refres
     )
     .await
     .unwrap();
+    assert!(saved.runtime_update_error.is_none());
+    let saved = saved.settings;
     assert_eq!(saved.settings_revision, 11);
     assert!(saved.linear_api_key_error.is_none());
     let skipped = fixture.state.worker.status().await;
@@ -830,4 +834,79 @@ async fn incomplete_workflow_save_reports_skipped_update_until_successful_refres
     assert!(fixture.state.worker.status().await.last_error.is_none());
     fixture.state.worker.stop().await;
     fixture.assert_stopped().await;
+}
+
+#[tokio::test]
+async fn committed_save_returns_receipt_when_runtime_admission_fails_after_commit() {
+    for disconnect_caller in [false, true] {
+        let fixture = Fixture::running().await;
+        let mut draft = fixture.settings.clone();
+        draft.prompt_template = "Committed settings must remain acknowledged.".into();
+        draft.polling_interval_ms = 4321;
+        let mut expected = draft.clone();
+        expected.settings_revision += 1;
+        let (committed, observed) = oneshot::channel();
+        let (release, continue_refresh) = oneshot::channel();
+        let (delivered, receipt_seen) = oneshot::channel();
+        let state = fixture.state.clone();
+        let caller = tokio::spawn(settings_store::finish_operation(async move {
+            let _effects = state.settings_store.commit_effects().await;
+            let result = state.settings_store.save(draft, None).await;
+            finish_settings_recovery(&state).await;
+            let saved = result?;
+            committed.send(()).unwrap();
+            continue_refresh.await.unwrap();
+            let receipt = finish_settings_save_after_commit(&state, saved).await;
+            delivered.send(receipt.clone()).unwrap();
+            Ok(receipt)
+        }));
+        observed.await.unwrap();
+        let durable = std::fs::read(&fixture.settings_path).unwrap();
+        let marker = fixture.settings_path.with_extension("json.transaction");
+        std::fs::write(&marker, b"malformed pending transaction").unwrap();
+        if disconnect_caller {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+        } else {
+            release.send(()).unwrap();
+            let response = caller
+                .await
+                .unwrap()
+                .expect("durable save remains successful");
+            assert_eq!(response.settings.settings_revision, 11);
+            assert!(response.runtime_update_error.is_some());
+        }
+        let receipt = receipt_seen.await.unwrap();
+        let _finished = fixture.state.settings_store.commit_effects().await;
+        fixture.assert_stopped().await;
+        // The committed revision fences delayed starts even when admission
+        // cannot read a fresh snapshot after the durable save.
+        assert!(matches!(
+            fixture
+                .state
+                .worker
+                .start(worker_start_config(&fixture.state, &fixture.settings, OLD_KEY).unwrap())
+                .await,
+            Err(symphony_worker::WorkerError::StaleSettings {
+                revision: 10,
+                latest_revision: 11,
+            })
+        ));
+        assert_eq!(
+            serde_json::to_value(&receipt.settings).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let error = receipt.runtime_update_error.as_deref().unwrap();
+        assert!(error.starts_with("Settings saved, but the worker could not refresh"));
+        assert!(!error.contains(OLD_KEY));
+        assert!(!error.contains("malformed pending transaction"));
+        // Failed admission contributes no invented key availability metadata.
+        assert!(receipt.settings.linear_api_key_set);
+        assert!(receipt.settings.linear_api_key_error.is_none());
+        assert_eq!(std::fs::read(&fixture.settings_path).unwrap(), durable);
+        let persisted: serde_json::Value = serde_json::from_slice(&durable).unwrap();
+        assert!(persisted.get("runtime_update_error").is_none());
+        assert!(marker.is_file());
+    }
 }

@@ -109,12 +109,12 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
         next.prompt_template === draft.prompt_template
           ? { ...next, prompt_template: previous.prompt_template }
           : next;
-      setDraft(normalized);
-      session.replaceDraft(normalized);
-      onDraftChange(normalized, session.readKey(), previous);
-      const revision = { id: session.advanceRevision(), settings: normalized };
+      const updated = session.replaceDraft(normalized);
+      setDraft(updated);
+      onDraftChange(updated, session.readKey(), previous);
+      const revision = { id: session.advanceRevision(), settings: updated };
       scheduleValidation(revision);
-      updateDirty(normalized, session.readKey());
+      updateDirty(updated, session.readKey());
     },
     [draft, session, onDraftChange, scheduleValidation, updateDirty],
   );
@@ -122,8 +122,7 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   const setPromptDraft = useCallback(
     (prompt: string) => {
       const previous = session.readDraft() ?? draft;
-      const next = { ...previous, prompt_template: prompt };
-      session.replaceDraft(next);
+      const next = session.replaceDraft({ ...previous, prompt_template: prompt });
       // Keep feature draft aligned without urgent shell work so a PromptEditor
       // remount reseeds from the latest prompt, not a stale parent value.
       startTransition(() => setDraft(next));
@@ -252,8 +251,7 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   const handleResetPrompt = useCallback(async () => {
     const prompt = await onResetPrompt();
     const previous = session.readDraft() ?? draft;
-    const next = { ...previous, prompt_template: prompt };
-    session.replaceDraft(next);
+    const next = session.replaceDraft({ ...previous, prompt_template: prompt });
     setDraft(next);
     setPromptSeedRevision((revision) => revision + 1);
     onDraftChange(next, session.readKey(), previous);

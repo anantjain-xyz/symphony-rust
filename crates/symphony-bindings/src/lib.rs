@@ -46,6 +46,7 @@ pub fn bindings_source() -> Result<String> {
     export_required!(symphony_core::RepoConfig);
     export_required!(AppSettings);
     export!(SaveSettingsRequest);
+    export!(SettingsSaveResult);
     export!(symphony_core::RunStatus);
     export!(symphony_core::AgentEventKind);
     export!(symphony_core::SessionInfoPayload);
