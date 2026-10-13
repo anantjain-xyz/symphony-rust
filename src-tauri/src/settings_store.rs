@@ -55,6 +55,13 @@ pub struct SettingsStore {
     credentials: Arc<dyn Credentials>,
 }
 
+/// Private runtime input captured under the same durable lock. Never serialize
+/// or debug-print the credential; IPC receives only `AppSettings` metadata.
+pub(crate) struct SettingsSnapshot {
+    pub settings: AppSettings,
+    pub credential: Option<String>,
+}
+
 impl SettingsStore {
     pub fn new(path: PathBuf, credentials: Arc<dyn Credentials>) -> Self {
         Self {
@@ -150,6 +157,35 @@ impl SettingsStore {
                 credential_availability(&mut settings, credentials);
             }
             Ok(settings)
+        })
+        .await
+    }
+
+    /// The caller owns `commit_effects` and drains recovery before using this
+    /// snapshot. Settings and the injected credential are read under one lock.
+    pub(crate) async fn runtime_snapshot(&self) -> Result<SettingsSnapshot, String> {
+        self.access(AccessMode::Load, |path, credentials, recovery_error| {
+            if let Some(error) = recovery_error {
+                return Err(error);
+            }
+            let mut settings = read_settings_with_migration(path, true)?;
+            let credential = match credentials.read() {
+                Ok(credential) => {
+                    settings.linear_api_key_set = credential.is_some();
+                    settings.linear_api_key_error = None;
+                    credential
+                }
+                Err(_) => {
+                    settings.linear_api_key_set = false;
+                    settings.linear_api_key_error =
+                        Some("The OS credential store is unavailable. Unlock it and retry.".into());
+                    None
+                }
+            };
+            Ok(SettingsSnapshot {
+                settings,
+                credential,
+            })
         })
         .await
     }

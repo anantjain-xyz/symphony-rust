@@ -250,20 +250,20 @@ fn primary_validation_issue(
 }
 
 async fn apply_settings_to_worker(state: &AppState, settings: &AppSettings) -> Result<(), String> {
+    // A committed revision must fence older work even if its fresh runtime
+    // snapshot cannot be read or validated.
     state
         .worker
         .observe_settings_revision(settings.settings_revision)
         .await;
-    if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
-        state
-            .worker
-            .stop_for_settings_revision(settings.settings_revision)
-            .await;
-    } else if live_reconfigure_allowed(settings) {
-        state
-            .worker
-            .reconfigure(worker_start_config(state, settings)?)
-            .await;
+    let snapshot = worker_settings_with_effects(state).await?;
+    if live_reconfigure_allowed(&snapshot.settings) {
+        if let Some(api_key) = snapshot.credential.as_deref() {
+            state
+                .worker
+                .reconfigure(worker_start_config(state, &snapshot.settings, api_key)?)
+                .await;
+        }
     }
     Ok(())
 }
@@ -585,21 +585,30 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
-    let state = state.inner().clone();
+    start_worker_owned(state.inner().clone()).await
+}
+
+async fn start_worker_owned(state: AppState) -> Result<WorkerStatus, String> {
     settings_store::finish_operation(async move {
         let _effects = state.settings_store.commit_effects().await;
-        let settings = load_settings_with_effects(&state).await?;
-        if let Some(error) = settings.linear_api_key_error {
+        let snapshot = worker_settings_with_effects(&state).await?;
+        if let Some(error) = snapshot.settings.linear_api_key_error {
             return Err(error);
         }
+        let Some(api_key) = snapshot.credential.as_deref() else {
+            return Err(
+                "No Linear API key configured. Add one under Settings → Linear, then start the worker."
+                    .to_string(),
+            );
+        };
         // A worker started from invalid settings (e.g. no active states) would
         // poll forever without dispatching anything — fail up front instead.
-        if let Some(error) = validate_workflow_settings(&settings) {
+        if let Some(error) = validate_workflow_settings(&snapshot.settings) {
             return Err(error);
         }
         state
             .worker
-            .start(worker_start_config(&state, &settings)?)
+            .start(worker_start_config(&state, &snapshot.settings, api_key)?)
             .await
             .map_err(|err| err.to_string())
     })
@@ -614,18 +623,18 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
 fn worker_start_config(
     state: &AppState,
     settings: &AppSettings,
+    api_key: &str,
 ) -> Result<WorkerStartConfig, String> {
-    let api_key = linear_api_key();
     Ok(WorkerStartConfig {
         runtime: symphony_core::RunnableConfig::new(
             settings.settings_revision,
-            workflow_from_settings(settings, api_key.as_deref()),
+            workflow_from_settings(settings, Some(api_key)),
             settings.repos.clone(),
             settings.session_env.clone(),
         )
         .map_err(|error| error.to_string())?,
         skills: bundled_skills(),
-        env: build_env(),
+        env: build_env(api_key),
         app_data_dir: state.app_data_dir.clone(),
     })
 }
@@ -1584,6 +1593,27 @@ async fn load_settings_with_effects(state: &AppState) -> Result<AppSettings, Str
     result
 }
 
+/// Caller owns the settings effects gate and an operation that outlives IPC.
+async fn worker_settings_with_effects(
+    state: &AppState,
+) -> Result<settings_store::SettingsSnapshot, String> {
+    let result = state.settings_store.runtime_snapshot().await;
+    finish_settings_recovery(state).await;
+    if let Ok(snapshot) = &result {
+        state
+            .worker
+            .observe_settings_revision(snapshot.settings.settings_revision)
+            .await;
+        if snapshot.settings.linear_api_key_error.is_none() && snapshot.credential.is_none() {
+            state
+                .worker
+                .stop_for_settings_revision(snapshot.settings.settings_revision)
+                .await;
+        }
+    }
+    result
+}
+
 async fn finish_settings_recovery(state: &AppState) {
     if state.settings_store.take_recovery_stop() {
         // Recovery may finish a previous removal or replacement after its IPC
@@ -1597,11 +1627,9 @@ async fn finish_settings_recovery(state: &AppState) {
 /// processes need at execution time). Repo-specific variables — REPO_URL,
 /// REPO_NAME, SYMPHONY_INSTALL_CMD — are overlaid per run by the worker once
 /// the issue is routed.
-fn build_env() -> BTreeMap<String, String> {
+fn build_env(api_key: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
-    if let Some(key) = linear_api_key() {
-        env.insert("LINEAR_API_KEY".to_string(), key);
-    }
+    env.insert("LINEAR_API_KEY".to_string(), api_key.to_string());
     env
 }
 
