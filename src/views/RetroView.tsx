@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type {
-  RetroBatchRow,
+  RetroChangeBatch,
   RetroDetail,
   RetroReport,
-  RetroRow,
   RetroStatus,
-  RetroSuggestionRow,
+  RetroSuggestionReview,
+  RetroSummary,
+  SuggestionDecision,
 } from "../bindings";
 import { openExternalUrl } from "../desktop/shell";
 import { shortTime } from "../format";
@@ -14,7 +15,7 @@ import { Badge, Empty, Panel } from "../viewPrimitives";
 import "./RetroView.css";
 
 export function retroRepoBatchState(
-  batches: RetroBatchRow[],
+  batches: RetroChangeBatch[],
   repoName: string,
 ): "available" | "locked" | "stale" {
   const repoBatches = batches.filter(
@@ -42,7 +43,7 @@ function RetroView({
   onApplyWorkflow,
   onCreatePrs,
 }: {
-  retros: RetroRow[];
+  retros: RetroSummary[];
   status: RetroStatus;
   selected: RetroDetail | null;
   runtimeAvailable: boolean;
@@ -52,7 +53,7 @@ function RetroView({
   onStartRetro: () => void;
   onOpenRetro: (id: string) => void;
   onDeleteRetro: (id: string) => void;
-  onDecideSuggestion: (id: string, decision: string) => void;
+  onDecideSuggestion: (id: string, decision: SuggestionDecision) => void;
   onApplyWorkflow: (retroId: string) => void;
   onCreatePrs: (retroId: string) => void;
 }) {
@@ -436,12 +437,12 @@ function RetroReviewRepo({
   onDecide,
 }: {
   repo: RetroReport["repos"][number];
-  suggestions: RetroSuggestionRow[];
+  suggestions: RetroSuggestionReview[];
   busy: boolean;
   runtimeAvailable: boolean;
   workflowLocked: boolean;
   repoLocked: boolean;
-  onDecide: (id: string, decision: string) => void;
+  onDecide: (id: string, decision: SuggestionDecision) => void;
 }) {
   if (suggestions.length === 0) return null;
   const reviewed = suggestions.filter((suggestion) => suggestion.decision !== "pending").length;
@@ -601,7 +602,7 @@ function UnifiedDiff({ diff }: { diff: string }) {
   );
 }
 
-function RetroBatchResults({ batches }: { batches: RetroBatchRow[] }) {
+function RetroBatchResults({ batches }: { batches: RetroChangeBatch[] }) {
   return (
     <section className="retro-batches">
       <h4>Change batches</h4>

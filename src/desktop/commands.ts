@@ -1,22 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
-  IssueRow,
+  DashboardOverview,
+  IssueSummary,
   LinearViewerProfile,
-  Overview,
   RepoWorkflowStatus,
-  RetroBatchRow,
+  RetroChangeBatch,
   RetroDetail,
-  RetroRow,
   RetroStatus,
-  RetroSuggestionRow,
+  RetroSuggestionReview,
+  RetroSummary,
   RunDetail,
-  RunWithIssueRow,
+  RunSummary,
   SaveSettingsRequest,
   SettingsSaveResult,
   SkillFile,
   SkillsInstallStatus,
   SkillsStatus,
+  SuggestionDecision,
   TrackerTestResult,
   ValidationResult,
   WorkerStatus,
@@ -28,10 +29,10 @@ function invokeCommand<Result>(command: string, args?: Record<string, unknown>):
   return args === undefined ? invoke<Result>(command) : invoke<Result>(command, args);
 }
 
-export const getOverview = () => invokeCommand<Overview>("get_overview");
-export const listRuns = () => invokeCommand<RunWithIssueRow[]>("list_runs");
-export const listIssues = () => invokeCommand<IssueRow[]>("list_issues");
-export const listBoardIssues = () => invokeCommand<IssueRow[]>("list_board_issues");
+export const getOverview = () => invokeCommand<DashboardOverview>("get_overview");
+export const listRuns = () => invokeCommand<RunSummary[]>("list_runs");
+export const listIssues = () => invokeCommand<IssueSummary[]>("list_issues");
+export const listBoardIssues = () => invokeCommand<IssueSummary[]>("list_board_issues");
 export const listWorkflowStates = () => invokeCommand<WorkflowStateRow[]>("list_workflow_states");
 export const setIssueState = (issueId: string, stateId: string) =>
   invokeCommand<void>("set_issue_state", { issueId, stateId });
@@ -39,7 +40,7 @@ export const getWorkerStatus = () => invokeCommand<WorkerStatus>("get_worker_sta
 export const getRunDetail = (id: string) =>
   invokeCommand<RunDetail | null>("get_run_detail", { id });
 export const getRetroStatus = () => invokeCommand<RetroStatus>("get_retro_status");
-export const listRetros = () => invokeCommand<RetroRow[]>("list_retros");
+export const listRetros = () => invokeCommand<RetroSummary[]>("list_retros");
 export const getRetroDetail = (id: string) =>
   invokeCommand<RetroDetail | null>("get_retro_detail", { id });
 export const hasInProgressRetroBatches = () =>
@@ -80,12 +81,12 @@ export const getWorkflowTransferStatus = () =>
   invokeCommand<WorkflowTransferStatus>("get_workflow_transfer_status");
 export const startRetro = () => invokeCommand<RetroStatus>("start_retro");
 export const deleteRetro = (id: string) => invokeCommand<void>("delete_retro", { id });
-export const setRetroSuggestionDecision = (id: string, decision: string) =>
-  invokeCommand<RetroSuggestionRow>("set_retro_suggestion_decision", {
+export const setRetroSuggestionDecision = (id: string, decision: SuggestionDecision) =>
+  invokeCommand<RetroSuggestionReview>("set_retro_suggestion_decision", {
     id,
     decision,
   });
 export const applyRetroWorkflow = (retroId: string) =>
-  invokeCommand<RetroBatchRow>("apply_retro_workflow", { retroId });
+  invokeCommand<RetroChangeBatch>("apply_retro_workflow", { retroId });
 export const startRetroPrs = (retroId: string) =>
-  invokeCommand<RetroBatchRow[]>("start_retro_prs", { retroId });
+  invokeCommand<RetroChangeBatch[]>("start_retro_prs", { retroId });

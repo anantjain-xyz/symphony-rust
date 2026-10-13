@@ -11,6 +11,6 @@ fn main() -> Result<()> {
         bail!("export-bindings accepts exactly one destination");
     }
     let destination = PathBuf::from(destination);
-    symphony_contracts::export_bindings(&destination)
+    symphony_bindings::export_bindings(&destination)
         .with_context(|| format!("export bindings to {}", destination.display()))
 }

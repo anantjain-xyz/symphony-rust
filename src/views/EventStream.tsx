@@ -1,23 +1,23 @@
 import { observeElementRect, useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
+  type RefCallback,
   useCallback,
   useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type RefCallback,
 } from "react";
-import type { AgentEventRow } from "../bindings";
-import { MarkdownText, highlightMatches } from "../MarkdownText";
+import type { AgentEvent } from "../bindings";
+import { highlightMatches, MarkdownText } from "../MarkdownText";
 import { AbsoluteTime } from "../RelativeTime";
 import {
+  type EventMatchStarts,
+  type PreparedEvent,
+  type PreparedEventCache,
   prepareEvents,
   searchPreparedEvents,
-  type EventMatchStarts,
-  type PreparedEventCache,
-  type PreparedEvent,
 } from "./eventStreamModel";
 
 const COLLAPSED_ROW_ESTIMATE = 76;
@@ -107,7 +107,7 @@ function centerExactMatch(container: HTMLElement | null, matchIndex: number) {
   if (mark instanceof HTMLElement) mark.scrollIntoView({ block: "center", inline: "nearest" });
 }
 
-export function EventStream({ events, live }: { events: AgentEventRow[]; live: boolean }) {
+export function EventStream({ events, live }: { events: AgentEvent[]; live: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const preparedCacheRef = useRef<PreparedEventCache>(new Map());

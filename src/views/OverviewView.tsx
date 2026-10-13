@@ -1,4 +1,4 @@
-import type { Overview } from "../bindings";
+import type { DashboardOverview } from "../bindings";
 import { formatTokens, providerRateLimits, providerTokenUsage } from "../format";
 import { RelativeTime } from "../RelativeTime";
 import { Empty, Panel, RunTable } from "../viewPrimitives";
@@ -23,7 +23,7 @@ export function OverviewView({
   onOpenSettings,
   onOpenIssues,
 }: {
-  overview: Overview;
+  overview: DashboardOverview;
   canStartWorker: boolean;
   canTriggerRetry: boolean;
   workerRunning: boolean;

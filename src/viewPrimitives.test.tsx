@@ -2,10 +2,10 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppSettings, RunWithIssueRow } from "./bindings";
+import type { AppSettings, RunSummary } from "./bindings";
 import { Badge, Empty, formSnapshot, Panel, RunTable } from "./viewPrimitives";
 
-function run(): RunWithIssueRow {
+function run(): RunSummary {
   return {
     id: "run-1",
     issue_id: "issue-1",

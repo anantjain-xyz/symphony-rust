@@ -1,11 +1,11 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { emit, listen } from "@tauri-apps/api/event";
-import type { StorageEvent } from "../bindings";
+import type { StorageNotification } from "../bindings";
 
-export type DbChanged = Extract<StorageEvent, { type: "db_changed" }>;
-export type AgentEvent = Extract<StorageEvent, { type: "agent_event" }>;
-export type RateLimitChanged = Extract<StorageEvent, { type: "rate_limit_changed" }>;
-export type WorkflowReady = Extract<StorageEvent, { type: "workflow_ready" }>;
+export type DbChanged = Extract<StorageNotification, { type: "db_changed" }>;
+export type AgentEvent = Extract<StorageNotification, { type: "agent_event" }>;
+export type RateLimitChanged = Extract<StorageNotification, { type: "rate_limit_changed" }>;
+export type WorkflowReady = Extract<StorageNotification, { type: "workflow_ready" }>;
 
 export type DesktopEventHandlers = {
   onDbChanged: (event: DbChanged) => void;

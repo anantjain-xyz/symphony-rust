@@ -50,6 +50,10 @@ const TERMINAL_WORKSPACE_GRACE_PERIOD: ChronoDuration = ChronoDuration::hours(1)
 pub enum WorkerError {
     #[error("worker is already running")]
     AlreadyRunning,
+    #[error(
+        "settings revision {revision} is stale; the worker has accepted revision {latest_revision}"
+    )]
+    StaleSettings { revision: u64, latest_revision: u64 },
     #[error("run {0} was not found")]
     RunNotFound(String),
     #[error("run {0} is not active")]
@@ -66,17 +70,24 @@ pub enum WorkerError {
     Storage(#[from] StorageError),
 }
 
-#[derive(Clone, Serialize, Deserialize, Type)]
+#[derive(Clone)]
 pub struct WorkerStartConfig {
-    pub workflow: ParsedWorkflow,
-    /// Configured repositories; each issue is routed to one of them.
-    pub repos: Vec<RepoConfig>,
+    pub runtime: symphony_core::RunnableConfig,
     /// Bundled Symphony skills copied into issue workspaces when missing.
     pub skills: Vec<SkillFile>,
     pub env: BTreeMap<String, String>,
-    /// User-configured variables explicitly injected into each agent session.
-    pub session_env: BTreeMap<String, String>,
     pub app_data_dir: PathBuf,
+}
+
+impl std::fmt::Debug for WorkerStartConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkerStartConfig")
+            .field("runtime", &self.runtime)
+            .field("skill_count", &self.skills.len())
+            .field("environment_entry_count", &self.env.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -100,6 +111,7 @@ struct InnerState {
     last_error: Option<String>,
     generation: u64,
     reconfigure_generation: u64,
+    latest_settings_revision: u64,
 }
 
 #[derive(Debug)]
@@ -136,6 +148,19 @@ impl InnerState {
             started_at,
             last_error: self.last_error.clone(),
         }
+    }
+
+    fn request_stop(&mut self) -> WorkerStatus {
+        self.reconfigure_generation = self.reconfigure_generation.wrapping_add(1);
+        let lifecycle = std::mem::replace(&mut self.lifecycle, WorkerLifecycle::Stopped);
+        self.lifecycle = match lifecycle {
+            WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
+                worker.stop.cancel();
+                WorkerLifecycle::Stopping(worker)
+            }
+            WorkerLifecycle::Stopped => WorkerLifecycle::Stopped,
+        };
+        self.status()
     }
 
     fn owns_generation(&self, generation: u64) -> bool {
@@ -230,6 +255,7 @@ impl WorkerManager {
                 last_error: None,
                 generation: 0,
                 reconfigure_generation: 0,
+                latest_settings_revision: 0,
             })),
             run_cancellations: RunCancellationRegistry::default(),
             wake: Arc::new(Notify::new()),
@@ -275,6 +301,13 @@ impl WorkerManager {
         if !matches!(inner.lifecycle, WorkerLifecycle::Stopped) {
             return Err(WorkerError::AlreadyRunning);
         }
+        let revision = config.runtime.settings_revision();
+        if revision < inner.latest_settings_revision {
+            return Err(WorkerError::StaleSettings {
+                revision,
+                latest_revision: inner.latest_settings_revision,
+            });
+        }
         let stop = CancellationToken::new();
         let run_tasks = RunTasks::default();
         let runtime = runtime_config_from_start(
@@ -285,6 +318,7 @@ impl WorkerManager {
             self.workspace_claims.clone(),
             run_tasks.clone(),
         );
+        inner.latest_settings_revision = runtime.settings_revision;
         let output_credentials = Arc::new(std::sync::Mutex::new(runtime.output_sanitizer()));
         let supervisor_credentials = output_credentials.clone();
         let runtime_config = Arc::new(RwLock::new(runtime));
@@ -354,6 +388,15 @@ impl WorkerManager {
             .await
     }
 
+    /// Fence a committed draft even when it cannot become a runtime config.
+    pub async fn observe_settings_revision(&self, revision: u64) {
+        let mut inner = self.inner.lock().await;
+        if revision > inner.latest_settings_revision {
+            inner.latest_settings_revision = revision;
+            inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
+        }
+    }
+
     async fn reconfigure_with_tracker_preflight<F, Fut>(
         &self,
         config: WorkerStartConfig,
@@ -365,6 +408,25 @@ impl WorkerManager {
     {
         let (runtime_config, generation) = {
             let mut inner = self.inner.lock().await;
+            if config.runtime.settings_revision() < inner.latest_settings_revision {
+                return inner.status();
+            }
+            // Fence committed settings order in every lifecycle state. A stopped
+            // save must invalidate a delayed start as well as an older reconfigure.
+            inner.latest_settings_revision = config.runtime.settings_revision();
+            // Absence is a removal intent, not a failed tracker replacement.
+            // Never retain an old in-memory credential after accepting it.
+            if config
+                .runtime
+                .workflow()
+                .front_matter
+                .tracker
+                .api_key
+                .trim()
+                .is_empty()
+            {
+                return inner.request_stop();
+            }
             let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
                 return inner.status();
             };
@@ -551,23 +613,32 @@ impl WorkerManager {
         Ok(())
     }
 
+    /// Stop requested by the user, independent of settings commit order.
     pub async fn stop(&self) -> WorkerStatus {
+        self.inner.lock().await.request_stop()
+    }
+
+    /// Only an adopted newer runtime can supersede credential-removal intent.
+    /// The same lock fences delayed starts/reconfiguration and owns cancellation.
+    pub async fn stop_for_settings_revision(&self, revision: u64) -> WorkerStatus {
         let mut inner = self.inner.lock().await;
-        inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
-        let lifecycle = std::mem::replace(&mut inner.lifecycle, WorkerLifecycle::Stopped);
-        inner.lifecycle = match lifecycle {
+        let active_revision = match &inner.lifecycle {
             WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
-                worker.stop.cancel();
-                WorkerLifecycle::Stopping(worker)
+                worker.runtime_config.read().await.settings_revision
             }
-            WorkerLifecycle::Stopped => WorkerLifecycle::Stopped,
+            WorkerLifecycle::Stopped => 0,
         };
-        inner.status()
+        if revision < active_revision {
+            return inner.status();
+        }
+        inner.latest_settings_revision = inner.latest_settings_revision.max(revision);
+        inner.request_stop()
     }
 }
 
 #[derive(Clone)]
 struct RuntimeConfig {
+    settings_revision: u64,
     workflow: ParsedWorkflow,
     repos: Vec<RepoConfig>,
     skills: Vec<SkillFile>,
@@ -579,19 +650,6 @@ struct RuntimeConfig {
     workspace_cleanup: Option<WorkspaceCleanupManager>,
     workspace_claims: WorkspaceClaims,
     run_tasks: RunTasks,
-}
-
-// Configurations contain inherited and explicit credentials. Debug is structural
-// only; serializable settings APIs retain their existing contract.
-impl std::fmt::Debug for WorkerStartConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerStartConfig")
-            .field("backend", &self.workflow.front_matter.agent.backend)
-            .field("repo_count", &self.repos.len())
-            .field("env_count", &self.env.len())
-            .field("session_env_count", &self.session_env.len())
-            .finish_non_exhaustive()
-    }
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -629,12 +687,15 @@ fn runtime_config_from_start(
     workspace_claims: WorkspaceClaims,
     run_tasks: RunTasks,
 ) -> RuntimeConfig {
+    let settings_revision = config.runtime.settings_revision();
+    let (workflow, repos, session_env) = config.runtime.into_parts();
     RuntimeConfig {
-        workflow: config.workflow,
-        repos: config.repos,
+        settings_revision,
+        workflow,
+        repos,
         skills: config.skills,
         env: config.env,
-        session_env: config.session_env,
+        session_env,
         app_data_dir: config.app_data_dir,
         run_cancellations,
         wake,
@@ -1638,9 +1699,9 @@ where
     if let Some(session) = &pre_session {
         repo.upsert_live_session(
             &run.id,
-            &format!("{session}-{session}"),
-            session,
-            session,
+            &symphony_core::AgentSessionId::new(format!("{session}-{session}")),
+            &symphony_core::AgentThreadId::new(session),
+            &symphony_core::AgentTurnId::new(session),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2083,6 +2144,7 @@ mod tests {
             ..Default::default()
         };
         RuntimeConfig {
+            settings_revision: 0,
             workflow: symphony_core::build_parsed_workflow(
                 front_matter,
                 "Prompt {{issue.identifier}}".to_string(),
@@ -2107,11 +2169,15 @@ mod tests {
 
     fn start_config(config: RuntimeConfig) -> WorkerStartConfig {
         WorkerStartConfig {
-            workflow: config.workflow,
-            repos: config.repos,
+            runtime: symphony_core::RunnableConfig::new(
+                config.settings_revision,
+                config.workflow,
+                config.repos,
+                config.session_env,
+            )
+            .unwrap(),
             skills: config.skills,
             env: config.env,
-            session_env: config.session_env,
             app_data_dir: config.app_data_dir,
         }
     }
@@ -2402,7 +2468,7 @@ mod tests {
             .event(
                 &run.id,
                 "codex",
-                &MappedAgentEvent {
+                &MappedAgentEvent::Visible {
                     kind: symphony_core::AgentEventKind::TokenCount,
                     payload: serde_json::json!({
                         "input_tokens": 120,
@@ -2410,13 +2476,15 @@ mod tests {
                         "total_tokens": 154,
                     }),
                     humanized: None,
-                    tokens: Some(TokenCountPayload {
-                        input_tokens: 120,
-                        output_tokens: 34,
-                        total_tokens: 154,
-                    }),
-                    rate_limit: None,
-                    session_info: None,
+                    metadata: symphony_core::AgentEventMetadata {
+                        tokens: Some(TokenCountPayload {
+                            input_tokens: 120,
+                            output_tokens: 34,
+                            total_tokens: 154,
+                        }),
+                        rate_limit: None,
+                        session_info: None,
+                    },
                 },
             )
             .await
@@ -2452,9 +2520,9 @@ mod tests {
 
         repo.upsert_live_session(
             &run.id,
-            "final-session",
-            "thread-1",
-            "turn-1",
+            &symphony_core::AgentSessionId::new("final-session"),
+            &symphony_core::AgentThreadId::new("thread-1"),
+            &symphony_core::AgentTurnId::new("turn-1"),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2553,14 +2621,14 @@ mod tests {
             .unwrap();
         let mut updates = repo.events().subscribe();
         let combined = format!("{TRACKER_CANARY} {ENV_CANARY} {SESSION_CANARY}");
-        output.event(&run.id, "codex", &MappedAgentEvent {
+        output.event(&run.id, "codex", &MappedAgentEvent::Visible {
             kind: symphony_core::AgentEventKind::ToolCall,
             payload: serde_json::json!({"args": {"output": combined, "authorization": "unknown-canary"}, "input_tokens": 12}),
             humanized: Some(combined.clone()),
-            tokens: Some(TokenCountPayload { input_tokens: 12, output_tokens: 3, total_tokens: 15 }),
+            metadata: symphony_core::AgentEventMetadata { tokens: Some(TokenCountPayload { input_tokens: 12, output_tokens: 3, total_tokens: 15 }),
             rate_limit: Some(symphony_core::RateLimitPayload { source: ENV_CANARY.into(), remaining: Some(0), reset_at: Some(SESSION_CANARY.into()) }),
             session_info: Some(symphony_core::SessionInfoPayload { model: Some(TRACKER_CANARY.into()), agent_version: Some(SESSION_CANARY.into()), ..Default::default() }),
-        }).await.unwrap();
+        }, }).await.unwrap();
         output
             .identity(&run.id, TRACKER_CANARY, SESSION_CANARY)
             .await
@@ -2594,19 +2662,77 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn metadata_only_output_is_sanitized_without_visible_timeline_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(
+            symphony_storage::open_sqlite(temp.path().join("metadata.sqlite"))
+                .await
+                .unwrap(),
+            symphony_storage::EventBus::default(),
+        );
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let sanitizer = OutputSanitizer::new("metadata-secret", &BTreeMap::new(), &BTreeMap::new());
+        RunOutput::new(&repo, &sanitizer)
+            .event(
+                &run.id,
+                "codex",
+                &MappedAgentEvent::Metadata {
+                    metadata: symphony_core::AgentEventMetadata {
+                        tokens: Some(TokenCountPayload {
+                            input_tokens: 1,
+                            output_tokens: 2,
+                            total_tokens: 3,
+                        }),
+                        session_info: Some(symphony_core::SessionInfoPayload {
+                            model: Some("metadata-secret".into()),
+                            ..Default::default()
+                        }),
+                        rate_limit: Some(symphony_core::RateLimitPayload {
+                            source: "codex_primary".into(),
+                            remaining: Some(0),
+                            reset_at: Some("2099-01-01T01:00:00+01:00".into()),
+                        }),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let (row, events) = repo.get_run_detail(&run.id).await.unwrap().unwrap();
+        assert!(events.is_empty());
+        assert_eq!(
+            row.session_info.unwrap().model.as_deref(),
+            Some("[REDACTED]")
+        );
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.live_sessions[0].total_tokens, 3);
+        assert_eq!(overview.rate_limits[0].source, "codex_primary");
+        assert_eq!(
+            overview.rate_limits[0].reset_at.as_deref(),
+            Some("2099-01-01T00:00:00.000Z")
+        );
+    }
+
     fn rate_limit_event(source: &str, reset_at: &str) -> MappedAgentEvent {
         let limit = symphony_core::RateLimitPayload {
             source: source.into(),
             remaining: Some(0),
             reset_at: Some(reset_at.into()),
         };
-        MappedAgentEvent {
+        MappedAgentEvent::Visible {
             kind: symphony_core::AgentEventKind::RateLimit,
             payload: serde_json::to_value(&limit).unwrap(),
             humanized: Some(format!("{source} resets at {reset_at}")),
-            tokens: None,
-            rate_limit: Some(limit),
-            session_info: None,
+            metadata: symphony_core::AgentEventMetadata {
+                tokens: None,
+                rate_limit: Some(limit),
+                session_info: None,
+            },
         }
     }
 
@@ -2659,9 +2785,9 @@ mod tests {
         }
         let detail = repo.get_run_detail(&run.id).await.unwrap().unwrap();
         for event in detail.1 {
-            assert!(!event.payload.contains("codex"));
-            assert!(!event.payload.contains("2026"));
-            assert!(event.payload.contains("[REDACTED]"));
+            assert!(!event.payload.to_string().contains("codex"));
+            assert!(!event.payload.to_string().contains("2026"));
+            assert!(event.payload.to_string().contains("[REDACTED]"));
         }
         // Both polling paths consume this provider predicate through Admission.
         // Drive the clock explicitly so expiry is tested without wall-clock sleeps.
@@ -3006,12 +3132,12 @@ mod tests {
             })
             .await
             .unwrap();
-        let mut changed = start_config(config.clone());
+        let mut changed = config.clone();
         changed
             .session_env
             .insert("ROTATED_KEY".into(), "synthetic-intermediate-key".into());
         manager
-            .reconfigure_with_tracker_preflight(changed, |_| async { Ok(()) })
+            .reconfigure_with_tracker_preflight(start_config(changed), |_| async { Ok(()) })
             .await;
         manager
             .reconfigure_with_tracker_preflight(start_config(config), |_| async { Ok(()) })
@@ -3067,9 +3193,9 @@ mod tests {
         // normal cleanup is skipped on the error path.
         repo.upsert_live_session(
             &run.id,
-            "sess-sess",
-            "sess",
-            "sess",
+            &symphony_core::AgentSessionId::new("sess-sess"),
+            &symphony_core::AgentThreadId::new("sess"),
+            &symphony_core::AgentTurnId::new("sess"),
             &symphony_core::TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3092,7 +3218,12 @@ mod tests {
 
         // The row is now terminal and a retry is queued, freeing its slot.
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "failure"
         );
         assert_eq!(
@@ -3153,7 +3284,7 @@ mod tests {
             .await;
 
             let row = repo.get_run(&run.id).await.unwrap().unwrap();
-            assert_eq!(row.status, "failure");
+            assert_eq!(row.status.as_str(), "failure");
             assert_eq!(row.error_class.as_deref(), Some("dispatch_error"));
             assert_eq!(
                 row.error_message.as_deref(),
@@ -3180,9 +3311,9 @@ mod tests {
         repo.mark_running(&run.id).await.unwrap();
         repo.upsert_live_session(
             &run.id,
-            "sess-sess",
-            "sess",
-            "sess",
+            &symphony_core::AgentSessionId::new("sess-sess"),
+            &symphony_core::AgentThreadId::new("sess"),
+            &symphony_core::AgentTurnId::new("sess"),
             &symphony_core::TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3209,7 +3340,7 @@ mod tests {
         .await;
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "failure");
+        assert_eq!(row.status.as_str(), "failure");
         assert_eq!(row.error_class.as_deref(), Some("dispatch_panic"));
         assert!(row
             .error_message
@@ -3256,7 +3387,12 @@ mod tests {
 
         // The success stands: no spurious failure overwrite, no retry queued.
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
         assert!(repo.all_retry_issue_ids().await.unwrap().is_empty());
@@ -3706,7 +3842,12 @@ printf cloned > hook-ran
             .unwrap();
         assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
     }
@@ -3788,7 +3929,12 @@ printf cloned > hook-ran
             .unwrap();
         assert!(exclude.contains("/.agents/skills/symphony-workpad/SKILL.md"));
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
     }
@@ -3873,7 +4019,7 @@ exit 7
         .unwrap();
 
         let finished = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(finished.status, "failure");
+        assert_eq!(finished.status.as_str(), "failure");
         assert_eq!(finished.error_class.as_deref(), Some("after_create_failed"));
         assert_eq!(
             tokio::fs::read_to_string(workspace_path.join("after-create-ran"))
@@ -3954,7 +4100,12 @@ exit 13
         .unwrap();
 
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "success"
         );
         assert_eq!(
@@ -4210,6 +4361,348 @@ exit 13
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "test-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make get"));
+    }
+
+    #[tokio::test]
+    async fn older_credential_removal_cannot_stop_a_newer_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut current = runtime_config(temp.path());
+        current.settings_revision = 2;
+        manager
+            .start_with_runner(start_config(current), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (stop, generation) = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("worker must be running");
+            };
+            (worker.stop.clone(), inner.reconfigure_generation)
+        };
+        let status = manager.stop_for_settings_revision(1).await;
+        assert_eq!(status.state, WorkerState::Running);
+        assert!(!stop.is_cancelled());
+        assert_eq!(
+            manager.inner.lock().await.reconfigure_generation,
+            generation
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+
+        // Explicit Stop still cancels the current worker regardless of revisions.
+        assert_eq!(manager.stop().await.state, WorkerState::Stopping);
+        assert!(stop.is_cancelled());
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn credential_removal_fences_a_delayed_older_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopped
+        );
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(old), |_, _, _| async {
+                panic!("configuration from before credential removal must not run")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn committed_incomplete_draft_fences_an_older_start_and_reconfiguration() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        // A saveable draft has no RunnableConfig; its revision still commits.
+        manager.observe_settings_revision(2).await;
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(old.clone()), |_, _, _| async {
+                panic!("superseded draft must not start")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        manager
+            .reconfigure_with_tracker_preflight(start_config(old), |_| async {
+                panic!("superseded reconfiguration must not reach preflight")
+            })
+            .await;
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn credential_less_reconfiguration_stops_the_old_runtime_without_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stop = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("running worker")
+            };
+            worker.stop.clone()
+        };
+        let mut no_key = runtime_config(temp.path());
+        no_key.settings_revision = 3;
+        no_key.workflow.front_matter.tracker.api_key.clear();
+        let status = manager.reconfigure_with_tracker_preflight(start_config(no_key), |_| async {
+            panic!("credential absence must stop rather than retain an old key after preflight failure")
+        }).await;
+        assert_eq!(status.state, WorkerState::Stopping);
+        assert!(stop.is_cancelled());
+        manager.stop_for_settings_revision(2).await;
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn an_unapplied_newer_draft_does_not_supersede_credential_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        manager.observe_settings_revision(3).await;
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopping
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_commit_invalidates_preflight_already_in_flight() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        manager
+            .start_with_runner(
+                start_config(runtime_config(temp.path())),
+                |_, _, stop| async move {
+                    stop.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let shared = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("running worker")
+            };
+            worker.runtime_config.clone()
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        old.workflow.front_matter.tracker.api_key = "older-replacement".into();
+        let pending_manager = manager.clone();
+        let pending = tokio::spawn(async move {
+            pending_manager
+                .reconfigure_with_tracker_preflight(start_config(old), |_| async move {
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        manager.observe_settings_revision(2).await;
+        release_tx.send(()).unwrap();
+        pending.await.unwrap();
+        assert_eq!(shared.read().await.settings_revision, 0);
+        assert_eq!(
+            shared.read().await.workflow.front_matter.tracker.api_key,
+            "test-key"
+        );
+        manager.stop().await;
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn failed_newer_tracker_replacement_does_not_supersede_credential_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut rejected = runtime_config(temp.path());
+        rejected.settings_revision = 3;
+        rejected.workflow.front_matter.tracker.api_key = "rejected-key".into();
+        manager
+            .reconfigure_with_tracker_preflight(start_config(rejected), |_| async {
+                Err(TrackerError::Auth("invalid replacement".into()).into())
+            })
+            .await;
+        assert_eq!(manager.status().await.state, WorkerState::Running);
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopping
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn stopped_save_fences_a_delayed_start_without_starting_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut newer = runtime_config(temp.path());
+        newer.settings_revision = 2;
+        let status = manager
+            .reconfigure_with_tracker_preflight(start_config(newer), |_| async {
+                panic!("stopped reconfiguration must not run preflight")
+            })
+            .await;
+        assert_eq!(status.state, WorkerState::Stopped);
+        let mut older = runtime_config(temp.path());
+        older.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(older), |_, _, _| async {
+                panic!("stale start must not run the worker")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn delayed_lower_revision_never_replaces_a_newer_settings_request() {
+        for fail_newer_preflight in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+                .await
+                .unwrap();
+            let manager =
+                WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+            let initial = runtime_config(temp.path());
+            let shared = Arc::new(RwLock::new(initial));
+            {
+                let mut inner = manager.inner.lock().await;
+                inner.lifecycle = test_running_worker(shared.clone(), CancellationToken::new());
+            }
+            let mut newer = runtime_config(temp.path());
+            newer.settings_revision = 2;
+            newer.workflow.front_matter.tracker.api_key = "newer-key".into();
+            manager
+                .reconfigure_with_tracker_preflight(start_config(newer), |_| async {
+                    if fail_newer_preflight {
+                        Err(TrackerError::Auth("bad key".into()).into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+            let generation = manager.inner.lock().await.reconfigure_generation;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let mut older = runtime_config(temp.path());
+            older.settings_revision = 1;
+            older.workflow.front_matter.tracker.api_key = "older-key".into();
+            manager
+                .reconfigure_with_tracker_preflight(start_config(older), move |_| async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                manager.inner.lock().await.reconfigure_generation,
+                generation
+            );
+            let expected = if fail_newer_preflight {
+                "test-key"
+            } else {
+                "newer-key"
+            };
+            assert_eq!(
+                shared.read().await.workflow.front_matter.tracker.api_key,
+                expected
+            );
+        }
     }
 
     #[tokio::test]
@@ -5294,7 +5787,12 @@ exit 13
 
         assert!(cancelled);
         assert_eq!(
-            repo.get_run(&run.id).await.unwrap().unwrap().status,
+            repo.get_run(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "cancelled"
         );
         assert!(repo
@@ -5355,7 +5853,7 @@ exit 13
             .unwrap());
 
         let terminal = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(terminal.status, "cancelled");
+        assert_eq!(terminal.status.as_str(), "cancelled");
         assert_eq!(terminal.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
         assert!(repo
@@ -5546,7 +6044,7 @@ exit 1
             .unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.status.as_str(), "cancelled");
         assert_eq!(row.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
@@ -5608,7 +6106,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
             .unwrap();
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(row.status, "cancelled");
+        assert_eq!(row.status.as_str(), "cancelled");
         assert_eq!(row.error_class.as_deref(), Some("cancelled"));
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
     }
@@ -5670,7 +6168,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
         let repo = Repository::new(pool, bus);
         let manager = WorkerManager::new(repo.clone());
         let config = start_config(runtime_config(temp.path()));
-        let expected_hash = config.workflow.source_hash.clone();
+        let expected_hash = config.runtime.workflow().source_hash.clone();
 
         // Start worker – run_worker emits workflow_ready before any tracker I/O.
         let _status = manager.start(config).await.unwrap();
@@ -5802,7 +6300,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
         assert_eq!(manager.stop().await.state, WorkerState::Stopping);
         assert_eq!(
             repo.get_run(&run.id).await.unwrap().unwrap().status,
-            "running"
+            RunStatus::Running
         );
         assert!(manager
             .workspace_claims
@@ -5814,7 +6312,7 @@ while [ ! -f "$WORKSPACE_PATH/release-after-run" ]; do /bin/sleep 0.01; done
         wait_until_stopped(&manager).await;
         assert_eq!(
             repo.get_run(&run.id).await.unwrap().unwrap().status,
-            "cancelled"
+            RunStatus::Cancelled
         );
         assert!(manager
             .workspace_claims

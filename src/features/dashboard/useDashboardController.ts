@@ -2,15 +2,16 @@ import type { SetStateAction } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSettings,
-  IssueRow,
-  Overview,
+  DashboardOverview,
+  IssueSummary,
   RepoWorkflowStatus,
   RetroDetail,
-  RetroRow,
   RetroStatus,
+  RetroSummary,
   RunDetail,
-  RunWithIssueRow,
+  RunSummary,
   SkillsStatus,
+  SuggestionDecision,
   WorkerStatus,
 } from "../../bindings";
 import {
@@ -59,7 +60,7 @@ const DASHBOARD_RESOURCE_KEYS: readonly DashboardResourceKey[] = [
   "selectedRetro",
 ];
 
-const emptyOverview: Overview = {
+const emptyOverview: DashboardOverview = {
   active_runs: [],
   retry_queue: [],
   retry_count: 0,
@@ -79,12 +80,12 @@ const emptyRetroStatus: RetroStatus = {
 };
 
 type DashboardSnapshot = {
-  overview: Overview;
-  runs: RunWithIssueRow[];
-  issues: IssueRow[];
+  overview: DashboardOverview;
+  runs: RunSummary[];
+  issues: IssueSummary[];
   worker: WorkerStatus;
   retroStatus: RetroStatus;
-  retros: RetroRow[];
+  retros: RetroSummary[];
   hasInProgressRetroBatches: boolean;
   requestedRunId: string | null;
   selectedRun: RunDetail | null;
@@ -100,13 +101,13 @@ type DashboardSnapshotSelection = {
 
 type RetroListResource = {
   retroStatus: RetroStatus;
-  retros: RetroRow[];
+  retros: RetroSummary[];
 };
 
 type DashboardResourceData = {
-  overview: Overview;
-  runs: RunWithIssueRow[];
-  issues: IssueRow[];
+  overview: DashboardOverview;
+  runs: RunSummary[];
+  issues: IssueSummary[];
   worker: WorkerStatus;
   retroList: RetroListResource;
   retroBatches: boolean;
@@ -131,9 +132,9 @@ export const RESOURCE_LABELS: Record<DashboardResourceKey, string> = {
 
 function createInitialDashboardResources(): DashboardResourceEnvelopes {
   return {
-    overview: createResourceEnvelope<Overview>(),
-    runs: createResourceEnvelope<RunWithIssueRow[]>(),
-    issues: createResourceEnvelope<IssueRow[]>(),
+    overview: createResourceEnvelope<DashboardOverview>(),
+    runs: createResourceEnvelope<RunSummary[]>(),
+    issues: createResourceEnvelope<IssueSummary[]>(),
     worker: createResourceEnvelope<WorkerStatus>(),
     retroList: createResourceEnvelope<RetroListResource>(),
     retroBatches: createResourceEnvelope<boolean>(),
@@ -251,7 +252,7 @@ function resetBootstrap() {
   bootstrapPromise = null;
 }
 
-function retroRowRenderedFields(row: RetroRow) {
+function retroRowRenderedFields(row: RetroSummary) {
   return {
     id: row.id,
     sinceAt: row.since_at,
@@ -415,15 +416,16 @@ export function useDashboardController(options: Options) {
     }));
   }
 
-  const setOverview = (update: SetStateAction<Overview>) => setResourceData("overview", update);
-  const setRuns = (update: SetStateAction<RunWithIssueRow[]>) => setResourceData("runs", update);
+  const setOverview = (update: SetStateAction<DashboardOverview>) =>
+    setResourceData("overview", update);
+  const setRuns = (update: SetStateAction<RunSummary[]>) => setResourceData("runs", update);
   const setWorker = (update: SetStateAction<WorkerStatus>) => setResourceData("worker", update);
   const setRetroStatus = (update: SetStateAction<RetroStatus>) =>
     setResourceData("retroList", (current) => ({
       ...current,
       retroStatus: typeof update === "function" ? update(current.retroStatus) : update,
     }));
-  const setRetros = (update: SetStateAction<RetroRow[]>) =>
+  const setRetros = (update: SetStateAction<RetroSummary[]>) =>
     setResourceData("retroList", (current) => ({
       ...current,
       retros: typeof update === "function" ? update(current.retros) : update,
@@ -600,7 +602,7 @@ export function useDashboardController(options: Options) {
               if (isAuthoritative(key)) {
                 commitResourceSuccess("issues", next);
                 const byId = new Map(next.map((issue) => [issue.id, issue]));
-                const updateRunIssue = (run: RunWithIssueRow): RunWithIssueRow => {
+                const updateRunIssue = (run: RunSummary): RunSummary => {
                   const issue = byId.get(run.issue_id);
                   return issue
                     ? { ...run, issue_title: issue.title, issue_state: issue.state }
@@ -1194,7 +1196,7 @@ export function useDashboardController(options: Options) {
     await refreshDashboard();
   }
 
-  async function decideRetroSuggestion(id: string, decision: string) {
+  async function decideRetroSuggestion(id: string, decision: SuggestionDecision) {
     if (!runtimeAvailable) {
       const preview = previewRuntimeRef.current;
       if (preview) setSelectedRetro((current) => preview.decideSuggestion(current, id, decision));
@@ -1248,7 +1250,7 @@ export function useDashboardController(options: Options) {
       poll: () => pollDashboardResources(keys),
       fingerprint: (resources) => {
         const retroList = resources.retroList as
-          | { retroStatus: RetroStatus; retros: RetroRow[] }
+          | { retroStatus: RetroStatus; retros: RetroSummary[] }
           | undefined;
         return JSON.stringify({
           status: (() => {
@@ -1275,7 +1277,7 @@ export function useDashboardController(options: Options) {
       pauseWhenHidden: true,
       onResult: (resources) => {
         const retroList = resources.retroList as
-          | { retroStatus: RetroStatus; retros: RetroRow[] }
+          | { retroStatus: RetroStatus; retros: RetroSummary[] }
           | undefined;
         return retroList?.retroStatus?.state === "running" || resources.retroBatches === true;
       },

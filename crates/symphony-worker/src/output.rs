@@ -2,7 +2,7 @@
 //! module through Debug, and matching happens before truncation.
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
-use symphony_core::{MappedAgentEvent, RetryContext};
+use symphony_core::{AgentEventKind, MappedAgentEvent, RetryContext};
 
 pub(crate) const ERROR_LIMIT: usize = 8 * 1024;
 pub(crate) const ID_LIMIT: usize = 256;
@@ -169,18 +169,8 @@ impl OutputSanitizer {
     }
 
     pub(crate) fn event(&self, event: &MappedAgentEvent) -> MappedAgentEvent {
-        let mut safe = MappedAgentEvent {
-            kind: event.kind.clone(),
-            payload: self.json(&event.payload),
-            humanized: event
-                .humanized
-                .as_ref()
-                .map(|s| self.text(s, SUMMARY_LIMIT)),
-            tokens: event.tokens.clone(),
-            rate_limit: event.rate_limit.clone(),
-            session_info: event.session_info.clone(),
-        };
-        if let Some(info) = &mut safe.session_info {
+        let mut metadata = event.metadata().clone();
+        if let Some(info) = &mut metadata.session_info {
             for value in [
                 &mut info.model,
                 &mut info.permission_mode,
@@ -195,20 +185,29 @@ impl OutputSanitizer {
         // session value (for example `codex` or `2026`) would change that policy.
         // RunOutput validates those operational fields separately; only their
         // visible payload representation passes through text redaction.
-        safe
+        match event {
+            MappedAgentEvent::Visible {
+                kind,
+                payload,
+                humanized,
+                ..
+            } => MappedAgentEvent::Visible {
+                kind: kind.clone(),
+                payload: self.json(payload),
+                humanized: humanized
+                    .as_ref()
+                    .map(|value| self.text(value, SUMMARY_LIMIT)),
+                metadata,
+            },
+            MappedAgentEvent::Metadata { .. } => MappedAgentEvent::Metadata { metadata },
+        }
     }
 
-    pub(crate) fn historical_event(&self, kind: &str, payload: &str) -> String {
-        // Parse first: a credential containing quotes/newlines is JSON-escaped
-        // in legacy rows and would evade a replacement on serialized text.
-        let payload = serde_json::from_str::<Value>(payload)
-            .map(|value| self.json(&value).to_string())
-            .unwrap_or_else(|_| self.text(payload, 2048));
-        format!(
-            "{}: {}",
-            self.text(kind, ID_LIMIT),
-            self.text(&payload, 2048)
-        )
+    pub(crate) fn historical_event(&self, kind: &AgentEventKind, payload: &Value) -> String {
+        // Storage has decoded JSON already. Redact decoded strings before
+        // serialization so escaped credentials cannot evade the boundary.
+        let payload = self.json(payload).to_string();
+        format!("{}: {}", kind.as_str(), self.text(&payload, 2048))
     }
 
     pub(crate) fn retry_prompt(&self, prompt: &str, context: &RetryContext) -> String {
@@ -444,15 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_and_retry_context_remove_escaped_credentials() {
+    fn decoded_json_and_retry_context_remove_escaped_credentials() {
         let secret = "synthetic\"\ncredential";
         let sanitizer = OutputSanitizer::new(secret, &BTreeMap::new(), &BTreeMap::new());
-        let payload = serde_json::json!({"output": secret}).to_string();
+        let payload = serde_json::json!({"output": secret});
         let context = RetryContext {
             run_number: 1,
             error_class: Some(secret.into()),
             error_message: Some(secret.into()),
-            recent_events: vec![sanitizer.historical_event("tool", &payload)],
+            recent_events: vec![sanitizer.historical_event(&AgentEventKind::ToolCall, &payload)],
         };
         let prompt = sanitizer.retry_prompt("base", &context);
         assert!(prompt.starts_with("base"));

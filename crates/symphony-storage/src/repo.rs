@@ -1,11 +1,12 @@
 use crate::{now_iso, EventBus, StorageError, StorageEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use specta::Type;
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use std::collections::BTreeMap;
 use symphony_core::{
-    AgentEventKind, Issue, RateLimitPayload, RunStatus, SessionInfoPayload, TokenCountPayload,
+    AgentEventKind, BatchKind, BatchState, Issue, ProposalState, RateLimitPayload, RetroState,
+    RunStatus, SessionInfoPayload, SuggestionConfidence, SuggestionDecision, SuggestionTarget,
+    TokenCountPayload,
 };
 use uuid::Uuid;
 
@@ -30,7 +31,7 @@ pub enum RunCompletion<'a> {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct IssueRow {
     pub id: String,
     pub identifier: String,
@@ -39,42 +40,48 @@ pub struct IssueRow {
     pub priority: i64,
     pub state: String,
     pub branch: Option<String>,
-    pub labels: String,
-    pub blockers: String,
+    #[sqlx(json)]
+    pub labels: Vec<String>,
+    #[sqlx(json)]
+    pub blockers: Vec<String>,
     pub raw: String,
     pub last_seen_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RunRow {
     pub id: String,
     pub issue_id: String,
     pub run_number: i64,
     pub workspace_path: String,
-    pub status: String,
+    #[sqlx(try_from = "String")]
+    pub status: RunStatus,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    /// JSON-encoded `SessionInfoPayload` reported by the agent CLI at startup.
-    pub session_info: Option<String>,
+    /// Session metadata decoded once at the storage boundary.
+    #[sqlx(json(nullable))]
+    pub session_info: Option<SessionInfoPayload>,
     /// Configured repo the run was routed to; null on pre-multi-repo rows.
     pub repo_name: Option<String>,
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RunWithIssueRow {
     pub id: String,
     pub issue_id: String,
     pub run_number: i64,
     pub workspace_path: String,
-    pub status: String,
+    #[sqlx(try_from = "String")]
+    pub status: RunStatus,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub error_class: Option<String>,
     pub error_message: Option<String>,
-    pub session_info: Option<String>,
+    #[sqlx(json(nullable))]
+    pub session_info: Option<SessionInfoPayload>,
     pub repo_name: Option<String>,
     pub created_at: String,
     pub issue_identifier: String,
@@ -82,7 +89,7 @@ pub struct RunWithIssueRow {
     pub issue_state: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct LiveSessionRow {
     pub run_id: String,
     pub session_id: String,
@@ -95,16 +102,18 @@ pub struct LiveSessionRow {
     pub started_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct AgentEventRow {
     pub id: i64,
     pub run_id: String,
-    pub kind: String,
-    pub payload: String,
+    #[sqlx(try_from = "String")]
+    pub kind: AgentEventKind,
+    #[sqlx(json)]
+    pub payload: Value,
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetryQueueRow {
     pub issue_id: String,
     pub run_number: i64,
@@ -114,7 +123,7 @@ pub struct RetryQueueRow {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetryWithIssueRow {
     pub issue_id: String,
     pub run_number: i64,
@@ -126,12 +135,13 @@ pub struct RetryWithIssueRow {
     pub issue_title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetroRow {
     pub id: String,
     pub since_at: String,
     pub until_at: String,
-    pub status: String,
+    #[sqlx(try_from = "String")]
+    pub status: RetroState,
     pub run_count: i64,
     pub issue_count: i64,
     pub report_json: Option<String>,
@@ -140,7 +150,7 @@ pub struct RetroRow {
     pub completed_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetroInputRow {
     pub retro_id: String,
     pub run_id: String,
@@ -150,42 +160,48 @@ pub struct RetroInputRow {
     pub workpad_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetroSuggestionRow {
     pub id: String,
     pub retro_id: String,
     pub repo_name: String,
     pub repo_url: Option<String>,
     pub finding_index: i64,
-    pub target_type: String,
+    #[sqlx(try_from = "String")]
+    pub target_type: SuggestionTarget,
     pub target_id: String,
     pub target_path: String,
     pub title: String,
     pub body: String,
     pub rationale: String,
-    pub confidence: String,
+    #[sqlx(try_from = "String")]
+    pub confidence: SuggestionConfidence,
     pub guidance: String,
     pub before_content: Option<String>,
     pub after_content: Option<String>,
     pub unified_diff: Option<String>,
     pub base_ref: Option<String>,
     pub base_hash: Option<String>,
-    pub proposal_status: String,
+    #[sqlx(try_from = "String")]
+    pub proposal_status: ProposalState,
     pub proposal_error: Option<String>,
-    pub decision: String,
+    #[sqlx(try_from = "String")]
+    pub decision: SuggestionDecision,
     pub decided_at: Option<String>,
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RetroBatchRow {
     pub id: String,
     pub retro_id: String,
-    pub kind: String,
+    #[sqlx(try_from = "String")]
+    pub kind: BatchKind,
     pub repo_name: Option<String>,
     pub repo_url: Option<String>,
     pub base_ref: Option<String>,
-    pub state: String,
+    #[sqlx(try_from = "String")]
+    pub state: BatchState,
     pub progress: Option<String>,
     pub error: Option<String>,
     pub pr_url: Option<String>,
@@ -201,7 +217,7 @@ pub enum RetroBatchReservation {
     AlreadyReserved,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WorkpadSnapshotRow {
     pub issue_id: String,
     pub comment_id: String,
@@ -212,7 +228,7 @@ pub struct WorkpadSnapshotRow {
     pub fetched_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RateLimitStateRow {
     pub source: String,
     pub remaining: Option<i64>,
@@ -220,7 +236,7 @@ pub struct RateLimitStateRow {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TokenUsageRow {
     pub source: String,
     pub input_tokens: i64,
@@ -230,7 +246,7 @@ pub struct TokenUsageRow {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WorkspaceCleanupRow {
     pub id: String,
     pub repo_name: String,
@@ -245,7 +261,7 @@ pub struct WorkspaceCleanupRow {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Overview {
     pub active_runs: Vec<RunWithIssueRow>,
     pub retry_queue: Vec<RetryWithIssueRow>,
@@ -872,9 +888,9 @@ impl Repository {
     pub async fn upsert_live_session(
         &self,
         run_id: &str,
-        session_id: &str,
-        thread_id: &str,
-        turn_id: &str,
+        session_id: &symphony_core::AgentSessionId,
+        thread_id: &symphony_core::AgentThreadId,
+        turn_id: &symphony_core::AgentTurnId,
         tokens: &TokenCountPayload,
     ) -> Result<(), StorageError> {
         sqlx::query(
@@ -915,9 +931,9 @@ impl Repository {
             "#,
         )
         .bind(run_id)
-        .bind(session_id)
-        .bind(thread_id)
-        .bind(turn_id)
+        .bind(session_id.as_str())
+        .bind(thread_id.as_str())
+        .bind(turn_id.as_str())
         .bind(tokens.input_tokens)
         .bind(tokens.output_tokens)
         .bind(tokens.total_tokens)
@@ -1522,22 +1538,22 @@ impl Repository {
             .bind(&suggestion.repo_name)
             .bind(&suggestion.repo_url)
             .bind(suggestion.finding_index)
-            .bind(&suggestion.target_type)
+            .bind(suggestion.target_type.as_str())
             .bind(&suggestion.target_id)
             .bind(&suggestion.target_path)
             .bind(&suggestion.title)
             .bind(&suggestion.body)
             .bind(&suggestion.rationale)
-            .bind(&suggestion.confidence)
+            .bind(suggestion.confidence.as_str())
             .bind(&suggestion.guidance)
             .bind(&suggestion.before_content)
             .bind(&suggestion.after_content)
             .bind(&suggestion.unified_diff)
             .bind(&suggestion.base_ref)
             .bind(&suggestion.base_hash)
-            .bind(&suggestion.proposal_status)
+            .bind(suggestion.proposal_status.as_str())
             .bind(&suggestion.proposal_error)
-            .bind(&suggestion.decision)
+            .bind(suggestion.decision.as_str())
             .bind(&suggestion.decided_at)
             .bind(&suggestion.created_at)
             .execute(&mut *tx)
@@ -1567,9 +1583,9 @@ impl Repository {
     pub async fn set_retro_suggestion_decision(
         &self,
         id: &str,
-        decision: &str,
+        decision: SuggestionDecision,
     ) -> Result<Option<RetroSuggestionRow>, StorageError> {
-        let decided_at = (decision != "pending").then(now_iso);
+        let decided_at = (decision != SuggestionDecision::Pending).then(now_iso);
         sqlx::query(
             r#"
             update retro_suggestions
@@ -1589,7 +1605,7 @@ impl Repository {
               )
             "#,
         )
-        .bind(decision)
+        .bind(decision.as_str())
         .bind(decided_at)
         .bind(id)
         .execute(&self.pool)
@@ -1650,7 +1666,7 @@ impl Repository {
             "#,
         )
         .bind(&batch.retro_id)
-        .bind(&batch.kind)
+        .bind(batch.kind.as_str())
         .bind(&batch.repo_name)
         .fetch_all(&mut *tx)
         .await?;
@@ -1687,11 +1703,11 @@ impl Repository {
         )
         .bind(&batch.id)
         .bind(&batch.retro_id)
-        .bind(&batch.kind)
+        .bind(batch.kind.as_str())
         .bind(&batch.repo_name)
         .bind(&batch.repo_url)
         .bind(&batch.base_ref)
-        .bind(&batch.state)
+        .bind(batch.state.as_str())
         .bind(&batch.progress)
         .bind(&batch.error)
         .bind(&batch.pr_url)
@@ -1742,12 +1758,16 @@ impl Repository {
     pub async fn update_retro_batch(
         &self,
         id: &str,
-        state: &str,
+        state: BatchState,
         progress: Option<&str>,
         error: Option<&str>,
         pr_url: Option<&str>,
     ) -> Result<(), StorageError> {
-        let completed_at = matches!(state, "completed" | "failed" | "stale").then(now_iso);
+        let completed_at = matches!(
+            state,
+            BatchState::Completed | BatchState::Failed | BatchState::Stale
+        )
+        .then(now_iso);
         sqlx::query(
             r#"
             update retro_batches
@@ -1755,7 +1775,7 @@ impl Repository {
             where id = ?6
             "#,
         )
-        .bind(state)
+        .bind(state.as_str())
         .bind(progress)
         .bind(error)
         .bind(pr_url)
@@ -2008,22 +2028,22 @@ mod tests {
             repo_name: "widgets".to_string(),
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             finding_index: 0,
-            target_type: "repo_workflow".to_string(),
+            target_type: symphony_core::SuggestionTarget::RepoWorkflow,
             target_id: "repository workflow".to_string(),
             target_path: "SYMPHONY-WORKFLOW.md".to_string(),
             title: "Record prerequisites".to_string(),
             body: "Add guidance".to_string(),
             rationale: "Repeated twice".to_string(),
-            confidence: "high".to_string(),
+            confidence: symphony_core::SuggestionConfidence::High,
             guidance: "Record reusable prerequisites.".to_string(),
             before_content: Some("before".to_string()),
             after_content: Some("after".to_string()),
             unified_diff: Some("--- before\n+++ after".to_string()),
             base_ref: Some("abc123".to_string()),
             base_hash: Some("hash".to_string()),
-            proposal_status: "ready".to_string(),
+            proposal_status: symphony_core::ProposalState::Ready,
             proposal_error: None,
-            decision: decision.to_string(),
+            decision: decision.parse().unwrap(),
             decided_at: (decision != "pending").then(now_iso),
             created_at: now_iso(),
         }
@@ -2038,11 +2058,11 @@ mod tests {
         RetroBatchRow {
             id: id.to_string(),
             retro_id: retro_id.to_string(),
-            kind: kind.to_string(),
+            kind: kind.parse().unwrap(),
             repo_name: repo_name.map(str::to_string),
             repo_url: repo_name.map(|_| "https://github.com/acme/widgets.git".to_string()),
             base_ref: Some("abc123".to_string()),
-            state: "queued".to_string(),
+            state: symphony_core::BatchState::Queued,
             progress: Some("Queued".to_string()),
             error: None,
             pr_url: None,
@@ -2062,9 +2082,9 @@ mod tests {
             .unwrap();
         repo.upsert_live_session(
             &run.id,
-            "session",
-            "thread",
-            "turn",
+            &symphony_core::AgentSessionId::new("session"),
+            &symphony_core::AgentThreadId::new("thread"),
+            &symphony_core::AgentTurnId::new("turn"),
             &TokenCountPayload {
                 input_tokens: 1,
                 output_tokens: 2,
@@ -2085,7 +2105,7 @@ mod tests {
             .await
             .unwrap());
         let stored = repo.get_run(&run.id).await.unwrap().unwrap();
-        assert_eq!(stored.status, "failure");
+        assert_eq!(stored.status.as_str(), "failure");
         let retry = repo.due_retries("2100-01-01T00:00:00Z").await.unwrap();
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0].run_number, 2);
@@ -2152,16 +2172,22 @@ mod tests {
             repo.upsert_issues(&[issue()]).await.unwrap();
             let run = repo.try_reserve_run("lin-1", 1, "/tmp/ws", None).await.unwrap().unwrap();
             repo.schedule_retry("lin-1", 2, "2099-01-01T00:00:00Z", None, None).await.unwrap();
-            repo.upsert_live_session(&run.id, "session", "thread", "turn", &TokenCountPayload {
+            repo.upsert_live_session(
+            &run.id,
+            &symphony_core::AgentSessionId::new("session"),
+            &symphony_core::AgentThreadId::new("thread"),
+            &symphony_core::AgentTurnId::new("turn"),
+            &TokenCountPayload {
                 input_tokens: 1, output_tokens: 2, total_tokens: 3,
-            }).await.unwrap();
+            },
+        ).await.unwrap();
             sqlx::query(statement).execute(&pool).await.unwrap();
             let mut events = repo.events().subscribe();
             assert!(repo.complete_run(&run.id, completion).await.is_err());
             assert!(events.try_recv().is_err());
             pool.close().await;
             let reopened = Repository::new(crate::open_sqlite(&path).await.unwrap(), EventBus::default());
-            assert_eq!(reopened.get_run(&run.id).await.unwrap().unwrap().status, "pending");
+            assert_eq!(reopened.get_run(&run.id).await.unwrap().unwrap().status.as_str(), "pending");
             assert_eq!(reopened.due_retries("2100-01-01T00:00:00Z").await.unwrap()[0].run_number, 2);
             assert_eq!(reopened.overview().await.unwrap().live_sessions.len(), 1);
             assert_eq!(reopened.issue_dispatch_suppression("lin-1", "user_cancelled").await.unwrap(), None);
@@ -2272,6 +2298,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_arrays_are_decoded_once_and_malformed_storage_is_an_error() {
+        let repo = repo().await;
+        let mut source = issue();
+        source.labels = vec!["repo:widgets".into()];
+        source.blockers = vec!["ENG-2".into()];
+        repo.upsert_issues(&[source.clone()]).await.unwrap();
+        let row = repo.list_issues(10).await.unwrap().remove(0);
+        assert_eq!(row.labels, ["repo:widgets"]);
+        assert_eq!(row.blockers, ["ENG-2"]);
+        for (column, malformed) in [
+            ("labels", "not json"),
+            ("labels", "[7]"),
+            ("blockers", "null"),
+            ("blockers", "{}"),
+        ] {
+            repo.upsert_issues(&[source.clone()]).await.unwrap();
+            sqlx::query(&format!("update issues set {column} = ?1"))
+                .bind(malformed)
+                .execute(&repo.pool)
+                .await
+                .unwrap();
+            let error = repo.list_issues(10).await.unwrap_err().to_string();
+            assert!(error.contains(column), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_session_event_and_closed_state_fail_at_storage_read() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("update runs set session_info = '{broken'")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_run(&run.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("session_info"));
+        sqlx::query("update runs set session_info = null")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        repo.append_event(
+            &run.id,
+            AgentEventKind::Status,
+            &serde_json::json!({"message": "ready"}),
+        )
+        .await
+        .unwrap();
+        sqlx::query("update agent_events set payload = '{broken'")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert!(repo
+            .get_run_detail(&run.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("payload"));
+        let mut connection = repo.pool.acquire().await.unwrap();
+        sqlx::query("pragma ignore_check_constraints = on")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("update runs set status = 'unknown-state'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(repo
+            .get_run(&run.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("status"));
+    }
+
+    #[tokio::test]
     async fn stores_session_info_on_run() {
         let repo = repo().await;
         repo.upsert_issues(&[issue()]).await.unwrap();
@@ -2294,8 +2405,7 @@ mod tests {
             .unwrap()
             .session_info
             .expect("session info should be stored");
-        let parsed: SessionInfoPayload = serde_json::from_str(&stored).unwrap();
-        assert_eq!(parsed, info);
+        assert_eq!(stored, info);
     }
 
     #[tokio::test]
@@ -2458,7 +2568,12 @@ mod tests {
         assert!(repo.has_active_run("lin-1").await.unwrap());
         assert!(repo.pending_retry_issue_ids().await.unwrap().is_empty());
         assert_eq!(
-            repo.get_run(&active.id).await.unwrap().unwrap().status,
+            repo.get_run(&active.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                .as_str(),
             "pending"
         );
     }
@@ -2505,7 +2620,7 @@ mod tests {
 
         assert_eq!(overview.active_runs.len(), 1);
         assert_eq!(overview.active_runs[0].id, run.id);
-        assert_eq!(overview.active_runs[0].status, "pending");
+        assert_eq!(overview.active_runs[0].status.as_str(), "pending");
     }
 
     #[tokio::test]
@@ -2534,7 +2649,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(queued.status, "queued");
+        assert_eq!(queued.status.as_str(), "queued");
         assert!(repo.claim_workspace_cleanup("cleanup-1").await.unwrap());
         assert!(!repo.claim_workspace_cleanup("cleanup-1").await.unwrap());
 
@@ -2544,7 +2659,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(recovered.status, "queued");
+        assert_eq!(recovered.status.as_str(), "queued");
         assert_eq!(recovered.attempts, 1);
 
         repo.retry_workspace_cleanup("cleanup-1", "2099-01-01T00:00:00.000Z", "busy")
@@ -2664,9 +2779,9 @@ mod tests {
 
         repo.upsert_live_session(
             &run.id,
-            "pending-session",
-            "",
-            "",
+            &symphony_core::AgentSessionId::new("pending-session"),
+            &symphony_core::AgentThreadId::new(""),
+            &symphony_core::AgentTurnId::new(""),
             &TokenCountPayload {
                 input_tokens: 120,
                 output_tokens: 34,
@@ -2677,9 +2792,9 @@ mod tests {
         .unwrap();
         repo.upsert_live_session(
             &run.id,
-            "final-session",
-            "thread-1",
-            "turn-1",
+            &symphony_core::AgentSessionId::new("final-session"),
+            &symphony_core::AgentThreadId::new("thread-1"),
+            &symphony_core::AgentTurnId::new("turn-1"),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2777,7 +2892,7 @@ mod tests {
 
         let latest = repo.latest_completed_retro().await.unwrap().unwrap();
         assert_eq!(latest.id, retro.id);
-        assert_eq!(latest.status, "completed");
+        assert_eq!(latest.status.as_str(), "completed");
         assert_eq!(latest.run_count, 1);
         assert_eq!(repo.list_retros(10).await.unwrap().len(), 1);
         let previous_hashes = repo
@@ -2797,7 +2912,7 @@ mod tests {
             .await
             .unwrap();
         let failed = repo.get_retro(&stale.id).await.unwrap().unwrap();
-        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.status.as_str(), "failed");
         assert_eq!(
             failed.error_message.as_deref(),
             Some("Retro interrupted before completion.")
@@ -2851,9 +2966,15 @@ mod tests {
                 .unwrap(),
             RetroBatchReservation::Created
         );
-        repo.update_retro_batch(&batch.id, "completed", Some("Done"), None, None)
-            .await
-            .unwrap();
+        repo.update_retro_batch(
+            &batch.id,
+            symphony_core::BatchState::Completed,
+            Some("Done"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(repo.delete_retro(&latest.id).await.unwrap());
         assert!(repo.get_retro(&latest.id).await.unwrap().is_none());
@@ -2915,7 +3036,7 @@ mod tests {
         assert!(!repo.delete_retro(&running.id).await.unwrap());
         repo.update_retro_batch(
             &protected_batch.id,
-            "failed",
+            symphony_core::BatchState::Failed,
             None,
             Some("Stopped for test."),
             None,
@@ -2938,22 +3059,22 @@ mod tests {
             repo_name: "widgets".to_string(),
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             finding_index: 0,
-            target_type: "skill".to_string(),
+            target_type: symphony_core::SuggestionTarget::Skill,
             target_id: "symphony-workpad".to_string(),
             target_path: ".agents/skills/symphony-workpad/SKILL.md".to_string(),
             title: "Record prerequisites".to_string(),
             body: "Add guidance".to_string(),
             rationale: "Repeated twice".to_string(),
-            confidence: "high".to_string(),
+            confidence: symphony_core::SuggestionConfidence::High,
             guidance: "Record reusable prerequisites.".to_string(),
             before_content: Some("before".to_string()),
             after_content: Some("after".to_string()),
             unified_diff: Some("--- before\n+++ after".to_string()),
             base_ref: Some("abc123".to_string()),
             base_hash: Some("hash".to_string()),
-            proposal_status: "ready".to_string(),
+            proposal_status: symphony_core::ProposalState::Ready,
             proposal_error: None,
-            decision: "pending".to_string(),
+            decision: symphony_core::SuggestionDecision::Pending,
             decided_at: None,
             created_at: now_iso(),
         };
@@ -2966,21 +3087,24 @@ mod tests {
             .await
             .unwrap();
         let accepted = repo
-            .set_retro_suggestion_decision(&suggestion.id, "accepted")
+            .set_retro_suggestion_decision(
+                &suggestion.id,
+                symphony_core::SuggestionDecision::Accepted,
+            )
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(accepted.decision, "accepted");
+        assert_eq!(accepted.decision.as_str(), "accepted");
         assert!(accepted.decided_at.is_some());
 
         let batch = RetroBatchRow {
             id: "batch-1".to_string(),
             retro_id: retro.id.clone(),
-            kind: "repo_pr".to_string(),
+            kind: symphony_core::BatchKind::RepoPr,
             repo_name: Some("widgets".to_string()),
             repo_url: suggestion.repo_url.clone(),
             base_ref: suggestion.base_ref.clone(),
-            state: "queued".to_string(),
+            state: symphony_core::BatchState::Queued,
             progress: Some("Queued".to_string()),
             error: None,
             pr_url: None,
@@ -2995,17 +3119,23 @@ mod tests {
         );
 
         let locked = repo
-            .set_retro_suggestion_decision(&suggestion.id, "pending")
+            .set_retro_suggestion_decision(
+                &suggestion.id,
+                symphony_core::SuggestionDecision::Pending,
+            )
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(locked.decision, "accepted");
+        assert_eq!(locked.decision.as_str(), "accepted");
         let rejected_locked = repo
-            .set_retro_suggestion_decision(&rejected.id, "accepted")
+            .set_retro_suggestion_decision(
+                &rejected.id,
+                symphony_core::SuggestionDecision::Accepted,
+            )
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(rejected_locked.decision, "rejected");
+        assert_eq!(rejected_locked.decision.as_str(), "rejected");
         assert_eq!(repo.list_retro_batches(&retro.id).await.unwrap().len(), 1);
     }
 
@@ -3061,9 +3191,12 @@ mod tests {
         );
         assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
 
-        repo.set_retro_suggestion_decision(&suggestion.id, "accepted")
-            .await
-            .unwrap();
+        repo.set_retro_suggestion_decision(
+            &suggestion.id,
+            symphony_core::SuggestionDecision::Accepted,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             repo.reserve_retro_batch(&batch, std::slice::from_ref(&suggestion.id))
                 .await
@@ -3126,7 +3259,7 @@ mod tests {
         let suggestion = test_retro_suggestion(&retro.id, "accepted-suggestion", "accepted");
         let mut prompt_suggestion = test_retro_suggestion(&retro.id, "accepted-prompt", "accepted");
         prompt_suggestion.finding_index = 1;
-        prompt_suggestion.target_type = "prompt".to_string();
+        prompt_suggestion.target_type = SuggestionTarget::Prompt;
         prompt_suggestion.target_id = "common prompt".to_string();
         prompt_suggestion.target_path = "Settings → Prompt template".to_string();
         repo.insert_retro_suggestions(&[suggestion.clone(), prompt_suggestion.clone()])
@@ -3146,9 +3279,15 @@ mod tests {
                 .unwrap(),
             RetroBatchReservation::Created
         );
-        repo.update_retro_batch(&running.id, "running", Some("Working"), None, None)
-            .await
-            .unwrap();
+        repo.update_retro_batch(
+            &running.id,
+            symphony_core::BatchState::Running,
+            Some("Working"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         repo.fail_in_progress_retro_batches("Restarted before completion.")
             .await
@@ -3156,7 +3295,9 @@ mod tests {
 
         let batches = repo.list_retro_batches(&retro.id).await.unwrap();
         assert_eq!(batches.len(), 2);
-        assert!(batches.iter().all(|batch| batch.state == "failed"));
+        assert!(batches
+            .iter()
+            .all(|batch| batch.state == symphony_core::BatchState::Failed));
         assert!(batches
             .iter()
             .all(|batch| batch.error.as_deref() == Some("Restarted before completion.")));
@@ -3180,9 +3321,15 @@ mod tests {
             .unwrap();
 
         assert!(repo.has_in_progress_retro_batches().await.unwrap());
-        repo.update_retro_batch(&batch.id, "completed", Some("Done"), None, None)
-            .await
-            .unwrap();
+        repo.update_retro_batch(
+            &batch.id,
+            symphony_core::BatchState::Completed,
+            Some("Done"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!repo.has_in_progress_retro_batches().await.unwrap());
     }
 
@@ -3338,7 +3485,7 @@ mod tests {
                     "{starts_running:?} -> {expected} should be legal"
                 );
                 let terminal = repo.get_run(&run.id).await.unwrap().unwrap();
-                assert_eq!(terminal.status, *expected);
+                assert_eq!(terminal.status.as_str(), *expected);
                 assert_eq!(terminal.error_class.as_deref(), Some("first"));
                 let ended_at = terminal.ended_at.clone();
 
@@ -3356,7 +3503,7 @@ mod tests {
                 );
                 repo.mark_running(&run.id).await.unwrap();
                 let unchanged = repo.get_run(&run.id).await.unwrap().unwrap();
-                assert_eq!(unchanged.status, *expected);
+                assert_eq!(unchanged.status.as_str(), *expected);
                 assert_eq!(unchanged.error_class.as_deref(), Some("first"));
                 assert_eq!(unchanged.ended_at, ended_at);
             }
@@ -3385,7 +3532,12 @@ mod tests {
                     if status == target.as_db_str()
             ));
             assert_eq!(
-                repo.get_run(&run.id).await.unwrap().unwrap().status,
+                repo.get_run(&run.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status
+                    .as_str(),
                 "pending"
             );
         }
@@ -3509,9 +3661,9 @@ mod tests {
         // Stream tokens on the 25th run — past the old cap.
         repo.upsert_live_session(
             &run_ids[24],
-            "sess",
-            "thread",
-            "turn",
+            &symphony_core::AgentSessionId::new("sess"),
+            &symphony_core::AgentThreadId::new("thread"),
+            &symphony_core::AgentTurnId::new("turn"),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3547,9 +3699,9 @@ mod tests {
         repo.mark_running(&run.id).await.unwrap();
         repo.upsert_live_session(
             &run.id,
-            "sess",
-            "thread",
-            "turn",
+            &symphony_core::AgentSessionId::new("sess"),
+            &symphony_core::AgentThreadId::new("thread"),
+            &symphony_core::AgentTurnId::new("turn"),
             &TokenCountPayload {
                 input_tokens: 0,
                 output_tokens: 0,

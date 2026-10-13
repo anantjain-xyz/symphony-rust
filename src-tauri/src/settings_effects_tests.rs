@@ -101,6 +101,11 @@ impl Fixture {
         let settings = AppSettings {
             settings_revision: 10,
             linear_api_key_set: true,
+            repos: vec![symphony_core::RepoConfig {
+                name: "fixture".into(),
+                url: "https://example.test/fixture.git".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         std::fs::write(
@@ -135,11 +140,15 @@ impl Fixture {
         state
             .worker
             .start(WorkerStartConfig {
-                workflow,
-                repos: vec![],
+                runtime: symphony_core::RunnableConfig::new(
+                    settings.settings_revision,
+                    workflow,
+                    settings.repos.clone(),
+                    BTreeMap::new(),
+                )
+                .unwrap(),
                 skills: vec![],
                 env: BTreeMap::new(),
-                session_env: BTreeMap::new(),
                 app_data_dir: directory.path().into(),
             })
             .await
@@ -474,6 +483,52 @@ async fn save_receipt_reports_unavailable_runtime_admission_without_losing_its_c
     fixture.assert_stopped().await;
 }
 
+#[tokio::test]
+async fn start_distinguishes_unavailable_credentials_from_confirmed_removal() {
+    for unavailable in [true, false] {
+        let fixture = Fixture::running().await;
+        fixture
+            .credentials
+            .unavailable
+            .store(unavailable, Ordering::SeqCst);
+        if !unavailable {
+            *fixture.credentials.key.lock().unwrap() = None;
+        }
+        let error = start_worker_owned(fixture.state.clone()).await.unwrap_err();
+        assert!(error.contains(if unavailable {
+            "unavailable"
+        } else {
+            "No Linear API key"
+        }));
+        if unavailable {
+            assert_eq!(
+                fixture.state.worker.status().await.state,
+                symphony_worker::WorkerState::Running
+            );
+            fixture.state.worker.stop().await;
+        }
+        fixture.assert_stopped().await;
+    }
+}
+
+#[tokio::test]
+async fn worker_config_uses_the_admitted_credential_for_tracker_and_environment() {
+    let fixture = Fixture::running().await;
+    fixture
+        .credentials
+        .unavailable
+        .store(true, Ordering::SeqCst);
+    let config =
+        worker_start_config(&fixture.state, &fixture.settings, "admitted-key-canary").unwrap();
+    assert_eq!(
+        config.runtime.workflow().front_matter.tracker.api_key,
+        "admitted-key-canary"
+    );
+    assert_eq!(config.env["LINEAR_API_KEY"], "admitted-key-canary");
+    fixture.state.worker.stop().await;
+    fixture.assert_stopped().await;
+}
+
 fn fail_settings_directory_sync(path: &std::path::Path) -> Result<(), String> {
     if path
         .extension()
@@ -573,22 +628,22 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
             repo_name: "widgets".into(),
             repo_url: Some("https://example.invalid/widgets.git".into()),
             finding_index: 0,
-            target_type: "prompt".into(),
+            target_type: symphony_core::SuggestionTarget::Prompt,
             target_id: "default-prompt".into(),
             target_path: "Settings → Prompt template".into(),
             title: "Clarify completion".into(),
             body: "Preserve the reviewed prompt update.".into(),
             rationale: "Test reviewed workflow continuation.".into(),
-            confidence: "high".into(),
+            confidence: symphony_core::SuggestionConfidence::High,
             guidance: "Verify before reporting completion.".into(),
             before_content: None,
             after_content: None,
             unified_diff: None,
             base_ref: Some("saved-prompt".into()),
             base_hash: Some(prompt_revision(&fixture.settings)),
-            proposal_status: "ready".into(),
+            proposal_status: symphony_core::ProposalState::Ready,
             proposal_error: None,
-            decision: "accepted".into(),
+            decision: symphony_core::SuggestionDecision::Accepted,
             decided_at: Some(now_iso()),
             created_at: now_iso(),
         };
@@ -601,11 +656,11 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
         let batch = RetroBatchRow {
             id: Uuid::new_v4().to_string(),
             retro_id: retro.id.clone(),
-            kind: "workflow_update".into(),
+            kind: symphony_core::BatchKind::WorkflowUpdate,
             repo_name: None,
             repo_url: None,
             base_ref: suggestion.base_ref.clone(),
-            state: "running".into(),
+            state: symphony_core::BatchState::Running,
             progress: Some("Applying reviewed prompt.".into()),
             error: None,
             pr_url: None,
@@ -636,7 +691,7 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
         let operation_batch = batch.clone();
         let caller = tokio::spawn(settings_store::finish_operation(async move {
             let _effects = state.settings_store.commit_effects().await;
-            state
+            let committed_settings = state
                 .settings_store
                 .apply_prompt(
                     settings.settings_revision,
@@ -647,7 +702,8 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
             finish_settings_recovery(&state).await;
             committed.send(()).unwrap();
             continue_refresh.await.unwrap();
-            finish_retro_workflow_after_prompt_save(&state, &operation_batch).await
+            finish_retro_workflow_after_prompt_save(&state, &operation_batch, &committed_settings)
+                .await
         }));
         observed.await.unwrap();
         let durable = std::fs::read(&fixture.settings_path).unwrap();
@@ -671,6 +727,17 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
         }
 
         fixture.assert_stopped().await;
+        assert!(matches!(
+            fixture
+                .state
+                .worker
+                .start(worker_start_config(&fixture.state, &fixture.settings, OLD_KEY).unwrap())
+                .await,
+            Err(symphony_worker::WorkerError::StaleSettings {
+                revision: 10,
+                latest_revision: 11,
+            })
+        ));
         let batches = fixture
             .state
             .repo
@@ -679,7 +746,7 @@ async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails
             .unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].id, batch.id);
-        assert_eq!(batches[0].state, "failed");
+        assert_eq!(batches[0].state, symphony_core::BatchState::Failed);
         assert_eq!(
             batches[0].progress.as_deref(),
             Some("Workflow prompt saved; runtime refresh failed.")
@@ -703,11 +770,13 @@ async fn incomplete_workflow_save_reports_skipped_update_until_successful_refres
     let fixture = Fixture::running().await;
     let original_status = fixture.state.worker.status().await;
     assert!(original_status.last_error.is_none());
-    assert!(!live_reconfigure_allowed(&fixture.settings));
+    let mut incomplete = fixture.settings.clone();
+    incomplete.repos.clear();
+    assert!(!live_reconfigure_allowed(&incomplete));
     let saved = save_settings_owned(
         fixture.state.clone(),
         SaveSettingsRequest {
-            settings: fixture.settings.clone(),
+            settings: incomplete,
             linear_api_key: None,
         },
     )
@@ -746,10 +815,18 @@ async fn incomplete_workflow_save_reports_skipped_update_until_successful_refres
         .save(complete, None)
         .await
         .unwrap();
-    let mut refresh = worker_start_config(&fixture.state, &complete, OLD_KEY);
+    let mut refresh = worker_start_config(&fixture.state, &complete, OLD_KEY).unwrap();
     // Keep the fixture's admitted tracker identity, so this actual worker
     // reconfiguration needs no external preflight or native credential access.
-    refresh.workflow.front_matter.tracker.endpoint = fixture.tracker_endpoint.clone();
+    let mut workflow = refresh.runtime.workflow().clone();
+    workflow.front_matter.tracker.endpoint = fixture.tracker_endpoint.clone();
+    refresh.runtime = symphony_core::RunnableConfig::new(
+        complete.settings_revision,
+        workflow,
+        complete.repos.clone(),
+        complete.session_env.clone(),
+    )
+    .unwrap();
     let refreshed = fixture.state.worker.reconfigure(refresh).await;
     assert_eq!(refreshed.state, symphony_worker::WorkerState::Running);
     assert_eq!(refreshed.started_at, original_status.started_at);
@@ -803,6 +880,19 @@ async fn committed_save_returns_receipt_when_runtime_admission_fails_after_commi
         let receipt = receipt_seen.await.unwrap();
         let _finished = fixture.state.settings_store.commit_effects().await;
         fixture.assert_stopped().await;
+        // The committed revision fences delayed starts even when admission
+        // cannot read a fresh snapshot after the durable save.
+        assert!(matches!(
+            fixture
+                .state
+                .worker
+                .start(worker_start_config(&fixture.state, &fixture.settings, OLD_KEY).unwrap())
+                .await,
+            Err(symphony_worker::WorkerError::StaleSettings {
+                revision: 10,
+                latest_revision: 11,
+            })
+        ));
         assert_eq!(
             serde_json::to_value(&receipt.settings).unwrap(),
             serde_json::to_value(&expected).unwrap()

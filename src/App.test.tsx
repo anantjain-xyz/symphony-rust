@@ -13,15 +13,15 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { useDeferredUpdater } from "./App";
 import type {
-  AgentEventRow,
+  AgentEvent,
   AppSettings,
-  IssueRow,
-  Overview,
+  DashboardOverview,
+  IssueSummary,
   RepoWorkflowStatus,
-  RetroBatchRow,
-  RetroRow,
+  RetroChangeBatch,
+  RetroSummary,
   RunDetail,
-  RunWithIssueRow,
+  RunSummary,
   SettingsSaveResult,
   SkillsStatus,
   ValidationResult,
@@ -66,6 +66,26 @@ vi.mock("./desktop/runtime", () => ({
     return tauriMocks.runtimeAvailable;
   },
 }));
+
+function testValidation(overrides: Partial<ValidationResult> = {}): ValidationResult {
+  return {
+    workflow_ok: true,
+    workflow_blocking: false,
+    workflow_error: null,
+    issues: [],
+    codex_found: true,
+    claude_found: true,
+    cursor_found: true,
+    opencode_found: true,
+    codex_command: "codex",
+    claude_command: "claude",
+    cursor_command: "agent",
+    opencode_command: "opencode",
+    app_data_dir: "/tmp/symphony",
+    database_path: "/tmp/symphony/symphony.db",
+    ...overrides,
+  };
+}
 
 function testSettings(): AppSettings {
   return {
@@ -156,7 +176,8 @@ function settingsInvoke({
   allowSave = false,
 }: {
   settings: AppSettings;
-  validation: Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error">;
+  validation: Pick<ValidationResult, "workflow_ok" | "workflow_blocking" | "workflow_error"> &
+    Partial<Pick<ValidationResult, "issues">>;
   allowSave?: boolean;
 }) {
   return async (command: string) => {
@@ -200,6 +221,7 @@ function settingsInvoke({
         };
       case "validate_settings":
         return {
+          issues: [],
           ...validation,
           codex_found: true,
           claude_found: true,
@@ -257,11 +279,7 @@ function dashboardInvoke({
     pr_url: null,
     can_transfer: true,
   },
-  validation = {
-    workflow_ok: true,
-    workflow_blocking: false,
-    workflow_error: null,
-  },
+  validation = { issues: [], workflow_ok: true, workflow_blocking: false, workflow_error: null },
   workerStatus = {
     state: "running",
     started_at: "2026-01-01T00:00:00.000Z",
@@ -269,8 +287,8 @@ function dashboardInvoke({
   },
 }: {
   settings: AppSettings;
-  issues?: IssueRow[];
-  overview?: Overview;
+  issues?: IssueSummary[];
+  overview?: DashboardOverview;
   skillsStatus?: SkillsStatus;
   workflowStatus?: RepoWorkflowStatus;
   validation?: Partial<ValidationResult> &
@@ -320,6 +338,7 @@ function dashboardInvoke({
         return workflowStatus;
       case "validate_settings":
         return {
+          issues: [],
           codex_found: true,
           claude_found: true,
           cursor_found: true,
@@ -359,7 +378,7 @@ function issueRow({
   title: string;
   state: string;
   blockers?: string[];
-}): IssueRow {
+}): IssueSummary {
   return {
     id,
     identifier,
@@ -368,26 +387,14 @@ function issueRow({
     priority: 2,
     state,
     branch: null,
-    labels: "[]",
-    blockers: JSON.stringify(blockers),
-    raw: JSON.stringify({
-      id,
-      identifier,
-      title,
-      description: null,
-      priority: 2,
-      state,
-      branch: null,
-      labels: [],
-      blockers,
-      project_id: null,
-      project_slug_id: null,
-    }),
+    labels: [],
+    blockers: blockers,
+
     last_seen_at: "2026-01-01T00:00:00.000Z",
   };
 }
 
-function runRow(overrides: Partial<RunWithIssueRow> = {}): RunWithIssueRow {
+function runRow(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
     id: "run-1",
     issue_id: "issue-sym-1",
@@ -664,11 +671,14 @@ describe("App settings", () => {
       ).toBe(true),
     );
     fireEvent.change(prompt, { target: { value: "Newer unsaved revision" } });
-    validation.resolve({
-      workflow_ok: true,
-      workflow_blocking: false,
-      workflow_error: null,
-    } as ValidationResult);
+    validation.resolve(
+      testValidation({
+        issues: [],
+        workflow_ok: true,
+        workflow_blocking: false,
+        workflow_error: null,
+      }),
+    );
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -715,11 +725,14 @@ describe("App settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Overview" }));
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(commandCount("validate_settings")).toBe(1);
-    validation.resolve({
-      workflow_ok: true,
-      workflow_blocking: false,
-      workflow_error: null,
-    } as ValidationResult);
+    validation.resolve(
+      testValidation({
+        issues: [],
+        workflow_ok: true,
+        workflow_blocking: false,
+        workflow_error: null,
+      }),
+    );
 
     await waitFor(() => expect(commandCount("save_settings")).toBe(1));
     expect(
@@ -751,11 +764,14 @@ describe("App settings", () => {
     ) as HTMLTextAreaElement;
     fireEvent.change(remountedPrompt, { target: { value: "Newer remounted draft" } });
     expect(commandCount("validate_settings")).toBe(1);
-    validation.resolve({
-      workflow_ok: true,
-      workflow_blocking: false,
-      workflow_error: null,
-    } as ValidationResult);
+    validation.resolve(
+      testValidation({
+        issues: [],
+        workflow_ok: true,
+        workflow_blocking: false,
+        workflow_error: null,
+      }),
+    );
 
     await waitFor(() => expect(commandCount("validate_settings")).toBe(2));
     expect(commandCount("save_settings")).toBe(0);
@@ -819,11 +835,14 @@ describe("App settings", () => {
     const saveButton = screen.getByRole("button", { name: "Save" });
     await waitFor(() => expect(saveButton.getAttribute("disabled")).not.toBeNull());
     fireEvent.submit(container.querySelector("#settings-form")!);
-    validation.resolve({
-      workflow_ok: true,
-      workflow_blocking: false,
-      workflow_error: null,
-    } as ValidationResult);
+    validation.resolve(
+      testValidation({
+        issues: [],
+        workflow_ok: true,
+        workflow_blocking: false,
+        workflow_error: null,
+      }),
+    );
 
     await waitFor(() => expect(commandCount("save_settings")).toBe(1));
     expect(commandCount("validate_settings")).toBe(1);
@@ -851,11 +870,20 @@ describe("App settings", () => {
     const settings = testSettings();
     const save = deferred<AppSettings>();
     const baseInvoke = dashboardInvoke({ settings });
-    tauriMocks.invoke.mockImplementation((command, args) =>
-      command === "save_settings"
+    let saves = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command !== "save_settings") return baseInvoke(command, args);
+      saves += 1;
+      return saves === 1
         ? save.promise.then((saved) => saveResult(saved))
-        : baseInvoke(command, args),
-    );
+        : Promise.resolve(
+            saveResult({
+              ...settings,
+              settings_revision: 2,
+              prompt_template: "Newer unsaved revision",
+            }),
+          );
+    });
     const { container } = render(<App />);
     await openSettings();
     const prompt = container.querySelector(".prompt-editor textarea")!;
@@ -885,11 +913,20 @@ describe("App settings", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(commandCount("save_settings")).toBe(2));
-    const saveCalls = tauriMocks.invoke.mock.calls.filter(
+    const secondSave = tauriMocks.invoke.mock.calls.filter(
       ([command]) => command === "save_settings",
+    )[1];
+    expect(secondSave[1]).toMatchObject({
+      request: {
+        settings: {
+          settings_revision: 1,
+          prompt_template: "Newer unsaved revision",
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull(),
     );
-    expect(saveCalls[1][1].request.settings.settings_revision).toBe(1);
-    expect(saveCalls[1][1].request.settings.prompt_template).toBe("Newer unsaved revision");
   });
 
   it("keeps a reverted draft saveable after the in-flight value becomes the saved baseline", async () => {
@@ -937,7 +974,7 @@ describe("App settings", () => {
           decision: suggestion.target_type === "prompt" ? "accepted" : "rejected",
         })),
       };
-      const apply = deferred<RetroBatchRow>();
+      const apply = deferred<RetroChangeBatch>();
       let saved = settings;
       const baseInvoke = dashboardInvoke({ settings });
       tauriMocks.invoke.mockImplementation((command, args) => {
@@ -1203,11 +1240,14 @@ describe("App settings", () => {
     fireEvent.change(screen.getByLabelText(/^API key/, { selector: "input" }), {
       target: { value: "lin_api_newer" },
     });
-    validation.resolve({
-      workflow_ok: true,
-      workflow_blocking: false,
-      workflow_error: null,
-    } as ValidationResult);
+    validation.resolve(
+      testValidation({
+        issues: [],
+        workflow_ok: true,
+        workflow_blocking: false,
+        workflow_error: null,
+      }),
+    );
     await act(async () => {
       await validation.promise;
       await Promise.resolve();
@@ -1226,6 +1266,14 @@ describe("App settings", () => {
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
     expect(await screen.findByRole("heading", { name: "Overview" })).toBeTruthy();
     expect(tauriMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("renders typed session metadata from a selected preview run", async () => {
+    render(<App />);
+    await openView("Runs");
+    fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-58 number 4" }));
+    expect(await screen.findByText("gpt-5")).toBeTruthy();
+    expect(screen.getByText("16k thinking")).toBeTruthy();
   });
 
   it("retries a failed deferred updater import", async () => {
@@ -1290,7 +1338,7 @@ describe("App settings", () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true };
     const settingsRead = deferred<AppSettings>();
-    const overviewRead = deferred<Overview>();
+    const overviewRead = deferred<DashboardOverview>();
     const baseInvoke = dashboardInvoke({
       settings,
       workerStatus: {
@@ -1451,8 +1499,8 @@ describe("App settings", () => {
   it("keeps a bootstrap failure blocking and retries with a fresh atomic snapshot", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true };
-    const initialOverview = deferred<Overview>();
-    const retryOverview = deferred<Overview>();
+    const initialOverview = deferred<DashboardOverview>();
+    const retryOverview = deferred<DashboardOverview>();
     let overviewReads = 0;
     const baseInvoke = dashboardInvoke({
       settings,
@@ -1522,14 +1570,14 @@ describe("App settings", () => {
   it("refreshes exact signal resources and defers hidden summaries until activation", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
-    const retro: RetroRow = {
+    const retro: RetroSummary = {
       id: "retro-1",
       since_at: "2026-01-01T00:00:00.000Z",
       until_at: "2026-01-02T00:00:00.000Z",
       status: "completed",
       run_count: 1,
       issue_count: 1,
-      report_json: null,
+
       error_message: null,
       created_at: "2026-01-02T00:00:00.000Z",
       completed_at: "2026-01-02T00:00:00.000Z",
@@ -1611,14 +1659,14 @@ describe("App settings", () => {
   it("fetches the bootstrap-selected Retro detail only when Retro opens", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
-    const retro: RetroRow = {
+    const retro: RetroSummary = {
       id: "retro-1",
       since_at: "2026-01-01T00:00:00.000Z",
       until_at: "2026-01-02T00:00:00.000Z",
       status: "completed",
       run_count: 1,
       issue_count: 1,
-      report_json: null,
+
       error_message: null,
       created_at: "2026-01-02T00:00:00.000Z",
       completed_at: "2026-01-02T00:00:00.000Z",
@@ -1697,11 +1745,11 @@ describe("App settings", () => {
       live_sessions: [],
       rate_limits: [],
       token_usage: [],
-    } satisfies Overview;
-    const overviewRefresh = deferred<Overview>();
-    const issuesFailure = deferred<IssueRow[]>();
-    const retryFailure = deferred<IssueRow[]>();
-    const retryRecovery = deferred<IssueRow[]>();
+    } satisfies DashboardOverview;
+    const overviewRefresh = deferred<DashboardOverview>();
+    const issuesFailure = deferred<IssueSummary[]>();
+    const retryFailure = deferred<IssueSummary[]>();
+    const retryRecovery = deferred<IssueSummary[]>();
     const baseInvoke = dashboardInvoke({ settings, issues: [oldIssue] });
     let overviewReads = 0;
     let issueReads = 0;
@@ -1811,7 +1859,7 @@ describe("App settings", () => {
   it("delays the nonblocking Refreshing affordance by 250ms", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
-    const refresh = deferred<Overview>();
+    const refresh = deferred<DashboardOverview>();
     const baseInvoke = dashboardInvoke({ settings });
     let overviewReads = 0;
     tauriMocks.invoke.mockImplementation((command, args) => {
@@ -1947,11 +1995,11 @@ describe("App settings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
     await waitFor(() => expect(commandCount("get_run_detail")).toBe(1));
     const detailReads = commandCount("get_run_detail");
-    const event: AgentEventRow = {
+    const event: AgentEvent = {
       id: 99,
       run_id: activeRun.id,
       kind: "status",
-      payload: JSON.stringify({ message: "streamed once" }),
+      payload: { message: "streamed once" },
       created_at: "2026-01-01T00:00:01.000Z",
     };
     listeners.get("agent_event")!({ payload: { type: "agent_event", event } });
@@ -2023,11 +2071,11 @@ describe("App settings", () => {
     });
     await waitFor(() => expect(staleResolve).not.toBeNull());
 
-    const event: AgentEventRow = {
+    const event: AgentEvent = {
       id: 200,
       run_id: activeRun.id,
       kind: "status",
-      payload: JSON.stringify({ message: "streamed event" }),
+      payload: { message: "streamed event" },
       created_at: "2026-01-01T00:00:01.000Z",
     };
     listeners.get("agent_event")!({ payload: { type: "agent_event", event } });
@@ -2129,7 +2177,7 @@ describe("App settings", () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: false };
     const activeRun = runRow();
-    const delayedRuns = deferred<RunWithIssueRow[]>();
+    const delayedRuns = deferred<RunSummary[]>();
     const baseInvoke = dashboardInvoke({ settings });
     let runReads = 0;
     tauriMocks.invoke.mockImplementation((command, args) => {
@@ -2306,7 +2354,7 @@ describe("App settings", () => {
   });
 
   it("scopes Retro PR locks to the repository whose batch succeeded", () => {
-    const batch = (repoName: string, state: string): RetroBatchRow => ({
+    const batch = (repoName: string, state: RetroChangeBatch["state"]): RetroChangeBatch => ({
       id: `${repoName}-${state}`,
       retro_id: "retro-1",
       kind: "repo_pr",
@@ -2522,7 +2570,7 @@ describe("App settings", () => {
     try {
       tauriMocks.runtimeAvailable = true;
       const settings = testSettings();
-      const firstOverview = deferred<Overview>();
+      const firstOverview = deferred<DashboardOverview>();
       const baseInvoke = dashboardInvoke({ settings });
       let overviewRequests = 0;
       tauriMocks.invoke.mockImplementation((command, args) => {
@@ -2564,7 +2612,7 @@ describe("App settings", () => {
                 id: index,
                 run_id: "other-run",
                 kind: "status",
-                payload: "{}",
+                payload: {},
                 created_at: "2026-01-01T00:00:00.000Z",
               },
             },
@@ -2716,7 +2764,12 @@ describe("App settings", () => {
     tauriMocks.invoke.mockImplementation(
       settingsInvoke({
         settings,
-        validation: { workflow_ok: true, workflow_blocking: false, workflow_error: null },
+        validation: {
+          issues: [],
+          workflow_ok: true,
+          workflow_blocking: false,
+          workflow_error: null,
+        },
       }),
     );
 
@@ -3273,6 +3326,7 @@ describe("App settings", () => {
       dashboardInvoke({
         settings,
         validation: {
+          issues: [],
           workflow_ok: false,
           workflow_blocking: false,
           workflow_error: "No repository configured.",
@@ -3776,6 +3830,7 @@ describe("App settings", () => {
       dashboardInvoke({
         settings,
         validation: {
+          issues: [],
           workflow_ok: true,
           workflow_blocking: false,
           workflow_error: null,
@@ -3960,6 +4015,14 @@ describe("App settings", () => {
           workflow_ok: false,
           workflow_blocking: true,
           workflow_error: validationError,
+          issues: [
+            {
+              code: "missing_active_states",
+              field: "active_states",
+              message: validationError,
+              blocking: true,
+            },
+          ],
         },
       }),
     );
@@ -3988,6 +4051,69 @@ describe("App settings", () => {
     expect(topbar?.textContent).not.toContain("Settings valid");
   });
 
+  it("focuses the structured blocking field regardless of validation message wording", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const message = "Repository prompt failed: review the supplied values.";
+    tauriMocks.invoke.mockImplementation(
+      settingsInvoke({
+        settings: testSettings(),
+        validation: {
+          workflow_ok: false,
+          workflow_blocking: true,
+          workflow_error: message,
+          issues: [
+            {
+              code: "missing_repository",
+              field: "repositories",
+              message: "Add a repository",
+              blocking: false,
+            },
+            { code: "invalid_environment_name", field: "session_env", message, blocking: true },
+          ],
+        },
+      }),
+    );
+    render(<App />);
+    await openSettings();
+    fireEvent.change(await screen.findByLabelText(/^API key/, { selector: "input" }), {
+      target: { value: "lin_api_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const link = await screen.findByRole("link", { name: "Go to the first affected field" });
+    expect(link.getAttribute("href")).toBe("#settings-session-environment");
+    fireEvent.click(link);
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Session environment/));
+    expect(screen.getByRole("link", { name: /Agent & runtime/ }).getAttribute("aria-current")).toBe(
+      "location",
+    );
+    expect(tauriMocks.invoke.mock.calls.some(([command]) => command === "save_settings")).toBe(
+      false,
+    );
+  });
+
+  it("does not infer validation focus from display prose when there is no field issue", async () => {
+    tauriMocks.runtimeAvailable = true;
+    tauriMocks.invoke.mockImplementation(
+      settingsInvoke({
+        settings: testSettings(),
+        validation: {
+          workflow_ok: false,
+          workflow_blocking: true,
+          workflow_error: "Prompt repository active states require attention.",
+          issues: [],
+        },
+      }),
+    );
+    render(<App />);
+    await openSettings();
+    fireEvent.change(await screen.findByLabelText(/^API key/, { selector: "input" }), {
+      target: { value: "lin_api_test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Settings need attention")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Go to the first affected field" })).toBeNull();
+  });
+
   it("saves an incomplete setup without flagging it as a blocking error", async () => {
     tauriMocks.runtimeAvailable = true;
     // A first-time user with no repo configured yet, entering only a Linear key.
@@ -4001,6 +4127,14 @@ describe("App settings", () => {
           workflow_ok: false,
           workflow_blocking: false,
           workflow_error: incompleteError,
+          issues: [
+            {
+              code: "missing_repository",
+              field: "repositories",
+              message: incompleteError,
+              blocking: false,
+            },
+          ],
         },
         allowSave: true,
       }),
@@ -4210,9 +4344,14 @@ describe("App settings", () => {
     );
   });
 
-  it.each(["resolves", "rejects"])(
-    "keeps global actions busy until both overlapping cancellations settle when the earlier one %s",
-    async (settlement) => {
+  it.each([
+    { order: "forward", settlement: "resolves" },
+    { order: "forward", settlement: "rejects" },
+    { order: "reverse", settlement: "resolves" },
+    { order: "reverse", settlement: "rejects" },
+  ])(
+    "keeps global actions busy in $order settlement order when the earlier cancellation $settlement",
+    async ({ order, settlement }) => {
       tauriMocks.runtimeAvailable = true;
       const first = runRow();
       const second = runRow({ id: "run-2", issue_id: "issue-2", issue_identifier: "SYM-2" });
@@ -4241,18 +4380,28 @@ describe("App settings", () => {
       const start = screen.getByRole("button", { name: "Start worker" }) as HTMLButtonElement;
       expect(start.disabled).toBe(true);
 
-      await act(async () => {
-        secondStop.resolve({ run: second, events: [] });
-        await secondStop.promise;
-      });
-      await screen.findByRole("button", { name: "Stop run" });
-      expect(start.disabled).toBe(true);
-
-      await act(async () => {
+      const settleFirst = async () => {
         if (settlement === "rejects") firstStop.reject(new Error("Cancellation failed"));
         else firstStop.resolve({ run: first, events: [] });
         await firstStop.promise.catch(() => undefined);
-      });
+      };
+      const settleSecond = async () => {
+        secondStop.resolve({ run: second, events: [] });
+        await secondStop.promise;
+      };
+      const [settleEarlier, settleLater] =
+        order === "forward" ? [settleFirst, settleSecond] : [settleSecond, settleFirst];
+      await act(settleEarlier);
+      // Observe the completed run's control so the busy assertion cannot pass
+      // merely because its command continuation has not finished yet.
+      const completedIdentifier = order === "forward" ? "SYM-1" : "SYM-2";
+      fireEvent.click(
+        screen.getByRole("button", { name: `Open run ${completedIdentifier} number 1` }),
+      );
+      await screen.findByRole("button", { name: "Stop run" });
+      expect(start.disabled).toBe(true);
+
+      await act(settleLater);
       await waitFor(() => expect(start.disabled).toBe(false));
     },
   );
@@ -4261,7 +4410,7 @@ describe("App settings", () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
     const activeRun = runRow();
-    const failedRefresh = deferred<Overview>();
+    const failedRefresh = deferred<DashboardOverview>();
     const overview = {
       active_runs: [activeRun],
       retry_queue: [],
@@ -4271,7 +4420,7 @@ describe("App settings", () => {
       live_sessions: [],
       rate_limits: [],
       token_usage: [],
-    } satisfies Overview;
+    } satisfies DashboardOverview;
     const baseInvoke = dashboardInvoke({
       settings,
       overview,

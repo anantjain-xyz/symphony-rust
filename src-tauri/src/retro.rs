@@ -203,10 +203,12 @@ async fn create_retro_window(repo: &Repository) -> Result<RetroRow, String> {
         .map_err(|err| err.to_string())
 }
 
-pub fn parse_report(row: &RetroRow) -> Option<RetroReport> {
+pub fn parse_report(row: &RetroRow) -> Result<Option<RetroReport>, String> {
     row.report_json
         .as_deref()
-        .and_then(|raw| serde_json::from_str(raw).ok())
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| format!("invalid stored retro report {}: {error}", row.id))
 }
 
 async fn set_message(inner: &Arc<Mutex<Option<RetroStatus>>>, message: impl Into<String>) {
@@ -381,10 +383,10 @@ async fn materialize_suggestions(
                 (RetroSuggestionTarget::Prompt, Ok(workflow))
                     if workflow.source == RepoWorkflowSource::Repository =>
                 {
-                    "repo_workflow"
+                    symphony_core::SuggestionTarget::RepoWorkflow
                 }
-                (RetroSuggestionTarget::Prompt, _) => "prompt",
-                (RetroSuggestionTarget::Skill, _) => "skill",
+                (RetroSuggestionTarget::Prompt, _) => symphony_core::SuggestionTarget::Prompt,
+                (RetroSuggestionTarget::Skill, _) => symphony_core::SuggestionTarget::Skill,
             };
             let target_path = match (&suggestion.target_type, &repo_workflow) {
                 (RetroSuggestionTarget::Prompt, Ok(workflow))
@@ -400,7 +402,7 @@ async fn materialize_suggestions(
                     format!(".agents/skills/{}/SKILL.md", suggestion.target_id)
                 }
             };
-            let target_id = if target_type == "repo_workflow" {
+            let target_id = if target_type == symphony_core::SuggestionTarget::RepoWorkflow {
                 "repository workflow".to_string()
             } else {
                 suggestion.target_id.clone()
@@ -515,7 +517,7 @@ async fn materialize_suggestions(
                     Some(diff),
                     Some(base_ref),
                     Some(base_hash),
-                    "ready".to_string(),
+                    symphony_core::ProposalState::Ready,
                     None,
                 ),
                 Err(error) => (
@@ -525,7 +527,7 @@ async fn materialize_suggestions(
                     None,
                     None,
                     None,
-                    "unavailable".to_string(),
+                    symphony_core::ProposalState::Unavailable,
                     Some(error),
                 ),
             };
@@ -535,13 +537,17 @@ async fn materialize_suggestions(
                 repo_name: repo_report.repo_name.clone(),
                 repo_url: repo_url.clone(),
                 finding_index: index as i64,
-                target_type: target_type.to_string(),
+                target_type,
                 target_id,
                 target_path,
                 title: suggestion.title.clone(),
                 body: suggestion.body.clone(),
                 rationale: suggestion.rationale.clone(),
-                confidence: confidence_label(&suggestion.confidence).to_string(),
+                confidence: match suggestion.confidence {
+                    RetroConfidence::Low => symphony_core::SuggestionConfidence::Low,
+                    RetroConfidence::Medium => symphony_core::SuggestionConfidence::Medium,
+                    RetroConfidence::High => symphony_core::SuggestionConfidence::High,
+                },
                 guidance,
                 before_content,
                 after_content,
@@ -550,7 +556,7 @@ async fn materialize_suggestions(
                 base_hash,
                 proposal_status: status,
                 proposal_error: error,
-                decision: "pending".to_string(),
+                decision: symphony_core::SuggestionDecision::Pending,
                 decided_at: None,
                 created_at,
             });
@@ -702,14 +708,6 @@ pub fn unified_diff(path: &str, before: &str, after: &str) -> String {
         .context_radius(3)
         .header(&before_path, &after_path)
         .to_string()
-}
-
-fn confidence_label(confidence: &RetroConfidence) -> &'static str {
-    match confidence {
-        RetroConfidence::Low => "low",
-        RetroConfidence::Medium => "medium",
-        RetroConfidence::High => "high",
-    }
 }
 
 fn path_key(value: &str) -> String {
@@ -890,7 +888,13 @@ pub async fn run_repo_pr_batch(
         execute_repo_pr_batch(&repository, &batch, &suggestions, &workspace, &session_env).await
     {
         repository
-            .update_retro_batch(&batch.id, "failed", None, Some(&message), None)
+            .update_retro_batch(
+                &batch.id,
+                symphony_core::BatchState::Failed,
+                None,
+                Some(&message),
+                None,
+            )
             .await
             .ok();
     }
@@ -906,7 +910,7 @@ async fn execute_repo_pr_batch(
     repository
         .update_retro_batch(
             &batch.id,
-            "running",
+            symphony_core::BatchState::Running,
             Some("Cloning the repository…"),
             None,
             None,
@@ -917,7 +921,7 @@ async fn execute_repo_pr_batch(
         repository
             .update_retro_batch(
                 &batch.id,
-                "stale",
+                symphony_core::BatchState::Stale,
                 Some("The proposal format changed."),
                 Some("Generate a new retro and review the updated in-place diff."),
                 None,
@@ -980,7 +984,7 @@ async fn execute_repo_pr_batch(
     repository
         .update_retro_batch(
             &batch.id,
-            "running",
+            symphony_core::BatchState::Running,
             Some("Applying accepted changes…"),
             None,
             None,
@@ -1020,7 +1024,7 @@ async fn execute_repo_pr_batch(
             repository
                 .update_retro_batch(
                     &batch.id,
-                    "stale",
+                    symphony_core::BatchState::Stale,
                     Some("A reviewed target file changed."),
                     Some("Generate a new retro and review the updated diff."),
                     None,
@@ -1039,7 +1043,10 @@ async fn execute_repo_pr_batch(
             .map(|item| item.guidance.clone())
             .collect::<Vec<_>>();
         let updated = integrate_retro_guidance(&seed, &guidance);
-        if items.iter().any(|item| item.target_type == "repo_workflow") {
+        if items
+            .iter()
+            .any(|item| item.target_type == symphony_core::SuggestionTarget::RepoWorkflow)
+        {
             symphony_core::validate_prompt_template(&updated)
                 .map_err(|error| format!("The proposed repository workflow is invalid: {error}"))?;
         }
@@ -1073,7 +1080,7 @@ async fn execute_repo_pr_batch(
     repository
         .update_retro_batch(
             &batch.id,
-            "running",
+            symphony_core::BatchState::Running,
             Some("Committing accepted changes…"),
             None,
             None,
@@ -1102,7 +1109,7 @@ async fn execute_repo_pr_batch(
     repository
         .update_retro_batch(
             &batch.id,
-            "running",
+            symphony_core::BatchState::Running,
             Some(if existing_url.is_some() {
                 "Verifying existing retro PR…"
             } else if reuse_remote_branch {
@@ -1170,7 +1177,7 @@ async fn execute_repo_pr_batch(
     repository
         .update_retro_batch(
             &batch.id,
-            "completed",
+            symphony_core::BatchState::Completed,
             Some(completed_progress),
             None,
             Some(&pr_url),
@@ -1358,7 +1365,7 @@ fn analyze_retro(
         }
         if matches!(run.status.as_str(), "failure" | "timeout") {
             entry.failure_count += 1;
-            let title = if run.status == "timeout" {
+            let title = if run.status == symphony_core::RunStatus::Timeout {
                 "Runs timed out".to_string()
             } else {
                 format!(
@@ -1383,7 +1390,7 @@ fn analyze_retro(
                 run_evidence(
                     run,
                     "run",
-                    run.error_message.as_deref().unwrap_or(&run.status),
+                    run.error_message.as_deref().unwrap_or(run.status.as_str()),
                 ),
             );
         }
@@ -1498,7 +1505,8 @@ fn workpad_hash_available_in_window(workpad: &WorkpadComment, until_at: &str) ->
 }
 
 fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &AgentEventRow) {
-    let value = serde_json::from_str::<serde_json::Value>(&event.payload).ok();
+    let value = Some(&event.payload);
+    let raw = event.payload.to_string();
     match event.kind.as_str() {
         "error" => {
             let class = value
@@ -1510,7 +1518,7 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                 .as_ref()
                 .and_then(|value| value.get("message"))
                 .and_then(|value| value.as_str())
-                .unwrap_or(&event.payload);
+                .unwrap_or(&raw);
             repo.push_finding(
                 format!("event-error:{class}"),
                 format!("Agent reported `{class}` errors"),
@@ -1526,7 +1534,7 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                 "Unattended runs work best when the prompt or skills avoid approval and follow-up paths."
                     .to_string(),
                 RetroSeverity::Medium,
-                event_evidence(run, event, &event.kind, &event.payload),
+                event_evidence(run, event, event.kind.as_str(), &raw),
             );
         }
         "tool_call" => {
@@ -1535,13 +1543,13 @@ fn inspect_event(repo: &mut RepoAccumulator, run: &RunWithIssueRow, event: &Agen
                 .and_then(|value| value.get("result_summary"))
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            if should_report_tool_confusion(value.as_ref(), summary) {
+            if should_report_tool_confusion(value, summary) {
                 let tool = value
                     .as_ref()
                     .and_then(|value| value.get("tool"))
                     .and_then(|value| value.as_str())
                     .unwrap_or("tool");
-                let command = tool_command(value.as_ref());
+                let command = tool_command(value);
                 let (key, title, detail) = tool_confusion_finding(tool, summary);
                 let evidence_summary = command
                     .map(|command| format!("{} → {summary}", truncate_detail(command)))
@@ -2052,6 +2060,28 @@ fn retro_relevant_workpad_hash(body: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_stored_report_is_an_error_instead_of_an_absent_report() {
+        let mut row = RetroRow {
+            id: "retro-corrupt".into(),
+            since_at: "2026-01-01T00:00:00Z".into(),
+            until_at: "2026-01-02T00:00:00Z".into(),
+            status: symphony_core::RetroState::Completed,
+            run_count: 0,
+            issue_count: 0,
+            report_json: None,
+            error_message: None,
+            created_at: "2026-01-02T00:00:00Z".into(),
+            completed_at: None,
+        };
+        assert!(parse_report(&row).unwrap().is_none());
+        for invalid in ["{", "null", "{}"] {
+            row.report_json = Some(invalid.into());
+            let error = parse_report(&row).unwrap_err();
+            assert!(error.contains("invalid stored retro report retro-corrupt"));
+        }
+    }
+
     async fn git_test_ok(cwd: Option<&Path>, args: &[&str]) {
         let output = command_output("git", args, cwd, &BTreeMap::new())
             .await
@@ -2071,22 +2101,22 @@ mod tests {
             repo_name: "widgets".to_string(),
             repo_url: Some("https://github.com/acme/widgets.git".to_string()),
             finding_index: 0,
-            target_type: "skill".to_string(),
+            target_type: symphony_core::SuggestionTarget::Skill,
             target_id: "symphony-push".to_string(),
             target_path: ".agents/skills/symphony-push/SKILL.md".to_string(),
             title: "Improve push validation".to_string(),
             body: "Record the validation requirement.".to_string(),
             rationale: "Repeated failures".to_string(),
-            confidence: "high".to_string(),
+            confidence: symphony_core::SuggestionConfidence::High,
             guidance: guidance.to_string(),
             before_content: Some(String::new()),
             after_content: Some(after_content),
             unified_diff: None,
             base_ref: Some("abc123".to_string()),
             base_hash: Some(hash_body("")),
-            proposal_status: "ready".to_string(),
+            proposal_status: symphony_core::ProposalState::Ready,
             proposal_error: None,
-            decision: "pending".to_string(),
+            decision: symphony_core::SuggestionDecision::Pending,
             decided_at: None,
             created_at: now_iso(),
         }
@@ -2173,7 +2203,7 @@ mod tests {
             id: "retro-1".to_string(),
             since_at: "1970-01-01T00:00:00.000Z".to_string(),
             until_at: "2099-01-01T00:00:00.000Z".to_string(),
-            status: "completed".to_string(),
+            status: symphony_core::RetroState::Completed,
             run_count: 2,
             issue_count: 1,
             report_json: None,
@@ -2260,7 +2290,7 @@ mod tests {
             id: "retro-repo-workflow".to_string(),
             since_at: RETRO_BEGINNING.to_string(),
             until_at: "2099-01-01T00:00:00.000Z".to_string(),
-            status: "completed".to_string(),
+            status: symphony_core::RetroState::Completed,
             run_count: 1,
             issue_count: 1,
             report_json: None,
@@ -2289,7 +2319,10 @@ mod tests {
 
         let rows = materialize_suggestions(&retro, &report, &config).await;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].target_type, "repo_workflow");
+        assert_eq!(
+            rows[0].target_type,
+            symphony_core::SuggestionTarget::RepoWorkflow
+        );
         assert_eq!(rows[0].target_path, symphony_worker::WORKFLOW_FILE);
         assert!(rows[0]
             .before_content

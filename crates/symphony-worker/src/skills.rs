@@ -772,10 +772,8 @@ async fn run_install(
     let result = loop {
         tokio::select! {
             maybe_event = rx.recv() => {
-                if let Some(event) = maybe_event {
-                    if let Some(summary) = event.humanized {
-                        set_message(inner, tail(&summary, 200)).await;
-                    }
+                if let Some(symphony_core::MappedAgentEvent::Visible { humanized: Some(summary), .. }) = maybe_event {
+                    set_message(inner, tail(&summary, 200)).await;
                 }
             }
             result = &mut run_fut => break result,

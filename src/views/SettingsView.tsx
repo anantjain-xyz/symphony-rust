@@ -9,6 +9,7 @@ import type {
   SkillsInstallStatus,
   SkillsStatus,
   TrackerTestResult,
+  ValidationField,
   ValidationResult,
   WorkerStatus,
   WorkflowTransferStatus,
@@ -210,20 +211,26 @@ type SettingsFeatureProps = {
   runtimeAvailable: boolean;
 };
 
-function validationFieldId(result: ValidationResult | null) {
-  const message = result?.workflow_error?.toLowerCase() ?? "";
-  if (message.includes("active state")) return "settings-active-states";
-  if (message.includes("prompt") || message.includes("placeholder")) {
-    return "settings-prompt-template";
-  }
-  if (message.includes("repo")) return "settings-repositories";
-  return null;
+const VALIDATION_FIELDS: Record<ValidationField, { id: string; section: SettingsSectionId }> = {
+  active_states: { id: "settings-active-states", section: "linear" },
+  repositories: { id: "settings-repositories", section: "repositories" },
+  prompt_template: { id: "settings-prompt-template", section: "workflow" },
+  session_env: { id: "settings-session-environment", section: "runtime" },
+  polling_interval_ms: { id: "settings-polling-interval", section: "runtime" },
+  max_concurrent_agents: { id: "settings-max-concurrent-agents", section: "runtime" },
+  max_retry_backoff_ms: { id: "settings-max-retry-backoff", section: "runtime" },
+  hook_timeout_ms: { id: "settings-hook-timeout", section: "runtime" },
+  turn_timeout_ms: { id: "settings-turn-timeout", section: "runtime" },
+  agent_command: { id: "settings-agent-command", section: "runtime" },
+};
+
+function firstValidationField(result: ValidationResult | null) {
+  const issue = result?.issues.find((issue) => issue.blocking) ?? result?.issues[0];
+  return issue ? VALIDATION_FIELDS[issue.field] : null;
 }
 
-function settingsSectionForField(fieldId: string | null): SettingsSectionId {
-  if (fieldId === "settings-repositories") return "repositories";
-  if (fieldId === "settings-prompt-template") return "workflow";
-  return "linear";
+function validationFieldId(result: ValidationResult | null) {
+  return firstValidationField(result)?.id ?? null;
 }
 
 function SettingsFeature({
@@ -545,9 +552,10 @@ function SettingsView({
               <a
                 href={`#${validationFieldId(validationState.result)}`}
                 onClick={() => {
-                  const fieldId = validationFieldId(validationState.result);
-                  setActiveSection(settingsSectionForField(fieldId));
-                  document.getElementById(fieldId ?? "")?.focus();
+                  const field = firstValidationField(validationState.result);
+                  if (!field) return;
+                  setActiveSection(field.section);
+                  document.getElementById(field.id)?.focus();
                 }}
               >
                 Go to the first affected field
@@ -1002,9 +1010,10 @@ function SettingsView({
                   <AgentCliStatus backend={settings.agent_backend} validation={validation} />
                 ) : null}
               </div>
-              <label>
+              <label htmlFor="settings-agent-command">
                 Launch command
                 <input
+                  id="settings-agent-command"
                   {...literalInputProps}
                   className="mono-input"
                   value={
