@@ -104,7 +104,8 @@ pub struct AppSettings {
     pub opencode_agent: Option<String>,
     #[serde(default = "default_true")]
     pub opencode_skip_permissions: bool,
-    // Derived from the OS keychain; never user-edited.
+    // Responses report current key availability; the file retains the last
+    // committed credential state when the OS store is unavailable. Not editable.
     #[serde(default)]
     pub linear_api_key_set: bool,
     /// Credential service availability is read metadata, never editable config.

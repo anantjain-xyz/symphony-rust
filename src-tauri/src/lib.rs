@@ -26,7 +26,10 @@ mod path_env;
 mod projections;
 mod retro;
 mod settings;
+#[cfg(test)]
+mod settings_effects_tests;
 mod settings_store;
+mod settings_transaction;
 mod storage_events;
 
 use retro::{
@@ -173,12 +176,21 @@ async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<AppSettings, String> {
-    let state = state.inner().clone();
+    save_settings_owned(state.inner().clone(), request).await
+}
+
+async fn save_settings_owned(
+    state: AppState,
+    request: SaveSettingsRequest,
+) -> Result<AppSettings, String> {
     settings_store::finish_operation(async move {
-        let settings = state
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state
             .settings_store
             .save(request.settings, request.linear_api_key)
-            .await?;
+            .await;
+        finish_settings_recovery(&state).await;
+        let settings = result?;
         apply_settings_to_worker(&state, &settings).await?;
         Ok(settings)
     })
@@ -470,9 +482,15 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummar
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let state = state.inner().clone();
+    remove_linear_api_key_owned(state.inner().clone()).await
+}
+
+async fn remove_linear_api_key_owned(state: AppState) -> Result<AppSettings, String> {
     settings_store::finish_operation(async move {
-        let settings = state.settings_store.remove_key().await?;
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state.settings_store.remove_key().await;
+        finish_settings_recovery(&state).await;
+        let settings = result?;
         state
             .worker
             .stop_for_settings_revision(settings.settings_revision)
@@ -567,17 +585,25 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
-    let settings = load_settings_from_disk(&state).await?;
-    // A worker started from invalid settings (e.g. no active states) would
-    // poll forever without dispatching anything — fail up front instead.
-    if let Some(error) = validate_workflow_settings(&settings) {
-        return Err(error);
-    }
-    state
-        .worker
-        .start(worker_start_config(&state, &settings)?)
-        .await
-        .map_err(|err| err.to_string())
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let settings = load_settings_with_effects(&state).await?;
+        if let Some(error) = settings.linear_api_key_error {
+            return Err(error);
+        }
+        // A worker started from invalid settings (e.g. no active states) would
+        // poll forever without dispatching anything — fail up front instead.
+        if let Some(error) = validate_workflow_settings(&settings) {
+            return Err(error);
+        }
+        state
+            .worker
+            .start(worker_start_config(&state, &settings)?)
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -980,15 +1006,19 @@ async fn apply_retro_workflow_inner(
             .map_err(|err| err.to_string())?;
         return Err(error);
     }
-    let updated = match state
+    // Source validation above may be slow. Serialize only the CAS commit and
+    // its complete worker/batch continuation; intervening saves fail CAS.
+    let _effects = state.settings_store.commit_effects().await;
+    let result = state
         .settings_store
         .apply_prompt(
             updated.settings_revision,
             expected_prompt_hash,
             updated.prompt_template.clone(),
         )
-        .await
-    {
+        .await;
+    finish_settings_recovery(&state).await;
+    let updated = match result {
         Ok(updated) => updated,
         Err(error) => {
             state
@@ -1527,7 +1557,39 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
 }
 
 async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String> {
-    state.settings_store.load().await
+    let state = state.clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        load_settings_with_effects(&state).await
+    })
+    .await
+}
+
+/// Caller owns the settings effects gate for this complete continuation.
+async fn load_settings_with_effects(state: &AppState) -> Result<AppSettings, String> {
+    let result = state.settings_store.load().await;
+    finish_settings_recovery(state).await;
+    if let Ok(settings) = &result {
+        state
+            .worker
+            .observe_settings_revision(settings.settings_revision)
+            .await;
+        if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
+            state
+                .worker
+                .stop_for_settings_revision(settings.settings_revision)
+                .await;
+        }
+    }
+    result
+}
+
+async fn finish_settings_recovery(state: &AppState) {
+    if state.settings_store.take_recovery_stop() {
+        // Recovery may finish a previous removal or replacement after its IPC
+        // failed. Stop any runtime holding the old credential before proceeding.
+        state.worker.stop().await;
+    }
 }
 
 /// Environment for hooks and agents (the structured settings feed the
@@ -1852,6 +1914,11 @@ mod tests {
             ..configured_settings()
         };
         assert!(!live_reconfigure_allowed(&broken));
+        let unavailable_keyring = AppSettings {
+            linear_api_key_error: Some("Credential store unavailable".into()),
+            ..configured_settings()
+        };
+        assert!(!live_reconfigure_allowed(&unavailable_keyring));
     }
 
     #[test]
