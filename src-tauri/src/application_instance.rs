@@ -2,6 +2,7 @@ use std::{
     fs::{File, OpenOptions},
     io,
     path::Path,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 
@@ -13,16 +14,39 @@ pub(crate) struct InstanceLease {
 
 impl InstanceLease {
     pub(crate) fn acquire(app_data_dir: &Path) -> io::Result<Option<Self>> {
+        // Tauri spawns its replacement before exiting. Keep exclusivity while
+        // allowing the old process time to release the lease at actual exit.
+        Self::acquire_with_timeout(app_data_dir, Duration::from_secs(5))
+    }
+
+    fn acquire_with_timeout(app_data_dir: &Path, timeout: Duration) -> io::Result<Option<Self>> {
+        Self::acquire_waiting(app_data_dir, timeout, std::thread::sleep)
+    }
+
+    fn acquire_waiting(
+        app_data_dir: &Path,
+        timeout: Duration,
+        mut wait: impl FnMut(Duration),
+    ) -> io::Result<Option<Self>> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(app_data_dir.join("application.lock"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Self { _file: file })),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Ok(None);
+                    }
+                    wait(Duration::from_millis(25).min(remaining));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            }
         }
     }
 }
@@ -63,7 +87,11 @@ fn activate_window(window: &impl ActivationWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, process::Command};
+    use std::{
+        cell::RefCell,
+        io::{Read, Write},
+        process::{Child, Command, Stdio},
+    };
 
     const CHILD_DIRECTORY: &str = "SYMPHONY_INSTANCE_LEASE_TEST_DIRECTORY";
     const CHILD_EXPECTATION: &str = "SYMPHONY_INSTANCE_LEASE_TEST_EXPECTATION";
@@ -76,26 +104,48 @@ mod tests {
             return;
         };
         let expected = std::env::var(CHILD_EXPECTATION).unwrap();
-        let lease = InstanceLease::acquire(Path::new(&directory)).unwrap();
-        assert_eq!(lease.is_some(), expected == "owner");
+        let directory = Path::new(&directory);
+        let lease = if expected == "replacement" {
+            let mut first_wait = true;
+            InstanceLease::acquire_waiting(directory, Duration::from_secs(5), |duration| {
+                if first_wait {
+                    first_wait = false;
+                    std::fs::write(directory.join("replacement-contended"), b"waiting").unwrap();
+                    std::io::stdin().read_exact(&mut [0]).unwrap();
+                }
+                std::thread::sleep(duration);
+            })
+            .unwrap()
+        } else {
+            InstanceLease::acquire_with_timeout(directory, Duration::ZERO).unwrap()
+        };
+        assert_eq!(lease.is_some(), expected != "blocked");
+        if expected == "delayed-owner" {
+            std::fs::write(directory.join("owner-ready"), b"locked").unwrap();
+            std::io::stdin().read_exact(&mut [0]).unwrap();
+            std::process::exit(0);
+        }
         if lease.is_some() {
-            std::fs::write(Path::new(&directory).join("runtime-started"), b"admitted").unwrap();
+            std::fs::write(directory.join("runtime-started"), b"admitted").unwrap();
             // Abrupt process exit must release the OS lease without destructors.
             std::process::exit(0);
         }
     }
 
+    fn child_command(directory: &Path, expectation: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "application_instance::tests::lease_child",
+            "--nocapture",
+        ]);
+        command.env(CHILD_DIRECTORY, directory);
+        command.env(CHILD_EXPECTATION, expectation);
+        command
+    }
+
     fn run_child(directory: &Path, expectation: &str) {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "application_instance::tests::lease_child",
-                "--nocapture",
-            ])
-            .env(CHILD_DIRECTORY, directory)
-            .env(CHILD_EXPECTATION, expectation)
-            .output()
-            .unwrap();
+        let output = child_command(directory, expectation).output().unwrap();
         assert!(
             output.status.success(),
             "child failed: {}\n{}",
@@ -110,7 +160,11 @@ mod tests {
         let owner = InstanceLease::acquire(directory.path()).unwrap().unwrap();
         run_child(directory.path(), "blocked");
         assert!(!directory.path().join("runtime-started").exists());
-        assert!(InstanceLease::acquire(directory.path()).unwrap().is_none());
+        assert!(
+            InstanceLease::acquire_with_timeout(directory.path(), Duration::ZERO)
+                .unwrap()
+                .is_none()
+        );
         drop(owner);
 
         run_child(directory.path(), "owner");
@@ -119,6 +173,79 @@ mod tests {
         // admitted. The stable lock file itself is deliberately retained.
         assert!(directory.path().join("application.lock").is_file());
         assert!(InstanceLease::acquire(directory.path()).unwrap().is_some());
+    }
+
+    struct TestChild(Child);
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn wait_for_marker(path: &Path) {
+        let started = Instant::now();
+        while !path.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "missing {path:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn replacement_waits_for_delayed_owner_exit_before_starting_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut owner = TestChild(
+            child_command(directory.path(), "delayed-owner")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for_marker(&directory.path().join("owner-ready"));
+        let mut replacement = TestChild(
+            child_command(directory.path(), "replacement")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_for_marker(&directory.path().join("replacement-contended"));
+        // The replacement has reached contention, yet the old process still
+        // owns the runtime. Only its real exit may admit the replacement.
+        assert!(owner.0.try_wait().unwrap().is_none());
+        assert!(replacement.0.try_wait().unwrap().is_none());
+        assert!(!directory.path().join("runtime-started").exists());
+        owner.0.stdin.take().unwrap().write_all(b"exit").unwrap();
+        assert!(owner.0.wait().unwrap().success());
+        replacement
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"retry")
+            .unwrap();
+        assert!(replacement.0.wait().unwrap().success());
+        assert!(directory.path().join("runtime-started").exists());
+        assert!(InstanceLease::acquire(directory.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn live_owner_keeps_exclusivity_after_a_bounded_handoff_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let _owner = InstanceLease::acquire(directory.path()).unwrap().unwrap();
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        assert!(
+            InstanceLease::acquire_with_timeout(directory.path(), timeout)
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() >= timeout);
+        assert!(!directory.path().join("runtime-started").exists());
     }
 
     #[test]
@@ -171,6 +298,9 @@ mod tests {
         let source = include_str!("lib.rs");
         let run = source.split_once("pub fn run() {").unwrap().1;
         let plugin = run.find(".plugin(").unwrap();
+        assert!(run[..plugin].contains(
+            "#[cfg(any(target_os = \"macos\", target_os = \"windows\"))]\n    let builder = builder"
+        ));
         assert!(run[plugin..].starts_with(".plugin(tauri_plugin_single_instance::init("));
         let setup = run.find(".setup(move |app| {").unwrap();
         assert!(plugin < setup);
@@ -193,5 +323,25 @@ mod tests {
                 "{first_effect} precedes admission"
             );
         }
+    }
+
+    #[test]
+    fn linux_startup_does_not_require_the_activation_plugins_dbus_connection() {
+        let manifest = include_str!("../Cargo.toml");
+        let dependency = manifest
+            .split_once("tauri-plugin-single-instance.workspace = true")
+            .unwrap()
+            .0;
+        let target = dependency.rsplit_once("[target.").unwrap().1.trim();
+        assert_eq!(
+            target,
+            "'cfg(any(target_os = \"macos\", target_os = \"windows\"))'.dependencies]"
+        );
+        // The startup-order test separately keeps the OS lease unconditional
+        // for desktop builds, including Linux without a session bus.
+        let source = include_str!("lib.rs");
+        assert!(source.contains(
+            "#[cfg(desktop)]\n            match application_instance::InstanceLease::acquire(&app_dir)?"
+        ));
     }
 }
