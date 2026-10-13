@@ -4344,9 +4344,14 @@ describe("App settings", () => {
     );
   });
 
-  it.each(["resolves", "rejects"])(
-    "keeps global actions busy until both overlapping cancellations settle when the earlier one %s",
-    async (settlement) => {
+  it.each([
+    { order: "forward", settlement: "resolves" },
+    { order: "forward", settlement: "rejects" },
+    { order: "reverse", settlement: "resolves" },
+    { order: "reverse", settlement: "rejects" },
+  ])(
+    "keeps global actions busy in $order settlement order when the earlier cancellation $settlement",
+    async ({ order, settlement }) => {
       tauriMocks.runtimeAvailable = true;
       const first = runRow();
       const second = runRow({ id: "run-2", issue_id: "issue-2", issue_identifier: "SYM-2" });
@@ -4375,18 +4380,28 @@ describe("App settings", () => {
       const start = screen.getByRole("button", { name: "Start worker" }) as HTMLButtonElement;
       expect(start.disabled).toBe(true);
 
-      await act(async () => {
-        secondStop.resolve({ run: second, events: [] });
-        await secondStop.promise;
-      });
-      await screen.findByRole("button", { name: "Stop run" });
-      expect(start.disabled).toBe(true);
-
-      await act(async () => {
+      const settleFirst = async () => {
         if (settlement === "rejects") firstStop.reject(new Error("Cancellation failed"));
         else firstStop.resolve({ run: first, events: [] });
         await firstStop.promise.catch(() => undefined);
-      });
+      };
+      const settleSecond = async () => {
+        secondStop.resolve({ run: second, events: [] });
+        await secondStop.promise;
+      };
+      const [settleEarlier, settleLater] =
+        order === "forward" ? [settleFirst, settleSecond] : [settleSecond, settleFirst];
+      await act(settleEarlier);
+      // Observe the completed run's control so the busy assertion cannot pass
+      // merely because its command continuation has not finished yet.
+      const completedIdentifier = order === "forward" ? "SYM-1" : "SYM-2";
+      fireEvent.click(
+        screen.getByRole("button", { name: `Open run ${completedIdentifier} number 1` }),
+      );
+      await screen.findByRole("button", { name: "Stop run" });
+      expect(start.disabled).toBe(true);
+
+      await act(settleLater);
       await waitFor(() => expect(start.disabled).toBe(false));
     },
   );
