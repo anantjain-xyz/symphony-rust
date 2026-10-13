@@ -35,6 +35,10 @@ pub enum TrackerError {
     Invalid(String),
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must_use on a boxed future"
+)]
 #[async_trait]
 pub trait TrackerClient: Send + Sync {
     async fn preflight(&self) -> Result<(), TrackerError>;
