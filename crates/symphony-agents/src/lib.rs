@@ -1,11 +1,15 @@
+mod process;
+#[cfg(all(test, unix))]
+mod process_tests;
+
 use async_trait::async_trait;
 use chrono::TimeZone;
+use process::{Protocol, StreamControl};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Command as StdCommand,
-    time::Duration,
+    process::{Command as StdCommand, ExitStatus},
 };
 use symphony_core::{
     AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CodexPermissionMode,
@@ -13,11 +17,7 @@ use symphony_core::{
     ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
 };
 use thiserror::Error;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    sync::mpsc,
-};
+use tokio::{process::Command, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -123,12 +123,49 @@ impl AgentDriver for NativeAgentDriver {
         events: AgentEventSender,
         cancel: CancellationToken,
     ) -> Result<AgentRunResult, AgentError> {
-        match request.backend {
-            AgentBackend::Codex => run_codex(request, events, cancel).await,
-            AgentBackend::Claude => run_claude(request, events, cancel).await,
-            AgentBackend::Cursor => run_cursor(request, events, cancel).await,
-            AgentBackend::Opencode => run_opencode(request, events, cancel).await,
-        }
+        let (args, mut protocol) = match request.backend {
+            AgentBackend::Codex => (
+                codex_args(&request),
+                NativeProtocol::Codex {
+                    thread_id: format!("th_{}", Uuid::new_v4()),
+                    turn_id: format!("tn_{}", Uuid::new_v4()),
+                    result: None,
+                },
+            ),
+            AgentBackend::Claude => {
+                let session_id = request
+                    .claude
+                    .session_id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                (
+                    claude_args(&request, &session_id),
+                    NativeProtocol::Claude {
+                        stream: ClaudeStreamState::new(
+                            session_id,
+                            &request.claude.permission_mode,
+                            request.cwd.clone(),
+                        ),
+                        result: None,
+                    },
+                )
+            }
+            AgentBackend::Cursor => (
+                cursor_args(&request),
+                NativeProtocol::Cursor {
+                    stream: CursorStreamState::new(format!("cs_{}", Uuid::new_v4())),
+                    result: None,
+                },
+            ),
+            AgentBackend::Opencode => (
+                opencode_args(&request),
+                NativeProtocol::Opencode {
+                    stream: OpencodeStreamState::new(format!("oc_{}", Uuid::new_v4())),
+                    result: None,
+                },
+            ),
+        };
+        process::run(&request, &args, &mut protocol, &events, &cancel).await
     }
 }
 
@@ -183,69 +220,168 @@ fn parse_opencode_stdout_line(line: &str) -> OpencodeStdoutLine {
     }
 }
 
-async fn run_codex(
-    request: AgentRunRequest,
-    events: AgentEventSender,
-    cancel: CancellationToken,
-) -> Result<AgentRunResult, AgentError> {
-    let thread_id = format!("th_{}", Uuid::new_v4());
-    let turn_id = format!("tn_{}", Uuid::new_v4());
-    let args = codex_args(&request);
+/// Provider state and protocol decisions; process ownership lives in `process`.
+enum NativeProtocol {
+    Codex {
+        thread_id: String,
+        turn_id: String,
+        result: Option<AgentRunResult>,
+    },
+    Claude {
+        stream: ClaudeStreamState,
+        result: Option<AgentRunResult>,
+    },
+    Cursor {
+        stream: CursorStreamState,
+        result: Option<AgentRunResult>,
+    },
+    Opencode {
+        stream: OpencodeStreamState,
+        result: Option<AgentRunResult>,
+    },
+}
 
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
-    let pid = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(request.prompt.as_bytes()).await?;
-    }
-    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut result: Option<AgentRunResult> = None;
-
-    let run = async {
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value = parse_strict_json_line(&line)?;
-            if let Some(done) = map_codex_event(&thread_id, &turn_id, value, &events).await? {
-                result = Some(done);
-            }
-        }
-        let status = child.wait().await?;
-        Ok::<_, AgentError>((status, result))
-    };
-
-    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
-    tokio::pin!(timeout);
-    let (status, parsed_result) = tokio::select! {
-        outcome = run => outcome?,
-        _ = &mut timeout => {
-            kill_pid(pid).await;
-            return Err(AgentError::Timeout(request.turn_timeout_ms));
-        }
-        _ = cancel.cancelled() => {
-            kill_pid(pid).await;
-            return Ok(AgentRunResult {
+#[async_trait]
+impl Protocol for NativeProtocol {
+    async fn push_line(
+        &mut self,
+        line: &str,
+        events: &AgentEventSender,
+    ) -> Result<StreamControl, AgentError> {
+        match self {
+            Self::Codex {
                 thread_id,
                 turn_id,
-                outcome: AgentOutcome::Cancelled,
-                error_class: Some("cancelled".to_string()),
-                error_message: Some("run cancelled".to_string()),
-            });
+                result,
+            } => {
+                if let Some(done) =
+                    map_codex_event(thread_id, turn_id, parse_strict_json_line(line)?, events)
+                        .await?
+                {
+                    *result = Some(done);
+                }
+            }
+            Self::Claude { stream, result } => {
+                if let Some(done) = stream.push(parse_strict_json_line(line)?, events).await? {
+                    *result = Some(done);
+                    if stream.abort {
+                        return Ok(StreamControl::Stop);
+                    }
+                }
+            }
+            Self::Cursor { stream, result } => {
+                if let Some(done) = stream.push(parse_strict_json_line(line)?, events).await? {
+                    *result = Some(done);
+                    // Cursor can linger on an MCP subprocess after its result.
+                    return Ok(StreamControl::Stop);
+                }
+            }
+            Self::Opencode { stream, result } => match parse_opencode_stdout_line(line.trim()) {
+                OpencodeStdoutLine::Event(value) => {
+                    if let Some(done) = stream.push(value, events).await? {
+                        *result = Some(done);
+                    }
+                }
+                OpencodeStdoutLine::AgentFallback(message) => {
+                    send_error(events, "agent_not_found", &message).await?;
+                    *result = Some(opencode_agent_fallback_result(stream, &message));
+                    return Ok(StreamControl::Stop);
+                }
+                OpencodeStdoutLine::Ignored => {}
+            },
         }
-    };
+        Ok(StreamControl::Continue)
+    }
 
-    Ok(parsed_result.unwrap_or_else(|| AgentRunResult {
-        thread_id,
-        turn_id,
-        outcome: if status.success() {
-            AgentOutcome::Success
-        } else {
-            AgentOutcome::Failure
-        },
-        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
-        error_message: (!status.success()).then(|| format!("codex exit {status}")),
-    }))
+    async fn finish(
+        &mut self,
+        status: Option<ExitStatus>,
+        stderr_tail: &str,
+        events: &AgentEventSender,
+    ) -> Result<AgentRunResult, AgentError> {
+        // OpenCode reports per-step usage and has no terminal record. Emit the
+        // accumulated count after process exit, still inside the deadline.
+        if let Self::Opencode { stream, result } = self {
+            stream.finish(events).await?;
+            if let Some(result) = result.take() {
+                return Ok(result);
+            }
+            let status = status.ok_or(AgentError::MissingResult)?;
+            return Ok(opencode_process_result(
+                stream,
+                status.success(),
+                (!status.success()).then(|| exit_error("opencode", status, stderr_tail)),
+            ));
+        }
+        let (backend, thread_id, turn_id, result) = match self {
+            Self::Codex {
+                thread_id,
+                turn_id,
+                result,
+            } => ("codex", thread_id.as_str(), turn_id.as_str(), result),
+            Self::Claude { stream, result } => (
+                "claude",
+                stream.session_id.as_str(),
+                stream.session_id.as_str(),
+                result,
+            ),
+            Self::Cursor { stream, result } => (
+                "cursor",
+                stream.session_id.as_str(),
+                stream.session_id.as_str(),
+                result,
+            ),
+            Self::Opencode { stream, result } => (
+                "opencode",
+                stream.session_id.as_str(),
+                stream.session_id.as_str(),
+                result,
+            ),
+        };
+        if let Some(result) = result.take() {
+            return Ok(result);
+        }
+        let status = status.ok_or(AgentError::MissingResult)?;
+        let error_message = exit_error(backend, status, stderr_tail);
+        Ok(AgentRunResult {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            outcome: if status.success() {
+                AgentOutcome::Success
+            } else {
+                AgentOutcome::Failure
+            },
+            error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
+            error_message: (!status.success()).then_some(error_message),
+        })
+    }
+
+    fn cancelled(&self) -> AgentRunResult {
+        let (thread_id, turn_id) = match self {
+            Self::Codex {
+                thread_id, turn_id, ..
+            } => (thread_id, turn_id),
+            Self::Claude { stream, .. } => (&stream.session_id, &stream.session_id),
+            Self::Cursor { stream, .. } => (&stream.session_id, &stream.session_id),
+            Self::Opencode { stream, .. } => (&stream.session_id, &stream.session_id),
+        };
+        AgentRunResult {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            outcome: AgentOutcome::Cancelled,
+            error_class: Some("cancelled".to_string()),
+            error_message: Some("run cancelled".to_string()),
+        }
+    }
+}
+
+fn exit_error(backend: &str, status: ExitStatus, stderr_tail: &str) -> String {
+    let mut message = format!("{backend} exit {status}");
+    if !stderr_tail.trim().is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr_tail.trim());
+    }
+    message
 }
 
 fn codex_args(request: &AgentRunRequest) -> Vec<String> {
@@ -554,84 +690,6 @@ fn codex_item_summary(item: &Value) -> Option<String> {
     } else {
         Some(lines.join("\n"))
     }
-}
-
-async fn run_claude(
-    request: AgentRunRequest,
-    events: AgentEventSender,
-    cancel: CancellationToken,
-) -> Result<AgentRunResult, AgentError> {
-    let session_id = request
-        .claude
-        .session_id
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let args = claude_args(&request, &session_id);
-
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
-    let pid = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(request.prompt.as_bytes()).await?;
-    }
-    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut stream = ClaudeStreamState::new(
-        session_id.clone(),
-        &request.claude.permission_mode,
-        request.cwd.clone(),
-    );
-    let mut result: Option<AgentRunResult> = None;
-
-    let run = async {
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value = parse_strict_json_line(&line)?;
-            if let Some(done) = stream.push(value, &events).await? {
-                if stream.abort {
-                    // Unusable session (e.g. dropped permission mode): stop
-                    // the process now; stdout closes and the loop drains out.
-                    kill_pid(pid).await;
-                }
-                result = Some(done);
-            }
-        }
-        let status = child.wait().await?;
-        Ok::<_, AgentError>((status, result))
-    };
-
-    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
-    tokio::pin!(timeout);
-    let (status, parsed_result) = tokio::select! {
-        outcome = run => outcome?,
-        _ = &mut timeout => {
-            kill_pid(pid).await;
-            return Err(AgentError::Timeout(request.turn_timeout_ms));
-        }
-        _ = cancel.cancelled() => {
-            kill_pid(pid).await;
-            return Ok(AgentRunResult {
-                thread_id: session_id.clone(),
-                turn_id: session_id,
-                outcome: AgentOutcome::Cancelled,
-                error_class: Some("cancelled".to_string()),
-                error_message: Some("run cancelled".to_string()),
-            });
-        }
-    };
-
-    Ok(parsed_result.unwrap_or_else(|| AgentRunResult {
-        thread_id: session_id.clone(),
-        turn_id: session_id,
-        outcome: if status.success() {
-            AgentOutcome::Success
-        } else {
-            AgentOutcome::Failure
-        },
-        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
-        error_message: (!status.success()).then(|| format!("claude exit {status}")),
-    }))
 }
 
 fn claude_args(request: &AgentRunRequest, session_id: &str) -> Vec<String> {
@@ -1038,88 +1096,6 @@ impl ClaudeStreamState {
     }
 }
 
-async fn run_cursor(
-    request: AgentRunRequest,
-    events: AgentEventSender,
-    cancel: CancellationToken,
-) -> Result<AgentRunResult, AgentError> {
-    let session_id = format!("cs_{}", Uuid::new_v4());
-    let args = cursor_args(&request);
-
-    // Stream the prompt over stdin (cursor-agent reads it in print mode) rather
-    // than as an argv entry: large issue prompts can exceed the OS command-line
-    // limit, and argv is visible to other processes while the agent runs.
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
-    let pid = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(request.prompt.as_bytes()).await?;
-    }
-    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut stream = CursorStreamState::new(session_id.clone());
-    let mut result: Option<AgentRunResult> = None;
-
-    let run = async {
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value = parse_strict_json_line(&line)?;
-            if let Some(done) = stream.push(value, &events).await? {
-                // The `result` record is terminal, but cursor-agent can keep
-                // the process alive afterwards waiting on a command-based MCP
-                // subprocess. Stop reading here instead of blocking on EOF /
-                // exit, which would otherwise strand the run until the turn
-                // timeout and mark a completed run as a timeout.
-                result = Some(done);
-                break;
-            }
-        }
-        Ok::<_, AgentError>(result)
-    };
-
-    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
-    tokio::pin!(timeout);
-    let parsed_result = tokio::select! {
-        outcome = run => outcome?,
-        _ = &mut timeout => {
-            kill_pid(pid).await;
-            return Err(AgentError::Timeout(request.turn_timeout_ms));
-        }
-        _ = cancel.cancelled() => {
-            kill_pid(pid).await;
-            return Ok(AgentRunResult {
-                thread_id: stream.session_id.clone(),
-                turn_id: stream.session_id.clone(),
-                outcome: AgentOutcome::Cancelled,
-                error_class: Some("cancelled".to_string()),
-                error_message: Some("run cancelled".to_string()),
-            });
-        }
-    };
-
-    let sid = stream.session_id.clone();
-    if let Some(done) = parsed_result {
-        // Terminate any process still lingering on an MCP subprocess.
-        kill_pid(pid).await;
-        return Ok(done);
-    }
-
-    // Stdout closed without a `result` record: fall back to the exit status.
-    let status = child.wait().await?;
-    Ok(AgentRunResult {
-        thread_id: sid.clone(),
-        turn_id: sid,
-        outcome: if status.success() {
-            AgentOutcome::Success
-        } else {
-            AgentOutcome::Failure
-        },
-        error_class: (!status.success()).then(|| "nonzero_exit".to_string()),
-        error_message: (!status.success()).then(|| format!("cursor exit {status}")),
-    })
-}
-
 fn cursor_args(request: &AgentRunRequest) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
@@ -1456,100 +1432,6 @@ fn strip_day_ordinal(value: &str) -> String {
     out
 }
 
-async fn run_opencode(
-    request: AgentRunRequest,
-    events: AgentEventSender,
-    cancel: CancellationToken,
-) -> Result<AgentRunResult, AgentError> {
-    let session_id = format!("oc_{}", Uuid::new_v4());
-    // No `--print-logs`: it pushes verbose provider/plugin/MCP logs to stderr,
-    // which would fill the OS pipe buffer and block the child (stalling stdout
-    // JSON parsing until the turn timeout) unless we drained stderr in lockstep.
-    // Leaving it off keeps stderr quiet; we still drain it below as a safety net.
-    let args = opencode_args(&request);
-
-    // Stream the prompt over stdin: opencode appends piped stdin to the
-    // message, and large issue prompts can exceed the OS argv limit (which is
-    // also visible to other processes while the agent runs).
-    let mut child = spawn_shell_command(&request.command, &args, &request.cwd, &request.env)?;
-    let pid = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(request.prompt.as_bytes()).await?;
-    }
-    // Drain stderr to a sink so a chatty child can never block writing to a
-    // full stderr pipe (which would stall stdout JSON parsing). The reader
-    // stops on its own when the process exits and closes the pipe.
-    if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(_)) = lines.next_line().await {}
-        });
-    }
-    let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut stream = OpencodeStreamState::new(session_id.clone());
-    let mut result: Option<AgentRunResult> = None;
-
-    let run = async {
-        while let Some(line) = lines.next_line().await? {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match parse_opencode_stdout_line(line) {
-                OpencodeStdoutLine::Event(value) => {
-                    if let Some(done) = stream.push(value, &events).await? {
-                        result = Some(done);
-                    }
-                }
-                OpencodeStdoutLine::AgentFallback(message) => {
-                    send_error(&events, "agent_not_found", &message).await?;
-                    result = Some(opencode_agent_fallback_result(&stream, &message));
-                    kill_pid(pid).await;
-                    break;
-                }
-                OpencodeStdoutLine::Ignored => {}
-            }
-        }
-        let status = child.wait().await?;
-        Ok::<_, AgentError>((status, result))
-    };
-
-    let timeout = tokio::time::sleep(Duration::from_millis(request.turn_timeout_ms));
-    tokio::pin!(timeout);
-    let (status, parsed_result) = tokio::select! {
-        outcome = run => outcome?,
-        _ = &mut timeout => {
-            kill_pid(pid).await;
-            return Err(AgentError::Timeout(request.turn_timeout_ms));
-        }
-        _ = cancel.cancelled() => {
-            kill_pid(pid).await;
-            return Ok(AgentRunResult {
-                thread_id: stream.session_id.clone(),
-                turn_id: stream.session_id.clone(),
-                outcome: AgentOutcome::Cancelled,
-                error_class: Some("cancelled".to_string()),
-                error_message: Some("run cancelled".to_string()),
-            });
-        }
-    };
-
-    // opencode has no terminal event in `--format json`; completion is the
-    // process exiting. An `error` event flips the exit code to 1 and records
-    // the failure on the stream, so a clean exit with no error is success.
-    // Emit the run's summed token usage once, now that all steps have arrived.
-    stream.finish(&events).await?;
-    if let Some(done) = parsed_result {
-        return Ok(done);
-    }
-    Ok(opencode_process_result(
-        &stream,
-        status.success(),
-        (!status.success()).then(|| format!("opencode exit {status}")),
-    ))
-}
-
 fn opencode_args(request: &AgentRunRequest) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -1805,12 +1687,8 @@ fn spawn_shell_command(
     cmd.arg("-lc")
         .arg(full)
         .current_dir(cwd)
-        // Tokio does not kill a child when its future is dropped. Without this,
-        // a caller that abandons the run future (e.g. dispatch_run returning
-        // early on a transient DB error) would leave the agent CLI alive,
-        // still mutating the workspace, while a retry is scheduled against the
-        // same checkout. kill_on_drop SIGKILLs it on drop; the cancel/timeout
-        // paths still SIGTERM first for a graceful stop.
+        // The process supervisor also owns a group-wide drop guard. Keep
+        // Tokio's direct-child kill/reaping fallback for runtime shutdown.
         .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1837,43 +1715,6 @@ fn request_env_has_github_token(envs: &[(String, String)]) -> bool {
     envs.iter().any(|(key, value)| {
         GITHUB_TOKEN_ENV_VARS.contains(&key.as_str()) && !value.trim().is_empty()
     })
-}
-
-#[cfg(unix)]
-async fn kill_pid(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    // The pid is the /bin/sh leader of the agent's process group (see
-    // spawn_shell_command). A negative target signals the whole group, so the
-    // agent CLI and every process it spawned receive the signal -- not just the
-    // shell, whose children would otherwise be reparented to init and survive.
-    let group = format!("-{pid}");
-    let _ = Command::new("/bin/kill")
-        .arg("-TERM")
-        .arg(&group)
-        .status()
-        .await;
-    // Give the group a moment to exit gracefully, then force-kill survivors
-    // (e.g. an agent wedged in a tool call that ignores SIGTERM).
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let _ = Command::new("/bin/kill")
-        .arg("-KILL")
-        .arg(&group)
-        .status()
-        .await;
-}
-
-#[cfg(not(unix))]
-async fn kill_pid(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    let _ = Command::new("/bin/kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status()
-        .await;
 }
 
 fn shell_quote(value: &str) -> String {
@@ -3420,51 +3261,6 @@ mod tests {
         assert!(matches!(result.outcome, AgentOutcome::Failure));
         assert_eq!(result.error_class.as_deref(), Some("turn_failed"));
         assert!(rx.try_recv().is_err(), "no rate-limit event");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn kill_pid_terminates_whole_process_group() {
-        if std::env::var_os("GITHUB_ACTIONS").is_some() {
-            eprintln!(
-                "skipping process-group signal test on GitHub Actions; Ubuntu hosted runners wedge this integration test"
-            );
-            return;
-        }
-
-        // A shell leader that ignores TERM and backgrounds a stubborn child
-        // that also ignores TERM -- modelling a wedged agent whose subprocess
-        // tree would otherwise be reparented to init when only the leader is
-        // signalled. kill_pid must take down the whole group.
-        let script = r#"trap "" TERM
-(trap "" TERM; while true; do /bin/sleep 0.05; done) &
-echo started
-wait"#;
-        let mut child = spawn_shell_command(script, &[], &std::env::temp_dir(), &[])
-            .expect("spawn stubborn group");
-        let pid = child.id().expect("leader pid");
-
-        // Wait until the group is fully up before signalling it.
-        let stdout = child.stdout.take().expect("stdout");
-        let mut lines = BufReader::new(stdout).lines();
-        lines.next_line().await.expect("read marker");
-
-        kill_pid(Some(pid)).await;
-        // Reap the leader so the group is fully torn down before we assert.
-        tokio::time::timeout(Duration::from_secs(2), child.wait())
-            .await
-            .expect("process group leader should exit after kill_pid")
-            .expect("wait for process group leader");
-
-        // A negative pid targets the whole group; with it gone, kill -0 fails.
-        let alive = Command::new("/bin/kill")
-            .arg("-0")
-            .arg(format!("-{pid}"))
-            .status()
-            .await
-            .expect("kill -0")
-            .success();
-        assert!(!alive, "process group {pid} should be dead after kill_pid");
     }
 
     fn opencode_stream() -> (
