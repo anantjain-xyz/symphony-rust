@@ -182,17 +182,27 @@ Application settings are stored as JSON under the app-data directory. The Linear
 API key is stored separately in the OS keychain.
 `SettingsStore` owns every read, migration, Save, retro prompt update, and
 credential change. Saved revisions reject stale drafts and retro applications.
-File updates use a synced temporary file followed by atomic replacement;
-credential changes are restored if replacement fails. Removing the Linear key
-advances the revision and stops the worker. A stable sidecar OS lock serializes
-separate application processes. The blocking operation owns both locks through
-commit; an owned asynchronous task also completes reconfiguration, key-removal
-shutdown, and retro batch finalization when an IPC caller disconnects. Drafts
+File updates use a synced temporary file followed by atomic replacement.
+A stable sidecar OS lock serializes separate application processes. Credential
+mutations also record recovery intent without storing the API key in the journal.
+Interrupted changes are reconciled before the next mutation; unresolved recovery
+leaves settings readable and blocks further writes.
+A recovered credential change or unresolved credential transaction queues a
+worker stop inside the blocking owner. Owned settings reads and mutations drain
+that obligation, including failed operations, before releasing the effects gate.
+A shared asynchronous gate orders each local settings commit through its worker
+effects. Start acquires it before capturing settings; Retro acquires it after
+network validation and before its revision check. Owned tasks retain this gate
+through reconfiguration, key-removal shutdown, and retro batch finalization when
+an IPC caller disconnects. Removing the key advances the revision and stops the
+worker before a newer Save can reconfigure it. Drafts
 adopt a newer revision only from their own Save operation; unrelated updates
 retain the old revision and produce a conflict.
 Readable settings remain available when the credential service fails; derived
-credential-error metadata explains the unavailable key. Credential mutations
-still fail before changing the file when that service cannot be read.
+credential-error metadata explains the unavailable key. Ordinary configuration
+and prompt edits preserve durable credential metadata and remain saveable while
+the keychain is locked. Credential mutations still require a readable keychain;
+unresolved credential availability blocks Start and skips live reconfiguration.
 The Tauri layer builds runtime
 configuration and environment maps. Repository install and workflow-transfer
 agents start with the repaired `PATH`. For `github.com` and

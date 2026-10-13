@@ -61,7 +61,7 @@ describe("settings draft provenance", () => {
     session.acceptSaved(settings(4));
     session.replaceKey("replacement-key");
     session.setDirty(true);
-    const source = session.captureDraftLineage(session.readDraft()!);
+    const source = session.captureKeyRemoval(session.readDraft()!);
     const removed = { ...settings(6, "Another writer's prompt"), linear_api_key_set: false };
 
     expect(session.completeKeyRemoval(source, removed)).toBe(true);
@@ -70,10 +70,29 @@ describe("settings draft provenance", () => {
     expect(session.isDirty()).toBe(false);
   });
 
+  it.each(["newer-key", "original-key"])(
+    "preserves a later key edit ending in %s when removal finishes",
+    (replacement) => {
+      const session = createSettingsSession(vi.fn(), vi.fn());
+      session.acceptSaved(settings(4));
+      session.replaceKey("original-key");
+      session.setDirty(true);
+      const source = session.captureKeyRemoval(session.readDraft()!);
+      session.replaceKey("intermediate-key");
+      session.replaceKey(replacement);
+      const removed = { ...settings(6, "Another writer's prompt"), linear_api_key_set: false };
+
+      expect(session.completeKeyRemoval(source, removed)).toBe(true);
+      expect(session.readDraft()).toEqual(removed);
+      expect(session.readKey()).toBe(replacement);
+      expect(session.isDirty()).toBe(true);
+    },
+  );
+
   it("preserves actual form edits at their old revision after a skipped removal revision", () => {
     const session = sessionWithDraft();
     session.replaceKey("replacement-key");
-    const source = session.captureDraftLineage(session.readDraft()!);
+    const source = session.captureKeyRemoval(session.readDraft()!);
     const removed = { ...settings(6, "Another writer's prompt"), linear_api_key_set: false };
 
     expect(session.completeKeyRemoval(source, removed)).toBe(true);
@@ -90,7 +109,7 @@ describe("settings draft provenance", () => {
   it("ignores a removal response older than an already published snapshot", () => {
     const session = createSettingsSession(vi.fn(), vi.fn());
     session.acceptSaved(settings(4));
-    const source = session.captureDraftLineage(session.readDraft()!);
+    const source = session.captureKeyRemoval(session.readDraft()!);
     const newer = { ...settings(6, "Newer saved prompt"), linear_api_key_set: true };
     session.acceptSaved(newer);
 
@@ -120,7 +139,7 @@ describe("settings draft provenance", () => {
 
   it("keeps the newer saved baseline when an older save or reload finishes late", () => {
     const session = sessionWithDraft();
-    const source = session.captureDraftLineage(session.readDraft()!);
+    const source = session.captureKeyRemoval(session.readDraft()!);
     const newer = settings(6, "A newer published workflow");
     session.acceptSaved(newer);
     const lateSave = settings(5, "Edited prompt");

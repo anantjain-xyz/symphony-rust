@@ -24,7 +24,10 @@ mod projections;
 mod retro;
 mod retro_service;
 mod settings;
+#[cfg(test)]
+mod settings_effects_tests;
 mod settings_store;
+mod settings_transaction;
 mod storage_events;
 
 use retro::{RetroDetail, RetroStatus, INTERRUPTED_RETRO_MESSAGE};
@@ -162,18 +165,22 @@ async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<AppSettings, String> {
-    let state = state.inner().clone();
+    save_settings_owned(state.inner().clone(), request).await
+}
+
+async fn save_settings_owned(
+    state: AppState,
+    request: SaveSettingsRequest,
+) -> Result<AppSettings, String> {
     settings_store::finish_operation(async move {
-        let settings = state
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state
             .settings_store
             .save(request.settings, request.linear_api_key)
-            .await?;
-        if live_reconfigure_allowed(&settings) {
-            state
-                .worker
-                .reconfigure(worker_start_config(&state, &settings)?)
-                .await;
-        }
+            .await;
+        finish_settings_recovery(&state).await;
+        let settings = result?;
+        apply_settings_to_worker(&state, &settings).await?;
         Ok(settings)
     })
     .await
@@ -185,7 +192,7 @@ async fn validate_settings(
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
     let issues = workflow_validation_issues(&settings);
-    let workflow_error = issues.first().map(|issue| issue.message.clone());
+    let workflow_error = primary_validation_issue(&issues).map(|issue| issue.message.clone());
     let workflow_blocking = issues.iter().any(|issue| issue.blocking);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
@@ -218,9 +225,36 @@ fn workflow_validation_issues(settings: &AppSettings) -> Vec<symphony_core::Vali
 }
 
 fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
-    workflow_validation_issues(settings)
-        .first()
+    primary_validation_issue(&workflow_validation_issues(settings))
         .map(|issue| issue.message.clone())
+}
+
+fn primary_validation_issue(
+    issues: &[symphony_core::ValidationIssue],
+) -> Option<&symphony_core::ValidationIssue> {
+    issues
+        .iter()
+        .find(|issue| issue.blocking)
+        .or(issues.first())
+}
+
+async fn apply_settings_to_worker(state: &AppState, settings: &AppSettings) -> Result<(), String> {
+    state
+        .worker
+        .observe_settings_revision(settings.settings_revision)
+        .await;
+    if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
+        state
+            .worker
+            .stop_for_settings_revision(settings.settings_revision)
+            .await;
+    } else if live_reconfigure_allowed(settings) {
+        state
+            .worker
+            .reconfigure(worker_start_config(state, settings)?)
+            .await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -231,7 +265,7 @@ fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
 }
 
 fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
-    workflow_validation_issues(settings).is_empty()
+    settings.linear_api_key_error.is_none() && workflow_validation_issues(settings).is_empty()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
@@ -437,9 +471,15 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummar
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let state = state.inner().clone();
+    remove_linear_api_key_owned(state.inner().clone()).await
+}
+
+async fn remove_linear_api_key_owned(state: AppState) -> Result<AppSettings, String> {
     settings_store::finish_operation(async move {
-        let settings = state.settings_store.remove_key().await?;
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state.settings_store.remove_key().await;
+        finish_settings_recovery(&state).await;
+        let settings = result?;
         state
             .worker
             .stop_for_settings_revision(settings.settings_revision)
@@ -534,17 +574,25 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
-    let settings = load_settings_from_disk(&state).await?;
-    // A worker started from invalid settings (e.g. no active states) would
-    // poll forever without dispatching anything — fail up front instead.
-    if let Some(error) = validate_workflow_settings(&settings) {
-        return Err(error);
-    }
-    state
-        .worker
-        .start(worker_start_config(&state, &settings)?)
-        .await
-        .map_err(|err| err.to_string())
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let settings = load_settings_with_effects(&state).await?;
+        if let Some(error) = settings.linear_api_key_error {
+            return Err(error);
+        }
+        // A worker started from invalid settings (e.g. no active states) would
+        // poll forever without dispatching anything — fail up front instead.
+        if let Some(error) = validate_workflow_settings(&settings) {
+            return Err(error);
+        }
+        state
+            .worker
+            .start(worker_start_config(&state, &settings)?)
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1008,7 +1056,39 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
 }
 
 async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String> {
-    state.settings_store.load().await
+    let state = state.clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        load_settings_with_effects(&state).await
+    })
+    .await
+}
+
+/// Caller owns the settings effects gate for this complete continuation.
+async fn load_settings_with_effects(state: &AppState) -> Result<AppSettings, String> {
+    let result = state.settings_store.load().await;
+    finish_settings_recovery(state).await;
+    if let Ok(settings) = &result {
+        state
+            .worker
+            .observe_settings_revision(settings.settings_revision)
+            .await;
+        if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
+            state
+                .worker
+                .stop_for_settings_revision(settings.settings_revision)
+                .await;
+        }
+    }
+    result
+}
+
+async fn finish_settings_recovery(state: &AppState) {
+    if state.settings_store.take_recovery_stop() {
+        // Recovery may finish a previous removal or replacement after its IPC
+        // failed. Stop any runtime holding the old credential before proceeding.
+        state.worker.stop().await;
+    }
 }
 
 /// Environment for hooks and agents (the structured settings feed the
@@ -1280,6 +1360,23 @@ mod tests {
     }
 
     #[test]
+    fn blocking_validation_message_matches_the_field_that_needs_attention() {
+        let mut draft = AppSettings::default();
+        draft
+            .session_env
+            .insert("INVALID-NAME".into(), "value".into());
+        let issues = workflow_validation_issues(&draft);
+        assert!(!issues.first().unwrap().blocking);
+        let primary = primary_validation_issue(&issues).unwrap();
+        assert!(primary.blocking);
+        assert_eq!(
+            validate_workflow_settings(&draft).as_deref(),
+            Some(primary.message.as_str())
+        );
+        assert_eq!(primary.field, symphony_core::ValidationField::SessionEnv);
+    }
+
+    #[test]
     fn only_runnable_settings_reconfigure_a_live_worker() {
         assert!(!live_reconfigure_allowed(&AppSettings::default()));
         assert!(live_reconfigure_allowed(&configured_settings()));
@@ -1289,6 +1386,11 @@ mod tests {
             ..configured_settings()
         };
         assert!(!live_reconfigure_allowed(&broken));
+        let unavailable_keyring = AppSettings {
+            linear_api_key_error: Some("Credential store unavailable".into()),
+            ..configured_settings()
+        };
+        assert!(!live_reconfigure_allowed(&unavailable_keyring));
     }
 
     #[test]

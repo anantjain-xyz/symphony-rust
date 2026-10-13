@@ -1001,6 +1001,54 @@ describe("App settings", () => {
     expect(request.linear_api_key).toBeNull();
   });
 
+  it("preserves a replacement key typed while saved-key removal is in flight", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const removal = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "remove_linear_api_key") return removal.promise;
+      if (command === "save_settings")
+        return {
+          ...args.request.settings,
+          settings_revision: 3,
+          linear_api_key_set: true,
+        };
+      return baseInvoke(command, args);
+    });
+    const { container } = render(<App />);
+    await openSettings();
+    const key = screen.getByLabelText(/^API key/, { selector: "input" });
+    fireEvent.change(key, { target: { value: "lin_api_original_replacement" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove saved key" }));
+    await waitFor(() => expect(commandCount("remove_linear_api_key")).toBe(1));
+    fireEvent.change(key, { target: { value: "lin_api_newer_replacement" } });
+    removal.resolve({
+      ...settings,
+      settings_revision: 2,
+      prompt_template: "Concurrent saved workflow",
+      linear_api_key_set: false,
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Remove saved key" })).toBeNull(),
+    );
+    expect((key as HTMLInputElement).value).toBe("lin_api_newer_replacement");
+    expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
+      "Concurrent saved workflow",
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    const request = tauriMocks.invoke.mock.calls.find(
+      ([command]) => command === "save_settings",
+    )![1].request;
+    expect(request.settings.settings_revision).toBe(2);
+    expect(request.settings.prompt_template).toBe("Concurrent saved workflow");
+    expect(request.linear_api_key).toBe("lin_api_newer_replacement");
+  });
+
   it("shows a credential-store error without making loaded settings dirty", async () => {
     tauriMocks.runtimeAvailable = true;
     const error = "The saved Linear API key is unavailable. Check your OS keychain and try again.";
