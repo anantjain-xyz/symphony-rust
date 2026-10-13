@@ -5,8 +5,8 @@ use std::{
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
-    LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult, ValidationResult,
-    WorkflowStateRow,
+    LinearViewerProfile, RunDetail, SaveSettingsRequest, SettingsSaveResult, TrackerTestResult,
+    ValidationResult, WorkflowStateRow,
 };
 use symphony_storage::{
     now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
@@ -173,14 +173,14 @@ async fn load_settings(state: State<'_, AppState>) -> Result<AppSettings, String
 async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
-) -> Result<AppSettings, String> {
+) -> Result<SettingsSaveResult, String> {
     save_settings_owned(state.inner().clone(), request).await
 }
 
 async fn save_settings_owned(
     state: AppState,
     request: SaveSettingsRequest,
-) -> Result<AppSettings, String> {
+) -> Result<SettingsSaveResult, String> {
     settings_store::finish_operation(async move {
         let _effects = state.settings_store.commit_effects().await;
         let result = state
@@ -188,15 +188,37 @@ async fn save_settings_owned(
             .save(request.settings, request.linear_api_key)
             .await;
         finish_settings_recovery(&state).await;
-        let mut settings = result?;
-        let admitted = apply_settings_to_worker(&state).await?;
-        // Keep this commit's receipt intact while reporting the credential
-        // availability that actually governed its runtime continuation.
-        settings.linear_api_key_set = admitted.linear_api_key_set;
-        settings.linear_api_key_error = admitted.linear_api_key_error;
-        Ok(settings)
+        Ok(finish_settings_save_after_commit(&state, result?).await)
     })
     .await
+}
+
+/// Caller owns the effects gate and an operation that outlives its IPC caller.
+/// Once committed, a runtime error must not turn the save receipt into failure.
+async fn finish_settings_save_after_commit(
+    state: &AppState,
+    mut settings: AppSettings,
+) -> SettingsSaveResult {
+    let runtime_update_error = match apply_settings_to_worker(state).await {
+        Ok(admitted) => {
+            // Keep the committed fields and revision; only overlay availability
+            // that was actually observed by this runtime continuation.
+            settings.linear_api_key_set = admitted.linear_api_key_set;
+            settings.linear_api_key_error = admitted.linear_api_key_error;
+            None
+        }
+        Err(_) => {
+            // Do not expose backend diagnostics that could contain credentials
+            // or environment values. Recovery details remain on settings load.
+            let error = "Settings saved, but the worker could not refresh its configuration. Resolve the settings or credential recovery error, then save again or restart the worker.";
+            state.worker.report_configuration_error(error).await;
+            Some(error.to_string())
+        }
+    };
+    SettingsSaveResult {
+        settings,
+        runtime_update_error,
+    }
 }
 
 #[tauri::command]

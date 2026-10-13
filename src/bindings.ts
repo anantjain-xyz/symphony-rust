@@ -29,6 +29,11 @@ export type AppSettings = { settings_revision: number; prompt_template: string; 
 
 export type SaveSettingsRequest = { settings: AppSettings; linear_api_key: string | null }
 
+/**
+ * A durable settings commit and the independent result of refreshing runtime.
+ */
+export type SettingsSaveResult = { settings: AppSettings; runtime_update_error: string | null }
+
 export type TrackerTestResult = { ok: boolean; message: string; active_issue_count: number | null }
 
 export type LinearViewerProfile = { id: string; username: string; display_name: string | null; email: string | null }

@@ -5693,6 +5693,7 @@ version = "0.1.28"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "specta",
  "symphony-core",
  "symphony-storage",
