@@ -48,7 +48,7 @@ pub enum AgentError {
     MissingResult,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentRunRequest {
     pub backend: AgentBackend,
     pub command: String,
@@ -65,6 +65,15 @@ pub struct AgentRunRequest {
     /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
     /// which lives in the OS keychain and is absent from the inherited env).
     pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for AgentRunRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRunRequest")
+            .field("backend", &self.backend)
+            .field("turn_timeout_ms", &self.turn_timeout_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default)]

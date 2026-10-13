@@ -91,11 +91,7 @@ pub(crate) async fn run(
     let finish = async {
         drain_stderr(&mut output.stderr, &mut output.tail).await?;
         protocol
-            .finish(
-                output.status,
-                &String::from_utf8_lossy(&output.tail),
-                events,
-            )
+            .finish(output.status, &output.tail.diagnostic(), events)
             .await
     };
     let result = tokio::select! {
@@ -110,7 +106,7 @@ pub(crate) async fn run(
 struct PumpOutput {
     status: Option<ExitStatus>,
     stderr: ChildStderr,
-    tail: Vec<u8>,
+    tail: StderrCapture,
 }
 
 async fn pump(
@@ -122,7 +118,7 @@ async fn pump(
     let mut stdin = child.stdin.take().ok_or(AgentError::MissingResult)?;
     let stdout = child.stdout.take().ok_or(AgentError::MissingResult)?;
     let mut stderr = child.stderr.take().ok_or(AgentError::MissingResult)?;
-    let mut tail = Vec::with_capacity(STDERR_TAIL_BYTES);
+    let mut tail = StderrCapture::default();
     let status = {
         let input = async {
             stdin.write_all(request.prompt.as_bytes()).await?;
@@ -181,7 +177,7 @@ async fn pump_concurrently<T>(
 
 async fn drain_stderr(
     mut stderr: impl AsyncRead + Unpin,
-    tail: &mut Vec<u8>,
+    tail: &mut StderrCapture,
 ) -> std::io::Result<()> {
     let mut buffer = [0_u8; 4096];
     loop {
@@ -189,9 +185,38 @@ async fn drain_stderr(
         if read == 0 {
             return Ok(());
         }
-        let excess = (tail.len() + read).saturating_sub(STDERR_TAIL_BYTES);
-        tail.drain(..excess);
-        tail.extend_from_slice(&buffer[..read]);
+        tail.push(&buffer[..read]);
+    }
+}
+
+#[derive(Default)]
+struct StderrCapture {
+    bytes: Vec<u8>,
+    omitted: bool,
+}
+
+impl StderrCapture {
+    fn push(&mut self, bytes: &[u8]) {
+        if self.omitted {
+            return;
+        }
+        if self.bytes.len() + bytes.len() > STDERR_TAIL_BYTES {
+            // Truncating before the worker's redaction boundary could retain
+            // only part of a credential, making exact-value redaction fail.
+            // Keep complete diagnostics or omit them, while draining every byte.
+            self.bytes.clear();
+            self.omitted = true;
+        } else {
+            self.bytes.extend_from_slice(bytes);
+        }
+    }
+
+    fn diagnostic(&self) -> std::borrow::Cow<'_, str> {
+        if self.omitted {
+            "[stderr omitted: diagnostic limit exceeded]".into()
+        } else {
+            String::from_utf8_lossy(&self.bytes)
+        }
     }
 }
 
