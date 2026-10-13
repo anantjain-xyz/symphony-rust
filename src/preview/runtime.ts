@@ -26,6 +26,7 @@ const BUNDLED_SKILL_NAMES = [
 ];
 
 const previewSettings: AppSettings = {
+  settings_revision: 0,
   prompt_template:
     "# Workflow preview\n\nConnect through the Tauri desktop runtime to load and edit the saved default workflow.",
   repos: [
@@ -78,6 +79,7 @@ const previewSettings: AppSettings = {
   opencode_agent: null,
   opencode_skip_permissions: true,
   linear_api_key_set: true,
+  linear_api_key_error: null,
 };
 
 const previewSkillsStatuses: Record<string, SkillsStatus> = {

@@ -241,15 +241,14 @@ function SettingsFeature({
       {...editor}
       {...controller.viewer}
       {...repositories.state}
+      credentialError={(controller.saved ?? editor.settings).linear_api_key_error}
       settingsDirty={controller.dirty}
       workerRunning={worker.state === "running"}
       workerConfigError={worker.state === "running" && worker.last_error !== null}
-      liveReconfigureSkipped={
-        worker.state === "running" &&
-        ((controller.validation?.workflow_ok === false &&
-          !controller.validation.workflow_blocking) ||
-          (controller.savedFlash && controller.savedLiveConfigKept))
-      }
+      workerConfigMessage={worker.last_error}
+      liveCredentialSkipped={controller.savedLiveConfigKeptReason === "credential"}
+      liveReconfigureSkipped={worker.state === "running" && controller.savedLiveConfigKept}
+      runtimeUpdateError={controller.runtimeUpdateError}
       activeRunCount={activeRunCount}
       busy={busy}
       runtimeAvailable={runtimeAvailable}
@@ -265,6 +264,7 @@ function SettingsView({
   settings,
   setSettings,
   linearKey,
+  credentialError,
   setLinearKey,
   linearViewer,
   linearViewerLoading,
@@ -284,7 +284,10 @@ function SettingsView({
   settingsDirty,
   workerRunning,
   workerConfigError,
+  workerConfigMessage,
   liveReconfigureSkipped,
+  liveCredentialSkipped,
+  runtimeUpdateError,
   activeRunCount,
   busy,
   runtimeAvailable,
@@ -300,6 +303,7 @@ function SettingsView({
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
   linearKey: string;
+  credentialError: string | null;
   setLinearKey: (value: string) => void;
   linearViewer: LinearViewerProfile | null;
   linearViewerLoading: boolean;
@@ -319,7 +323,10 @@ function SettingsView({
   settingsDirty: boolean;
   workerRunning: boolean;
   workerConfigError: boolean;
+  workerConfigMessage: string | null;
   liveReconfigureSkipped: boolean;
+  liveCredentialSkipped: boolean;
+  runtimeUpdateError: string | null;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -486,23 +493,31 @@ function SettingsView({
           validate, and save configuration.
         </div>
       ) : null}
-      {runtimeAvailable && workerRunning ? (
+      {runtimeUpdateError ? (
+        <div className="banner error" role="alert">
+          <strong>Settings saved; worker update failed</strong>
+          <span>{runtimeUpdateError}</span>
+        </div>
+      ) : null}
+      {runtimeAvailable && workerRunning && !runtimeUpdateError ? (
         <div className="banner info">
           <strong>
             {workerConfigError || liveReconfigureSkipped ? "Worker configuration" : "Live worker"}
           </strong>
           <span>
-            {workerConfigError
-              ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
-              : liveReconfigureSkipped
-                ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
-                : `Saved settings apply to future dispatches without restarting the worker. ${
-                    activeRunCount > 0
-                      ? `${activeRunCount} active ${
-                          activeRunCount === 1 ? "run keeps" : "runs keep"
-                        } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
-                      : "No active runs are using an older config."
-                  }`}
+            {liveCredentialSkipped
+              ? "Settings are saved, but credential access prevented the live worker from updating. Unlock the credential store if needed, then restart the worker to apply the saved settings."
+              : workerConfigError
+                ? `Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed. ${workerConfigMessage ?? ""}`
+                : liveReconfigureSkipped
+                  ? "Settings save to disk, but the worker keeps its previous configuration. Finish any incomplete setup, then restart the worker to apply the saved settings."
+                  : `Saved settings apply to future dispatches without restarting the worker. ${
+                      activeRunCount > 0
+                        ? `${activeRunCount} active ${
+                            activeRunCount === 1 ? "run keeps" : "runs keep"
+                          } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                        : "No active runs are using an older config."
+                    }`}
           </span>
         </div>
       ) : null}
@@ -600,6 +615,11 @@ function SettingsView({
                   . It is stored in the OS keychain, never on disk.
                 </small>
               </label>
+              {credentialError ? (
+                <p className="banner error" role="alert">
+                  {credentialError}
+                </p>
+              ) : null}
               {settings.linear_api_key_set ? (
                 <button
                   type="button"
@@ -2520,8 +2540,7 @@ export function SettingsHeaderActions({
   validation,
   dirty,
   savedFlash,
-  workerRunning,
-  workerConfigError,
+  runtimeUpdateError,
   liveReconfigureSkipped,
   busy,
   runtimeAvailable,
@@ -2529,8 +2548,7 @@ export function SettingsHeaderActions({
   validation: ValidationResult | null;
   dirty: boolean;
   savedFlash: boolean;
-  workerRunning: boolean;
-  workerConfigError: boolean;
+  runtimeUpdateError: string | null;
   liveReconfigureSkipped: boolean;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -2542,16 +2560,16 @@ export function SettingsHeaderActions({
   const status =
     validationError ??
     (savedFlash
-      ? workerRunning
-        ? workerConfigError || liveReconfigureSkipped
+      ? runtimeUpdateError
+        ? "Saved; worker update failed"
+        : liveReconfigureSkipped
           ? "Saved; worker kept previous config"
-          : "Saved; future runs use changes"
-        : "Saved"
+          : "Saved"
       : dirty
         ? "Unsaved changes"
         : "");
   const statusClass =
-    validationError || (savedFlash && (workerConfigError || liveReconfigureSkipped))
+    validationError || (savedFlash && (runtimeUpdateError || liveReconfigureSkipped))
       ? "save-status invalid"
       : savedFlash
         ? "save-status ok"

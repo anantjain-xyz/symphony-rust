@@ -1,12 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
-    LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult, ValidationResult,
-    WorkflowStateRow,
+    LinearViewerProfile, RunDetail, SaveSettingsRequest, SettingsSaveResult, TrackerTestResult,
+    ValidationResult, WorkflowStateRow,
 };
 use symphony_storage::{
     now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
@@ -21,9 +21,15 @@ use symphony_worker::{
 };
 use tauri::{Emitter, Listener, Manager, State};
 
+#[cfg(desktop)]
+mod application_instance;
 mod path_env;
 mod retro;
 mod settings;
+#[cfg(test)]
+mod settings_effects_tests;
+mod settings_store;
+mod settings_transaction;
 mod storage_events;
 
 use retro::{
@@ -31,7 +37,7 @@ use retro::{
     uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
     INTERRUPTED_RETRO_MESSAGE,
 };
-use settings::{default_prompt_template, parse_settings, workflow_from_settings};
+use settings::{default_prompt_template, workflow_from_settings};
 use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "symphony";
@@ -130,7 +136,7 @@ struct AppState {
     workflow_transfer: WorkflowTransferManager,
     retro: RetroManager,
     app_data_dir: PathBuf,
-    settings_path: PathBuf,
+    settings_store: settings_store::SettingsStore,
     database_path: PathBuf,
 }
 
@@ -169,29 +175,52 @@ async fn load_settings(state: State<'_, AppState>) -> Result<AppSettings, String
 async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
-) -> Result<AppSettings, String> {
-    if let Some(key) = request.linear_api_key.as_ref() {
-        if !key.trim().is_empty() {
-            keyring_entry()
-                .map_err(|err| err.to_string())?
-                .set_password(key)
-                .map_err(|err| err.to_string())?;
-        }
-    }
-    let mut settings = request.settings;
-    settings::normalize_linear_filters(&mut settings);
-    settings.linear_api_key_set = linear_api_key().is_some();
-    let json = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    tokio::fs::write(&state.settings_path, json)
-        .await
-        .map_err(|err| err.to_string())?;
-    if live_reconfigure_allowed(&settings) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &settings))
+) -> Result<SettingsSaveResult, String> {
+    save_settings_owned(state.inner().clone(), request).await
+}
+
+async fn save_settings_owned(
+    state: AppState,
+    request: SaveSettingsRequest,
+) -> Result<SettingsSaveResult, String> {
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state
+            .settings_store
+            .save(request.settings, request.linear_api_key)
             .await;
+        finish_settings_recovery(&state).await;
+        Ok(finish_settings_save_after_commit(&state, result?).await)
+    })
+    .await
+}
+
+/// Caller owns the effects gate and an operation that outlives its IPC caller.
+/// Once committed, a runtime error must not turn the save receipt into failure.
+async fn finish_settings_save_after_commit(
+    state: &AppState,
+    mut settings: AppSettings,
+) -> SettingsSaveResult {
+    let runtime_update_error = match apply_settings_to_worker(state).await {
+        Ok(admitted) => {
+            // Keep the committed fields and revision; only overlay availability
+            // that was actually observed by this runtime continuation.
+            settings.linear_api_key_set = admitted.linear_api_key_set;
+            settings.linear_api_key_error = admitted.linear_api_key_error;
+            None
+        }
+        Err(_) => {
+            // Do not expose backend diagnostics that could contain credentials
+            // or environment values. Recovery details remain on settings load.
+            let error = "Settings saved, but the worker could not refresh its configuration. Resolve the settings or credential recovery error, then save again or restart the worker.";
+            state.worker.report_configuration_error(error).await;
+            Some(error.to_string())
+        }
+    };
+    SettingsSaveResult {
+        settings,
+        runtime_update_error,
     }
-    Ok(settings)
 }
 
 #[tauri::command]
@@ -255,7 +284,7 @@ fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
 }
 
 fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
-    validate_workflow_settings(settings).is_none()
+    settings.linear_api_key_error.is_none() && validate_workflow_settings(settings).is_none()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
@@ -353,13 +382,11 @@ fn command_found(command: &str) -> bool {
 
 #[tauri::command]
 async fn test_tracker_connection(
+    state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<TrackerTestResult, String> {
     // Prefer the unsaved form value so users can test a just-typed key.
-    let api_key = request
-        .linear_api_key
-        .filter(|key| !key.trim().is_empty())
-        .or_else(linear_api_key);
+    let api_key = request_linear_api_key(&state, request.linear_api_key).await?;
     let Some(api_key) = api_key else {
         return Ok(TrackerTestResult {
             ok: false,
@@ -396,13 +423,13 @@ async fn test_tracker_connection(
 }
 
 #[tauri::command]
-async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerProfile, String> {
+async fn get_linear_viewer(
+    state: State<'_, AppState>,
+    request: SaveSettingsRequest,
+) -> Result<LinearViewerProfile, String> {
     // Prefer the unsaved form value so checking the box can resolve the user
     // before the API key has been saved.
-    let api_key = request
-        .linear_api_key
-        .filter(|key| !key.trim().is_empty())
-        .or_else(linear_api_key);
+    let api_key = request_linear_api_key(&state, request.linear_api_key).await?;
     let Some(api_key) = api_key else {
         return Err(
             "No Linear API key configured. Add one above to show the assigned user.".to_string(),
@@ -431,13 +458,14 @@ async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerP
 
 #[tauri::command]
 async fn list_workflow_states(state: State<'_, AppState>) -> Result<Vec<WorkflowStateRow>, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to load the board columns."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let states = tracker
@@ -475,13 +503,14 @@ async fn set_issue_state(
         );
     }
     // Trust boundary: the mutation runs against Linear with the user's own key.
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to move issues."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     tracker
@@ -492,13 +521,14 @@ async fn set_issue_state(
 
 #[tauri::command]
 async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to load the board."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let issues = tracker
@@ -532,14 +562,19 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    match keyring_entry() {
-        Ok(entry) => match entry.delete_credential() {
-            Ok(()) | Err(keyring_core::Error::NoEntry) => {}
-            Err(err) => return Err(err.to_string()),
-        },
-        Err(err) => return Err(err.to_string()),
-    }
-    load_settings_from_disk(&state).await
+    remove_linear_api_key_owned(state.inner().clone()).await
+}
+
+async fn remove_linear_api_key_owned(state: AppState) -> Result<AppSettings, String> {
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let result = state.settings_store.remove_key().await;
+        finish_settings_recovery(&state).await;
+        let settings = result?;
+        state.worker.stop().await;
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -610,17 +645,29 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
-    let settings = load_settings_from_disk(&state).await?;
-    // A worker started from invalid settings (e.g. no active states) would
-    // poll forever without dispatching anything — fail up front instead.
-    if let Some(error) = validate_workflow_settings(&settings) {
-        return Err(error);
-    }
-    state
-        .worker
-        .start(worker_start_config(&state, &settings))
-        .await
-        .map_err(|err| err.to_string())
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let snapshot = worker_settings_with_effects(&state).await?;
+        if let Some(error) = snapshot.settings.linear_api_key_error.as_ref() {
+            return Err(error.clone());
+        }
+        let api_key = snapshot.credential.as_deref().ok_or_else(|| {
+            "No Linear API key configured. Add one under Settings → Linear.".to_string()
+        })?;
+        let settings = snapshot.settings;
+        // A worker started from invalid settings (e.g. no active states) would
+        // poll forever without dispatching anything — fail up front instead.
+        if let Some(error) = validate_workflow_settings(&settings) {
+            return Err(error);
+        }
+        state
+            .worker
+            .start(worker_start_config(&state, &settings, api_key))
+            .await
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -628,13 +675,16 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
-fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartConfig {
-    let api_key = linear_api_key();
+fn worker_start_config(
+    state: &AppState,
+    settings: &AppSettings,
+    api_key: &str,
+) -> WorkerStartConfig {
     WorkerStartConfig {
-        workflow: workflow_from_settings(settings, api_key.as_deref()),
+        workflow: workflow_from_settings(settings, Some(api_key)),
         repos: settings.repos.clone(),
         skills: bundled_skills(),
-        env: build_env(),
+        env: build_env(api_key),
         session_env: settings.session_env.clone(),
         app_data_dir: state.app_data_dir.clone(),
     }
@@ -651,13 +701,14 @@ async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Resu
 
 #[tauri::command]
 async fn start_retro(state: State<'_, AppState>) -> Result<RetroStatus, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear, then run a retro."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let workspace_root =
@@ -787,6 +838,14 @@ async fn apply_retro_workflow(
     state: State<'_, AppState>,
     retro_id: String,
 ) -> Result<RetroBatchRow, String> {
+    let state = state.inner().clone();
+    settings_store::finish_operation(apply_retro_workflow_inner(state, retro_id)).await
+}
+
+async fn apply_retro_workflow_inner(
+    state: AppState,
+    retro_id: String,
+) -> Result<RetroBatchRow, String> {
     let all_suggestions = state
         .repo
         .list_retro_suggestions(&retro_id)
@@ -903,7 +962,7 @@ async fn apply_retro_workflow(
     // added a valid checked-in workflow after review, applying the old batch
     // would update the wrong source of truth.
     let source_check_root = resolve_workspace_root_dir(
-        &workflow_from_settings(&settings, linear_api_key().as_deref())
+        &workflow_from_settings(&settings, None)
             .front_matter
             .workspace
             .root,
@@ -995,19 +1054,48 @@ async fn apply_retro_workflow(
             .map_err(|err| err.to_string())?;
         return Err(error);
     }
-    if let Err(error) = write_settings_file(&state.settings_path, &updated).await {
+    // Source validation above may be slow. Serialize only the CAS commit and
+    // its complete worker/batch continuation; intervening saves fail CAS.
+    let _effects = state.settings_store.commit_effects().await;
+    let result = state
+        .settings_store
+        .apply_prompt(
+            updated.settings_revision,
+            expected_prompt_hash,
+            updated.prompt_template.clone(),
+        )
+        .await;
+    finish_settings_recovery(&state).await;
+    match result {
+        Ok(_) => {}
+        Err(error) => {
+            state
+                .repo
+                .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+                .await
+                .map_err(|update_err| update_err.to_string())?;
+            return Err(error);
+        }
+    };
+    finish_retro_workflow_after_prompt_save(&state, &batch).await
+}
+
+/// The prompt has committed. The owned caller keeps the settings effects gate
+/// until runtime refresh and the batch's terminal outcome are both recorded.
+async fn finish_retro_workflow_after_prompt_save(
+    state: &AppState,
+    batch: &RetroBatchRow,
+) -> Result<RetroBatchRow, String> {
+    if let Err(error) = apply_settings_to_worker(state).await {
+        let progress = "Workflow prompt saved; runtime refresh failed.";
         state
             .repo
-            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .update_retro_batch(&batch.id, "failed", Some(progress), Some(&error), None)
             .await
-            .map_err(|update_err| update_err.to_string())?;
-        return Err(error);
-    }
-    if live_reconfigure_allowed(&updated) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &updated))
-            .await;
+            .map_err(|update_error| {
+                format!("{progress} {error} Could not record the batch outcome: {update_error}")
+            })?;
+        return Err(format!("{progress} {error}"));
     }
     state
         .repo
@@ -1022,7 +1110,7 @@ async fn apply_retro_workflow(
         .map_err(|err| err.to_string())?;
     state
         .repo
-        .list_retro_batches(&retro_id)
+        .list_retro_batches(&batch.retro_id)
         .await
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -1047,13 +1135,6 @@ fn current_retro_repo_url(
 
 fn prompt_revision(settings: &AppSettings) -> String {
     hash_body(&settings.prompt_template)
-}
-
-async fn write_settings_file(path: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
-    tokio::fs::write(path, json)
-        .await
-        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1102,7 +1183,7 @@ async fn start_retro_prs(
         .filter_map(|batch| batch.repo_name)
         .collect::<BTreeSet<_>>();
     let workspace_root = resolve_workspace_root_dir(
-        &workflow_from_settings(&settings, linear_api_key().as_deref())
+        &workflow_from_settings(&settings, None)
             .front_matter
             .workspace
             .root,
@@ -1234,8 +1315,7 @@ async fn install_skills(
     if repo_url.is_empty() {
         return Err("Add a repository URL under Settings → Repositories first.".to_string());
     }
-    let api_key = linear_api_key();
-    let workflow = workflow_from_settings(&settings, api_key.as_deref());
+    let workflow = workflow_from_settings(&settings, None);
     let workspace_root =
         resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
     state
@@ -1283,7 +1363,7 @@ async fn transfer_workflow_to_repo(
     if let Some(error) = validate_workflow_settings(&settings) {
         return Err(error);
     }
-    let workflow = workflow_from_settings(&settings, linear_api_key().as_deref());
+    let workflow = workflow_from_settings(&settings, None);
     let workspace_root =
         resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
     state
@@ -1331,7 +1411,14 @@ pub fn run() {
     // agent processes that need user-installed tools. Overlay the login-shell
     // PATH before Tauri spawns threads that read the environment.
     let path_fix = path_env::fix();
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Register first where plugin IPC is available. Linux relies on the file
+    // lease below: this plugin version panics without a working session D-Bus.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        application_instance::activate_main_window(app);
+    }));
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1339,11 +1426,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
         if event.id() == CHECK_FOR_UPDATES_MENU_ID {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            application_instance::activate_main_window(app);
             let bridge = app.state::<UpdateCheckBridge>();
             let delivery = bridge.queue_request();
             deliver_update_check_request(app, &bridge, delivery);
@@ -1351,6 +1434,17 @@ pub fn run() {
     });
     builder
         .setup(move |app| {
+            let app_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&app_dir)?;
+            // Plugin IPC can fail open. The stable app-data lease is the final
+            // admission gate, held in app state until this process terminates.
+            #[cfg(desktop)]
+            match application_instance::InstanceLease::acquire(&app_dir)? {
+                Some(lease) => {
+                    app.manage(lease);
+                }
+                None => std::process::exit(0),
+            }
             let handle = app.handle().clone();
             let ready_handle = handle.clone();
             app.listen("up:r", move |_| {
@@ -1364,8 +1458,6 @@ pub fn run() {
                 let delivery = bridge.acknowledge();
                 deliver_update_check_request(&acknowledged_handle, &bridge, delivery);
             });
-            let app_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&app_dir)?;
             let _ = keyring::use_native_store(false);
             init_tracing(&app_dir);
             match &path_fix {
@@ -1402,7 +1494,10 @@ pub fn run() {
                 workflow_transfer: WorkflowTransferManager::new(),
                 retro: RetroManager::new(),
                 app_data_dir: app_dir.clone(),
-                settings_path: app_dir.join("settings.json"),
+                settings_store: settings_store::SettingsStore::new(
+                    app_dir.join("settings.json"),
+                    Arc::new(settings_store::KeyringCredentials),
+                ),
                 database_path: db_path,
             };
             forward_events(handle, bus);
@@ -1512,34 +1607,94 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
 }
 
 async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String> {
-    let mut settings = match tokio::fs::read_to_string(&state.settings_path).await {
-        Ok(raw) => {
-            let (settings, migrated) = parse_settings(&raw)?;
-            if migrated {
-                // Keep the pre-migration file around in case the user needs to
-                // inspect or restore settings from an older shape.
-                let backup = state.settings_path.with_extension("json.bak");
-                tokio::fs::write(&backup, &raw)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let json =
-                    serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-                tokio::fs::write(&state.settings_path, json)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                tracing::info!(
-                    target: "symphony",
-                    backup = %backup.display(),
-                    "migrated settings to the current configuration shape"
-                );
-            }
-            settings
+    let state = state.clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        load_settings_with_effects(&state).await
+    })
+    .await
+}
+
+/// Caller owns the settings effects gate for this complete continuation.
+async fn load_settings_with_effects(state: &AppState) -> Result<AppSettings, String> {
+    let result = state.settings_store.load().await;
+    finish_settings_recovery(state).await;
+    result
+}
+
+/// Read one recoverable settings/credential pair before operational use.
+async fn load_runtime_settings(
+    state: &AppState,
+) -> Result<settings_store::SettingsSnapshot, String> {
+    let state = state.clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let snapshot = worker_settings_with_effects(&state).await?;
+        if let Some(error) = snapshot.settings.linear_api_key_error.as_ref() {
+            return Err(error.clone());
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
-        Err(err) => return Err(err.to_string()),
-    };
-    settings.linear_api_key_set = linear_api_key().is_some();
-    Ok(settings)
+        Ok(snapshot)
+    })
+    .await
+}
+
+async fn request_linear_api_key(
+    state: &AppState,
+    typed_key: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(key) = typed_key.filter(|key| !key.trim().is_empty()) {
+        return Ok(Some(key));
+    }
+    Ok(load_runtime_settings(state).await?.credential)
+}
+
+/// Caller owns the settings effects gate and an operation that outlives IPC.
+async fn worker_settings_with_effects(
+    state: &AppState,
+) -> Result<settings_store::SettingsSnapshot, String> {
+    let result = state.settings_store.runtime_snapshot().await;
+    finish_settings_recovery(state).await;
+    if let Ok(snapshot) = &result {
+        if snapshot.settings.linear_api_key_error.is_none() && snapshot.credential.is_none() {
+            state.worker.stop().await;
+        }
+    }
+    result
+}
+
+async fn apply_settings_to_worker(state: &AppState) -> Result<AppSettings, String> {
+    let snapshot = worker_settings_with_effects(state).await?;
+    if snapshot.settings.linear_api_key_error.is_some() {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.",
+            )
+            .await;
+    } else if live_reconfigure_allowed(&snapshot.settings) {
+        if let Some(api_key) = snapshot.credential.as_deref() {
+            state
+                .worker
+                .reconfigure(worker_start_config(state, &snapshot.settings, api_key))
+                .await;
+        }
+    } else {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.",
+            )
+            .await;
+    }
+    Ok(snapshot.settings)
+}
+
+async fn finish_settings_recovery(state: &AppState) {
+    if state.settings_store.take_recovery_stop() {
+        // Recovery may finish a previous removal or replacement after its IPC
+        // failed. Stop any runtime holding the old credential before proceeding.
+        state.worker.stop().await;
+    }
 }
 
 /// Environment for hooks and agents (the structured settings feed the
@@ -1547,11 +1702,9 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
 /// processes need at execution time). Repo-specific variables — REPO_URL,
 /// REPO_NAME, SYMPHONY_INSTALL_CMD — are overlaid per run by the worker once
 /// the issue is routed.
-fn build_env() -> BTreeMap<String, String> {
+fn build_env(api_key: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
-    if let Some(key) = linear_api_key() {
-        env.insert("LINEAR_API_KEY".to_string(), key);
-    }
+    env.insert("LINEAR_API_KEY".to_string(), api_key.to_string());
     env
 }
 
@@ -1572,10 +1725,6 @@ fn build_install_env_from(
 
 fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
     keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_LINEAR_USER)
-}
-
-fn linear_api_key() -> Option<String> {
-    keyring_entry().ok()?.get_password().ok()
 }
 
 fn init_tracing(app_dir: &std::path::Path) {
@@ -1665,20 +1814,6 @@ mod tests {
 
         assert_ne!(original_workflow.source_hash, changed_workflow.source_hash);
         assert_eq!(prompt_revision(&changed), revision);
-    }
-
-    #[tokio::test]
-    async fn settings_write_errors_are_reported_to_retro_batches() {
-        let directory =
-            std::env::temp_dir().join(format!("symphony-settings-write-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&directory).await.unwrap();
-
-        let error = write_settings_file(&directory, &configured_settings())
-            .await
-            .unwrap_err();
-        assert!(!error.is_empty());
-
-        tokio::fs::remove_dir_all(directory).await.ok();
     }
 
     #[test]
@@ -1861,6 +1996,11 @@ mod tests {
             ..configured_settings()
         };
         assert!(!live_reconfigure_allowed(&broken));
+        let unavailable_keyring = AppSettings {
+            linear_api_key_error: Some("Credential store unavailable".into()),
+            ..configured_settings()
+        };
+        assert!(!live_reconfigure_allowed(&unavailable_keyring));
     }
 
     #[test]

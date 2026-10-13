@@ -615,7 +615,12 @@ export function useDashboardController(options: Options) {
             }
             case "worker": {
               const next = await loadDashboardResource(key, desktopCommands.getWorkerStatus);
-              if (isAuthoritative(key)) {
+              // An explicitly accepted command status supersedes reads that
+              // started before it, even if their coordinator epoch is current.
+              if (
+                isAuthoritative(key) &&
+                (dirtyResourceVersionsRef.current.worker ?? 0) === dirtyVersion
+              ) {
                 commitResourceSuccess("worker", next);
               }
               break;
@@ -1372,7 +1377,10 @@ export function useDashboardController(options: Options) {
       startRetroPrs,
       refreshDashboard,
     },
-    acceptWorker: setWorker,
+    acceptWorker(status: WorkerStatus) {
+      markResourceDirty("worker");
+      setWorker(status);
+    },
     acceptOverview: setOverview,
     acceptRetroBatchWork: setHasInProgressRetroBatches,
   };

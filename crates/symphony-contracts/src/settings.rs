@@ -11,6 +11,8 @@ use symphony_core::{
 /// ship as a YAML front matter (states, hooks, sandbox/permission options).
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub settings_revision: u64,
     #[serde(default = "default_prompt_template")]
     pub prompt_template: String,
     // Repositories; each issue routes to one by repo:<name> or bare repo-name
@@ -102,14 +104,19 @@ pub struct AppSettings {
     pub opencode_agent: Option<String>,
     #[serde(default = "default_true")]
     pub opencode_skip_permissions: bool,
-    // Derived from the OS keychain; never user-edited.
+    // Responses report current key availability; the file retains the last
+    // committed credential state when the OS store is unavailable. Not editable.
     #[serde(default)]
     pub linear_api_key_set: bool,
+    /// Credential service availability is read metadata, never editable config.
+    #[serde(default)]
+    pub linear_api_key_error: Option<String>,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            settings_revision: 0,
             prompt_template: default_prompt_template(),
             repos: Vec::new(),
             workspace_root: None,
@@ -151,6 +158,7 @@ impl Default for AppSettings {
             opencode_agent: None,
             opencode_skip_permissions: true,
             linear_api_key_set: false,
+            linear_api_key_error: None,
         }
     }
 }

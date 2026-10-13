@@ -10,8 +10,11 @@ export const MANIFEST_PATH = resolve(DIST_DIR, ".vite/manifest.json");
 export const BUDGETS = {
   // Explicit feature owners and persistent settings-session capabilities add
   // ~0.65 kB gzip versus the board-operations baseline (80.63 -> 81.28 kB).
+  // Exact Save acknowledgements fence dirty-draft provenance; the measured
+  // integrated shell with credential diagnostics/reconciliation is 81.80 kB
+  // gzip. Keep a small runner cushion.
   // Preserve startup behavior and every existing lazy/forbidden entry boundary.
-  eagerJavaScript: 81_500,
+  eagerJavaScript: 82_000,
   eagerCss: 7_000,
   lazyViewJavaScript: 50_000,
 };

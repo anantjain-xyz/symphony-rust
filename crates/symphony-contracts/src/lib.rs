@@ -50,6 +50,7 @@ pub fn bindings_source() -> Result<String> {
     export_required!(symphony_core::RepoConfig);
     export_required!(AppSettings);
     export!(SaveSettingsRequest);
+    export!(SettingsSaveResult);
     export!(TrackerTestResult);
     export!(LinearViewerProfile);
     export!(WorkflowStateRow);

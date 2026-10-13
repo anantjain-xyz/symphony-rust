@@ -17,7 +17,7 @@ type Options = {
   runtimeAvailable: boolean;
   run: RunDesktopAction;
   acceptWorker: (status: WorkerStatus) => void;
-  readWorkerState: () => WorkerStatus["state"];
+  readWorkerStatus: () => WorkerStatus;
   refreshRepositories: (settings: AppSettings) => void;
 };
 export function useSettingsController(options: Options) {
@@ -33,10 +33,34 @@ export function useSettingsController(options: Options) {
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [savedLiveConfigKept, setSavedLiveConfigKept] = useState(false);
+  const [runtimeUpdateError, setRuntimeUpdateError] = useState<string | null>(null);
+  const [savedLiveConfigKeptReason, setSavedLiveConfigKeptReason] = useState<
+    "credential" | "workflow" | "worker" | null
+  >(null);
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const linearViewerSeq = useRef(0);
+  const keptWorkerSnapshots = useRef<{
+    observed: WorkerStatus;
+    refreshed: WorkerStatus | null;
+  } | null>(null);
+  useEffect(() => {
+    const worker = options.readWorkerStatus();
+    const skipped = keptWorkerSnapshots.current;
+    if (
+      worker.state !== "running" ||
+      (skipped &&
+        worker !== skipped.observed &&
+        worker !== skipped.refreshed &&
+        worker.last_error === null)
+    ) {
+      if (worker.state === "running") {
+        keptWorkerSnapshots.current = null;
+        setRuntimeUpdateError(null);
+      }
+      setSavedLiveConfigKeptReason(null);
+    }
+  }, [options.readWorkerStatus]);
   const refreshLinearViewer = useCallback(
     (exactSettings: AppSettings, exactKey: string) => {
       if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
@@ -112,13 +136,21 @@ export function useSettingsController(options: Options) {
   ) {
     setValidation(result);
     if (result.workflow_blocking) return;
-    const saved = await call(() =>
+    const source = session.captureDraftLineage(exactSettings);
+    const receipt = await call(() =>
       desktopCommands.saveSettings({
         settings: exactSettings,
         linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
       }),
     );
+    const saved = receipt.settings;
+    // Only this operation may advance a descendant draft's concurrency token.
+    const acknowledged = session.acknowledgeSave(source, saved);
+    if (session.readSaved() !== saved) return;
+    // A prior Save's snapshots cannot clear this receipt's runtime error.
+    keptWorkerSnapshots.current = null;
     setSettings(saved);
+    setRuntimeUpdateError(receipt.runtime_update_error);
     let refreshedWorker: WorkerStatus | null = null;
     try {
       refreshedWorker = await desktopCommands.getWorkerStatus();
@@ -127,10 +159,20 @@ export function useSettingsController(options: Options) {
       // Settings are saved even if this status refresh fails; the next dashboard
       // refresh will reconcile worker state.
     }
-    const liveWorkerState = refreshedWorker?.state ?? context.current.readWorkerState();
-    setSavedLiveConfigKept(
-      liveWorkerState === "running" &&
-        (!result.workflow_ok || refreshedWorker?.last_error !== null),
+    // Neither the previously rendered status nor this Save's status response
+    // proves that a later operation has applied the settings.
+    const observedWorker = context.current.readWorkerStatus();
+    keptWorkerSnapshots.current = { observed: observedWorker, refreshed: refreshedWorker };
+    setSavedLiveConfigKeptReason(
+      refreshedWorker?.state !== "running"
+        ? null
+        : saved.linear_api_key_error !== null
+          ? "credential"
+          : !result.workflow_ok
+            ? "workflow"
+            : refreshedWorker.last_error !== null
+              ? "worker"
+              : null,
     );
     const currentDraft = session.readDraft();
     const refreshTarget =
@@ -144,9 +186,8 @@ export function useSettingsController(options: Options) {
     }
     savedFlashTimer.current = window.setTimeout(() => {
       setSavedFlash(false);
-      setSavedLiveConfigKept(false);
     }, 2500);
-    return saved;
+    return acknowledged && session.readSaved() === saved ? saved : undefined;
   }
 
   async function testConnection(exactSettings: AppSettings, exactLinearKey: string) {
@@ -160,13 +201,13 @@ export function useSettingsController(options: Options) {
   }
 
   async function removeLinearKey() {
+    const draft = session.readDraft() ?? settings;
+    const source = draft ? session.captureKeyRemoval(draft) : null;
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
-    setSettings((current) =>
-      current ? { ...current, linear_api_key_set: fromDisk.linear_api_key_set } : current,
-    );
-    session.replaceKey("");
+    if (!session.completeKeyRemoval(source, fromDisk)) return false;
+    setSettings(fromDisk);
     setTrackerTest(null);
-    return fromDisk.linear_api_key_set;
+    return true;
   }
 
   async function resetPrompt() {
@@ -186,12 +227,13 @@ export function useSettingsController(options: Options) {
     savePending,
     validation,
     savedFlash,
-    savedLiveConfigKept,
+    runtimeUpdateError,
+    savedLiveConfigKept: savedLiveConfigKeptReason !== null,
+    savedLiveConfigKeptReason,
     viewer: { linearViewer, linearViewerLoading, linearViewerError, trackerTest },
     session,
     acceptSaved(next: AppSettings) {
-      session.acceptSaved(next);
-      setSettings(next);
+      if (session.acceptSaved(next)) setSettings(next);
     },
     draftChanged: handleSettingsDraftChange,
     acceptValidation: setValidation,
