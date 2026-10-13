@@ -49,6 +49,9 @@ tracing-subscriber.workspace = true
 which.workspace = true
 uuid.workspace = true
 
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance.workspace = true
+
 [dev-dependencies]
 base64.workspace = true
 minisign-verify.workspace = true
