@@ -442,6 +442,106 @@ async fn save_receipt_reports_unavailable_runtime_admission_without_losing_its_c
     assert_eq!(durable.prompt_template, draft.prompt_template);
     assert!(durable.linear_api_key_set);
     assert!(durable.linear_api_key_error.is_none());
+    let expected_error = "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.";
+    assert_eq!(
+        fixture.state.worker.status().await.last_error.as_deref(),
+        Some(expected_error)
+    );
+    fixture
+        .credentials
+        .unavailable_at_read
+        .store(usize::MAX, Ordering::SeqCst);
+    let reloaded = load_settings_from_disk(&fixture.state).await.unwrap();
+    assert!(reloaded.linear_api_key_error.is_none());
+    assert!(reloaded.linear_api_key_set);
+    // A new webview reads these separately after the credential store unlocks.
+    // Reloading settings must not imply that the active worker adopted them.
+    let status_after_reload = fixture.state.worker.status().await;
+    assert_eq!(
+        status_after_reload.state,
+        symphony_worker::WorkerState::Running
+    );
+    assert_eq!(
+        status_after_reload.last_error.as_deref(),
+        Some(expected_error)
+    );
     fixture.state.worker.stop().await;
     fixture.assert_stopped().await;
+}
+
+fn fail_settings_directory_sync(path: &std::path::Path) -> Result<(), String> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
+        assert!(path.is_file());
+        Err("Synthetic settings parent-directory sync failure.".into())
+    } else {
+        settings_transaction::sync_parent(path)
+    }
+}
+
+#[tokio::test]
+async fn ordinary_save_stops_stale_runtime_after_post_rename_sync_error() {
+    let mut fixture = Fixture::running().await;
+    fixture.state.settings_store = fixture
+        .state
+        .settings_store
+        .clone()
+        .with_parent_sync(fail_settings_directory_sync);
+    let mut draft = fixture.settings.clone();
+    draft.prompt_template = "Visible replacement whose directory sync failed.".into();
+    let error = save_settings_owned(
+        fixture.state.clone(),
+        SaveSettingsRequest {
+            settings: draft.clone(),
+            linear_api_key: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("parent-directory sync"));
+    fixture.assert_stopped().await;
+    let visible: AppSettings =
+        serde_json::from_slice(&std::fs::read(&fixture.settings_path).unwrap()).unwrap();
+    assert_eq!(visible.settings_revision, 11);
+    assert_eq!(visible.prompt_template, draft.prompt_template);
+    assert_eq!(
+        fixture.credentials.key.lock().unwrap().as_deref(),
+        Some(OLD_KEY)
+    );
+    assert!(!settings_transaction::has_pending(&fixture.settings_path));
+}
+
+#[tokio::test]
+async fn migration_load_stops_stale_runtime_after_post_rename_sync_error() {
+    let mut fixture = Fixture::running().await;
+    fixture.state.settings_store = fixture
+        .state
+        .settings_store
+        .clone()
+        .with_parent_sync(fail_settings_directory_sync);
+    let mut legacy = serde_json::to_value(&fixture.settings).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("codex_permission_mode");
+    legacy["codex_approval_policy"] = serde_json::json!("never");
+    let raw = serde_json::to_string(&legacy).unwrap();
+    std::fs::write(&fixture.settings_path, &raw).unwrap();
+    let error = load_settings_from_disk(&fixture.state).await.unwrap_err();
+    assert!(error.contains("parent-directory sync"));
+    fixture.assert_stopped().await;
+    let visible = std::fs::read_to_string(&fixture.settings_path).unwrap();
+    let (migrated, needs_migration) = settings::parse_settings(&visible).unwrap();
+    assert!(!needs_migration);
+    assert_eq!(migrated.settings_revision, 11);
+    assert_eq!(
+        std::fs::read_to_string(fixture.settings_path.with_extension("json.bak")).unwrap(),
+        raw
+    );
+    assert_eq!(
+        fixture.credentials.key.lock().unwrap().as_deref(),
+        Some(OLD_KEY)
+    );
 }
