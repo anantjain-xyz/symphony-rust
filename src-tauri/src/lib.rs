@@ -440,7 +440,10 @@ async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings
     let state = state.inner().clone();
     settings_store::finish_operation(async move {
         let settings = state.settings_store.remove_key().await?;
-        state.worker.stop().await;
+        state
+            .worker
+            .stop_for_settings_revision(settings.settings_revision)
+            .await;
         Ok(settings)
     })
     .await
