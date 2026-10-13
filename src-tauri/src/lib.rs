@@ -179,12 +179,7 @@ async fn save_settings(
             .settings_store
             .save(request.settings, request.linear_api_key)
             .await?;
-        if live_reconfigure_allowed(&settings) {
-            state
-                .worker
-                .reconfigure(worker_start_config(&state, &settings)?)
-                .await;
-        }
+        apply_settings_to_worker(&state, &settings).await?;
         Ok(settings)
     })
     .await
@@ -196,7 +191,7 @@ async fn validate_settings(
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
     let issues = workflow_validation_issues(&settings);
-    let workflow_error = issues.first().map(|issue| issue.message.clone());
+    let workflow_error = primary_validation_issue(&issues).map(|issue| issue.message.clone());
     let workflow_blocking = issues.iter().any(|issue| issue.blocking);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
@@ -229,9 +224,36 @@ fn workflow_validation_issues(settings: &AppSettings) -> Vec<symphony_core::Vali
 }
 
 fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
-    workflow_validation_issues(settings)
-        .first()
+    primary_validation_issue(&workflow_validation_issues(settings))
         .map(|issue| issue.message.clone())
+}
+
+fn primary_validation_issue(
+    issues: &[symphony_core::ValidationIssue],
+) -> Option<&symphony_core::ValidationIssue> {
+    issues
+        .iter()
+        .find(|issue| issue.blocking)
+        .or(issues.first())
+}
+
+async fn apply_settings_to_worker(state: &AppState, settings: &AppSettings) -> Result<(), String> {
+    state
+        .worker
+        .observe_settings_revision(settings.settings_revision)
+        .await;
+    if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
+        state
+            .worker
+            .stop_for_settings_revision(settings.settings_revision)
+            .await;
+    } else if live_reconfigure_allowed(settings) {
+        state
+            .worker
+            .reconfigure(worker_start_config(state, settings)?)
+            .await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -242,7 +264,7 @@ fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
 }
 
 fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
-    workflow_validation_issues(settings).is_empty()
+    settings.linear_api_key_error.is_none() && workflow_validation_issues(settings).is_empty()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
@@ -983,12 +1005,7 @@ async fn apply_retro_workflow_inner(
             return Err(error);
         }
     };
-    if live_reconfigure_allowed(&updated) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &updated)?)
-            .await;
-    }
+    apply_settings_to_worker(&state, &updated).await?;
     state
         .repo
         .update_retro_batch(
@@ -1806,6 +1823,23 @@ mod tests {
         };
         assert!(validate_workflow_settings(&broken).is_some());
         assert!(!workflow_setup_incomplete(&broken));
+    }
+
+    #[test]
+    fn blocking_validation_message_matches_the_field_that_needs_attention() {
+        let mut draft = AppSettings::default();
+        draft
+            .session_env
+            .insert("INVALID-NAME".into(), "value".into());
+        let issues = workflow_validation_issues(&draft);
+        assert!(!issues.first().unwrap().blocking);
+        let primary = primary_validation_issue(&issues).unwrap();
+        assert!(primary.blocking);
+        assert_eq!(
+            validate_workflow_settings(&draft).as_deref(),
+            Some(primary.message.as_str())
+        );
+        assert_eq!(primary.field, symphony_core::ValidationField::SessionEnv);
     }
 
     #[test]

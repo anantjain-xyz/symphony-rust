@@ -377,6 +377,15 @@ impl WorkerManager {
             .await
     }
 
+    /// Fence a committed draft even when it cannot become a runtime config.
+    pub async fn observe_settings_revision(&self, revision: u64) {
+        let mut inner = self.inner.lock().await;
+        if revision > inner.latest_settings_revision {
+            inner.latest_settings_revision = revision;
+            inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
+        }
+    }
+
     async fn reconfigure_with_tracker_preflight<F, Fut>(
         &self,
         config: WorkerStartConfig,
@@ -394,6 +403,19 @@ impl WorkerManager {
             // Fence committed settings order in every lifecycle state. A stopped
             // save must invalidate a delayed start as well as an older reconfigure.
             inner.latest_settings_revision = config.runtime.settings_revision();
+            // Absence is a removal intent, not a failed tracker replacement.
+            // Never retain an old in-memory credential after accepting it.
+            if config
+                .runtime
+                .workflow()
+                .front_matter
+                .tracker
+                .api_key
+                .trim()
+                .is_empty()
+            {
+                return inner.request_stop();
+            }
             let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
                 return inner.status();
             };
@@ -585,14 +607,20 @@ impl WorkerManager {
         self.inner.lock().await.request_stop()
     }
 
-    /// Apply credential-removal intent only if its commit is still current.
+    /// Only an adopted newer runtime can supersede credential-removal intent.
     /// The same lock fences delayed starts/reconfiguration and owns cancellation.
     pub async fn stop_for_settings_revision(&self, revision: u64) -> WorkerStatus {
         let mut inner = self.inner.lock().await;
-        if revision < inner.latest_settings_revision {
+        let active_revision = match &inner.lifecycle {
+            WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
+                worker.runtime_config.read().await.settings_revision
+            }
+            WorkerLifecycle::Stopped => 0,
+        };
+        if revision < active_revision {
             return inner.status();
         }
-        inner.latest_settings_revision = revision;
+        inner.latest_settings_revision = inner.latest_settings_revision.max(revision);
         inner.request_stop()
     }
 }
@@ -4348,6 +4376,189 @@ exit 13
         ));
         assert_eq!(manager.status().await.state, WorkerState::Stopped);
         assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn committed_incomplete_draft_fences_an_older_start_and_reconfiguration() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        // A saveable draft has no RunnableConfig; its revision still commits.
+        manager.observe_settings_revision(2).await;
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(old.clone()), |_, _, _| async {
+                panic!("superseded draft must not start")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        manager
+            .reconfigure_with_tracker_preflight(start_config(old), |_| async {
+                panic!("superseded reconfiguration must not reach preflight")
+            })
+            .await;
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+    }
+
+    #[tokio::test]
+    async fn credential_less_reconfiguration_stops_the_old_runtime_without_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stop = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("running worker")
+            };
+            worker.stop.clone()
+        };
+        let mut no_key = runtime_config(temp.path());
+        no_key.settings_revision = 3;
+        no_key.workflow.front_matter.tracker.api_key.clear();
+        let status = manager.reconfigure_with_tracker_preflight(start_config(no_key), |_| async {
+            panic!("credential absence must stop rather than retain an old key after preflight failure")
+        }).await;
+        assert_eq!(status.state, WorkerState::Stopping);
+        assert!(stop.is_cancelled());
+        manager.stop_for_settings_revision(2).await;
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn an_unapplied_newer_draft_does_not_supersede_credential_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        manager.observe_settings_revision(3).await;
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopping
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_commit_invalidates_preflight_already_in_flight() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        manager
+            .start_with_runner(
+                start_config(runtime_config(temp.path())),
+                |_, _, stop| async move {
+                    stop.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let shared = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("running worker")
+            };
+            worker.runtime_config.clone()
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        old.workflow.front_matter.tracker.api_key = "older-replacement".into();
+        let pending_manager = manager.clone();
+        let pending = tokio::spawn(async move {
+            pending_manager
+                .reconfigure_with_tracker_preflight(start_config(old), |_| async move {
+                    entered_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        manager.observe_settings_revision(2).await;
+        release_tx.send(()).unwrap();
+        pending.await.unwrap();
+        assert_eq!(shared.read().await.settings_revision, 0);
+        assert_eq!(
+            shared.read().await.workflow.front_matter.tracker.api_key,
+            "test-key"
+        );
+        manager.stop().await;
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn failed_newer_tracker_replacement_does_not_supersede_credential_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut initial = runtime_config(temp.path());
+        initial.settings_revision = 1;
+        manager
+            .start_with_runner(start_config(initial), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut rejected = runtime_config(temp.path());
+        rejected.settings_revision = 3;
+        rejected.workflow.front_matter.tracker.api_key = "rejected-key".into();
+        manager
+            .reconfigure_with_tracker_preflight(start_config(rejected), |_| async {
+                Err(TrackerError::Auth("invalid replacement".into()).into())
+            })
+            .await;
+        assert_eq!(manager.status().await.state, WorkerState::Running);
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopping
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 3);
+        wait_until_stopped(&manager).await;
     }
 
     #[tokio::test]
