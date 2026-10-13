@@ -237,11 +237,17 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   }, [draft, session, ensureController, onSave]);
 
   const handleRemoveKey = useCallback(async () => {
-    const linearApiKeySet = await onRemoveKey();
-    if (linearApiKeySet === undefined) return;
-    setLinearKey("");
-    setSettingsDraft({ ...(session.readDraft() ?? draft), linear_api_key_set: linearApiKeySet });
-  }, [draft, session, onRemoveKey, setLinearKey, setSettingsDraft]);
+    if (!(await onRemoveKey())) return;
+    // Read the reconciled session after the await, without replaying a captured
+    // draft or comparing it to the editor's old saved-settings closure.
+    const next = session.readDraft();
+    if (!next) return;
+    setDraft(next);
+    setLinearKeyState(session.readKey());
+    dirtyRef.current = session.isDirty();
+    onDraftChange(next, session.readKey(), next);
+    scheduleValidation({ id: session.advanceRevision(), settings: next });
+  }, [session, onRemoveKey, onDraftChange, scheduleValidation]);
 
   const handleResetPrompt = useCallback(async () => {
     const prompt = await onResetPrompt();
