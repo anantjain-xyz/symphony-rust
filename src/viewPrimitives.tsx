@@ -4,7 +4,12 @@ import { statusSlug } from "./format";
 import { RelativeTime } from "./RelativeTime";
 
 export function formSnapshot(settings: AppSettings) {
-  const { linear_api_key_set: _ignored, settings_revision: _revision, ...form } = settings;
+  const {
+    linear_api_key_set: _ignored,
+    linear_api_key_error: _credentialError,
+    settings_revision: _revision,
+    ...form
+  } = settings;
   return JSON.stringify(form);
 }
 

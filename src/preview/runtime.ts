@@ -79,6 +79,7 @@ const previewSettings: AppSettings = {
   opencode_agent: null,
   opencode_skip_permissions: true,
   linear_api_key_set: true,
+  linear_api_key_error: null,
 };
 
 const previewSkillsStatuses: Record<string, SkillsStatus> = {

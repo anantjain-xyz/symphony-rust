@@ -75,16 +75,25 @@ describe("shared view primitives", () => {
     expect(screen.getByText("In Progress").className).toBe("badge in-progress");
   });
 
-  it("omits the server-derived API-key flag from form snapshots", () => {
+  it("omits server-derived credential metadata and revision from form snapshots", () => {
     const settings = {
       prompt_template: "Prompt",
       repos: [],
       linear_api_key_set: false,
+      linear_api_key_error: null,
+      settings_revision: 0,
     } as unknown as AppSettings;
     const saved = formSnapshot(settings);
-    const withKey = formSnapshot({ ...settings, linear_api_key_set: true });
+    const withKey = formSnapshot({
+      ...settings,
+      linear_api_key_set: true,
+      linear_api_key_error: "Keychain unavailable",
+      settings_revision: 2,
+    });
 
     expect(saved).toBe(withKey);
     expect(saved).not.toContain("linear_api_key_set");
+    expect(saved).not.toContain("linear_api_key_error");
+    expect(saved).not.toContain("settings_revision");
   });
 });

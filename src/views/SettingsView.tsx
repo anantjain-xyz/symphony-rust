@@ -241,6 +241,7 @@ function SettingsFeature({
       {...editor}
       {...controller.viewer}
       {...repositories.state}
+      credentialError={(controller.saved ?? editor.settings).linear_api_key_error}
       settingsDirty={controller.dirty}
       workerRunning={worker.state === "running"}
       workerConfigError={worker.state === "running" && worker.last_error !== null}
@@ -265,6 +266,7 @@ function SettingsView({
   settings,
   setSettings,
   linearKey,
+  credentialError,
   setLinearKey,
   linearViewer,
   linearViewerLoading,
@@ -300,6 +302,7 @@ function SettingsView({
   settings: AppSettings;
   setSettings: (settings: AppSettings) => void;
   linearKey: string;
+  credentialError: string | null;
   setLinearKey: (value: string) => void;
   linearViewer: LinearViewerProfile | null;
   linearViewerLoading: boolean;
@@ -600,6 +603,11 @@ function SettingsView({
                   . It is stored in the OS keychain, never on disk.
                 </small>
               </label>
+              {credentialError ? (
+                <p className="banner error" role="alert">
+                  {credentialError}
+                </p>
+              ) : null}
               {settings.linear_api_key_set ? (
                 <button
                   type="button"

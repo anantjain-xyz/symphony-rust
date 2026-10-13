@@ -107,6 +107,9 @@ pub struct AppSettings {
     // Derived from the OS keychain; never user-edited.
     #[serde(default)]
     pub linear_api_key_set: bool,
+    /// Credential service availability is read metadata, never editable config.
+    #[serde(default)]
+    pub linear_api_key_error: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -154,6 +157,7 @@ impl Default for AppSettings {
             opencode_agent: None,
             opencode_skip_permissions: true,
             linear_api_key_set: false,
+            linear_api_key_error: None,
         }
     }
 }

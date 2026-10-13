@@ -121,6 +121,7 @@ export function useSettingsController(options: Options) {
     );
     // Only this operation may advance a descendant draft's concurrency token.
     const acknowledged = session.acknowledgeSave(source, saved);
+    if (session.readSaved() !== saved) return;
     setSettings(saved);
     let refreshedWorker: WorkerStatus | null = null;
     try {
@@ -149,7 +150,7 @@ export function useSettingsController(options: Options) {
       setSavedFlash(false);
       setSavedLiveConfigKept(false);
     }, 2500);
-    return acknowledged ? saved : undefined;
+    return acknowledged && session.readSaved() === saved ? saved : undefined;
   }
 
   async function testConnection(exactSettings: AppSettings, exactLinearKey: string) {
@@ -166,16 +167,10 @@ export function useSettingsController(options: Options) {
     const draft = session.readDraft() ?? settings;
     const source = draft ? session.captureDraftLineage(draft) : null;
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
-    // Key removal has no snapshot CAS. Adopt its revision only if it directly
-    // follows this draft; a skipped revision means another write changed its base.
-    if (source && fromDisk.settings_revision === source.settingsRevision + 1) {
-      session.acknowledgeSave(source, fromDisk);
-    }
-    session.acceptSaved(fromDisk);
+    if (!session.completeKeyRemoval(source, fromDisk)) return false;
     setSettings(fromDisk);
-    session.replaceKey("");
     setTrackerTest(null);
-    return fromDisk.linear_api_key_set;
+    return true;
   }
 
   async function resetPrompt() {
@@ -199,8 +194,7 @@ export function useSettingsController(options: Options) {
     viewer: { linearViewer, linearViewerLoading, linearViewerError, trackerTest },
     session,
     acceptSaved(next: AppSettings) {
-      session.acceptSaved(next);
-      setSettings(next);
+      if (session.acceptSaved(next)) setSettings(next);
     },
     draftChanged: handleSettingsDraftChange,
     acceptValidation: setValidation,

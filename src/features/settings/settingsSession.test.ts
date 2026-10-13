@@ -55,4 +55,84 @@ describe("settings draft provenance", () => {
       prompt_template: "Edit of the replacement draft",
     });
   });
+
+  it("adopts the fresh snapshot when removing a replacement key leaves no form edits", () => {
+    const session = createSettingsSession(vi.fn(), vi.fn());
+    session.acceptSaved(settings(4));
+    session.replaceKey("replacement-key");
+    session.setDirty(true);
+    const source = session.captureDraftLineage(session.readDraft()!);
+    const removed = { ...settings(6, "Another writer's prompt"), linear_api_key_set: false };
+
+    expect(session.completeKeyRemoval(source, removed)).toBe(true);
+    expect(session.readDraft()).toEqual(removed);
+    expect(session.readKey()).toBe("");
+    expect(session.isDirty()).toBe(false);
+  });
+
+  it("preserves actual form edits at their old revision after a skipped removal revision", () => {
+    const session = sessionWithDraft();
+    session.replaceKey("replacement-key");
+    const source = session.captureDraftLineage(session.readDraft()!);
+    const removed = { ...settings(6, "Another writer's prompt"), linear_api_key_set: false };
+
+    expect(session.completeKeyRemoval(source, removed)).toBe(true);
+    expect(session.readDraft()).toMatchObject({
+      settings_revision: 4,
+      prompt_template: "Edited prompt",
+      linear_api_key_set: false,
+      linear_api_key_error: null,
+    });
+    expect(session.readKey()).toBe("");
+    expect(session.isDirty()).toBe(true);
+  });
+
+  it("ignores a removal response older than an already published snapshot", () => {
+    const session = createSettingsSession(vi.fn(), vi.fn());
+    session.acceptSaved(settings(4));
+    const source = session.captureDraftLineage(session.readDraft()!);
+    const newer = { ...settings(6, "Newer saved prompt"), linear_api_key_set: true };
+    session.acceptSaved(newer);
+
+    expect(session.completeKeyRemoval(source, { ...settings(5), linear_api_key_set: false })).toBe(
+      false,
+    );
+    expect(session.readDraft()).toEqual(newer);
+    expect(session.isDirty()).toBe(false);
+  });
+
+  it("refreshes credential metadata only for an acknowledged save lineage", () => {
+    const session = sessionWithDraft();
+    const submitted = session.readDraft()!;
+    const source = session.captureDraftLineage(submitted);
+    const saved = {
+      ...submitted,
+      settings_revision: 5,
+      linear_api_key_error: "Keychain unavailable",
+    };
+
+    expect(session.acknowledgeSave(source, saved)).toBe(true);
+    expect(session.readDraft()?.linear_api_key_error).toBe("Keychain unavailable");
+    session.acceptSaved({ ...saved, settings_revision: 6, linear_api_key_error: null });
+    expect(session.readDraft()?.linear_api_key_error).toBe("Keychain unavailable");
+    expect(session.readDraft()?.settings_revision).toBe(5);
+  });
+
+  it("keeps the newer saved baseline when an older save or reload finishes late", () => {
+    const session = sessionWithDraft();
+    const source = session.captureDraftLineage(session.readDraft()!);
+    const newer = settings(6, "A newer published workflow");
+    session.acceptSaved(newer);
+    const lateSave = settings(5, "Edited prompt");
+
+    expect(session.acknowledgeSave(source, lateSave)).toBe(false);
+    expect(session.readSaved()).toBe(newer);
+    expect(session.acceptSaved(lateSave)).toBe(false);
+    expect(session.readSaved()).toBe(newer);
+    expect(session.readDraft()).toMatchObject({
+      settings_revision: 4,
+      prompt_template: "Edited prompt",
+    });
+    expect(session.completeKeyRemoval(source, lateSave)).toBe(false);
+  });
 });
