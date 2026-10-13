@@ -509,6 +509,18 @@ async fn shared_runtime_validation_rejects_unrunnable_prompt_application_before_
         .await
         .unwrap();
     assert_eq!(batches[0].state, BatchState::Failed);
+    assert!(!fixture.service.has_in_progress_batches().await.unwrap());
+    fixture
+        .service
+        .delete(fixture.retro.id.clone())
+        .await
+        .unwrap();
+    assert!(fixture
+        .service
+        .detail(fixture.retro.id.clone())
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]

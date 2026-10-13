@@ -468,13 +468,6 @@ impl RetroService {
             .collect::<Vec<_>>();
         let mut updated = settings;
         updated.prompt_template = integrate_retro_guidance(&updated.prompt_template, &guidance);
-        if let Err(error) = runtime.worker_config(&updated) {
-            self.repo
-                .update_retro_batch(&batch.id, BatchState::Failed, None, Some(&error), None)
-                .await
-                .map_err(|err| err.to_string())?;
-            return Err(error);
-        }
         // Slow source validation happens outside the settings effects gate.
         // Recheck the exact revision and refresh credentials at admission.
         let _effects = self.settings.commit_effects().await;
@@ -493,6 +486,29 @@ impl RetroService {
             }
         };
         let runtime = runtime.with_credential(snapshot.credential);
+        // Retain the validated configuration across the durable commit. The
+        // settings CAS advances exactly one revision; a conflict or exhausted
+        // revision fails below without ever applying this prepared value.
+        let prepared = updated
+            .settings_revision
+            .checked_add(1)
+            .ok_or_else(|| "Settings revision limit reached.".to_string())
+            .and_then(|settings_revision| {
+                runtime.worker_config(&AppSettings {
+                    settings_revision,
+                    ..updated.clone()
+                })
+            });
+        let prepared = match prepared {
+            Ok(config) => config,
+            Err(error) => {
+                self.repo
+                    .update_retro_batch(&batch.id, BatchState::Failed, None, Some(&error), None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                return Err(error);
+            }
+        };
         let result = self
             .settings
             .apply_prompt(
@@ -522,9 +538,7 @@ impl RetroService {
         } else if updated.linear_api_key_error.is_none() && runtime.api_key.is_some() {
             // Post-commit availability can change independently of the admitted
             // snapshot. Never infer a captured key from newer response metadata.
-            self.worker
-                .reconfigure(runtime.worker_config(&updated)?)
-                .await;
+            self.worker.reconfigure(prepared).await;
         } else {
             self.worker
                 .report_configuration_error(
