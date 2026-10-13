@@ -19,6 +19,8 @@ use symphony_worker::{
 };
 use tauri::{Emitter, Listener, Manager, State};
 
+#[cfg(desktop)]
+mod application_instance;
 mod path_env;
 mod projections;
 mod retro;
@@ -906,7 +908,14 @@ pub fn run() {
     // agent processes that need user-installed tools. Overlay the login-shell
     // PATH before Tauri spawns threads that read the environment.
     let path_fix = path_env::fix();
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Register first: a normal duplicate launch activates the existing window
+    // and exits before application setup can touch shared runtime state.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        application_instance::activate_main_window(app);
+    }));
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -914,11 +923,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.menu(build_app_menu).on_menu_event(|app, event| {
         if event.id() == CHECK_FOR_UPDATES_MENU_ID {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            application_instance::activate_main_window(app);
             let bridge = app.state::<UpdateCheckBridge>();
             let delivery = bridge.queue_request();
             deliver_update_check_request(app, &bridge, delivery);
@@ -926,6 +931,17 @@ pub fn run() {
     });
     builder
         .setup(move |app| {
+            let app_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&app_dir)?;
+            // Plugin IPC can fail open. The stable app-data lease is the final
+            // admission gate, held in app state until this process terminates.
+            #[cfg(desktop)]
+            match application_instance::InstanceLease::acquire(&app_dir)? {
+                Some(lease) => {
+                    app.manage(lease);
+                }
+                None => std::process::exit(0),
+            }
             let handle = app.handle().clone();
             let ready_handle = handle.clone();
             app.listen("up:r", move |_| {
@@ -939,8 +955,6 @@ pub fn run() {
                 let delivery = bridge.acknowledge();
                 deliver_update_check_request(&acknowledged_handle, &bridge, delivery);
             });
-            let app_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&app_dir)?;
             let _ = keyring::use_native_store(false);
             init_tracing(&app_dir);
             match &path_fix {
