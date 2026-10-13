@@ -26,6 +26,7 @@ import type {
   ValidationResult,
   WorkerStatus,
 } from "./bindings";
+import { useDashboardController } from "./features/dashboard/useDashboardController";
 import { retroRepoBatchState } from "./views/RetroView";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -478,6 +479,63 @@ describe("App settings", () => {
     });
   });
 
+  it("keeps an accepted worker status when a refresh started before Save settles late", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const healthy: WorkerStatus = { state: "running", started_at: null, last_error: null };
+    const staleRead = deferred<WorkerStatus>();
+    const nextRead = deferred<WorkerStatus>();
+    const baseInvoke = dashboardInvoke({ settings, workerStatus: healthy });
+    let workerReads = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_worker_status") {
+        workerReads += 1;
+        if (workerReads === 2) return staleRead.promise;
+        if (workerReads === 3) return nextRead.promise;
+      }
+      return baseInvoke(command, args);
+    });
+    const options: Parameters<typeof useDashboardController>[0] = {
+      runtimeAvailable: true,
+      view: "settings",
+      settings,
+      navigate: vi.fn(),
+      run: async (operation) => operation(),
+      reportError: vi.fn(),
+      acceptSettings: vi.fn(),
+      initializeRepositories: vi.fn(),
+      invalidateWorkflow: vi.fn(),
+    };
+    const { result } = renderHook(() => useDashboardController(options));
+    await waitFor(() => expect(result.current.bootstrap.settled).toBe(true));
+    let refresh!: Promise<void>;
+    act(() => {
+      refresh = result.current.resources.retry("worker");
+    });
+    await waitFor(() => expect(workerReads).toBe(2));
+    const skipped: WorkerStatus = {
+      ...healthy,
+      last_error: "Settings saved, but credential access prevented worker update.",
+    };
+    act(() => result.current.acceptWorker(skipped));
+    await act(async () => {
+      staleRead.resolve({ ...healthy });
+      await refresh;
+    });
+    expect(result.current.data.worker).toBe(skipped);
+
+    act(() => {
+      refresh = result.current.resources.retry("worker");
+    });
+    await waitFor(() => expect(workerReads).toBe(3));
+    const reconfigured = { ...healthy };
+    await act(async () => {
+      nextRead.resolve(reconfigured);
+      await refresh;
+    });
+    expect(result.current.data.worker).toBe(reconfigured);
+  });
+
   it("preserves an unsaved prompt across Settings navigation", async () => {
     tauriMocks.runtimeAvailable = true;
     tauriMocks.invoke.mockImplementation(dashboardInvoke({ settings: testSettings() }));
@@ -888,66 +946,94 @@ describe("App settings", () => {
     });
   });
 
-  it("keeps a dirty draft's base revision when an unrelated Retro completes", async () => {
-    tauriMocks.runtimeAvailable = true;
-    const { previewRuntime } = await import("./preview/runtime");
-    const settings = testSettings();
-    const retro = {
-      ...previewRuntime.retroDetail,
-      suggestions: previewRuntime.retroDetail.suggestions.map((suggestion) => ({
-        ...suggestion,
-        decision: suggestion.target_type === "prompt" ? "accepted" : "rejected",
-      })),
-    };
-    const apply = deferred<RetroChangeBatch>();
-    let saved = settings;
-    const baseInvoke = dashboardInvoke({ settings });
-    tauriMocks.invoke.mockImplementation((command, args) => {
-      if (command === "load_settings") return saved;
-      if (command === "list_retros") return [retro.row];
-      if (command === "get_retro_detail") return retro;
-      if (command === "apply_retro_workflow") return apply.promise;
-      if (command === "save_settings")
-        return Promise.reject(new Error("Settings changed; reload before saving."));
-      return baseInvoke(command, args);
-    });
-    const { container } = render(<App />);
-    await openView("Retro");
-    fireEvent.click(await screen.findByRole("button", { name: /Open retro from/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /Apply default workflow/ }));
-    await waitFor(() => expect(commandCount("apply_retro_workflow")).toBe(1));
-    await openSettings();
-    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
-      target: { value: "Unsaved draft from the original workflow" },
-    });
-    saved = { ...settings, settings_revision: 1, prompt_template: "Retro's newer workflow" };
-    apply.resolve({
-      id: "batch-provenance",
-      retro_id: retro.row.id,
-      kind: "workflow_update",
-      repo_name: null,
-      repo_url: null,
-      base_ref: null,
-      state: "completed",
-      progress: null,
-      error: null,
-      pr_url: null,
-      created_at: retro.row.created_at,
-      completed_at: retro.row.created_at,
-    });
-    await waitFor(() => expect(commandCount("load_settings")).toBe(2));
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
-    const request = tauriMocks.invoke.mock.calls.find(
-      ([command]) => command === "save_settings",
-    )![1].request;
-    expect(request.settings.settings_revision).toBe(0);
-    expect(request.settings.prompt_template).toBe("Unsaved draft from the original workflow");
-    expect(await screen.findByText(/Settings changed; reload before saving/)).toBeTruthy();
-  });
+  it.each([false, true])(
+    "reconciles a Retro revision only when its form matches the dirty draft: %s",
+    async (matchesDraft) => {
+      tauriMocks.runtimeAvailable = true;
+      const { previewRuntime } = await import("./preview/runtime");
+      const settings = testSettings();
+      const retro = {
+        ...previewRuntime.retroDetail,
+        suggestions: previewRuntime.retroDetail.suggestions.map((suggestion) => ({
+          ...suggestion,
+          decision: suggestion.target_type === "prompt" ? "accepted" : "rejected",
+        })),
+      };
+      const apply = deferred<RetroChangeBatch>();
+      let saved = settings;
+      const baseInvoke = dashboardInvoke({ settings });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "load_settings") return saved;
+        if (command === "list_retros") return [retro.row];
+        if (command === "get_retro_detail") return retro;
+        if (command === "apply_retro_workflow") return apply.promise;
+        if (command === "save_settings" && !matchesDraft)
+          return Promise.reject(new Error("Settings changed; reload before saving."));
+        return baseInvoke(command, args);
+      });
+      const { container } = render(<App />);
+      await openView("Retro");
+      fireEvent.click(await screen.findByRole("button", { name: /Open retro from/ }));
+      fireEvent.click(await screen.findByRole("button", { name: /Apply default workflow/ }));
+      await waitFor(() => expect(commandCount("apply_retro_workflow")).toBe(1));
+      await openSettings();
+      fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+        target: { value: "Unsaved draft from the original workflow" },
+      });
+      saved = {
+        ...settings,
+        settings_revision: 1,
+        prompt_template: matchesDraft
+          ? "Unsaved draft from the original workflow"
+          : "Retro's newer workflow",
+      };
+      apply.resolve({
+        id: "batch-provenance",
+        retro_id: retro.row.id,
+        kind: "workflow_update",
+        repo_name: null,
+        repo_url: null,
+        base_ref: null,
+        state: "completed",
+        progress: null,
+        error: null,
+        pr_url: null,
+        created_at: retro.row.created_at,
+        completed_at: retro.row.created_at,
+      });
+      await waitFor(() => expect(commandCount("load_settings")).toBe(2));
+      if (matchesDraft) {
+        await waitFor(() =>
+          expect(
+            screen.getByRole("button", { name: "Save" }).getAttribute("disabled"),
+          ).not.toBeNull(),
+        );
+        const prompt = container.querySelector(".prompt-editor textarea")!;
+        fireEvent.change(prompt, { target: { value: "Temporary edit" } });
+        fireEvent.change(prompt, { target: { value: saved.prompt_template } });
+        expect(
+          screen.getByRole("button", { name: "Save" }).getAttribute("disabled"),
+        ).not.toBeNull();
+        fireEvent.change(prompt, { target: { value: "Next edit after matching Retro" } });
+      }
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+      const request = tauriMocks.invoke.mock.calls.find(
+        ([command]) => command === "save_settings",
+      )![1].request;
+      expect(request.settings.settings_revision).toBe(matchesDraft ? 1 : 0);
+      expect(request.settings.prompt_template).toBe(
+        matchesDraft
+          ? "Next edit after matching Retro"
+          : "Unsaved draft from the original workflow",
+      );
+      if (!matchesDraft)
+        expect(await screen.findByText(/Settings changed; reload before saving/)).toBeTruthy();
+    },
+  );
 
   it.each([1, 2])(
     "adopts key-removal revision %s only when it directly follows the dirty draft",

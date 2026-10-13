@@ -40,6 +40,29 @@ describe("settings draft provenance", () => {
     expect(session.isDirty()).toBe(true);
   });
 
+  it.each(["", "replacement-key"])(
+    "adopts a form-equivalent external revision while preserving key input %s",
+    (key) => {
+      const session = sessionWithDraft();
+      session.replaceKey(key);
+      const external = {
+        ...settings(5, "Edited prompt"),
+        linear_api_key_error: "Keychain unavailable",
+      };
+      expect(session.acceptSaved(external)).toBe(true);
+      expect(session.readDraft()).toBe(external);
+      expect(session.readKey()).toBe(key);
+      expect(session.isDirty()).toBe(key !== "");
+
+      const removal = session.captureKeyRemoval(external);
+      session.replaceKey("newer-key");
+      session.acceptSaved({ ...external, settings_revision: 6 });
+      session.completeKeyRemoval(removal, { ...external, settings_revision: 7 });
+      expect(session.readKey()).toBe("newer-key");
+      expect(session.isDirty()).toBe(true);
+    },
+  );
+
   it("recomputes dirtiness when an in-flight save changes the saved baseline", () => {
     const session = sessionWithDraft();
     const submitted = session.readDraft()!;

@@ -78,6 +78,7 @@ struct Fixture {
     credentials: Arc<FixtureCredentials>,
     settings_path: PathBuf,
     settings: AppSettings,
+    tracker_endpoint: String,
     tracker: JoinHandle<()>,
 }
 
@@ -133,8 +134,9 @@ impl Fixture {
             let _ = connected.send(());
             std::future::pending::<()>().await;
         });
+        let tracker_endpoint = format!("http://{address}/graphql");
         let mut workflow = workflow_from_settings(&settings, Some(OLD_KEY));
-        workflow.front_matter.tracker.endpoint = format!("http://{address}/graphql");
+        workflow.front_matter.tracker.endpoint = tracker_endpoint.clone();
         state
             .worker
             .start(WorkerStartConfig {
@@ -165,6 +167,7 @@ impl Fixture {
             credentials,
             settings_path,
             settings,
+            tracker_endpoint,
             tracker,
         }
     }
@@ -599,4 +602,232 @@ async fn migration_load_stops_stale_runtime_after_post_rename_sync_error() {
         fixture.credentials.key.lock().unwrap().as_deref(),
         Some(OLD_KEY)
     );
+}
+
+#[tokio::test]
+async fn committed_retro_prompt_finishes_failed_batch_when_runtime_refresh_fails() {
+    for disconnect_caller in [false, true] {
+        let fixture = Fixture::running().await;
+        let retro = fixture
+            .state
+            .repo
+            .create_retro("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z")
+            .await
+            .unwrap();
+        fixture
+            .state
+            .repo
+            .finish_retro(&retro.id, "{}", 0, 0)
+            .await
+            .unwrap();
+        let suggestion = RetroSuggestionRow {
+            id: Uuid::new_v4().to_string(),
+            retro_id: retro.id.clone(),
+            repo_name: "widgets".into(),
+            repo_url: Some("https://example.invalid/widgets.git".into()),
+            finding_index: 0,
+            target_type: symphony_core::SuggestionTarget::Prompt,
+            target_id: "default-prompt".into(),
+            target_path: "Settings → Prompt template".into(),
+            title: "Clarify completion".into(),
+            body: "Preserve the reviewed prompt update.".into(),
+            rationale: "Test reviewed workflow continuation.".into(),
+            confidence: symphony_core::SuggestionConfidence::High,
+            guidance: "Verify before reporting completion.".into(),
+            before_content: None,
+            after_content: None,
+            unified_diff: None,
+            base_ref: Some("saved-prompt".into()),
+            base_hash: Some(prompt_revision(&fixture.settings)),
+            proposal_status: symphony_core::ProposalState::Ready,
+            proposal_error: None,
+            decision: symphony_core::SuggestionDecision::Accepted,
+            decided_at: Some(now_iso()),
+            created_at: now_iso(),
+        };
+        fixture
+            .state
+            .repo
+            .insert_retro_suggestions(std::slice::from_ref(&suggestion))
+            .await
+            .unwrap();
+        let batch = RetroBatchRow {
+            id: Uuid::new_v4().to_string(),
+            retro_id: retro.id.clone(),
+            kind: symphony_core::BatchKind::WorkflowUpdate,
+            repo_name: None,
+            repo_url: None,
+            base_ref: suggestion.base_ref.clone(),
+            state: symphony_core::BatchState::Running,
+            progress: Some("Applying reviewed prompt.".into()),
+            error: None,
+            pr_url: None,
+            created_at: now_iso(),
+            completed_at: None,
+        };
+        assert_eq!(
+            fixture
+                .state
+                .repo
+                .reserve_retro_batch(&batch, std::slice::from_ref(&suggestion.id))
+                .await
+                .unwrap(),
+            RetroBatchReservation::Created
+        );
+        assert!(fixture
+            .state
+            .repo
+            .has_in_progress_retro_batches()
+            .await
+            .unwrap());
+        assert!(!fixture.state.repo.delete_retro(&retro.id).await.unwrap());
+
+        let (committed, observed) = oneshot::channel();
+        let (release, continue_refresh) = oneshot::channel();
+        let state = fixture.state.clone();
+        let settings = fixture.settings.clone();
+        let operation_batch = batch.clone();
+        let caller = tokio::spawn(settings_store::finish_operation(async move {
+            let _effects = state.settings_store.commit_effects().await;
+            let committed_settings = state
+                .settings_store
+                .apply_prompt(
+                    settings.settings_revision,
+                    prompt_revision(&settings),
+                    "Durably saved reviewed prompt.".into(),
+                )
+                .await?;
+            finish_settings_recovery(&state).await;
+            committed.send(()).unwrap();
+            continue_refresh.await.unwrap();
+            finish_retro_workflow_after_prompt_save(&state, &operation_batch, &committed_settings)
+                .await
+        }));
+        observed.await.unwrap();
+        let durable = std::fs::read(&fixture.settings_path).unwrap();
+        let saved: AppSettings = serde_json::from_slice(&durable).unwrap();
+        assert_eq!(saved.settings_revision, 11);
+        assert_eq!(saved.prompt_template, "Durably saved reviewed prompt.");
+        // A malformed pending recovery record makes the real runtime snapshot
+        // fail after the successful commit, without any source Git or Linear IO.
+        let marker = fixture.settings_path.with_extension("json.transaction");
+        std::fs::write(&marker, b"malformed pending transaction").unwrap();
+        if disconnect_caller {
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+            let _finished = fixture.state.settings_store.commit_effects().await;
+        } else {
+            release.send(()).unwrap();
+            let error = caller.await.unwrap().unwrap_err();
+            assert!(error.contains("Workflow prompt saved; runtime refresh failed."));
+            assert!(error.contains("unreadable"));
+        }
+
+        fixture.assert_stopped().await;
+        assert!(matches!(
+            fixture
+                .state
+                .worker
+                .start(worker_start_config(&fixture.state, &fixture.settings, OLD_KEY).unwrap())
+                .await,
+            Err(symphony_worker::WorkerError::StaleSettings {
+                revision: 10,
+                latest_revision: 11,
+            })
+        ));
+        let batches = fixture
+            .state
+            .repo
+            .list_retro_batches(&retro.id)
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].id, batch.id);
+        assert_eq!(batches[0].state, symphony_core::BatchState::Failed);
+        assert_eq!(
+            batches[0].progress.as_deref(),
+            Some("Workflow prompt saved; runtime refresh failed.")
+        );
+        assert!(batches[0].error.as_deref().unwrap().contains("unreadable"));
+        assert!(batches[0].completed_at.is_some());
+        assert!(!fixture
+            .state
+            .repo
+            .has_in_progress_retro_batches()
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read(&fixture.settings_path).unwrap(), durable);
+        assert!(marker.is_file());
+        assert!(fixture.state.repo.delete_retro(&retro.id).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn incomplete_workflow_save_reports_skipped_update_until_successful_refresh() {
+    let fixture = Fixture::running().await;
+    let original_status = fixture.state.worker.status().await;
+    assert!(original_status.last_error.is_none());
+    let mut incomplete = fixture.settings.clone();
+    incomplete.repos.clear();
+    assert!(!live_reconfigure_allowed(&incomplete));
+    let saved = save_settings_owned(
+        fixture.state.clone(),
+        SaveSettingsRequest {
+            settings: incomplete,
+            linear_api_key: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.settings_revision, 11);
+    assert!(saved.linear_api_key_error.is_none());
+    let skipped = fixture.state.worker.status().await;
+    assert_eq!(skipped.state, symphony_worker::WorkerState::Running);
+    assert_eq!(skipped.started_at, original_status.started_at);
+    assert_eq!(
+        skipped.last_error.as_deref(),
+        Some("Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.")
+    );
+    load_settings_from_disk(&fixture.state).await.unwrap();
+    assert_eq!(
+        fixture.state.worker.status().await.last_error,
+        skipped.last_error
+    );
+
+    let mut complete = saved;
+    complete.repos = vec![symphony_core::RepoConfig {
+        name: "widgets".into(),
+        url: "https://example.invalid/widgets.git".into(),
+        install_cmd: None,
+        is_default: true,
+        skills_marked_installed: false,
+    }];
+    assert!(live_reconfigure_allowed(&complete));
+    let _effects = fixture.state.settings_store.commit_effects().await;
+    let complete = fixture
+        .state
+        .settings_store
+        .save(complete, None)
+        .await
+        .unwrap();
+    let mut refresh = worker_start_config(&fixture.state, &complete, OLD_KEY).unwrap();
+    // Keep the fixture's admitted tracker identity, so this actual worker
+    // reconfiguration needs no external preflight or native credential access.
+    let mut workflow = refresh.runtime.workflow().clone();
+    workflow.front_matter.tracker.endpoint = fixture.tracker_endpoint.clone();
+    refresh.runtime = symphony_core::RunnableConfig::new(
+        complete.settings_revision,
+        workflow,
+        complete.repos.clone(),
+        complete.session_env.clone(),
+    )
+    .unwrap();
+    let refreshed = fixture.state.worker.reconfigure(refresh).await;
+    assert_eq!(refreshed.state, symphony_worker::WorkerState::Running);
+    assert_eq!(refreshed.started_at, original_status.started_at);
+    assert!(refreshed.last_error.is_none());
+    assert!(fixture.state.worker.status().await.last_error.is_none());
+    fixture.state.worker.stop().await;
+    fixture.assert_stopped().await;
 }

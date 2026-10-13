@@ -175,8 +175,8 @@ export function useSettingsEditor(controller: SettingsController, runtimeAvailab
   }, [session, ensureController, savePending, savedSettings]);
 
   useEffect(() => {
-    // The session preserves draft provenance. External saved settings never
-    // advance a dirty draft; acknowledgements of its own operations do.
+    // The session advances a draft only for its own completed operation or a
+    // saved form that exactly matches it; unrelated edits retain their base.
     const next = session.readDraft() ?? savedSettings;
     if (next !== draft) setDraft(next);
   }, [draft, session, savedSettings]);

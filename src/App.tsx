@@ -154,7 +154,7 @@ function App() {
     runtimeAvailable,
     run: actions.run,
     acceptWorker: (status): void => dashboard.acceptWorker(status),
-    readWorkerState: (): import("./bindings").WorkerStatus["state"] => dashboard.data.worker.state,
+    readWorkerStatus: (): import("./bindings").WorkerStatus => dashboard.data.worker,
     refreshRepositories: (target): void => repositories.queueRefresh(target),
   });
   const repositories = useRepositoryReadiness({
