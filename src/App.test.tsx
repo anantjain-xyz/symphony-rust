@@ -822,6 +822,35 @@ describe("App settings", () => {
     expect(saveCalls[1][1].request.settings.prompt_template).toBe("Newer unsaved revision");
   });
 
+  it("keeps a reverted draft saveable after the in-flight value becomes the saved baseline", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = testSettings();
+    const save = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "save_settings" ? save.promise : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Submitted B" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    fireEvent.change(prompt, { target: { value: settings.prompt_template } });
+    save.resolve({ ...settings, settings_revision: 1, prompt_template: "Submitted B" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+    expect(prompt.value).toBe(settings.prompt_template);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(2));
+    const calls = tauriMocks.invoke.mock.calls.filter(([command]) => command === "save_settings");
+    expect(calls[1][1].request.settings).toMatchObject({
+      settings_revision: 1,
+      prompt_template: settings.prompt_template,
+    });
+  });
+
   it("keeps a dirty draft's base revision when an unrelated Retro completes", async () => {
     tauriMocks.runtimeAvailable = true;
     const { previewRuntime } = await import("./preview/runtime");
@@ -3046,7 +3075,7 @@ describe("App settings", () => {
     const { container } = render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(await screen.findByText(/this configuration is incomplete/)).toBeTruthy();
+    expect(await screen.findByText(/Finish any incomplete setup/)).toBeTruthy();
     expect(
       screen.queryByText(/Saved settings apply to future dispatches without restarting/),
     ).toBeNull();
@@ -3068,6 +3097,40 @@ describe("App settings", () => {
     expect(container.querySelector(".topbar")?.textContent).not.toContain(
       "Saved; future runs use changes",
     );
+  });
+
+  it("reports a saved configuration kept out of a running worker by an unavailable keyring", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const baseInvoke = dashboardInvoke({
+      settings,
+      workerStatus: { state: "running", started_at: "2026-01-01T00:00:00.000Z", last_error: null },
+    });
+    tauriMocks.invoke.mockImplementation((command, args) =>
+      command === "save_settings"
+        ? {
+            ...args.request.settings,
+            settings_revision: 1,
+            linear_api_key_set: false,
+            linear_api_key_error: "The OS credential store is unavailable. Unlock it and retry.",
+          }
+        : baseInvoke(command, args),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    fireEvent.change(await screen.findByLabelText(/^Hook timeout/, { selector: "input" }), {
+      target: { value: "45" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(container.querySelector(".topbar")?.textContent).toContain(
+        "Saved; worker kept previous config",
+      ),
+    );
+    expect(
+      screen.queryByText(/Saved settings apply to future dispatches without restarting/),
+    ).toBeNull();
+    expect(await screen.findByText(/restart the worker to apply the saved settings/)).toBeTruthy();
   });
 
   it("shows actionable agent skills install guidance in preview settings", async () => {

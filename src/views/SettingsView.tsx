@@ -249,7 +249,8 @@ function SettingsFeature({
         worker.state === "running" &&
         ((controller.validation?.workflow_ok === false &&
           !controller.validation.workflow_blocking) ||
-          (controller.savedFlash && controller.savedLiveConfigKept))
+          controller.savedLiveConfigKept ||
+          controller.saved?.linear_api_key_error != null)
       }
       activeRunCount={activeRunCount}
       busy={busy}
@@ -497,15 +498,17 @@ function SettingsView({
           <span>
             {workerConfigError
               ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
-              : liveReconfigureSkipped
-                ? "Settings save to disk, but this configuration is incomplete, so the live worker keeps its previous runtime config until setup is runnable."
-                : `Saved settings apply to future dispatches without restarting the worker. ${
-                    activeRunCount > 0
-                      ? `${activeRunCount} active ${
-                          activeRunCount === 1 ? "run keeps" : "runs keep"
-                        } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
-                      : "No active runs are using an older config."
-                  }`}
+              : liveReconfigureSkipped && credentialError
+                ? "Settings save to disk, but credential access is unavailable, so the worker keeps its previous configuration. Unlock the credential store, then restart the worker to apply the saved settings."
+                : liveReconfigureSkipped
+                  ? "Settings save to disk, but the worker keeps its previous configuration. Finish any incomplete setup, then restart the worker to apply the saved settings."
+                  : `Saved settings apply to future dispatches without restarting the worker. ${
+                      activeRunCount > 0
+                        ? `${activeRunCount} active ${
+                            activeRunCount === 1 ? "run keeps" : "runs keep"
+                          } the config ${activeRunCount === 1 ? "it" : "they"} started with.`
+                        : "No active runs are using an older config."
+                    }`}
           </span>
         </div>
       ) : null}
