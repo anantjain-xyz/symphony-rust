@@ -116,7 +116,8 @@ impl SettingsStore {
                 store.credentials.as_ref(),
             ) {
                 Ok(crate::settings_transaction::RecoveryOutcome::Ready) => None,
-                Ok(crate::settings_transaction::RecoveryOutcome::Recovered { .. }) => {
+                Ok(crate::settings_transaction::RecoveryOutcome::Recovered { .. })
+                | Ok(crate::settings_transaction::RecoveryOutcome::Superseded) => {
                     // Record before releasing the blocking task's ownership.
                     // Cancellation of its async waiter cannot erase this effect.
                     store.recovery_stop.store(true, Ordering::Release);

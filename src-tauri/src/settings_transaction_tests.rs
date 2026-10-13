@@ -257,7 +257,7 @@ fn a_newer_file_supersedes_an_old_marker_without_touching_credentials() {
         .credentials
         .unavailable
         .store(true, Ordering::SeqCst);
-    fixture.recover_twice(RecoveryOutcome::Ready);
+    fixture.recover_twice(RecoveryOutcome::Superseded);
     assert_eq!(fixture.settings().settings_revision, 12);
     assert_eq!(fixture.settings().polling_interval_ms, 3000);
     assert_eq!(fixture.credentials.reads.load(Ordering::SeqCst), 0);

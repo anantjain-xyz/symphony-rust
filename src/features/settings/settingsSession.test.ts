@@ -40,6 +40,21 @@ describe("settings draft provenance", () => {
     expect(session.isDirty()).toBe(true);
   });
 
+  it("recomputes dirtiness when an in-flight save changes the saved baseline", () => {
+    const session = sessionWithDraft();
+    const submitted = session.readDraft()!;
+    const source = session.captureDraftLineage(submitted);
+    session.replaceDraft(settings(4));
+    session.setDirty(false);
+
+    expect(session.acknowledgeSave(source, { ...submitted, settings_revision: 5 })).toBe(true);
+    expect(session.readDraft()).toMatchObject({
+      settings_revision: 5,
+      prompt_template: "Saved prompt",
+    });
+    expect(session.isDirty()).toBe(true);
+  });
+
   it("rejects an acknowledgement after its draft lineage was replaced", () => {
     const session = sessionWithDraft();
     const submitted = session.readDraft()!;
@@ -129,6 +144,7 @@ describe("settings draft provenance", () => {
       settings_revision: 5,
       linear_api_key_error: "Keychain unavailable",
     };
+    session.replaceDraft({ ...submitted, prompt_template: "Another edit while saving" });
 
     expect(session.acknowledgeSave(source, saved)).toBe(true);
     expect(session.readDraft()?.linear_api_key_error).toBe("Keychain unavailable");

@@ -37,6 +37,9 @@ export function useSettingsController(options: Options) {
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const linearViewerSeq = useRef(0);
+  useEffect(() => {
+    if (options.readWorkerState() !== "running") setSavedLiveConfigKept(false);
+  }, [options.readWorkerState]);
   const refreshLinearViewer = useCallback(
     (exactSettings: AppSettings, exactKey: string) => {
       if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
@@ -134,7 +137,9 @@ export function useSettingsController(options: Options) {
     const liveWorkerState = refreshedWorker?.state ?? context.current.readWorkerState();
     setSavedLiveConfigKept(
       liveWorkerState === "running" &&
-        (!result.workflow_ok || refreshedWorker?.last_error !== null),
+        (saved.linear_api_key_error !== null ||
+          !result.workflow_ok ||
+          refreshedWorker?.last_error !== null),
     );
     const currentDraft = session.readDraft();
     const refreshTarget =
@@ -148,7 +153,6 @@ export function useSettingsController(options: Options) {
     }
     savedFlashTimer.current = window.setTimeout(() => {
       setSavedFlash(false);
-      setSavedLiveConfigKept(false);
     }, 2500);
     return acknowledged && session.readSaved() === saved ? saved : undefined;
   }

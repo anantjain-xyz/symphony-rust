@@ -62,6 +62,7 @@ export function createSettingsSession(
         linear_api_key_error: saved.linear_api_key_error,
       };
       draftBase = saved;
+      setDirty(formSnapshot(draft) !== formSnapshot(saved) || key.trim() !== "");
       return true;
     },
     completeKeyRemoval(source: KeyRemovalSource | null, saved: AppSettings) {

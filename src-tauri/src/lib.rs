@@ -190,8 +190,12 @@ async fn save_settings_owned(
             .save(request.settings, request.linear_api_key)
             .await;
         finish_settings_recovery(&state).await;
-        let settings = result?;
-        apply_settings_to_worker(&state, &settings).await?;
+        let mut settings = result?;
+        let admitted = apply_settings_to_worker(&state, &settings).await?;
+        // Keep this commit's receipt intact while reporting the credential
+        // availability that actually governed its runtime continuation.
+        settings.linear_api_key_set = admitted.linear_api_key_set;
+        settings.linear_api_key_error = admitted.linear_api_key_error;
         Ok(settings)
     })
     .await
@@ -249,7 +253,10 @@ fn primary_validation_issue(
         .or(issues.first())
 }
 
-async fn apply_settings_to_worker(state: &AppState, settings: &AppSettings) -> Result<(), String> {
+async fn apply_settings_to_worker(
+    state: &AppState,
+    settings: &AppSettings,
+) -> Result<AppSettings, String> {
     // A committed revision must fence older work even if its fresh runtime
     // snapshot cannot be read or validated.
     state
@@ -265,7 +272,7 @@ async fn apply_settings_to_worker(state: &AppState, settings: &AppSettings) -> R
                 .await;
         }
     }
-    Ok(())
+    Ok(snapshot.settings)
 }
 
 #[cfg(test)]
@@ -310,13 +317,11 @@ fn command_found(command: &str) -> bool {
 
 #[tauri::command]
 async fn test_tracker_connection(
+    state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<TrackerTestResult, String> {
     // Prefer the unsaved form value so users can test a just-typed key.
-    let api_key = request
-        .linear_api_key
-        .filter(|key| !key.trim().is_empty())
-        .or_else(linear_api_key);
+    let api_key = request_linear_api_key(&state, request.linear_api_key).await?;
     let Some(api_key) = api_key else {
         return Ok(TrackerTestResult {
             ok: false,
@@ -353,13 +358,13 @@ async fn test_tracker_connection(
 }
 
 #[tauri::command]
-async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerProfile, String> {
+async fn get_linear_viewer(
+    state: State<'_, AppState>,
+    request: SaveSettingsRequest,
+) -> Result<LinearViewerProfile, String> {
     // Prefer the unsaved form value so checking the box can resolve the user
     // before the API key has been saved.
-    let api_key = request
-        .linear_api_key
-        .filter(|key| !key.trim().is_empty())
-        .or_else(linear_api_key);
+    let api_key = request_linear_api_key(&state, request.linear_api_key).await?;
     let Some(api_key) = api_key else {
         return Err(
             "No Linear API key configured. Add one above to show the assigned user.".to_string(),
@@ -388,13 +393,14 @@ async fn get_linear_viewer(request: SaveSettingsRequest) -> Result<LinearViewerP
 
 #[tauri::command]
 async fn list_workflow_states(state: State<'_, AppState>) -> Result<Vec<WorkflowStateRow>, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to load the board columns."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let states = tracker
@@ -432,13 +438,14 @@ async fn set_issue_state(
         );
     }
     // Trust boundary: the mutation runs against Linear with the user's own key.
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to move issues."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     tracker
@@ -449,13 +456,14 @@ async fn set_issue_state(
 
 #[tauri::command]
 async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummary>, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to load the board."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let issues = tracker
@@ -592,8 +600,8 @@ async fn start_worker_owned(state: AppState) -> Result<WorkerStatus, String> {
     settings_store::finish_operation(async move {
         let _effects = state.settings_store.commit_effects().await;
         let snapshot = worker_settings_with_effects(&state).await?;
-        if let Some(error) = snapshot.settings.linear_api_key_error {
-            return Err(error);
+        if let Some(error) = snapshot.settings.linear_api_key_error.as_ref() {
+            return Err(error.clone());
         }
         let Some(api_key) = snapshot.credential.as_deref() else {
             return Err(
@@ -650,13 +658,14 @@ async fn trigger_retry_now(state: State<'_, AppState>, issue_id: String) -> Resu
 
 #[tauri::command]
 async fn start_retro(state: State<'_, AppState>) -> Result<RetroStatus, String> {
-    let Some(api_key) = linear_api_key() else {
+    let snapshot = load_runtime_settings(&state).await?;
+    let Some(api_key) = snapshot.credential else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear, then run a retro."
                 .to_string(),
         );
     };
-    let settings = load_settings_from_disk(&state).await?;
+    let settings = snapshot.settings;
     let workflow = workflow_from_settings(&settings, Some(&api_key));
     let tracker = LinearTracker::new(workflow.front_matter.tracker.clone());
     let workspace_root =
@@ -917,7 +926,7 @@ async fn apply_retro_workflow_inner(
     // added a valid checked-in workflow after review, applying the old batch
     // would update the wrong source of truth.
     let source_check_root = resolve_workspace_root_dir(
-        &workflow_from_settings(&settings, linear_api_key().as_deref())
+        &workflow_from_settings(&settings, None)
             .front_matter
             .workspace
             .root,
@@ -1027,8 +1036,8 @@ async fn apply_retro_workflow_inner(
         )
         .await;
     finish_settings_recovery(&state).await;
-    let updated = match result {
-        Ok(updated) => updated,
+    match result {
+        Ok(_) => {}
         Err(error) => {
             state
                 .repo
@@ -1142,7 +1151,7 @@ async fn start_retro_prs_inner(
         .filter_map(|batch| batch.repo_name)
         .collect::<BTreeSet<_>>();
     let workspace_root = resolve_workspace_root_dir(
-        &workflow_from_settings(&settings, linear_api_key().as_deref())
+        &workflow_from_settings(&settings, None)
             .front_matter
             .workspace
             .root,
@@ -1273,8 +1282,7 @@ async fn install_skills(
     if repo_url.is_empty() {
         return Err("Add a repository URL under Settings → Repositories first.".to_string());
     }
-    let api_key = linear_api_key();
-    let workflow = workflow_from_settings(&settings, api_key.as_deref());
+    let workflow = workflow_from_settings(&settings, None);
     let workspace_root =
         resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
     state
@@ -1322,7 +1330,7 @@ async fn transfer_workflow_to_repo(
     if let Some(error) = validate_workflow_settings(&settings) {
         return Err(error);
     }
-    let workflow = workflow_from_settings(&settings, linear_api_key().as_deref());
+    let workflow = workflow_from_settings(&settings, None);
     let workspace_root =
         resolve_workspace_root_dir(&workflow.front_matter.workspace.root, &state.app_data_dir);
     state
@@ -1614,6 +1622,32 @@ async fn worker_settings_with_effects(
     result
 }
 
+/// Read one recoverable settings/credential pair before operational use.
+async fn load_runtime_settings(
+    state: &AppState,
+) -> Result<settings_store::SettingsSnapshot, String> {
+    let state = state.clone();
+    settings_store::finish_operation(async move {
+        let _effects = state.settings_store.commit_effects().await;
+        let snapshot = worker_settings_with_effects(&state).await?;
+        if let Some(error) = snapshot.settings.linear_api_key_error.as_ref() {
+            return Err(error.clone());
+        }
+        Ok(snapshot)
+    })
+    .await
+}
+
+async fn request_linear_api_key(
+    state: &AppState,
+    typed_key: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(key) = typed_key.filter(|key| !key.trim().is_empty()) {
+        return Ok(Some(key));
+    }
+    Ok(load_runtime_settings(state).await?.credential)
+}
+
 async fn finish_settings_recovery(state: &AppState) {
     if state.settings_store.take_recovery_stop() {
         // Recovery may finish a previous removal or replacement after its IPC
@@ -1650,10 +1684,6 @@ fn build_install_env_from(
 
 fn keyring_entry() -> keyring_core::Result<keyring_core::Entry> {
     keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_LINEAR_USER)
-}
-
-fn linear_api_key() -> Option<String> {
-    keyring_entry().ok()?.get_password().ok()
 }
 
 fn init_tracing(app_dir: &std::path::Path) {
