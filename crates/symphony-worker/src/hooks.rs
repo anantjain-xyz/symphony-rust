@@ -1,3 +1,4 @@
+use crate::output::{OutputSanitizer, RedactedTail};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -29,6 +30,14 @@ pub struct HookInvocation<'a> {
 }
 
 pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
+    let sanitizer = OutputSanitizer::new("", invocation.env, &BTreeMap::new());
+    run_hook_with_sanitizer(invocation, sanitizer).await
+}
+
+pub(crate) async fn run_hook_with_sanitizer(
+    invocation: HookInvocation<'_>,
+    sanitizer: OutputSanitizer,
+) -> HookResult {
     let HookInvocation {
         hook,
         script,
@@ -90,17 +99,15 @@ pub async fn run_hook(invocation: HookInvocation<'_>) -> HookResult {
     let process_group_id = child.id();
     let stderr = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
-            let mut retained = std::collections::VecDeque::with_capacity(4096);
+            let mut retained = RedactedTail::new(sanitizer, 4096);
             let mut chunk = [0_u8; 4096];
             while let Ok(read) = stderr.read(&mut chunk).await {
                 if read == 0 {
                     break;
                 }
-                let excess = retained.len().saturating_add(read).saturating_sub(4096);
-                retained.drain(..excess);
-                retained.extend(&chunk[..read]);
+                retained.push(&chunk[..read]);
             }
-            retained.into_iter().collect()
+            retained.finish().into_bytes()
         })
     });
     let timeout = tokio::time::sleep(Duration::from_millis(timeout_ms));

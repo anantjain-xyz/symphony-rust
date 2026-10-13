@@ -309,13 +309,19 @@ OpenCode preserves `error.name` (for example `ProviderAuthError`). Consumers
 must treat provider classes as opaque strings rather than assuming
 snake_case.
 
-There is no universal bound on persisted error messages. Status text, many
-tool summaries, rate-limit failures, and OpenCode errors are truncated in
-their adapters, but ordinary Codex `turn.failed` messages, Claude result
-errors, and Cursor result/error text can reach `finish_run()` without
-truncation. The storage layer binds those strings directly. Consumers must not
-rely on a maximum length until bounding is applied at a shared persistence
-boundary or consistently in every adapter.
+Run output passes through `RunOutput` before persistence or UI invalidation.
+Known configured credentials are redacted before byte limits are applied.
+
+| Output | UTF-8 byte limit |
+| --- | --- |
+| Error message / JSON string value | 8 KiB |
+| Error class / session metadata field | 256 B |
+| Humanized summary / hook stderr tail | 4 KiB |
+| Serialized event payload | 64 KiB |
+| Retry context trailer | 32 KiB |
+
+JSON traversal also limits depth and node count. Oversized payloads become
+bounded previews; token counts remain numeric.
 
 | Layer | Rust representation | Persisted behavior |
 | --- | --- | --- |
@@ -336,17 +342,38 @@ need domain-specific classes so the UI, retry context, and retros can
 distinguish them. Existing compatibility mappings should be removed as
 dedicated variants are introduced, not copied into new code.
 
-Keeping secrets out of errors and events is a required invariant, not a
-current enforcement guarantee. The worker injects credentials and configured
-session variables into the agent environment, while normalized event payloads,
-human-readable summaries, and terminal error messages are persisted without a
-redaction pass. A tool result that prints its environment can therefore expose
-an injected value in SQLite and the run-history UI even when its summary is
-length-bounded. Treat stored run output as sensitive, avoid commands that echo
-credentials, and do not claim this invariant is satisfied until known injected
-values are redacted before event, summary, retry-context, and terminal-error
-persistence. Authentication failures should still name only the missing
-mechanism or variable, never its contents.
+## Output boundary and dispatch policy
+
+```mermaid
+flowchart LR
+    Provider[Provider events and results] --> Output[RunOutput: redact and bound]
+    Hook[Hook stderr: redact then retain bounded tail] --> Output
+    Recovery[Dispatch error recovery] --> Output
+    Output --> DB[(SQLite)]
+    DB --> UI[Run history and overview]
+    DB --> Retry[Re-sanitize historical retry context]
+    Retry --> Prompt[Next run prompt]
+    Facts[Tracker snapshot and stored scheduling facts] --> Policy[Pure eligibility decision]
+    Policy --> Skip[Skip reason: clear or retain retry]
+    Policy --> Plan[Dispatch plan: issue, repository, run number]
+    Plan --> Claim[Workspace claim and run reservation]
+```
+
+- Secret sources: tracker API key, credential-like inherited environment keys,
+  and every explicit session environment value. Matching includes literal and
+  JSON-escaped values; sensitive JSON field names also redact unknown values.
+- Hook capture handles credentials across read chunks before truncation.
+  Explicit adapter ellipses also redact trailing credential-prefix fragments.
+- Worker/configuration `Debug` implementations omit environment values and
+  workflow text.
+- Existing database rows are not migrated. Retry prompt construction sanitizes
+  historical errors and decoded event payloads again.
+- This boundary does not discover unknown secrets or arbitrary encodings, and
+  it does not protect files written directly by an agent. Short custom session
+  values and ambiguous truncated fragments may redact ordinary words; this conservative tradeoff is intentional.
+- Eligibility has no I/O. The polling loop gathers current facts and applies
+  retry/state effects; only reservation acquires a workspace claim and creates
+  an owned run. Capacity and provider quota pauses retain queued retries.
 
 ## Change checklist
 
