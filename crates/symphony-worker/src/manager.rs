@@ -150,6 +150,19 @@ impl InnerState {
         }
     }
 
+    fn request_stop(&mut self) -> WorkerStatus {
+        self.reconfigure_generation = self.reconfigure_generation.wrapping_add(1);
+        let lifecycle = std::mem::replace(&mut self.lifecycle, WorkerLifecycle::Stopped);
+        self.lifecycle = match lifecycle {
+            WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
+                worker.stop.cancel();
+                WorkerLifecycle::Stopping(worker)
+            }
+            WorkerLifecycle::Stopped => WorkerLifecycle::Stopped,
+        };
+        self.status()
+    }
+
     fn owns_generation(&self, generation: u64) -> bool {
         match &self.lifecycle {
             WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
@@ -567,18 +580,20 @@ impl WorkerManager {
         Ok(())
     }
 
+    /// Stop requested by the user, independent of settings commit order.
     pub async fn stop(&self) -> WorkerStatus {
+        self.inner.lock().await.request_stop()
+    }
+
+    /// Apply credential-removal intent only if its commit is still current.
+    /// The same lock fences delayed starts/reconfiguration and owns cancellation.
+    pub async fn stop_for_settings_revision(&self, revision: u64) -> WorkerStatus {
         let mut inner = self.inner.lock().await;
-        inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
-        let lifecycle = std::mem::replace(&mut inner.lifecycle, WorkerLifecycle::Stopped);
-        inner.lifecycle = match lifecycle {
-            WorkerLifecycle::Running(worker) | WorkerLifecycle::Stopping(worker) => {
-                worker.stop.cancel();
-                WorkerLifecycle::Stopping(worker)
-            }
-            WorkerLifecycle::Stopped => WorkerLifecycle::Stopped,
-        };
-        inner.status()
+        if revision < inner.latest_settings_revision {
+            return inner.status();
+        }
+        inner.latest_settings_revision = revision;
+        inner.request_stop()
     }
 }
 
@@ -4264,6 +4279,75 @@ exit 13
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "test-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make get"));
+    }
+
+    #[tokio::test]
+    async fn older_credential_removal_cannot_stop_a_newer_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut current = runtime_config(temp.path());
+        current.settings_revision = 2;
+        manager
+            .start_with_runner(start_config(current), |_, _, stop| async move {
+                stop.cancelled().await;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (stop, generation) = {
+            let inner = manager.inner.lock().await;
+            let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
+                panic!("worker must be running");
+            };
+            (worker.stop.clone(), inner.reconfigure_generation)
+        };
+        let status = manager.stop_for_settings_revision(1).await;
+        assert_eq!(status.state, WorkerState::Running);
+        assert!(!stop.is_cancelled());
+        assert_eq!(
+            manager.inner.lock().await.reconfigure_generation,
+            generation
+        );
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
+
+        // Explicit Stop still cancels the current worker regardless of revisions.
+        assert_eq!(manager.stop().await.state, WorkerState::Stopping);
+        assert!(stop.is_cancelled());
+        wait_until_stopped(&manager).await;
+    }
+
+    #[tokio::test]
+    async fn credential_removal_fences_a_delayed_older_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        assert_eq!(
+            manager.stop_for_settings_revision(2).await.state,
+            WorkerState::Stopped
+        );
+        let mut old = runtime_config(temp.path());
+        old.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(old), |_, _, _| async {
+                panic!("configuration from before credential removal must not run")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
     }
 
     #[tokio::test]
