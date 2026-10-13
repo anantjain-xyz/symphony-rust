@@ -7,6 +7,18 @@ import {
 } from "./dashboardResources";
 
 describe("dashboard resource invalidation map", () => {
+  it("resynchronizes selected details and hidden lists after lost events", () => {
+    expect(resourcesForDbChange("*")).toEqual([
+      "overview",
+      "runs",
+      "issues",
+      "worker",
+      "retroList",
+      "retroBatches",
+      "selectedRun",
+      "selectedRetro",
+    ]);
+  });
   it.each([
     ["rate_limit_state", ["overview"]],
     ["token_usage", ["overview"]],

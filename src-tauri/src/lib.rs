@@ -24,6 +24,7 @@ use tauri::{Emitter, Listener, Manager, State};
 mod path_env;
 mod retro;
 mod settings;
+mod storage_events;
 
 use retro::{
     clone_repo_snapshot, hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
@@ -1491,7 +1492,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
 fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
     tauri::async_runtime::spawn(async move {
         let mut rx = bus.subscribe();
-        while let Ok(event) = rx.recv().await {
+        while let Some(event) = storage_events::next_event(&mut rx).await {
             match &event {
                 StorageEvent::DbChanged { .. } => {
                     let _ = handle.emit("db_changed", &event);

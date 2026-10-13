@@ -98,6 +98,10 @@ const GITHUB_TOKEN_ENV_VARS: &[&str] = &[
     "GITHUB_ENTERPRISE_TOKEN",
 ];
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must_use on a boxed future"
+)]
 #[async_trait]
 pub trait AgentDriver: Send + Sync {
     async fn run(

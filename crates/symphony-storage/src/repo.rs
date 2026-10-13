@@ -14,6 +14,22 @@ pub const USER_REQUESTED_RETRY_CLASS: &str = "user_requested_retry";
 const ISSUE_ROW_COLUMNS: &str =
     "id, identifier, title, description, priority, state, branch, labels, blockers, raw, last_seen_at";
 
+/// The terminal outcome and its durable scheduling consequences commit together.
+#[derive(Debug, Clone, Copy)]
+pub enum RunCompletion<'a> {
+    Success,
+    Failure {
+        error_class: &'a str,
+        error_message: &'a str,
+        retry_due_at: &'a str,
+    },
+    Cancelled {
+        error_class: Option<&'a str>,
+        error_message: Option<&'a str>,
+        suppression: Option<(&'a str, &'a str)>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, FromRow)]
 pub struct IssueRow {
     pub id: String,
@@ -427,6 +443,98 @@ impl Repository {
             self.changed("runs", "update");
         }
         Ok(transitioned)
+    }
+
+    pub async fn complete_run(
+        &self,
+        run_id: &str,
+        completion: RunCompletion<'_>,
+    ) -> Result<bool, StorageError> {
+        let (status, class, message) = match completion {
+            RunCompletion::Success => (RunStatus::Success, None, None),
+            RunCompletion::Failure {
+                error_class,
+                error_message,
+                ..
+            } => (RunStatus::Failure, Some(error_class), Some(error_message)),
+            RunCompletion::Cancelled {
+                error_class,
+                error_message,
+                ..
+            } => (RunStatus::Cancelled, error_class, error_message),
+        };
+        let mut tx = self.pool.begin().await?;
+        let run: Option<(String, i64)> = sqlx::query_as(
+            "update runs set status = ?1, ended_at = ?2, error_class = ?3, error_message = ?4 where id = ?5 and status in ('pending', 'running') returning issue_id, run_number",
+        )
+        .bind(status.as_db_str()).bind(now_iso()).bind(class).bind(message).bind(run_id)
+        .fetch_optional(&mut *tx).await?;
+        let Some((issue_id, run_number)) = run else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        match completion {
+            RunCompletion::Failure { retry_due_at, .. } => {
+                sqlx::query(
+                    r#"insert into retry_queue (issue_id, run_number, due_at, error_class, error_message)
+                    values (?1, ?2, ?3, ?4, ?5)
+                    on conflict(issue_id) do update set run_number = excluded.run_number,
+                    due_at = excluded.due_at, error_class = excluded.error_class,
+                    error_message = excluded.error_message,
+                    created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"#,
+                )
+                .bind(&issue_id).bind(run_number + 1).bind(retry_due_at).bind(class).bind(message)
+                .execute(&mut *tx).await?;
+            }
+            RunCompletion::Success | RunCompletion::Cancelled { .. } => {
+                sqlx::query("delete from retry_queue where issue_id = ?1")
+                    .bind(&issue_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        if let RunCompletion::Cancelled {
+            suppression: Some((reason, fingerprint)),
+            ..
+        } = completion
+        {
+            sqlx::query(
+                r#"insert into issue_dispatch_suppressions (issue_id, reason, issue_fingerprint)
+                values (?1, ?2, ?3) on conflict(issue_id, reason) do update set
+                issue_fingerprint = excluded.issue_fingerprint,
+                created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"#,
+            )
+            .bind(&issue_id)
+            .bind(reason)
+            .bind(fingerprint)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("delete from live_sessions where run_id = ?1")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.changed("runs", "update");
+        self.changed(
+            "retry_queue",
+            if matches!(completion, RunCompletion::Failure { .. }) {
+                "upsert"
+            } else {
+                "delete"
+            },
+        );
+        if matches!(
+            completion,
+            RunCompletion::Cancelled {
+                suppression: Some(_),
+                ..
+            }
+        ) {
+            self.changed("issue_dispatch_suppressions", "upsert");
+        }
+        self.changed("live_sessions", "delete");
+        Ok(true)
     }
 
     pub async fn list_running(&self) -> Result<Vec<RunRow>, StorageError> {
@@ -971,73 +1079,49 @@ impl Repository {
     }
 
     pub async fn trigger_retry_now(&self, issue_id: &str) -> Result<bool, StorageError> {
-        if self.has_active_run(issue_id).await? {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active: bool = sqlx::query_scalar(
+            "select exists(select 1 from runs where issue_id = ?1 and status in ('pending', 'running'))",
+        ).bind(issue_id).fetch_one(&mut *tx).await?;
+        if active {
+            tx.rollback().await?;
             return Ok(false);
         }
-
-        let result = sqlx::query("update retry_queue set due_at = ?1 where issue_id = ?2")
+        let retry_due = sqlx::query("update retry_queue set due_at = ?1 where issue_id = ?2")
             .bind(now_iso())
             .bind(issue_id)
-            .execute(&self.pool)
-            .await?;
-        let retry_due = result.rows_affected() > 0;
-        if retry_due {
-            self.changed("retry_queue", "update");
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        if !retry_due {
+            let latest: Option<(i64, String)> = sqlx::query_as(
+                "select run_number, status from runs where issue_id = ?1 order by run_number desc limit 1",
+            ).bind(issue_id).fetch_optional(&mut *tx).await?;
+            let Some((run_number, status)) = latest else {
+                tx.rollback().await?;
+                return Ok(false);
+            };
+            if status != "cancelled" {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            sqlx::query("insert into retry_queue (issue_id, run_number, due_at, error_class) values (?1, ?2, ?3, ?4)")
+                .bind(issue_id).bind(run_number + 1).bind(now_iso()).bind(USER_REQUESTED_RETRY_CLASS)
+                .execute(&mut *tx).await?;
         }
-        if retry_due {
-            self.clear_all_issue_dispatch_suppressions(issue_id).await?;
-            return Ok(true);
-        }
-
-        // A run the user stopped (not one that failed) may have no retry_queue
-        // row at all. Only the latest run should be actionable from the
-        // issue-scoped retry endpoint; older cancelled runs may already have
-        // been superseded by a successful retry.
-        let Some(latest_cancelled_run_number) = self.latest_cancelled_run_number(issue_id).await?
-        else {
-            return Ok(false);
-        };
-
-        self.clear_all_issue_dispatch_suppressions(issue_id).await?;
-        let last_run_number = self.last_run_number(issue_id).await?;
-        let run_number = std::cmp::max(latest_cancelled_run_number, last_run_number) + 1;
-        self.schedule_retry(
-            issue_id,
-            run_number,
-            &now_iso(),
-            Some(USER_REQUESTED_RETRY_CLASS),
-            None,
-        )
-        .await?;
-        Ok(true)
-    }
-
-    async fn latest_cancelled_run_number(
-        &self,
-        issue_id: &str,
-    ) -> Result<Option<i64>, StorageError> {
-        let row: Option<(i64, String)> = sqlx::query_as(
-            "select run_number, status from runs where issue_id = ?1 order by run_number desc limit 1",
-        )
-        .bind(issue_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.and_then(|(run_number, status)| (status == "cancelled").then_some(run_number)))
-    }
-
-    async fn clear_all_issue_dispatch_suppressions(
-        &self,
-        issue_id: &str,
-    ) -> Result<bool, StorageError> {
-        let result = sqlx::query("delete from issue_dispatch_suppressions where issue_id = ?1")
+        let cleared = sqlx::query("delete from issue_dispatch_suppressions where issue_id = ?1")
             .bind(issue_id)
-            .execute(&self.pool)
-            .await?;
-        let cleared = result.rows_affected() > 0;
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            > 0;
+        tx.commit().await?;
+        self.changed("retry_queue", if retry_due { "update" } else { "insert" });
         if cleared {
             self.changed("issue_dispatch_suppressions", "delete");
         }
-        Ok(cleared)
+        Ok(true)
     }
 
     pub async fn pending_retry_issue_ids(&self) -> Result<Vec<String>, StorageError> {
@@ -1965,6 +2049,158 @@ mod tests {
             created_at: now_iso(),
             completed_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_completion_commits_scheduling_and_is_idempotent() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.upsert_live_session(
+            &run.id,
+            "session",
+            "thread",
+            "turn",
+            &TokenCountPayload {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_tokens: 3,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .complete_run(
+                &run.id,
+                RunCompletion::Failure {
+                    error_class: "failed",
+                    error_message: "retry me",
+                    retry_due_at: "2099-01-01T00:00:00Z",
+                }
+            )
+            .await
+            .unwrap());
+        let stored = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "failure");
+        let retry = repo.due_retries("2100-01-01T00:00:00Z").await.unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].run_number, 2);
+        assert_eq!(retry[0].error_message.as_deref(), Some("retry me"));
+        assert_eq!(repo.overview().await.unwrap().live_sessions.len(), 0);
+        assert!(!repo
+            .complete_run(&run.id, RunCompletion::Success)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_run(&run.id).await.unwrap().unwrap().ended_at,
+            stored.ended_at
+        );
+        assert_eq!(
+            repo.due_retries("2100-01-01T00:00:00Z").await.unwrap()[0].run_number,
+            2
+        );
+
+        let next = repo
+            .try_reserve_run("lin-1", 2, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repo
+            .complete_run(
+                &next.id,
+                RunCompletion::Cancelled {
+                    error_class: Some("cancelled"),
+                    error_message: None,
+                    suppression: Some(("user_cancelled", "reviewed-issue")),
+                }
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            repo.issue_dispatch_suppression("lin-1", "user_cancelled")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("reviewed-issue")
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_terminal_operations_roll_back_and_survive_reopen() {
+        for (statement, completion) in [
+            ("create trigger fail_retry before insert on retry_queue begin select raise(abort, 'injected'); end", RunCompletion::Failure {
+                error_class: "failed", error_message: "retry me", retry_due_at: "2099-01-01T00:00:00Z",
+            }),
+            ("create trigger fail_suppression before insert on issue_dispatch_suppressions begin select raise(abort, 'injected'); end", RunCompletion::Cancelled {
+                error_class: Some("cancelled"), error_message: None, suppression: Some(("user_cancelled", "fingerprint")),
+            }),
+            ("create trigger fail_clear before delete on retry_queue begin select raise(abort, 'injected'); end", RunCompletion::Success),
+            ("create trigger fail_session before delete on live_sessions begin select raise(abort, 'injected'); end", RunCompletion::Success),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("atomic.sqlite");
+            let pool = crate::open_sqlite(&path).await.unwrap();
+            let repo = Repository::new(pool.clone(), EventBus::default());
+            repo.upsert_issues(&[issue()]).await.unwrap();
+            let run = repo.try_reserve_run("lin-1", 1, "/tmp/ws", None).await.unwrap().unwrap();
+            repo.schedule_retry("lin-1", 2, "2099-01-01T00:00:00Z", None, None).await.unwrap();
+            repo.upsert_live_session(&run.id, "session", "thread", "turn", &TokenCountPayload {
+                input_tokens: 1, output_tokens: 2, total_tokens: 3,
+            }).await.unwrap();
+            sqlx::query(statement).execute(&pool).await.unwrap();
+            let mut events = repo.events().subscribe();
+            assert!(repo.complete_run(&run.id, completion).await.is_err());
+            assert!(events.try_recv().is_err());
+            pool.close().await;
+            let reopened = Repository::new(crate::open_sqlite(&path).await.unwrap(), EventBus::default());
+            assert_eq!(reopened.get_run(&run.id).await.unwrap().unwrap().status, "pending");
+            assert_eq!(reopened.due_retries("2100-01-01T00:00:00Z").await.unwrap()[0].run_number, 2);
+            assert_eq!(reopened.overview().await.unwrap().live_sessions.len(), 1);
+            assert_eq!(reopened.issue_dispatch_suppression("lin-1", "user_cancelled").await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_failure_preserves_cancellation_suppression() {
+        let repo = repo().await;
+        repo.upsert_issues(&[issue()]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        repo.complete_run(
+            &run.id,
+            RunCompletion::Cancelled {
+                error_class: None,
+                error_message: None,
+                suppression: Some(("user_cancelled", "fingerprint")),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("create trigger fail_clear before delete on issue_dispatch_suppressions begin select raise(abort, 'injected'); end")
+            .execute(repo.pool()).await.unwrap();
+        assert!(repo.trigger_retry_now("lin-1").await.is_err());
+        assert_eq!(
+            repo.pending_retry_issue_ids().await.unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            repo.issue_dispatch_suppression("lin-1", "user_cancelled")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("fingerprint")
+        );
     }
 
     #[tokio::test]
