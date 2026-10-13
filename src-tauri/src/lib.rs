@@ -1053,7 +1053,26 @@ async fn apply_retro_workflow_inner(
             return Err(error);
         }
     };
-    apply_settings_to_worker(&state).await?;
+    finish_retro_workflow_after_prompt_save(&state, &batch).await
+}
+
+/// The prompt has committed. The owned caller keeps the settings effects gate
+/// until runtime refresh and the batch's terminal outcome are both recorded.
+async fn finish_retro_workflow_after_prompt_save(
+    state: &AppState,
+    batch: &RetroBatchRow,
+) -> Result<RetroBatchRow, String> {
+    if let Err(error) = apply_settings_to_worker(state).await {
+        let progress = "Workflow prompt saved; runtime refresh failed.";
+        state
+            .repo
+            .update_retro_batch(&batch.id, "failed", Some(progress), Some(&error), None)
+            .await
+            .map_err(|update_error| {
+                format!("{progress} {error} Could not record the batch outcome: {update_error}")
+            })?;
+        return Err(format!("{progress} {error}"));
+    }
     state
         .repo
         .update_retro_batch(
@@ -1067,7 +1086,7 @@ async fn apply_retro_workflow_inner(
         .map_err(|err| err.to_string())?;
     state
         .repo
-        .list_retro_batches(&retro_id)
+        .list_retro_batches(&batch.retro_id)
         .await
         .map_err(|err| err.to_string())?
         .into_iter()
