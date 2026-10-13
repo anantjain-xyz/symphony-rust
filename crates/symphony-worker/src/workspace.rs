@@ -6,6 +6,61 @@ use crate::{WorkspaceCleanupError, WorkspaceCleanupManager};
 
 pub const WORKSPACE_READY_SENTINEL: &str = ".symphony-workspace-ready";
 
+/// Dispatch and terminal cleanup share one claim per checkout path. A claim is
+/// acquired before reserving a run and lives until its task and recovery exit;
+/// cleanup holds the same claim across tracker revalidation and quarantine.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkspaceClaims {
+    entries: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
+}
+
+pub(crate) struct WorkspaceClaim {
+    claims: WorkspaceClaims,
+    key: PathBuf,
+}
+
+impl WorkspaceClaims {
+    pub(crate) fn try_claim(&self, path: &Path) -> Result<Option<WorkspaceClaim>, WorkspaceError> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let absolute = normalize(&absolute);
+        // Resolve existing ancestors, preserving the workspace's final component
+        // so a workspace symlink is claimed as a link rather than its target.
+        let mut parent = absolute.parent();
+        let key = loop {
+            match parent {
+                Some(candidate) => match candidate.canonicalize() {
+                    Ok(resolved) => {
+                        break resolved
+                            .join(absolute.strip_prefix(candidate).expect("ancestor prefix"))
+                    }
+                    Err(_) => parent = candidate.parent(),
+                },
+                None => break absolute,
+            }
+        };
+        let mut entries = self.entries.lock().expect("workspace claims poisoned");
+        Ok(entries.insert(key.clone()).then(|| WorkspaceClaim {
+            claims: self.clone(),
+            key,
+        }))
+    }
+}
+
+impl Drop for WorkspaceClaim {
+    fn drop(&mut self) {
+        let mut entries = self
+            .claims
+            .entries
+            .lock()
+            .expect("workspace claims poisoned");
+        entries.remove(&self.key);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
     #[error("workspace path escaped root: {0}")]
@@ -326,5 +381,34 @@ mod tests {
                 .unwrap(),
             "keep"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn workspace_claims_resolve_aliases_before_and_after_directory_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let claims = WorkspaceClaims::default();
+        let first = claims
+            .try_claim(&linked.join("repo/SYM-1"))
+            .unwrap()
+            .unwrap();
+        std::fs::create_dir_all(real.join("repo/SYM-1")).unwrap();
+        assert!(claims
+            .try_claim(&real.join("repo/SYM-1"))
+            .unwrap()
+            .is_none());
+        assert!(claims
+            .try_claim(&real.join("repo/SYM-2"))
+            .unwrap()
+            .is_some());
+        drop(first);
+        assert!(claims
+            .try_claim(&real.join("repo/SYM-1"))
+            .unwrap()
+            .is_some());
+        assert!(claims.entries.lock().unwrap().is_empty());
     }
 }

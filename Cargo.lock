@@ -5678,6 +5678,7 @@ version = "0.1.28"
 dependencies = [
  "async-trait",
  "chrono",
+ "libc",
  "serde_json",
  "symphony-core",
  "thiserror 2.0.18",
