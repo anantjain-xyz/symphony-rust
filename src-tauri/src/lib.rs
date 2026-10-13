@@ -264,7 +264,14 @@ async fn apply_settings_to_worker(
         .observe_settings_revision(settings.settings_revision)
         .await;
     let snapshot = worker_settings_with_effects(state).await?;
-    if live_reconfigure_allowed(&snapshot.settings) {
+    if snapshot.settings.linear_api_key_error.is_some() {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.",
+            )
+            .await;
+    } else if live_reconfigure_allowed(&snapshot.settings) {
         if let Some(api_key) = snapshot.credential.as_deref() {
             state
                 .worker

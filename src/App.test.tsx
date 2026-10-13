@@ -3096,6 +3096,32 @@ describe("App settings", () => {
     );
   });
 
+  it("shows the retained backend skip diagnostic when reloaded settings have usable credentials", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true, linear_api_key_error: null };
+    tauriMocks.invoke.mockImplementation(
+      dashboardInvoke({
+        settings,
+        workerStatus: {
+          state: "running",
+          started_at: "2026-01-01T00:00:00.000Z",
+          last_error:
+            "Settings saved, but credential access prevented the worker update. Restart the worker after unlocking the credential store.",
+        },
+      }),
+    );
+    const { container } = render(<App />);
+    await openSettings();
+    await waitFor(() =>
+      expect(container.querySelector(".settings-form .banner.info")?.textContent).toContain(
+        "Restart the worker after unlocking",
+      ),
+    );
+    expect(
+      screen.queryByText(/Saved settings apply to future dispatches without restarting/),
+    ).toBeNull();
+  });
+
   it("does not promise live settings when save skips reconfigure", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = { ...testSettings(), linear_api_key_set: true, repos: [] };

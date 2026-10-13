@@ -356,7 +356,7 @@ fn sync_current(path: &Path) -> Result<(), String> {
     sync_parent(path)
 }
 
-fn sync_parent(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
     let parent = path.parent().ok_or("Settings path has no parent.")?;
     let mut options = File::options();
     options.read(true);
