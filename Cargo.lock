@@ -5679,6 +5679,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "libc",
+ "serde",
  "serde_json",
  "symphony-core",
  "thiserror 2.0.18",
@@ -5688,16 +5689,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphony-contracts"
+name = "symphony-bindings"
 version = "0.1.28"
 dependencies = [
  "anyhow",
- "serde",
  "specta",
+ "symphony-contracts",
  "symphony-core",
- "symphony-storage",
  "symphony-worker",
  "tempfile",
+]
+
+[[package]]
+name = "symphony-contracts"
+version = "0.1.28"
+dependencies = [
+ "serde",
+ "serde_json",
+ "specta",
+ "symphony-core",
 ]
 
 [[package]]
@@ -5751,7 +5761,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "specta",
  "sqlx",
  "symphony-core",
  "tempfile",
@@ -5783,6 +5792,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "specta",
  "symphony-agents",
  "symphony-core",

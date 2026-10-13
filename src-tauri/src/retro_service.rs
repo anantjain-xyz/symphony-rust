@@ -4,7 +4,7 @@
 use crate::{
     retro::{
         clone_repo_snapshot, hash_body, integrate_retro_guidance, parse_report, run_repo_pr_batch,
-        uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
+        uses_legacy_retro_section, RetroManager, RetroProposalConfig, RetroReport, RetroStatus,
     },
     settings::workflow_from_settings,
     settings_store::SettingsStore,
@@ -15,6 +15,9 @@ use std::{
     sync::Arc,
 };
 use symphony_contracts::AppSettings;
+use symphony_core::{
+    BatchKind, BatchState, ProposalState, RunnableConfig, SuggestionDecision, SuggestionTarget,
+};
 use symphony_storage::{
     now_iso, Repository, RetroBatchReservation, RetroBatchRow, RetroRow, RetroSuggestionRow,
 };
@@ -40,15 +43,19 @@ pub struct RetroRuntime {
 }
 
 impl RetroRuntime {
-    fn worker_config(&self, settings: &AppSettings) -> WorkerStartConfig {
-        WorkerStartConfig {
-            workflow: workflow_from_settings(settings, self.api_key.as_deref()),
-            repos: settings.repos.clone(),
+    fn worker_config(&self, settings: &AppSettings) -> Result<WorkerStartConfig, String> {
+        Ok(WorkerStartConfig {
+            runtime: RunnableConfig::new(
+                settings.settings_revision,
+                workflow_from_settings(settings, self.api_key.as_deref()),
+                settings.repos.clone(),
+                settings.session_env.clone(),
+            )
+            .map_err(|error| error.to_string())?,
             skills: self.skills.clone(),
             env: self.env.clone(),
-            session_env: settings.session_env.clone(),
             app_data_dir: self.app_data_dir.clone(),
-        }
+        })
     }
 }
 
@@ -152,16 +159,17 @@ pub struct RetroService {
     generation: RetroManager,
     effects: Arc<dyn RetroEffects>,
     jobs: Arc<Mutex<JoinSet<()>>>,
-    validate: fn(&AppSettings) -> Option<String>,
+}
+
+pub struct RetroSnapshot {
+    pub row: RetroRow,
+    pub report: Option<RetroReport>,
+    pub suggestions: Vec<RetroSuggestionRow>,
+    pub batches: Vec<RetroBatchRow>,
 }
 
 impl RetroService {
-    pub fn new(
-        repo: Repository,
-        settings: SettingsStore,
-        worker: WorkerManager,
-        validate: fn(&AppSettings) -> Option<String>,
-    ) -> Self {
+    pub fn new(repo: Repository, settings: SettingsStore, worker: WorkerManager) -> Self {
         Self {
             repo,
             settings,
@@ -169,7 +177,6 @@ impl RetroService {
             generation: RetroManager::new(),
             effects: Arc::new(NativeRetroEffects),
             jobs: Arc::default(),
-            validate,
         }
     }
 
@@ -250,7 +257,7 @@ impl RetroService {
             .map_err(|err| err.to_string())
     }
 
-    pub async fn detail(&self, id: String) -> Result<Option<RetroDetail>, String> {
+    pub async fn detail(&self, id: String) -> Result<Option<RetroSnapshot>, String> {
         let Some(row) = self
             .repo
             .get_retro(&id)
@@ -269,8 +276,8 @@ impl RetroService {
             .list_retro_batches(&id)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(Some(RetroDetail {
-            report: parse_report(&row),
+        Ok(Some(RetroSnapshot {
+            report: parse_report(&row)?,
             row,
             suggestions,
             batches,
@@ -300,12 +307,13 @@ impl RetroService {
         Ok(())
     }
 
-    pub async fn review(&self, id: String, decision: String) -> Result<RetroSuggestionRow, String> {
-        if !matches!(decision.as_str(), "pending" | "accepted" | "rejected") {
-            return Err("Decision must be pending, accepted, or rejected.".to_string());
-        }
+    pub async fn review(
+        &self,
+        id: String,
+        decision: SuggestionDecision,
+    ) -> Result<RetroSuggestionRow, String> {
         self.repo
-            .set_retro_suggestion_decision(&id, &decision)
+            .set_retro_suggestion_decision(&id, decision)
             .await
             .map_err(|err| err.to_string())?
             .ok_or_else(|| "Suggestion was not found.".to_string())
@@ -331,11 +339,11 @@ impl RetroService {
         let batch = RetroBatchRow {
             id: Uuid::new_v4().to_string(),
             retro_id: retro_id.clone(),
-            kind: "workflow_update".to_string(),
+            kind: BatchKind::WorkflowUpdate,
             repo_name: None,
             repo_url: None,
             base_ref: Some(expected_ref.clone()),
-            state: "running".to_string(),
+            state: BatchState::Running,
             progress: Some("Checking workflow freshness…".to_string()),
             error: None,
             pr_url: None,
@@ -366,7 +374,7 @@ impl RetroService {
             self.repo
                 .update_retro_batch(
                     &batch.id,
-                    "stale",
+                    BatchState::Stale,
                     Some("The proposal format changed."),
                     Some("Generate a new retro and review the updated in-place diff."),
                     None,
@@ -379,7 +387,7 @@ impl RetroService {
             self.repo
                 .update_retro_batch(
                     &batch.id,
-                    "stale",
+                    BatchState::Stale,
                     Some("Prompt changed since this diff was prepared."),
                     Some("Generate a new retro and review the updated diff."),
                     None,
@@ -411,7 +419,7 @@ impl RetroService {
             self.repo
                 .update_retro_batch(
                     &batch.id,
-                    "stale",
+                    BatchState::Stale,
                     Some("A repository workflow source changed."),
                     Some(&format!(
                         "{error} Generate a new retro and review the updated diff."
@@ -429,9 +437,9 @@ impl RetroService {
             .collect::<Vec<_>>();
         let mut updated = settings;
         updated.prompt_template = integrate_retro_guidance(&updated.prompt_template, &guidance);
-        if let Some(error) = (self.validate)(&updated) {
+        if let Err(error) = runtime.worker_config(&updated) {
             self.repo
-                .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+                .update_retro_batch(&batch.id, BatchState::Failed, None, Some(&error), None)
                 .await
                 .map_err(|err| err.to_string())?;
             return Err(error);
@@ -448,19 +456,19 @@ impl RetroService {
             Ok(updated) => updated,
             Err(error) => {
                 self.repo
-                    .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+                    .update_retro_batch(&batch.id, BatchState::Failed, None, Some(&error), None)
                     .await
                     .map_err(|update_err| update_err.to_string())?;
                 return Err(error);
             }
         };
         self.worker
-            .reconfigure(runtime.worker_config(&updated))
+            .reconfigure(runtime.worker_config(&updated)?)
             .await;
         self.repo
             .update_retro_batch(
                 &batch.id,
-                "completed",
+                BatchState::Completed,
                 Some("Workflow prompt updated."),
                 None,
                 None,
@@ -501,10 +509,13 @@ impl RetroService {
             .map_err(|err| err.to_string())?
             .into_iter()
             .filter(|batch| {
-                batch.kind == "repo_pr"
+                batch.kind == BatchKind::RepoPr
                     && matches!(
-                        batch.state.as_str(),
-                        "queued" | "running" | "completed" | "stale"
+                        batch.state,
+                        BatchState::Queued
+                            | BatchState::Running
+                            | BatchState::Completed
+                            | BatchState::Stale
                     )
             })
             .filter_map(|batch| batch.repo_name)
@@ -540,16 +551,15 @@ impl RetroService {
             let batch = RetroBatchRow {
                 id: Uuid::new_v4().to_string(),
                 retro_id: retro_id.clone(),
-                kind: "repo_pr".to_string(),
+                kind: BatchKind::RepoPr,
                 repo_name: Some(repo_name.clone()),
                 repo_url,
                 base_ref: suggestions.first().and_then(|item| item.base_ref.clone()),
                 state: if stale_error.is_some() {
-                    "stale"
+                    BatchState::Stale
                 } else {
-                    "queued"
-                }
-                .to_string(),
+                    BatchState::Queued
+                },
                 progress: stale_error
                     .as_ref()
                     .map(|_| {
@@ -626,14 +636,17 @@ impl ReviewedSuggestions {
             .into_iter()
             .filter(|suggestion| {
                 let relevant = match target {
-                    ReviewTarget::Workflow => suggestion.target_type == "prompt",
+                    ReviewTarget::Workflow => suggestion.target_type == SuggestionTarget::Prompt,
                     ReviewTarget::Repository => {
-                        matches!(suggestion.target_type.as_str(), "skill" | "repo_workflow")
+                        matches!(
+                            suggestion.target_type,
+                            SuggestionTarget::Skill | SuggestionTarget::RepoWorkflow
+                        )
                     }
                 };
                 relevant
-                    && suggestion.decision == "accepted"
-                    && suggestion.proposal_status == "ready"
+                    && suggestion.decision == SuggestionDecision::Accepted
+                    && suggestion.proposal_status == ProposalState::Ready
             })
             .collect::<Vec<_>>();
         if selected.is_empty() {
@@ -687,10 +700,10 @@ impl WorkflowPlan {
 }
 
 fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<(), String> {
-    if suggestions
-        .iter()
-        .any(|suggestion| suggestion.proposal_status == "ready" && suggestion.decision == "pending")
-    {
+    if suggestions.iter().any(|suggestion| {
+        suggestion.proposal_status == ProposalState::Ready
+            && suggestion.decision == SuggestionDecision::Pending
+    }) {
         Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
     } else {
         Ok(())

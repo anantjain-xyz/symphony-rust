@@ -1,3 +1,10 @@
+mod provider_records;
+#[cfg(test)]
+mod provider_records_tests;
+use provider_records::{
+    decode, token_sum, tokens, CodexCompleted, CodexFailed, CursorUsage, OpencodeErrorRecord,
+    OpencodeStep, ResultRecord, SnakeUsage,
+};
 mod process;
 #[cfg(all(test, unix))]
 mod process_tests;
@@ -12,9 +19,9 @@ use std::{
     process::{Command as StdCommand, ExitStatus},
 };
 use symphony_core::{
-    AgentBackend, AgentEventKind, AgentOutcome, ClaudePermissionMode, CodexPermissionMode,
-    CursorAgentMode, CursorSandboxMode, MappedAgentEvent, RateLimitPayload, SessionInfoPayload,
-    ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
+    AgentBackend, AgentEventKind, AgentEventMetadata, AgentOutcome, ClaudePermissionMode,
+    CodexPermissionMode, CursorAgentMode, CursorSandboxMode, MappedAgentEvent, RateLimitPayload,
+    SessionInfoPayload, ThreadSandbox, TokenCountPayload, ToolCallPayload, TurnSandboxPolicy,
 };
 use thiserror::Error;
 use tokio::{process::Command, sync::mpsc};
@@ -31,11 +38,17 @@ pub enum AgentError {
     Timeout(u64),
     #[error("agent JSON parse failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{backend} {event} protocol error: {message}")]
+    Protocol {
+        backend: &'static str,
+        event: &'static str,
+        message: String,
+    },
     #[error("agent process exited without a result")]
     MissingResult,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentRunRequest {
     pub backend: AgentBackend,
     pub command: String,
@@ -52,6 +65,15 @@ pub struct AgentRunRequest {
     /// Extra environment variables for the agent process (e.g. LINEAR_API_KEY,
     /// which lives in the OS keychain and is absent from the inherited env).
     pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for AgentRunRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRunRequest")
+            .field("backend", &self.backend)
+            .field("turn_timeout_ms", &self.turn_timeout_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -534,13 +556,11 @@ async fn map_codex_event(
                 })?;
                 send_mapped(
                     events,
-                    MappedAgentEvent {
+                    MappedAgentEvent::Visible {
                         kind: AgentEventKind::ToolCall,
                         payload,
                         humanized: Some(format!("bash: {summary}")),
-                        tokens: None,
-                        rate_limit: None,
-                        session_info: None,
+                        metadata: AgentEventMetadata::default(),
                     },
                 )
                 .await;
@@ -564,14 +584,13 @@ async fn map_codex_event(
             // is a subset of `output_tokens`. Do not add either or we double
             // count — unlike Claude/Cursor/opencode, where cache buckets are
             // separate and must be folded into input.
-            let usage = &ev["usage"];
-            let input = usage["input_tokens"].as_i64().unwrap_or(0);
-            let output = usage["output_tokens"].as_i64().unwrap_or(0);
-            let tokens = TokenCountPayload {
-                input_tokens: input,
-                output_tokens: output,
-                total_tokens: input + output,
-            };
+            let record: CodexCompleted = decode("codex", "turn.completed", &ev)?;
+            let tokens = tokens(
+                "codex",
+                "turn.completed",
+                &[record.usage.input_tokens],
+                &[record.usage.output_tokens],
+            )?;
             send_token_count(events, tokens).await?;
             if let Some(limits) = ev.get("rate_limits").and_then(Value::as_object) {
                 for (bucket, info) in limits {
@@ -605,8 +624,11 @@ async fn map_codex_event(
             // message ("You've hit your usage limit... try again at ..."), not
             // as rate_limits on turn.completed. Detect them so the dashboard
             // and dispatch pause see the hit — matching Claude/Cursor/opencode.
-            let message = ev["error"]["message"]
-                .as_str()
+            let record: CodexFailed = decode("codex", "turn.failed", &ev)?;
+            let message = record
+                .error
+                .message
+                .as_deref()
                 .unwrap_or("Codex turn failed");
             if let Some(limit) = detect_codex_rate_limit(message) {
                 send_rate_limit(events, limit).await?;
@@ -622,11 +644,12 @@ async fn map_codex_event(
                 thread_id: thread_id.to_string(),
                 turn_id: turn_id.to_string(),
                 outcome: AgentOutcome::Failure,
-                error_class: ev["error"]["type"]
-                    .as_str()
-                    .unwrap_or("turn_failed")
-                    .to_string()
-                    .into(),
+                error_class: Some(
+                    record
+                        .error
+                        .kind
+                        .unwrap_or_else(|| "turn_failed".to_string()),
+                ),
                 error_message: Some(message.to_string()),
             }));
         }
@@ -799,13 +822,15 @@ impl ClaudeStreamState {
                     }
                     send_mapped(
                         events,
-                        MappedAgentEvent {
+                        MappedAgentEvent::Visible {
                             kind: AgentEventKind::Status,
                             payload: json!({ "message": message }),
                             humanized: Some(message),
-                            tokens: None,
-                            rate_limit: None,
-                            session_info: Some(self.session_info.clone()),
+                            metadata: AgentEventMetadata {
+                                tokens: None,
+                                rate_limit: None,
+                                session_info: Some(self.session_info.clone()),
+                            },
                         },
                     )
                     .await;
@@ -840,19 +865,17 @@ impl ClaudeStreamState {
                     }
                     // Persist each update as it happens: runs that time out,
                     // get cancelled, or die without a usage-bearing result
-                    // event would otherwise lose the estimate. The null
-                    // payload marks this as metadata-only so the worker skips
-                    // the event log.
+                    // event would otherwise lose the estimate. The explicit metadata
+                    // variant updates the session without adding a visible log row.
                     if self.session_info.thinking_tokens != prior {
                         send_mapped(
                             events,
-                            MappedAgentEvent {
-                                kind: AgentEventKind::Status,
-                                payload: Value::Null,
-                                humanized: None,
-                                tokens: None,
-                                rate_limit: None,
-                                session_info: Some(self.session_info.clone()),
+                            MappedAgentEvent::Metadata {
+                                metadata: AgentEventMetadata {
+                                    tokens: None,
+                                    rate_limit: None,
+                                    session_info: Some(self.session_info.clone()),
+                                },
                             },
                         )
                         .await;
@@ -888,13 +911,11 @@ impl ClaudeStreamState {
                             })?;
                             send_mapped(
                                 events,
-                                MappedAgentEvent {
+                                MappedAgentEvent::Visible {
                                     kind: AgentEventKind::ToolCall,
                                     payload,
                                     humanized: Some(format!("Calling {name}")),
-                                    tokens: None,
-                                    rate_limit: None,
-                                    session_info: None,
+                                    metadata: AgentEventMetadata::default(),
                                 },
                             )
                             .await;
@@ -949,13 +970,11 @@ impl ClaudeStreamState {
                     })?;
                     send_mapped(
                         events,
-                        MappedAgentEvent {
+                        MappedAgentEvent::Visible {
                             kind: AgentEventKind::ToolCall,
                             payload,
                             humanized: Some(summary.clone()),
-                            tokens: None,
-                            rate_limit: None,
-                            session_info: None,
+                            metadata: AgentEventMetadata::default(),
                         },
                     )
                     .await;
@@ -964,13 +983,11 @@ impl ClaudeStreamState {
                     {
                         send_mapped(
                             events,
-                            MappedAgentEvent {
+                            MappedAgentEvent::Visible {
                                 kind: AgentEventKind::Approval,
                                 payload: json!({ "reason": summary, "call_id": id }),
                                 humanized: Some("Approval requested".to_string()),
-                                tokens: None,
-                                rate_limit: None,
-                                session_info: None,
+                                metadata: AgentEventMetadata::default(),
                             },
                         )
                         .await;
@@ -988,27 +1005,31 @@ impl ClaudeStreamState {
                 }
             }
             "result" => {
-                let usage = &ev["usage"];
-                let input = usage["input_tokens"].as_i64().unwrap_or(0)
-                    + usage["cache_creation_input_tokens"].as_i64().unwrap_or(0)
-                    + usage["cache_read_input_tokens"].as_i64().unwrap_or(0);
-                let output = usage["output_tokens"].as_i64().unwrap_or(0);
-                if input > 0 || output > 0 {
-                    let tokens = TokenCountPayload {
-                        input_tokens: input,
-                        output_tokens: output,
-                        total_tokens: input + output,
-                    };
+                let record: ResultRecord<SnakeUsage> = decode("claude", "result", &ev)?;
+                let usage = &record.usage;
+                let tokens = tokens(
+                    "claude",
+                    "result",
+                    &[
+                        usage.input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                    ],
+                    &[usage.output_tokens],
+                )?;
+                if tokens.input_tokens > 0 || tokens.output_tokens > 0 {
                     send_mapped(
                         events,
-                        MappedAgentEvent {
+                        MappedAgentEvent::Visible {
                             kind: AgentEventKind::TokenCount,
                             payload: serde_json::to_value(&tokens)?,
                             humanized: None,
-                            tokens: Some(tokens),
-                            rate_limit: None,
-                            session_info: (!self.session_info.is_empty())
-                                .then(|| self.session_info.clone()),
+                            metadata: AgentEventMetadata {
+                                tokens: Some(tokens),
+                                rate_limit: None,
+                                session_info: (!self.session_info.is_empty())
+                                    .then(|| self.session_info.clone()),
+                            },
                         },
                     )
                     .await;
@@ -1021,8 +1042,8 @@ impl ClaudeStreamState {
                 // Record the signal so the dashboard surfaces it and, when a
                 // reset time is known, the worker pauses dispatch until then.
                 let limit_hit = [
-                    ev["result"].as_str().unwrap_or_default(),
-                    ev["error"].as_str().unwrap_or_default(),
+                    record.result.as_deref().unwrap_or_default(),
+                    record.error.as_deref().unwrap_or_default(),
                     self.last_assistant_text.as_str(),
                 ]
                 .into_iter()
@@ -1037,7 +1058,7 @@ impl ClaudeStreamState {
                         error_message: Some(truncate(text, 1000)),
                     }));
                 }
-                if ev["subtype"].as_str() == Some("success") {
+                if record.subtype.is_success() && !record.is_error {
                     if let Some(class) = classify_api_error(&self.last_assistant_text) {
                         return Ok(Some(AgentRunResult {
                             thread_id: self.session_id.clone(),
@@ -1080,11 +1101,12 @@ impl ClaudeStreamState {
                     thread_id: self.session_id.clone(),
                     turn_id: self.session_id.clone(),
                     outcome: AgentOutcome::Failure,
-                    error_class: Some(ev["subtype"].as_str().unwrap_or("claude_error").to_string()),
+                    error_class: Some(record.subtype.as_str().to_owned()),
                     error_message: Some(
-                        ev["error"]
-                            .as_str()
-                            .or_else(|| ev["result"].as_str())
+                        record
+                            .error
+                            .as_deref()
+                            .or(record.result.as_deref())
                             .unwrap_or("Claude run failed")
                             .to_string(),
                     ),
@@ -1183,13 +1205,15 @@ impl CursorStreamState {
                 }
                 send_mapped(
                     events,
-                    MappedAgentEvent {
+                    MappedAgentEvent::Visible {
                         kind: AgentEventKind::Status,
                         payload: json!({ "message": message }),
                         humanized: Some(message),
-                        tokens: None,
-                        rate_limit: None,
-                        session_info: Some(self.session_info.clone()),
+                        metadata: AgentEventMetadata {
+                            tokens: None,
+                            rate_limit: None,
+                            session_info: Some(self.session_info.clone()),
+                        },
                     },
                 )
                 .await;
@@ -1223,7 +1247,7 @@ impl CursorStreamState {
                 })?;
                 send_mapped(
                     events,
-                    MappedAgentEvent {
+                    MappedAgentEvent::Visible {
                         kind: AgentEventKind::ToolCall,
                         payload,
                         humanized: summary.or_else(|| {
@@ -1233,36 +1257,31 @@ impl CursorStreamState {
                                 "Tool completed".to_string()
                             })
                         }),
-                        tokens: None,
-                        rate_limit: None,
-                        session_info: None,
+                        metadata: AgentEventMetadata::default(),
                     },
                 )
                 .await;
             }
             "result" => {
+                let record: ResultRecord<CursorUsage> = decode("cursor", "result", &ev)?;
+                let usage = &record.usage;
+                // Cursor cache buckets are additional input, unlike Codex subsets.
+                let tokens = tokens(
+                    "cursor",
+                    "result",
+                    &[
+                        usage.input_tokens,
+                        usage.cache_read_tokens,
+                        usage.cache_write_tokens,
+                    ],
+                    &[usage.output_tokens],
+                )?;
                 self.completed = true;
-                // cursor-agent reports usage with camelCase keys. Cache read/
-                // write are separate buckets (like Claude/opencode), so fold
-                // them into input for a comparable per-run total.
-                let usage = &ev["usage"];
-                let input = usage["inputTokens"].as_i64().unwrap_or(0)
-                    + usage["cacheReadTokens"].as_i64().unwrap_or(0)
-                    + usage["cacheWriteTokens"].as_i64().unwrap_or(0);
-                let output = usage["outputTokens"].as_i64().unwrap_or(0);
-                if input > 0 || output > 0 {
-                    send_token_count(
-                        events,
-                        TokenCountPayload {
-                            input_tokens: input,
-                            output_tokens: output,
-                            total_tokens: input + output,
-                        },
-                    )
-                    .await?;
+                if tokens.input_tokens > 0 || tokens.output_tokens > 0 {
+                    send_token_count(events, tokens).await?;
                 }
-                let result_text = ev["result"].as_str().unwrap_or_default();
-                let error_text = ev["error"].as_str().unwrap_or_default();
+                let result_text = record.result.as_deref().unwrap_or_default();
+                let error_text = record.error.as_deref().unwrap_or_default();
                 let limit_hit = [result_text, error_text, self.last_assistant_text.as_str()]
                     .into_iter()
                     .find_map(|text| detect_cursor_rate_limit(text).map(|limit| (text, limit)));
@@ -1276,9 +1295,7 @@ impl CursorStreamState {
                         error_message: Some(truncate(text, 1000)),
                     }));
                 }
-                if ev["subtype"].as_str() == Some("success")
-                    && !ev["is_error"].as_bool().unwrap_or(false)
-                {
+                if record.subtype.is_success() && !record.is_error {
                     return Ok(Some(AgentRunResult {
                         thread_id: self.session_id.clone(),
                         turn_id: self.session_id.clone(),
@@ -1291,7 +1308,7 @@ impl CursorStreamState {
                     thread_id: self.session_id.clone(),
                     turn_id: self.session_id.clone(),
                     outcome: AgentOutcome::Failure,
-                    error_class: Some(ev["subtype"].as_str().unwrap_or("cursor_error").to_string()),
+                    error_class: Some(record.subtype.as_str().to_owned()),
                     error_message: Some(if !error_text.is_empty() {
                         error_text.to_string()
                     } else if !result_text.is_empty() {
@@ -1494,7 +1511,11 @@ impl OpencodeStreamState {
                 TokenCountPayload {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
-                    total_tokens: self.input_tokens + self.output_tokens,
+                    total_tokens: token_sum(
+                        "opencode",
+                        "step_finish",
+                        &[self.input_tokens, self.output_tokens],
+                    )?,
                 },
             )
             .await?;
@@ -1547,35 +1568,45 @@ impl OpencodeStreamState {
                 })?;
                 send_mapped(
                     events,
-                    MappedAgentEvent {
+                    MappedAgentEvent::Visible {
                         kind: AgentEventKind::ToolCall,
                         payload,
                         humanized: Some(summary),
-                        tokens: None,
-                        rate_limit: None,
-                        session_info: None,
+                        metadata: AgentEventMetadata::default(),
                     },
                 )
                 .await;
             }
             "step_finish" => {
-                let tokens = &ev["part"]["tokens"];
-                let input = tokens["input"].as_i64().unwrap_or(0)
-                    + tokens["cache"]["read"].as_i64().unwrap_or(0)
-                    + tokens["cache"]["write"].as_i64().unwrap_or(0);
-                let output = tokens["output"].as_i64().unwrap_or(0)
-                    + tokens["reasoning"].as_i64().unwrap_or(0);
-                self.input_tokens += input;
-                self.output_tokens += output;
+                let record: OpencodeStep = decode("opencode", "step_finish", &ev)?;
+                let usage = record.part.tokens;
+                // Validate the entire new total before mutating accumulated usage.
+                let next = tokens(
+                    "opencode",
+                    "step_finish",
+                    &[
+                        self.input_tokens,
+                        usage.input,
+                        usage.cache.read,
+                        usage.cache.write,
+                    ],
+                    &[self.output_tokens, usage.output, usage.reasoning],
+                )?;
+                self.input_tokens = next.input_tokens;
+                self.output_tokens = next.output_tokens;
             }
             "error" => {
-                let data = &ev["error"]["data"];
-                let name = ev["error"]["name"].as_str().unwrap_or("opencode_error");
-                let message = data["message"]
-                    .as_str()
-                    .or_else(|| ev["error"]["message"].as_str())
+                let record: OpencodeErrorRecord = decode("opencode", "error", &ev)?;
+                let error = record.error;
+                let name = error.name.as_deref().unwrap_or("opencode_error");
+                let message = error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.message.as_deref())
+                    .or(error.message.as_deref())
                     .unwrap_or("opencode error");
-                if let Some(limit) = detect_opencode_rate_limit(data, message) {
+                let status_code = error.data.as_ref().and_then(|data| data.status_code);
+                if let Some(limit) = detect_opencode_rate_limit(status_code, message) {
                     send_rate_limit(events, limit).await?;
                     self.failure = Some(AgentRunResult {
                         thread_id: self.session_id.clone(),
@@ -1651,9 +1682,9 @@ fn is_opencode_agent_fallback(line: &str) -> bool {
 /// a provider message that leads with a usage-limit notice. Anchored to the
 /// start of the message like the Claude/Cursor detectors so prose that merely
 /// mentions rate limits is not misread as a hit.
-fn detect_opencode_rate_limit(data: &Value, message: &str) -> Option<RateLimitPayload> {
+fn detect_opencode_rate_limit(status_code: Option<u16>, message: &str) -> Option<RateLimitPayload> {
     let lower = message.trim().to_lowercase();
-    let hit = data["statusCode"].as_i64() == Some(429)
+    let hit = status_code == Some(429)
         || lower.starts_with("api error: 429")
         || lower.starts_with("rate limit exceeded")
         || lower.starts_with("usage limit reached")
@@ -1749,13 +1780,11 @@ async fn send_status(events: &AgentEventSender, message: impl Into<String>) {
     let message = message.into();
     send_mapped(
         events,
-        MappedAgentEvent {
+        MappedAgentEvent::Visible {
             kind: AgentEventKind::Status,
             payload: json!({ "message": message }),
             humanized: Some(message),
-            tokens: None,
-            rate_limit: None,
-            session_info: None,
+            metadata: AgentEventMetadata::default(),
         },
     )
     .await;
@@ -1768,13 +1797,11 @@ async fn send_error(
 ) -> Result<(), AgentError> {
     send_mapped(
         events,
-        MappedAgentEvent {
+        MappedAgentEvent::Visible {
             kind: AgentEventKind::Error,
             payload: json!({ "class": class, "message": message, "recoverable": true }),
             humanized: Some(format!("Error ({class}): {message}")),
-            tokens: None,
-            rate_limit: None,
-            session_info: None,
+            metadata: AgentEventMetadata::default(),
         },
     )
     .await;
@@ -1787,13 +1814,15 @@ async fn send_token_count(
 ) -> Result<(), AgentError> {
     send_mapped(
         events,
-        MappedAgentEvent {
+        MappedAgentEvent::Visible {
             kind: AgentEventKind::TokenCount,
             payload: serde_json::to_value(&tokens)?,
             humanized: None,
-            tokens: Some(tokens),
-            rate_limit: None,
-            session_info: None,
+            metadata: AgentEventMetadata {
+                tokens: Some(tokens),
+                rate_limit: None,
+                session_info: None,
+            },
         },
     )
     .await;
@@ -1806,13 +1835,15 @@ async fn send_rate_limit(
 ) -> Result<(), AgentError> {
     send_mapped(
         events,
-        MappedAgentEvent {
+        MappedAgentEvent::Visible {
             kind: AgentEventKind::RateLimit,
             payload: serde_json::to_value(&payload)?,
             humanized: None,
-            tokens: None,
-            rate_limit: Some(payload),
-            session_info: None,
+            metadata: AgentEventMetadata {
+                tokens: None,
+                rate_limit: Some(payload),
+                session_info: None,
+            },
         },
     )
     .await;
@@ -1920,6 +1951,25 @@ fn classify_api_error(text: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kind(event: &MappedAgentEvent) -> AgentEventKind {
+        match event {
+            MappedAgentEvent::Visible { kind, .. } => kind.clone(),
+            MappedAgentEvent::Metadata { .. } => panic!("expected visible event"),
+        }
+    }
+    fn payload(event: &MappedAgentEvent) -> &Value {
+        match event {
+            MappedAgentEvent::Visible { payload, .. } => payload,
+            MappedAgentEvent::Metadata { .. } => panic!("expected visible event"),
+        }
+    }
+    fn humanized(event: &MappedAgentEvent) -> Option<&str> {
+        match event {
+            MappedAgentEvent::Visible { humanized, .. } => humanized.as_deref(),
+            MappedAgentEvent::Metadata { .. } => panic!("expected visible event"),
+        }
+    }
 
     #[test]
     fn shell_quote_handles_single_quotes() {
@@ -2195,25 +2245,39 @@ mod tests {
             );
             assert_eq!(observation.result.error_class, None);
             assert!(
-                observation
-                    .events
-                    .iter()
-                    .any(|event| event.kind == AgentEventKind::Status),
+                observation.events.iter().any(|event| matches!(
+                    event,
+                    MappedAgentEvent::Visible {
+                        kind: AgentEventKind::Status,
+                        ..
+                    }
+                )),
                 "{} status",
                 observation.backend
             );
             assert!(
-                observation
-                    .events
-                    .iter()
-                    .any(|event| event.kind == AgentEventKind::ToolCall),
+                observation.events.iter().any(|event| matches!(
+                    event,
+                    MappedAgentEvent::Visible {
+                        kind: AgentEventKind::ToolCall,
+                        ..
+                    }
+                )),
                 "{} tool call",
                 observation.backend
             );
             let token_events = observation
                 .events
                 .iter()
-                .filter(|event| event.kind == AgentEventKind::TokenCount)
+                .filter(|event| {
+                    matches!(
+                        event,
+                        MappedAgentEvent::Visible {
+                            kind: AgentEventKind::TokenCount,
+                            ..
+                        }
+                    )
+                })
                 .collect::<Vec<_>>();
             assert_eq!(
                 token_events.len(),
@@ -2222,7 +2286,7 @@ mod tests {
                 observation.backend
             );
             assert_eq!(
-                token_events[0].tokens,
+                token_events[0].metadata().tokens.clone(),
                 Some(TokenCountPayload {
                     input_tokens: 7,
                     output_tokens: 3,
@@ -2237,7 +2301,7 @@ mod tests {
             let carries_session_info = observation
                 .events
                 .iter()
-                .any(|event| event.session_info.is_some());
+                .any(|event| event.metadata().session_info.clone().is_some());
             assert_eq!(
                 carries_session_info,
                 matches!(observation.backend, "claude" | "cursor"),
@@ -2247,9 +2311,18 @@ mod tests {
             let tool_event = observation
                 .events
                 .iter()
-                .find(|event| event.kind == AgentEventKind::ToolCall)
+                .find(|event| {
+                    matches!(
+                        event,
+                        MappedAgentEvent::Visible {
+                            kind: AgentEventKind::ToolCall,
+                            ..
+                        }
+                    )
+                })
                 .expect("fixture tool event");
-            let tool: ToolCallPayload = serde_json::from_value(tool_event.payload.clone()).unwrap();
+            let tool: ToolCallPayload =
+                serde_json::from_value(payload(tool_event).clone()).unwrap();
             let expected_tool = match observation.backend {
                 "codex" => "bash",
                 "claude" => "Read",
@@ -2603,7 +2676,11 @@ mod tests {
             .await
             .unwrap();
         let started = rx.recv().await.unwrap();
-        let info = started.session_info.expect("init carries session info");
+        let info = started
+            .metadata()
+            .session_info
+            .clone()
+            .expect("init carries session info");
         assert_eq!(info.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(info.permission_mode.as_deref(), Some("acceptEdits"));
         assert_eq!(info.agent_version.as_deref(), Some("2.1.172"));
@@ -2619,9 +2696,13 @@ mod tests {
         // Thinking updates emit a metadata-only event right away, so the
         // estimate survives runs that never reach a usage-bearing result.
         let thinking = rx.recv().await.unwrap();
-        assert!(thinking.payload.is_null());
+        assert!(matches!(thinking, MappedAgentEvent::Metadata { .. }));
         assert_eq!(
-            thinking.session_info.and_then(|info| info.thinking_tokens),
+            thinking
+                .metadata()
+                .session_info
+                .clone()
+                .and_then(|info| info.thinking_tokens),
             Some(42)
         );
         let result = stream
@@ -2640,7 +2721,9 @@ mod tests {
         let tokens_event = rx.recv().await.unwrap();
         assert_eq!(
             tokens_event
+                .metadata()
                 .session_info
+                .clone()
                 .and_then(|info| info.thinking_tokens),
             Some(42)
         );
@@ -2680,9 +2763,9 @@ mod tests {
             .unwrap()
             .is_none());
         let mapped = rx.recv().await.unwrap();
-        assert!(matches!(mapped.kind, AgentEventKind::ToolCall));
+        assert!(matches!(kind(&mapped), AgentEventKind::ToolCall));
         assert_eq!(
-            mapped.humanized.as_deref(),
+            humanized(&mapped),
             Some("bash: /bin/zsh -lc 'gh auth token'")
         );
     }
@@ -2703,9 +2786,9 @@ mod tests {
             .unwrap()
             .is_none());
         let mapped = rx.recv().await.unwrap();
-        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert!(matches!(kind(&mapped), AgentEventKind::Status));
         assert_eq!(
-            mapped.humanized.as_deref(),
+            humanized(&mapped),
             Some("Let's verify the images render correctly.")
         );
     }
@@ -2726,8 +2809,8 @@ mod tests {
             .unwrap()
             .is_none());
         let mapped = rx.recv().await.unwrap();
-        assert!(matches!(mapped.kind, AgentEventKind::Status));
-        assert_eq!(mapped.humanized.as_deref(), Some("user_message completed"));
+        assert!(matches!(kind(&mapped), AgentEventKind::Status));
+        assert_eq!(humanized(&mapped), Some("user_message completed"));
     }
 
     #[tokio::test]
@@ -2746,9 +2829,9 @@ mod tests {
             .unwrap()
             .is_none());
         let mapped = rx.recv().await.unwrap();
-        assert!(matches!(mapped.kind, AgentEventKind::Status));
+        assert!(matches!(kind(&mapped), AgentEventKind::Status));
         let expected = format!("{}...", "a".repeat(2000));
-        assert_eq!(mapped.humanized.as_deref(), Some(expected.as_str()));
+        assert_eq!(humanized(&mapped), Some(expected.as_str()));
     }
 
     #[tokio::test]
@@ -2773,12 +2856,36 @@ mod tests {
         .expect("turn.completed finishes run");
         assert!(matches!(done.outcome, AgentOutcome::Success));
         let tokens = rx.recv().await.expect("token count event");
-        assert!(matches!(tokens.kind, AgentEventKind::TokenCount));
+        assert!(matches!(kind(&tokens), AgentEventKind::TokenCount));
         // cached_input_tokens / reasoning_output_tokens are subsets — do not
         // add them (Claude/Cursor/opencode cache buckets are additive).
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(24763));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.output_tokens), Some(122));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.total_tokens), Some(24885));
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.input_tokens),
+            Some(24763)
+        );
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.output_tokens),
+            Some(122)
+        );
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.total_tokens),
+            Some(24885)
+        );
     }
 
     #[test]
@@ -2835,7 +2942,10 @@ mod tests {
         assert!(matches!(result.outcome, AgentOutcome::Failure));
         assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
         let event = rx.recv().await.unwrap();
-        assert_eq!(event.rate_limit.expect("payload").source, "claude");
+        assert_eq!(
+            event.metadata().rate_limit.clone().expect("payload").source,
+            "claude"
+        );
     }
 
     #[tokio::test]
@@ -2863,8 +2973,12 @@ mod tests {
         assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
 
         let event = rx.recv().await.unwrap();
-        assert!(matches!(event.kind, AgentEventKind::RateLimit));
-        let limit = event.rate_limit.expect("rate-limit payload");
+        assert!(matches!(kind(&event), AgentEventKind::RateLimit));
+        let limit = event
+            .metadata()
+            .rate_limit
+            .clone()
+            .expect("rate-limit payload");
         assert_eq!(limit.source, "claude");
         assert_eq!(limit.reset_at.as_deref(), Some("2025-06-15T15:06:40.000Z"));
     }
@@ -3075,7 +3189,7 @@ mod tests {
             .unwrap()
             .is_none());
         let event = rx.recv().await.expect("init status event");
-        let info = event.session_info.expect("session info");
+        let info = event.metadata().session_info.clone().expect("session info");
         assert_eq!(info.model.as_deref(), Some("Composer 2.5"));
         assert_eq!(info.permission_mode.as_deref(), Some("default"));
     }
@@ -3096,7 +3210,7 @@ mod tests {
             .await
             .unwrap();
         let started = rx.recv().await.expect("tool started");
-        assert!(matches!(started.kind, AgentEventKind::ToolCall));
+        assert!(matches!(kind(&started), AgentEventKind::ToolCall));
         stream
             .push(
                 json!({
@@ -3113,7 +3227,7 @@ mod tests {
             .await
             .unwrap();
         let completed = rx.recv().await.expect("tool completed");
-        assert!(matches!(completed.kind, AgentEventKind::ToolCall));
+        assert!(matches!(kind(&completed), AgentEventKind::ToolCall));
     }
 
     #[tokio::test]
@@ -3140,10 +3254,34 @@ mod tests {
             .expect("result finishes run");
         assert!(matches!(done.outcome, AgentOutcome::Success));
         let tokens = rx.recv().await.expect("token count event");
-        assert!(matches!(tokens.kind, AgentEventKind::TokenCount));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.input_tokens), Some(960));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.output_tokens), Some(45));
-        assert_eq!(tokens.tokens.as_ref().map(|t| t.total_tokens), Some(1005));
+        assert!(matches!(kind(&tokens), AgentEventKind::TokenCount));
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.input_tokens),
+            Some(960)
+        );
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.output_tokens),
+            Some(45)
+        );
+        assert_eq!(
+            tokens
+                .metadata()
+                .tokens
+                .clone()
+                .as_ref()
+                .map(|t| t.total_tokens),
+            Some(1005)
+        );
     }
 
     #[tokio::test]
@@ -3234,8 +3372,12 @@ mod tests {
         assert_eq!(result.error_class.as_deref(), Some("rate_limited"));
 
         let event = rx.recv().await.unwrap();
-        assert!(matches!(event.kind, AgentEventKind::RateLimit));
-        let limit = event.rate_limit.expect("rate-limit payload");
+        assert!(matches!(kind(&event), AgentEventKind::RateLimit));
+        let limit = event
+            .metadata()
+            .rate_limit
+            .clone()
+            .expect("rate-limit payload");
         assert_eq!(limit.source, "codex");
         assert!(limit.reset_at.is_some());
     }
@@ -3289,7 +3431,7 @@ mod tests {
             .is_none());
         assert_eq!(stream.session_id, "sess-real");
         let event = rx.recv().await.expect("status event");
-        assert!(matches!(event.kind, AgentEventKind::Status));
+        assert!(matches!(kind(&event), AgentEventKind::Status));
     }
 
     #[tokio::test]
@@ -3316,8 +3458,8 @@ mod tests {
             .await
             .unwrap();
         let event = rx.recv().await.expect("tool call event");
-        assert!(matches!(event.kind, AgentEventKind::ToolCall));
-        assert_eq!(event.humanized.as_deref(), Some("Edit src/bar.rs"));
+        assert!(matches!(kind(&event), AgentEventKind::ToolCall));
+        assert_eq!(humanized(&event), Some("Edit src/bar.rs"));
     }
 
     #[tokio::test]
@@ -3344,8 +3486,8 @@ mod tests {
 
         stream.finish(&tx).await.unwrap();
         let event = rx.recv().await.expect("token count event");
-        assert!(matches!(event.kind, AgentEventKind::TokenCount));
-        let tokens = event.tokens.expect("token payload");
+        assert!(matches!(kind(&event), AgentEventKind::TokenCount));
+        let tokens = event.metadata().tokens.clone().expect("token payload");
         assert_eq!(tokens.input_tokens, 4800);
         assert_eq!(tokens.output_tokens, 674);
         assert_eq!(tokens.total_tokens, 5474);
@@ -3380,7 +3522,7 @@ mod tests {
         assert!(matches!(done.outcome, AgentOutcome::Failure));
         assert_eq!(done.error_class.as_deref(), Some("ProviderAuthError"));
         let event = rx.recv().await.expect("error event");
-        assert!(matches!(event.kind, AgentEventKind::Error));
+        assert!(matches!(kind(&event), AgentEventKind::Error));
     }
 
     #[tokio::test]
@@ -3404,21 +3546,19 @@ mod tests {
         assert!(matches!(done.outcome, AgentOutcome::Failure));
         assert_eq!(done.error_class.as_deref(), Some("rate_limited"));
         let event = rx.recv().await.expect("rate-limit event");
-        assert_eq!(event.rate_limit.expect("payload").source, "opencode");
+        assert_eq!(
+            event.metadata().rate_limit.clone().expect("payload").source,
+            "opencode"
+        );
     }
 
     #[test]
     fn detects_opencode_rate_limit_hits() {
-        assert!(
-            detect_opencode_rate_limit(&json!({ "statusCode": 429 }), "Too many requests")
-                .is_some()
-        );
-        assert!(
-            detect_opencode_rate_limit(&json!({}), "Rate limit exceeded for this model").is_some()
-        );
-        assert!(detect_opencode_rate_limit(&json!({}), "All tests passing").is_none());
+        assert!(detect_opencode_rate_limit(Some(429), "Too many requests").is_some());
+        assert!(detect_opencode_rate_limit(None, "Rate limit exceeded for this model").is_some());
+        assert!(detect_opencode_rate_limit(None, "All tests passing").is_none());
         assert!(detect_opencode_rate_limit(
-            &json!({ "statusCode": 200 }),
+            Some(200),
             "I updated how the rate limit exceeded path is handled"
         )
         .is_none());

@@ -64,7 +64,7 @@ describe("desktop event subscription", () => {
           id: 1,
           run_id: "run-1",
           kind: "status",
-          payload: "{}",
+          payload: {},
           created_at: "2026-07-26T00:00:00.000Z",
         },
       },

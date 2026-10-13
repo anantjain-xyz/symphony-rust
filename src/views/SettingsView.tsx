@@ -1,7 +1,5 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
-import * as desktopCommands from "../desktop/commands";
-import { getDesktopVersion, openExternalUrl, revealDesktopPath } from "../desktop/shell";
 import type { InputHTMLAttributes } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   LinearViewerProfile,
@@ -11,13 +9,19 @@ import type {
   SkillsInstallStatus,
   SkillsStatus,
   TrackerTestResult,
+  ValidationField,
   ValidationResult,
+  WorkerStatus,
   WorkflowTransferStatus,
 } from "../bindings";
-import { SettingsValidationController } from "../settingsValidationController";
-import type { SettingsValidationState } from "../settingsValidationController";
+import * as desktopCommands from "../desktop/commands";
+import { getDesktopVersion, openExternalUrl, revealDesktopPath } from "../desktop/shell";
+import type { RepositoryReadiness } from "../features/repositories/useRepositoryReadiness";
+import type { SettingsController } from "../features/settings/useSettingsController";
+import { useSettingsEditor } from "../features/settings/useSettingsEditor";
 import { nullable } from "../format";
-import { formSnapshot, Panel } from "../viewPrimitives";
+import type { SettingsValidationState } from "../settingsValidationController";
+import { Panel } from "../viewPrimitives";
 import "./IconSelect.css";
 import "./SettingsView.css";
 
@@ -199,368 +203,67 @@ const PROMPT_VARIABLES: { name: string; description: string; example: string }[]
 ];
 
 type SettingsFeatureProps = {
-  savedSettings: AppSettings;
-  draftRef: { current: AppSettings | null };
-  revisionRef: { current: number };
-  linearKeyRef: { current: string };
-  linearViewer: LinearViewerProfile | null;
-  linearViewerLoading: boolean;
-  linearViewerError: string | null;
-  trackerTest: TrackerTestResult | null;
-  skillsStatuses: Record<string, SkillsStatus>;
-  skillsChecking: Record<string, boolean>;
-  skillsInstall: SkillsInstallStatus | null;
-  workflowStatuses: Record<string, RepoWorkflowStatus>;
-  workflowChecking: Record<string, boolean>;
-  workflowTransfer: WorkflowTransferStatus | null;
-  settingsDirty: boolean;
-  workerRunning: boolean;
-  workerConfigError: boolean;
-  liveReconfigureSkipped: boolean;
+  controller: SettingsController;
+  repositories: RepositoryReadiness;
+  worker: WorkerStatus;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
-  onDirtyChange: (dirty: boolean) => void;
-  savePendingRef: { current: boolean };
-  saveControllerRef: { current: SettingsValidationController | null };
-  savePending: boolean;
-  onSavePendingChange: (pending: boolean) => void;
-  onValidationResult: (result: ValidationResult) => void;
-  onDraftChange: (next: AppSettings, linearKey: string, previous: AppSettings) => void;
-  onSave: (
-    settings: AppSettings,
-    linearKey: string,
-    result: ValidationResult,
-  ) => Promise<AppSettings | undefined>;
-  onTestConnection: (settings: AppSettings, linearKey: string) => void;
-  onRemoveKey: () => Promise<boolean | undefined>;
-  onResetPrompt: () => Promise<string>;
-  onRefreshSkills: (repoUrl: string, sessionEnv: AppSettings["session_env"]) => void;
-  onInstallSkills: (settings: AppSettings, repoUrl: string) => void;
-  onRefreshWorkflow: (repoUrl: string, sessionEnv: AppSettings["session_env"]) => void;
-  onTransferWorkflow: (repoUrl: string) => void;
 };
 
-function validationFieldId(result: ValidationResult | null) {
-  const message = result?.workflow_error?.toLowerCase() ?? "";
-  if (message.includes("active state")) return "settings-active-states";
-  if (message.includes("prompt") || message.includes("placeholder")) {
-    return "settings-prompt-template";
-  }
-  if (message.includes("repo")) return "settings-repositories";
-  return null;
+const VALIDATION_FIELDS: Record<ValidationField, { id: string; section: SettingsSectionId }> = {
+  active_states: { id: "settings-active-states", section: "linear" },
+  repositories: { id: "settings-repositories", section: "repositories" },
+  prompt_template: { id: "settings-prompt-template", section: "workflow" },
+  session_env: { id: "settings-session-environment", section: "runtime" },
+  polling_interval_ms: { id: "settings-polling-interval", section: "runtime" },
+  max_concurrent_agents: { id: "settings-max-concurrent-agents", section: "runtime" },
+  max_retry_backoff_ms: { id: "settings-max-retry-backoff", section: "runtime" },
+  hook_timeout_ms: { id: "settings-hook-timeout", section: "runtime" },
+  turn_timeout_ms: { id: "settings-turn-timeout", section: "runtime" },
+  agent_command: { id: "settings-agent-command", section: "runtime" },
+};
+
+function firstValidationField(result: ValidationResult | null) {
+  const issue = result?.issues.find((issue) => issue.blocking) ?? result?.issues[0];
+  return issue ? VALIDATION_FIELDS[issue.field] : null;
 }
 
-function settingsSectionForField(fieldId: string | null): SettingsSectionId {
-  if (fieldId === "settings-repositories") return "repositories";
-  if (fieldId === "settings-prompt-template") return "workflow";
-  return "linear";
+function validationFieldId(result: ValidationResult | null) {
+  return firstValidationField(result)?.id ?? null;
 }
 
 function SettingsFeature({
-  savedSettings,
-  draftRef,
-  revisionRef,
-  linearKeyRef,
-  onDirtyChange,
-  savePendingRef,
-  saveControllerRef,
-  savePending,
-  onSavePendingChange,
-  onValidationResult,
-  onDraftChange,
-  onSave,
-  onTestConnection,
-  onRemoveKey,
-  onResetPrompt,
-  onRefreshSkills,
-  onInstallSkills,
-  onRefreshWorkflow,
-  ...viewProps
+  controller,
+  repositories,
+  worker,
+  activeRunCount,
+  busy,
+  runtimeAvailable,
 }: SettingsFeatureProps) {
-  const [draft, setDraft] = useState(() => draftRef.current ?? savedSettings);
-  const [linearKey, setLinearKeyState] = useState(() => linearKeyRef.current);
-  const [validationState, setValidationState] = useState<SettingsValidationState>(
-    viewProps.runtimeAvailable
-      ? { status: "idle", result: null, stale: false }
-      : { status: "unavailable", result: null, stale: false },
-  );
-  const dirtyRef = useRef(viewProps.settingsDirty);
-  const summaryRef = useRef<HTMLDivElement>(null);
-  const [focusInvalidSummary, setFocusInvalidSummary] = useState(false);
-  const [promptSeedRevision, setPromptSeedRevision] = useState(0);
-  const deferredValidationRef = useRef(false);
-  const controllerRef = useRef<SettingsValidationController | null>(null);
-  const mountedRef = useRef(false);
-  const onValidationResultRef = useRef(onValidationResult);
-  onValidationResultRef.current = onValidationResult;
-
-  // Lazily create the controller and remint only when runtime availability
-  // changes or the previous one was disposed. Effect teardown must NOT dispose —
-  // React Strict Mode runs cleanup→setup on the same fiber, and disposing there
-  // permanently breaks Save.
-  const ensureController = useCallback(() => {
-    const existing = controllerRef.current;
-    if (
-      existing &&
-      !existing.isDisposed &&
-      existing.runtimeAvailable === viewProps.runtimeAvailable
-    ) {
-      return existing;
-    }
-    // Drop the previous instance only when Save does not own it.
-    if (existing && !existing.isDisposed && saveControllerRef.current !== existing) {
-      existing.dispose();
-    }
-    const created = new SettingsValidationController(
-      viewProps.runtimeAvailable,
-      desktopCommands.validateSettings,
-      (state) => {
-        if (!mountedRef.current) return;
-        // Keep pending updates low-priority, but flush terminal states immediately
-        // so Save can read the real error instead of a stale/generic banner.
-        if (state.status === "pending") {
-          startTransition(() => setValidationState(state));
-        } else {
-          setValidationState(state);
-        }
-        if (state.result && state.status !== "pending") {
-          onValidationResultRef.current(state.result);
-        }
-      },
-    );
-    controllerRef.current = created;
-    return created;
-  }, [saveControllerRef, viewProps.runtimeAvailable]);
-
-  const scheduleValidation = useCallback(
-    (revision: { id: number; settings: AppSettings }) => {
-      const controller = ensureController();
-      if (savePendingRef.current && saveControllerRef.current !== controller) {
-        deferredValidationRef.current = true;
-        return;
-      }
-      controller.schedule(revision);
-    },
-    [ensureController, saveControllerRef, savePendingRef],
-  );
-
-  const updateDirty = useCallback(
-    (next: AppSettings, nextKey: string) => {
-      const baseline = formSnapshot(savedSettings);
-      const dirty = formSnapshot(next) !== baseline || nextKey.trim() !== "";
-      if (dirtyRef.current === dirty) return;
-      dirtyRef.current = dirty;
-      onDirtyChange(dirty);
-    },
-    [onDirtyChange, savedSettings],
-  );
-
-  useEffect(() => {
-    dirtyRef.current = viewProps.settingsDirty;
-  }, [viewProps.settingsDirty]);
-
-  const setSettingsDraft = useCallback(
-    (next: AppSettings) => {
-      const previous = draftRef.current ?? draft;
-      const normalized =
-        next.prompt_template === draft.prompt_template
-          ? { ...next, prompt_template: previous.prompt_template }
-          : next;
-      setDraft(normalized);
-      draftRef.current = normalized;
-      onDraftChange(normalized, linearKeyRef.current, previous);
-      const revision = { id: ++revisionRef.current, settings: normalized };
-      scheduleValidation(revision);
-      updateDirty(normalized, linearKeyRef.current);
-    },
-    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, scheduleValidation, updateDirty],
-  );
-
-  const setPromptDraft = useCallback(
-    (prompt: string) => {
-      const previous = draftRef.current ?? draft;
-      const next = { ...previous, prompt_template: prompt };
-      draftRef.current = next;
-      // Keep feature draft aligned without urgent shell work so a PromptEditor
-      // remount reseeds from the latest prompt, not a stale parent value.
-      startTransition(() => setDraft(next));
-      onDraftChange(next, linearKeyRef.current, previous);
-      scheduleValidation({ id: ++revisionRef.current, settings: next });
-      updateDirty(next, linearKeyRef.current);
-    },
-    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, scheduleValidation, updateDirty],
-  );
-
-  const setLinearKey = useCallback(
-    (next: string) => {
-      setLinearKeyState(next);
-      linearKeyRef.current = next;
-      revisionRef.current += 1;
-      const current = draftRef.current ?? draft;
-      onDraftChange(current, next, current);
-      updateDirty(current, next);
-    },
-    [draft, draftRef, linearKeyRef, onDraftChange, revisionRef, updateDirty],
-  );
-
-  useEffect(() => {
-    mountedRef.current = true;
-    const controller = ensureController();
-    const current = draftRef.current;
-    if (current) {
-      controller.schedule({ id: revisionRef.current, settings: current });
-    }
-    return () => {
-      mountedRef.current = false;
-      // Clear debounce only — never dispose here. Strict Mode's fake teardown
-      // would otherwise leave Save pointed at a dead controller on the same fiber.
-      controller.clearScheduled();
-    };
-  }, [draftRef, ensureController, revisionRef]);
-
-  useEffect(() => {
-    if (savePending) {
-      if (saveControllerRef.current !== controllerRef.current) {
-        deferredValidationRef.current = true;
-      }
-      return;
-    }
-    if (!deferredValidationRef.current) return;
-    deferredValidationRef.current = false;
-    const current = draftRef.current ?? savedSettings;
-    ensureController().schedule({ id: revisionRef.current, settings: current });
-  }, [draftRef, ensureController, revisionRef, saveControllerRef, savePending, savedSettings]);
-
-  useEffect(() => {
-    const preserved = dirtyRef.current ? (draftRef.current ?? draft) : savedSettings;
-    const next =
-      preserved.settings_revision === savedSettings.settings_revision
-        ? preserved
-        : { ...preserved, settings_revision: savedSettings.settings_revision };
-    if (next === draftRef.current) return;
-    draftRef.current = next;
-    setDraft(next);
-  }, [draft, draftRef, savedSettings]);
-
-  useEffect(() => {
-    if (!focusInvalidSummary) return;
-    if (validationState.status !== "invalid" && validationState.status !== "unavailable") {
-      return;
-    }
-    summaryRef.current?.focus();
-    setFocusInvalidSummary(false);
-  }, [focusInvalidSummary, validationState.status]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: revisionRef.current is mutable validation state, not a render dependency.
-  const handleSave = useCallback(async () => {
-    if (savePendingRef.current) return;
-    const activeController = ensureController();
-    savePendingRef.current = true;
-    saveControllerRef.current = activeController;
-    onSavePendingChange(true);
-    try {
-      const exactSettings = draftRef.current ?? draft;
-      const exactLinearKey = linearKeyRef.current;
-      const exactRevision = { id: revisionRef.current, settings: exactSettings };
-      const outcome = await activeController.validateNow(exactRevision);
-      if (revisionRef.current !== exactRevision.id) return;
-      if (outcome.status === "unavailable") {
-        if (outcome.cause === "superseded") return;
-        setValidationState({
-          status: "unavailable",
-          result: null,
-          stale: false,
-          reason: outcome.reason,
-        });
-        setFocusInvalidSummary(true);
-        return;
-      }
-      const result = outcome.result;
-      if (result.workflow_blocking) {
-        setFocusInvalidSummary(true);
-        return;
-      }
-      const saved = await onSave(exactSettings, exactLinearKey, result);
-      if (!saved || revisionRef.current !== exactRevision.id) return;
-      draftRef.current = saved;
-      setDraft(saved);
-      linearKeyRef.current = "";
-      setLinearKeyState("");
-      dirtyRef.current = false;
-      onDirtyChange(false);
-    } finally {
-      savePendingRef.current = false;
-      if (saveControllerRef.current === activeController) {
-        saveControllerRef.current = null;
-      }
-      onSavePendingChange(false);
-    }
-  }, [
-    draft,
-    draftRef,
-    ensureController,
-    linearKeyRef,
-    onDirtyChange,
-    onSave,
-    onSavePendingChange,
-    saveControllerRef,
-    savePendingRef,
-  ]);
-
-  const handleRemoveKey = useCallback(async () => {
-    const linearApiKeySet = await onRemoveKey();
-    if (linearApiKeySet === undefined) return;
-    setLinearKey("");
-    setSettingsDraft({ ...(draftRef.current ?? draft), linear_api_key_set: linearApiKeySet });
-  }, [draft, draftRef, onRemoveKey, setLinearKey, setSettingsDraft]);
-
-  const handleResetPrompt = useCallback(async () => {
-    const prompt = await onResetPrompt();
-    const previous = draftRef.current ?? draft;
-    const next = { ...previous, prompt_template: prompt };
-    draftRef.current = next;
-    setDraft(next);
-    setPromptSeedRevision((revision) => revision + 1);
-    onDraftChange(next, linearKeyRef.current, previous);
-    scheduleValidation({ id: ++revisionRef.current, settings: next });
-    updateDirty(next, linearKeyRef.current);
-  }, [
-    draft,
-    draftRef,
-    linearKeyRef,
-    onDraftChange,
-    onResetPrompt,
-    revisionRef,
-    scheduleValidation,
-    updateDirty,
-  ]);
-
+  const editor = useSettingsEditor(controller, runtimeAvailable);
+  const draft = () => controller.session.readDraft() ?? editor.settings;
   return (
     <SettingsView
-      {...viewProps}
-      settings={draft}
-      setSettings={setSettingsDraft}
-      linearKey={linearKey}
-      setLinearKey={setLinearKey}
-      validation={validationState.result}
-      validationState={validationState}
-      validationSummaryRef={summaryRef}
-      promptSeedRevision={promptSeedRevision}
-      onPromptChange={setPromptDraft}
-      onSave={handleSave}
-      onTestConnection={() => onTestConnection(draftRef.current ?? draft, linearKeyRef.current)}
-      onRemoveKey={handleRemoveKey}
-      onResetPrompt={handleResetPrompt}
-      onRefreshSkills={(repoUrl) => {
-        const current = draftRef.current ?? draft;
-        onRefreshSkills(repoUrl, current.session_env);
-      }}
-      onInstallSkills={(repoUrl) => onInstallSkills(draftRef.current ?? draft, repoUrl)}
-      onRefreshWorkflow={(repoUrl) => {
-        const current = draftRef.current ?? draft;
-        onRefreshWorkflow(repoUrl, current.session_env);
-      }}
+      {...editor}
+      {...controller.viewer}
+      {...repositories.state}
+      settingsDirty={controller.dirty}
+      workerRunning={worker.state === "running"}
+      workerConfigError={worker.state === "running" && worker.last_error !== null}
+      liveReconfigureSkipped={
+        worker.state === "running" &&
+        ((controller.validation?.workflow_ok === false &&
+          !controller.validation.workflow_blocking) ||
+          (controller.savedFlash && controller.savedLiveConfigKept))
+      }
+      activeRunCount={activeRunCount}
+      busy={busy}
+      runtimeAvailable={runtimeAvailable}
+      onRefreshSkills={(url) => repositories.checkSkills(url, draft().session_env)}
+      onInstallSkills={(url) => repositories.installSkills(draft(), url)}
+      onRefreshWorkflow={(url) => repositories.checkWorkflow(url, draft().session_env)}
+      onTransferWorkflow={repositories.transferWorkflow}
     />
   );
 }
@@ -834,9 +537,10 @@ function SettingsView({
               <a
                 href={`#${validationFieldId(validationState.result)}`}
                 onClick={() => {
-                  const fieldId = validationFieldId(validationState.result);
-                  setActiveSection(settingsSectionForField(fieldId));
-                  document.getElementById(fieldId ?? "")?.focus();
+                  const field = firstValidationField(validationState.result);
+                  if (!field) return;
+                  setActiveSection(field.section);
+                  document.getElementById(field.id)?.focus();
                 }}
               >
                 Go to the first affected field
@@ -1286,9 +990,10 @@ function SettingsView({
                   <AgentCliStatus backend={settings.agent_backend} validation={validation} />
                 ) : null}
               </div>
-              <label>
+              <label htmlFor="settings-agent-command">
                 Launch command
                 <input
+                  id="settings-agent-command"
                   {...literalInputProps}
                   className="mono-input"
                   value={

@@ -1,18 +1,19 @@
 import { readFile } from "node:fs/promises";
-import { gzipSync } from "node:zlib";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const DIST_DIR = resolve(SCRIPT_DIR, "../dist");
 export const MANIFEST_PATH = resolve(DIST_DIR, ".vite/manifest.json");
 
 export const BUDGETS = {
-  // The eager primitive extraction preserves raw size but changes Rollup's
-  // module ordering; lost-event recovery adds selected-detail invalidation.
-  // Retain a small gzip cushion for the resulting runner
-  // variance without allowing a new chunk or view payload into the shell.
-  eagerJavaScript: 80_800,
+  // Explicit feature owners and persistent settings-session capabilities add
+  // ~0.65 kB gzip versus the board-operations baseline (80.63 -> 81.28 kB).
+  // Exact Save acknowledgements fence dirty-draft provenance; the measured
+  // integrated shell is 81.60 kB gzip. Keep a small runner cushion.
+  // Preserve startup behavior and every existing lazy/forbidden entry boundary.
+  eagerJavaScript: 81_800,
   eagerCss: 7_000,
   lazyViewJavaScript: 50_000,
 };

@@ -1,4 +1,4 @@
-import type { RateLimitStateRow, TokenUsageRow } from "./bindings";
+import type { AgentEvent, AgentEventKind, RateLimitState, TokenUsage } from "./bindings";
 
 export function shortTime(value: string) {
   const date = new Date(value);
@@ -36,13 +36,13 @@ const PROVIDERS = [
 export type ProviderRateLimit = {
   id: string;
   label: string;
-  limit: RateLimitStateRow | null;
+  limit: RateLimitState | null;
 };
 
 // One display row per provider, even without signals; a provider with
 // several signal buckets (codex_primary, codex_secondary, ...) gets a row
 // per bucket. Sources from unknown providers are appended as-is.
-export function providerRateLimits(limits: RateLimitStateRow[]): ProviderRateLimit[] {
+export function providerRateLimits(limits: RateLimitState[]): ProviderRateLimit[] {
   const claimed = new Set<string>();
   const rows = PROVIDERS.flatMap(({ key, label }): ProviderRateLimit[] => {
     const matches = limits.filter(
@@ -67,12 +67,12 @@ export function providerRateLimits(limits: RateLimitStateRow[]): ProviderRateLim
 export type ProviderTokenUsage = {
   id: string;
   label: string;
-  usage: TokenUsageRow | null;
+  usage: TokenUsage | null;
 };
 
 // One display row per provider, even before any usage is recorded; sources
 // from unknown providers are appended as-is.
-export function providerTokenUsage(rows: TokenUsageRow[]): ProviderTokenUsage[] {
+export function providerTokenUsage(rows: TokenUsage[]): ProviderTokenUsage[] {
   const claimed = new Set<string>();
   const known = PROVIDERS.map(({ key, label }): ProviderTokenUsage => {
     const usage = rows.find((row) => row.source === key) ?? null;
@@ -111,52 +111,11 @@ export function timeOnly(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
 }
 
-export type SessionInfo = {
-  model: string | null;
-  permission_mode: string | null;
-  agent_version: string | null;
-  output_style: string | null;
-  fast_mode: string | null;
-  thinking_tokens: number | null;
-};
-
-export function parseSessionInfo(raw: string | null): SessionInfo | null {
-  if (!raw) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed as SessionInfo;
-  } catch {
-    return null;
-  }
-}
-
 export type EventSummary = {
   label: string;
   summary: string;
   tone?: "error";
 };
-
-export type ParsedEventPayload =
-  | Record<string, unknown>
-  | unknown[]
-  | string
-  | number
-  | boolean
-  | null;
-
-export const EVENT_PAYLOAD_PARSE_FAILED = Symbol("event-payload-parse-failed");
-export type EventPayloadParseResult = ParsedEventPayload | typeof EVENT_PAYLOAD_PARSE_FAILED;
-
-export function parseEventPayload(payload: string): EventPayloadParseResult {
-  try {
-    return JSON.parse(payload) as ParsedEventPayload;
-  } catch {
-    return EVENT_PAYLOAD_PARSE_FAILED;
-  }
-}
 
 function isGenericToolLifecycle(summary: string) {
   return summary === "running" || /^exit (?:-?\d+|\?)$/.test(summary);
@@ -169,63 +128,58 @@ function toolCallDetail(resultSummary: string | null, command: string | null) {
   return resultSummary === "running" ? command : `${command} (${resultSummary})`;
 }
 
-export function describeEvent(
-  kind: string,
-  payload: string,
-  parsed: EventPayloadParseResult = parseEventPayload(payload),
-): EventSummary {
+export function describeEvent(kind: AgentEventKind, payload: AgentEvent["payload"]): EventSummary {
   const data =
-    parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
       : null;
+  const fallback = () => prettyPayload(payload);
   const text = (value: unknown) => (typeof value === "string" ? value : null);
   const count = (value: unknown) => (typeof value === "number" ? value : 0);
 
   switch (kind) {
     case "status":
-      return { label: "Status", summary: text(data?.message) ?? payload };
+      return { label: "Status", summary: text(data?.message) ?? fallback() };
     case "tool_call": {
       const tool = text(data?.tool) ?? "tool";
-      const args = data?.args as Record<string, unknown> | undefined;
+      const args =
+        data?.args && typeof data.args === "object" && !Array.isArray(data.args)
+          ? (data.args as Record<string, unknown>)
+          : null;
       const detail = toolCallDetail(text(data?.result_summary), text(args?.command));
       return { label: "Tool call", summary: detail ? `${tool}: ${detail}` : tool };
     }
     case "approval":
-      return { label: "Approval", summary: text(data?.reason) ?? payload };
+      return { label: "Approval", summary: text(data?.reason) ?? fallback() };
     case "token_count":
       return {
         label: "Tokens",
         summary: data
           ? `${formatTokens(count(data.input_tokens))} in · ${formatTokens(count(data.output_tokens))} out`
-          : payload,
+          : fallback(),
       };
     case "error":
       return {
         label: "Error",
-        summary: data ? `${text(data.class) ?? "Error"}: ${text(data.message) ?? ""}` : payload,
+        summary: data ? `${text(data.class) ?? "Error"}: ${text(data.message) ?? ""}` : fallback(),
         tone: "error",
       };
     case "user_input":
-      return { label: "User input", summary: text(data?.text) ?? payload };
+      return { label: "User input", summary: text(data?.text) ?? fallback() };
     case "rate_limit":
       return {
         label: "Rate limit",
         summary: data
           ? `${text(data.source) ?? "provider"} — ${data.remaining ?? "unknown"} remaining`
-          : payload,
+          : fallback(),
       };
     case "humanized":
-      return { label: "Summary", summary: text(data?.summary) ?? payload };
-    default:
-      return { label: kind, summary: "" };
+      return { label: "Summary", summary: text(data?.summary) ?? fallback() };
   }
 }
 
-export function prettyPayload(
-  value: string,
-  parsed: EventPayloadParseResult = parseEventPayload(value),
-) {
-  return parsed === EVENT_PAYLOAD_PARSE_FAILED ? value : JSON.stringify(parsed, null, 2);
+export function prettyPayload(value: AgentEvent["payload"]): string {
+  return typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? "");
 }
 
 export function nullable(value: string) {

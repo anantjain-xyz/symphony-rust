@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { AppSettings, RunWithIssueRow } from "./bindings";
+import type { AppSettings, RunSummary } from "./bindings";
 import { statusSlug } from "./format";
 import { RelativeTime } from "./RelativeTime";
 
@@ -21,7 +21,7 @@ export function RunTable({
   lastActivity,
   showRepo,
 }: {
-  runs: RunWithIssueRow[];
+  runs: RunSummary[];
   onOpenRun: (id: string) => void;
   emptyTitle?: string;
   emptyText?: string;

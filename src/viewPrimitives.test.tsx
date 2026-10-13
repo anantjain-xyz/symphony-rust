@@ -2,10 +2,10 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppSettings, RunWithIssueRow } from "./bindings";
+import type { AppSettings, RunSummary } from "./bindings";
 import { Badge, Empty, formSnapshot, Panel, RunTable } from "./viewPrimitives";
 
-function run(): RunWithIssueRow {
+function run(): RunSummary {
   return {
     id: "run-1",
     issue_id: "issue-1",
@@ -75,16 +75,18 @@ describe("shared view primitives", () => {
     expect(screen.getByText("In Progress").className).toBe("badge in-progress");
   });
 
-  it("omits the server-derived API-key flag from form snapshots", () => {
+  it("omits server-derived metadata from form snapshots", () => {
     const settings = {
       prompt_template: "Prompt",
       repos: [],
       linear_api_key_set: false,
+      settings_revision: 0,
     } as unknown as AppSettings;
     const saved = formSnapshot(settings);
-    const withKey = formSnapshot({ ...settings, linear_api_key_set: true });
+    const withKey = formSnapshot({ ...settings, linear_api_key_set: true, settings_revision: 7 });
 
     expect(saved).toBe(withKey);
     expect(saved).not.toContain("linear_api_key_set");
+    expect(saved).not.toContain("settings_revision");
   });
 });

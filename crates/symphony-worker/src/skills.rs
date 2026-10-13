@@ -625,7 +625,7 @@ impl SkillsInstallStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SkillsInstallConfig {
     pub repo_url: String,
     /// Resolved workspace root (same directory per-issue workspaces live in).
@@ -639,6 +639,15 @@ pub struct SkillsInstallConfig {
     pub env: BTreeMap<String, String>,
     /// Custom session env from settings (e.g. `CURSOR_API_KEY`).
     pub session_env: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for SkillsInstallConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkillsInstallConfig")
+            .field("env_count", &self.env.len())
+            .field("session_env_count", &self.session_env.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One-at-a-time background install; status is polled by the UI.
@@ -763,10 +772,8 @@ async fn run_install(
     let result = loop {
         tokio::select! {
             maybe_event = rx.recv() => {
-                if let Some(event) = maybe_event {
-                    if let Some(summary) = event.humanized {
-                        set_message(inner, tail(&summary, 200)).await;
-                    }
+                if let Some(symphony_core::MappedAgentEvent::Visible { humanized: Some(summary), .. }) = maybe_event {
+                    set_message(inner, tail(&summary, 200)).await;
                 }
             }
             result = &mut run_fut => break result,

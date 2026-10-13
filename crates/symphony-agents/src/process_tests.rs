@@ -263,13 +263,11 @@ async fn dropping_every_provider_stops_descendants_even_during_event_backpressur
         ));
         let (tx, _rx) = mpsc::channel(1);
         // Fill the channel first so provider event delivery cannot finish.
-        tx.send(MappedAgentEvent {
+        tx.send(MappedAgentEvent::Visible {
             kind: AgentEventKind::Status,
             payload: json!({}),
             humanized: None,
-            tokens: None,
-            rate_limit: None,
-            session_info: None,
+            metadata: AgentEventMetadata::default(),
         })
         .await
         .unwrap();
@@ -295,13 +293,11 @@ async fn every_provider_cancels_during_event_backpressure() {
             shell_quote(success_record(&backend))
         ));
         let (tx, _rx) = mpsc::channel(1);
-        tx.send(MappedAgentEvent {
+        tx.send(MappedAgentEvent::Visible {
             kind: AgentEventKind::Status,
             payload: json!({}),
             humanized: None,
-            tokens: None,
-            rate_limit: None,
-            session_info: None,
+            metadata: AgentEventMetadata::default(),
         })
         .await
         .unwrap();
@@ -356,20 +352,39 @@ async fn cursor_terminal_result_stops_a_lingering_process() {
 }
 
 #[tokio::test]
-async fn nonzero_exit_keeps_only_a_bounded_stderr_tail_for_every_provider() {
+async fn nonzero_exit_omits_overflowed_stderr_without_retaining_credential_fragments() {
     for backend in BACKENDS {
-        let fixture = Fixture::new("cat >/dev/null\ndd if=/dev/zero bs=65536 count=32 >&2 2>/dev/null\nprintf 'diagnostic é final\\n' >&2\nexit 7");
+        let fixture = Fixture::new("cat >/dev/null\nprintf 'credential-prefix-' >&2\ndd if=/dev/zero bs=65536 count=32 >&2 2>/dev/null\nprintf 'credential-suffix\\n' >&2\nexit 7");
         let (tx, _rx) = mpsc::channel(64);
         let mut running = Running::start(fixture.request(backend), tx, CancellationToken::new());
         let result = running.result().await.unwrap();
         assert!(matches!(result.outcome, AgentOutcome::Failure));
         assert_eq!(result.error_class.as_deref(), Some("nonzero_exit"));
         let message = result.error_message.unwrap();
-        assert!(
-            message.ends_with("diagnostic é final"),
-            "missing diagnostic tail"
-        );
+        assert!(message.ends_with("[stderr omitted: diagnostic limit exceeded]"));
+        assert!(!message.contains("credential"));
         assert!(message.len() < 8 * 1024 + 100);
+        fixture.assert_stopped("leader.pid").await;
+    }
+}
+
+#[tokio::test]
+async fn nonzero_exit_preserves_complete_bounded_stderr_for_every_provider() {
+    for backend in BACKENDS {
+        let fixture = Fixture::new("cat >/dev/null\nprintf 'diagnostic é final\\n' >&2\nexit 7");
+        let mut request = fixture.request(backend);
+        request.prompt = "prompt-canary-secret".into();
+        request.env = vec![("CUSTOM".into(), "env-canary-secret".into())];
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("canary"));
+        let (tx, _rx) = mpsc::channel(64);
+        let mut running = Running::start(request, tx, CancellationToken::new());
+        let result = running.result().await.unwrap();
+        assert!(matches!(result.outcome, AgentOutcome::Failure));
+        assert!(result
+            .error_message
+            .unwrap()
+            .ends_with("diagnostic é final"));
         fixture.assert_stopped("leader.pid").await;
     }
 }
@@ -378,13 +393,11 @@ async fn nonzero_exit_keeps_only_a_bounded_stderr_tail_for_every_provider() {
 async fn opencode_final_usage_delivery_keeps_the_execution_deadline() {
     let fixture = Fixture::new("cat >/dev/null\nprintf '%s\\n' '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1,\"output\":1}}}'");
     let (tx, _rx) = mpsc::channel(1);
-    tx.send(MappedAgentEvent {
+    tx.send(MappedAgentEvent::Visible {
         kind: AgentEventKind::Status,
         payload: json!({}),
         humanized: None,
-        tokens: None,
-        rate_limit: None,
-        session_info: None,
+        metadata: AgentEventMetadata::default(),
     })
     .await
     .unwrap();

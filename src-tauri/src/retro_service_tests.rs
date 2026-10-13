@@ -60,7 +60,7 @@ impl RetroEffects for FakeEffects {
         repository
             .update_retro_batch(
                 &batch.id,
-                "completed",
+                BatchState::Completed,
                 Some("Fake PR completed"),
                 None,
                 Some("https://example.test/pr/1"),
@@ -102,19 +102,26 @@ impl Fixture {
         );
         settings.save(configured_settings(), None).await.unwrap();
         let worker = WorkerManager::new(repo.clone());
-        let mut service = RetroService::new(
-            repo.clone(),
-            settings,
-            worker,
-            crate::validate_workflow_settings,
-        );
+        let mut service = RetroService::new(repo.clone(), settings, worker);
         let effects = Arc::new(FakeEffects::default());
         service.effects = effects.clone();
         let retro = repo
             .create_retro("2000-01-01T00:00:00Z", "2000-01-02T00:00:00Z")
             .await
             .unwrap();
-        repo.finish_retro(&retro.id, "{}", 0, 0).await.unwrap();
+        let report = RetroReport {
+            id: retro.id.clone(),
+            since_at: retro.since_at.clone(),
+            until_at: retro.until_at.clone(),
+            generated_at: now_iso(),
+            run_count: 0,
+            issue_count: 0,
+            workpad_count: 0,
+            repos: vec![],
+        };
+        repo.finish_retro(&retro.id, &serde_json::to_string(&report).unwrap(), 0, 0)
+            .await
+            .unwrap();
         Self {
             directory,
             service,
@@ -138,13 +145,13 @@ impl Fixture {
             repo_name: "widgets".into(),
             repo_url: Some(settings.repos[0].url.clone()),
             finding_index: 0,
-            target_type: target.into(),
+            target_type: target.parse().unwrap(),
             target_id: id.into(),
             target_path: "WORKFLOW.md".into(),
             title: "Validate changes".into(),
             body: "Run checks".into(),
             rationale: "Repeated failure".into(),
-            confidence: "high".into(),
+            confidence: symphony_core::SuggestionConfidence::High,
             guidance: "Validate changes before pushing.".into(),
             before_content: Some(settings.prompt_template.clone()),
             after_content: Some(integrate_retro_guidance(
@@ -154,9 +161,9 @@ impl Fixture {
             unified_diff: None,
             base_ref: Some("reviewed-ref".into()),
             base_hash: Some(prompt_revision(&settings)),
-            proposal_status: "ready".into(),
+            proposal_status: ProposalState::Ready,
             proposal_error: None,
-            decision: decision.into(),
+            decision: decision.parse().unwrap(),
             decided_at: None,
             created_at: now_iso(),
         };
@@ -203,26 +210,21 @@ async fn whole_retro_review_is_required_before_either_batch_kind() {
         .unwrap()
         .is_empty());
     assert_eq!(fixture.effects.checks.load(Ordering::SeqCst), 0);
-    assert!(fixture
-        .service
-        .review(pending.id.clone(), "invalid".into())
-        .await
-        .is_err());
     assert_eq!(
         fixture
             .service
-            .review(pending.id, "rejected".into())
+            .review(pending.id, SuggestionDecision::Rejected)
             .await
             .unwrap()
             .decision,
-        "rejected"
+        SuggestionDecision::Rejected
     );
     let batch = fixture
         .service
         .apply_workflow(fixture.retro.id.clone(), fixture.runtime())
         .await
         .unwrap();
-    assert_eq!(batch.state, "completed");
+    assert_eq!(batch.state, BatchState::Completed);
 }
 
 #[tokio::test]
@@ -253,7 +255,7 @@ async fn workflow_apply_uses_settings_cas_after_source_check() {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(batch.state, "failed");
+    assert_eq!(batch.state, BatchState::Failed);
 }
 
 #[tokio::test]
@@ -277,7 +279,7 @@ async fn disconnected_caller_does_not_abandon_reserved_workflow_application() {
                 .list_retro_batches(&fixture.retro.id)
                 .await
                 .unwrap();
-            if batches[0].state == "completed" {
+            if batches[0].state == BatchState::Completed {
                 break;
             }
             tokio::task::yield_now().await;
@@ -335,10 +337,10 @@ async fn concurrent_pr_requests_reserve_once_per_repository_and_delete_only_when
         .is_err());
     let reserved = fixture
         .service
-        .review("skill-one".into(), "rejected".into())
+        .review("skill-one".into(), SuggestionDecision::Rejected)
         .await
         .unwrap();
-    assert_eq!(reserved.decision, "accepted");
+    assert_eq!(reserved.decision, SuggestionDecision::Accepted);
     fixture.effects.pr_release.notify_one();
     fixture.join_jobs().await;
     let calls = fixture.effects.jobs.lock().await;
@@ -353,7 +355,7 @@ async fn concurrent_pr_requests_reserve_once_per_repository_and_delete_only_when
         .await
         .unwrap();
     assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].state, "completed");
+    assert_eq!(batches[0].state, BatchState::Completed);
     assert!(fixture
         .service
         .detail(fixture.retro.id.clone())
@@ -415,7 +417,7 @@ async fn repository_source_change_marks_prompt_batch_stale_without_writing_setti
         .apply_workflow(fixture.retro.id.clone(), fixture.runtime())
         .await
         .unwrap();
-    assert_eq!(batch.state, "stale");
+    assert_eq!(batch.state, BatchState::Stale);
     assert!(batch.error.unwrap().contains("checked-in workflow"));
     assert_eq!(
         fixture
@@ -452,6 +454,49 @@ async fn generation_without_credentials_does_not_create_a_retro() {
         .unwrap_err()
         .contains("No Linear API key"));
     assert_eq!(fixture.service.list().await.unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn shared_runtime_validation_rejects_unrunnable_prompt_application_before_save() {
+    let fixture = Fixture::new().await;
+    fixture.suggestion("prompt", "prompt", "accepted").await;
+    let mut settings = fixture.service.settings.load().await.unwrap();
+    settings.polling_interval_ms = 0;
+    let before = fixture.service.settings.save(settings, None).await.unwrap();
+    let error = fixture
+        .service
+        .apply_workflow(fixture.retro.id.clone(), fixture.runtime())
+        .await
+        .unwrap_err();
+    assert!(error.contains("Polling interval must be positive"));
+    let after = fixture.service.settings.load().await.unwrap();
+    assert_eq!(after.settings_revision, before.settings_revision);
+    assert_eq!(after.prompt_template, before.prompt_template);
+    let batches = fixture
+        .service
+        .repo
+        .list_retro_batches(&fixture.retro.id)
+        .await
+        .unwrap();
+    assert_eq!(batches[0].state, BatchState::Failed);
+}
+
+#[tokio::test]
+async fn detail_reports_corrupt_stored_report_instead_of_hiding_it() {
+    let fixture = Fixture::new().await;
+    fixture
+        .service
+        .repo
+        .finish_retro(&fixture.retro.id, "{}", 0, 0)
+        .await
+        .unwrap();
+    let error = fixture
+        .service
+        .detail(fixture.retro.id.clone())
+        .await
+        .err()
+        .unwrap();
+    assert!(error.contains("invalid stored retro report"));
 }
 #[test]
 fn retro_prs_require_the_saved_repo_name_and_url_to_match() {

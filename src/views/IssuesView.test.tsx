@@ -1,20 +1,20 @@
 // @vitest-environment jsdom
 
-import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import React from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { IssueRow, WorkflowStateRow } from "../bindings";
+import type { IssueSummary, WorkflowStateRow } from "../bindings";
 
 const graphMocks = vi.hoisted(() => ({
   builds: vi.fn(),
   loads: vi.fn(),
-  models: new WeakMap<readonly IssueRow[], true>(),
+  models: new WeakMap<readonly IssueSummary[], true>(),
 }));
 
 vi.mock("./DependencyGraphPanel", () => {
   graphMocks.loads();
   return {
-    default: ({ issues }: { issues: readonly IssueRow[] }) => {
+    default: ({ issues }: { issues: readonly IssueSummary[] }) => {
       if (!graphMocks.models.has(issues)) {
         graphMocks.models.set(issues, true);
         graphMocks.builds(issues);
@@ -27,11 +27,11 @@ vi.mock("./DependencyGraphPanel", () => {
 import IssuesView, {
   BOARD_COLUMN_PAGE_SIZE,
   BOARD_REFRESH_INTERVAL_MS,
-  boardDragScrollDelta,
   boardColumns,
+  boardDragScrollDelta,
 } from "./IssuesView";
 
-function issue(identifier: string, state = "Todo", priority = 2): IssueRow {
+function issue(identifier: string, state = "Todo", priority = 2): IssueSummary {
   return {
     id: `issue-${identifier}`,
     identifier,
@@ -40,9 +40,9 @@ function issue(identifier: string, state = "Todo", priority = 2): IssueRow {
     priority,
     state,
     branch: null,
-    labels: "[]",
-    blockers: "[]",
-    raw: "{}",
+    labels: [],
+    blockers: [],
+
     last_seen_at: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -701,7 +701,7 @@ it("locks a card from a second move while the first is pending (#3)", async () =
 
 it("coalesces board polls — no concurrent fetch while one is in flight (#2/#5)", async () => {
   vi.useFakeTimers();
-  const pending = deferred<IssueRow[]>();
+  const pending = deferred<IssueSummary[]>();
   const loadBoardIssues = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue([]);
   render(
     <IssuesView

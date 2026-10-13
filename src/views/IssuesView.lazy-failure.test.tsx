@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import React from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { IssueRow } from "../bindings";
+import type { IssueSummary } from "../bindings";
 
 const graphMock = vi.hoisted(() => ({
   attempts: 0,
@@ -25,7 +25,7 @@ vi.mock("./DependencyGraphPanel", () => {
 
 import IssuesView from "./IssuesView";
 
-const issue: IssueRow = {
+const issue: IssueSummary = {
   id: "issue-SYM-1",
   identifier: "SYM-1",
   title: "Title for SYM-1",
@@ -33,9 +33,9 @@ const issue: IssueRow = {
   priority: 2,
   state: "Todo",
   branch: null,
-  labels: "[]",
-  blockers: "[]",
-  raw: "{}",
+  labels: [],
+  blockers: [],
+
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
 

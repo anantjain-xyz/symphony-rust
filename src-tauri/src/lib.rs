@@ -5,23 +5,22 @@ use std::{
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
-    LinearViewerProfile, RunDetail, SaveSettingsRequest, TrackerTestResult, ValidationResult,
+    DashboardOverview, IssueSummary, LinearViewerProfile, RetroChangeBatch, RetroSuggestionReview,
+    RetroSummary, RunDetail, RunSummary, SaveSettingsRequest, TrackerTestResult, ValidationResult,
     WorkflowStateRow,
 };
-use symphony_storage::{
-    now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchRow, RetroRow,
-    RetroSuggestionRow, RunWithIssueRow, StorageEvent,
-};
+use symphony_storage::{now_iso, open_sqlite, EventBus, Repository, StorageEvent};
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
-    check_repo_workflow, check_skills, resolve_workspace_root_dir, sanitize_key,
-    RepoWorkflowStatus, SkillFile, SkillsInstallConfig, SkillsInstallStatus, SkillsInstaller,
-    SkillsStatus, WorkerManager, WorkerStartConfig, WorkerStatus, WorkflowTransferConfig,
-    WorkflowTransferManager, WorkflowTransferStatus,
+    check_repo_workflow, check_skills, resolve_workspace_root_dir, RepoWorkflowStatus, SkillFile,
+    SkillsInstallConfig, SkillsInstallStatus, SkillsInstaller, SkillsStatus, WorkerManager,
+    WorkerStartConfig, WorkerStatus, WorkflowTransferConfig, WorkflowTransferManager,
+    WorkflowTransferStatus,
 };
 use tauri::{Emitter, Listener, Manager, State};
 
 mod path_env;
+mod projections;
 mod retro;
 mod retro_service;
 mod settings;
@@ -163,17 +162,21 @@ async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<AppSettings, String> {
-    let settings = state
-        .settings_store
-        .save(request.settings, request.linear_api_key)
-        .await?;
-    if live_reconfigure_allowed(&settings) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &settings))
-            .await;
-    }
-    Ok(settings)
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state
+            .settings_store
+            .save(request.settings, request.linear_api_key)
+            .await?;
+        if live_reconfigure_allowed(&settings) {
+            state
+                .worker
+                .reconfigure(worker_start_config(&state, &settings)?)
+                .await;
+        }
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -181,8 +184,9 @@ async fn validate_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
-    let workflow_error = validate_workflow_settings(&settings);
-    let workflow_blocking = workflow_error.is_some() && !workflow_setup_incomplete(&settings);
+    let issues = workflow_validation_issues(&settings);
+    let workflow_error = issues.first().map(|issue| issue.message.clone());
+    let workflow_blocking = issues.iter().any(|issue| issue.blocking);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
     let cursor_command = settings::effective_cursor_command(&settings.cursor_command);
@@ -191,6 +195,7 @@ async fn validate_settings(
         workflow_ok: workflow_error.is_none(),
         workflow_blocking,
         workflow_error,
+        issues,
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
         cursor_found: command_found(&cursor_command),
@@ -204,117 +209,42 @@ async fn validate_settings(
     })
 }
 
-fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
-    if settings
-        .active_states
-        .iter()
-        .all(|state| state.trim().is_empty())
-    {
-        return Some(
-            "Active states is empty — the worker would never pick up an issue. Add at least one Linear state under Settings → Linear.".to_string(),
-        );
-    }
-    if let Some(error) = validate_repos(&settings.repos) {
-        return Some(error);
-    }
-    if let Some(error) = validate_session_env(&settings.session_env) {
-        return Some(error);
-    }
-    if let Err(error) = symphony_core::validate_prompt_template(&settings.prompt_template) {
-        return Some(error.replace("The workflow is empty.", "The prompt template is empty."));
-    }
-    None
+fn workflow_validation_issues(settings: &AppSettings) -> Vec<symphony_core::ValidationIssue> {
+    symphony_core::validate_runtime_config(
+        &workflow_from_settings(settings, None),
+        &settings.repos,
+        &settings.session_env,
+    )
 }
 
-/// Whether the workflow is unrunnable only because setup is not finished yet,
-/// rather than because something entered is wrong. The setup checklist already
-/// guides the user through configuring a repository, so this state must not
-/// block a save — a first-time user who has typed only their Linear API key
-/// (no repo yet) still needs `save_settings` to persist that key. Genuine
-/// mistakes once a repo exists (duplicate names, bad placeholders, …) do block.
+fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
+    workflow_validation_issues(settings)
+        .first()
+        .map(|issue| issue.message.clone())
+}
+
+#[cfg(test)]
 fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
-    settings.repos.is_empty()
+    workflow_validation_issues(settings)
+        .iter()
+        .any(|issue| issue.code == symphony_core::ValidationCode::MissingRepository)
 }
 
 fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
-    validate_workflow_settings(settings).is_none()
+    workflow_validation_issues(settings).is_empty()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
-    let invalid = env
-        .keys()
-        .filter(|key| !valid_env_key(key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !invalid.is_empty() {
-        return Some(format!(
-            "Session environment variable name{} invalid: {}. Use letters, numbers, and underscores, and do not start with a number.",
-            if invalid.len() == 1 { " is" } else { "s are" },
-            invalid.join(", ")
-        ));
-    }
-
-    let nul_values = env
-        .iter()
-        .filter(|(_key, value)| value.contains('\0'))
-        .map(|(key, _value)| key.clone())
-        .collect::<Vec<_>>();
-    if !nul_values.is_empty() {
-        return Some(format!(
-            "Session environment variable value{} contain a NUL byte: {}.",
-            if nul_values.len() == 1 {
-                " must not"
-            } else {
-                "s must not"
-            },
-            nul_values.join(", ")
-        ));
-    }
-
-    None
+    symphony_core::validate_session_environment(env)
+        .first()
+        .map(|issue| issue.message.clone())
 }
 
-fn valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-/// Repository names are label routing keys (either `repo:<name>` or bare
-/// `<name>`) and workspace namespaces, so they have to exist and be unique.
+#[cfg(test)]
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
-    if repos.is_empty() {
-        return Some(
-            "No repository configured — add one under Settings → Repositories.".to_string(),
-        );
-    }
-    let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-    for repo in repos {
-        let name = repo.name.trim();
-        if name.is_empty() {
-            return Some(
-                "Every repository needs a name — it is the key issues route by (repo:<name> or matching bare labels) and the workspace folder.".to_string(),
-            );
-        }
-        if repo.url.trim().is_empty() {
-            return Some(format!("Repository \"{name}\" has no Git URL."));
-        }
-        // Uniqueness is checked on the sanitized form the worker uses as the
-        // workspace folder: distinct names like "api.v2" and "api_v2" map to
-        // the same directory and would silently share checkouts.
-        if let Some(other) = names.insert(sanitize_key(name).to_lowercase(), name) {
-            if other.eq_ignore_ascii_case(name) {
-                return Some(format!("Two repositories share the name \"{name}\"."));
-            }
-            return Some(format!(
-                "Repository names \"{other}\" and \"{name}\" collide — they map to the same workspace folder."
-            ));
-        }
-    }
-    if repos.iter().filter(|repo| repo.is_default).count() > 1 {
-        return Some("Only one repository can be marked as the default.".to_string());
-    }
-    None
+    symphony_core::validate_repositories(repos)
+        .first()
+        .map(|issue| issue.message.clone())
 }
 
 fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
@@ -473,7 +403,7 @@ async fn set_issue_state(
 }
 
 #[tauri::command]
-async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
+async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummary>, String> {
     let Some(api_key) = linear_api_key() else {
         return Err(
             "No Linear API key configured. Add one under Settings → Linear to load the board."
@@ -488,35 +418,32 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
         .await
         .map_err(|err| err.to_string())?;
     let seen_at = now_iso();
-    issues
+    Ok(issues
         .into_iter()
-        .map(|issue| {
-            // Serialize the raw snapshot before moving fields out of `issue`.
-            let labels = serde_json::to_string(&issue.labels).map_err(|err| err.to_string())?;
-            let blockers = serde_json::to_string(&issue.blockers).map_err(|err| err.to_string())?;
-            let raw = serde_json::to_string(&issue).map_err(|err| err.to_string())?;
-            Ok(IssueRow {
-                id: issue.id,
-                identifier: issue.identifier,
-                title: issue.title,
-                description: issue.description,
-                priority: i64::from(issue.priority),
-                state: issue.state,
-                branch: issue.branch,
-                labels,
-                blockers,
-                raw,
-                last_seen_at: seen_at.clone(),
-            })
+        .map(|issue| IssueSummary {
+            id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            description: issue.description,
+            priority: i64::from(issue.priority),
+            state: issue.state,
+            branch: issue.branch,
+            labels: issue.labels,
+            blockers: issue.blockers,
+            last_seen_at: seen_at.clone(),
         })
-        .collect()
+        .collect())
 }
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    let settings = state.settings_store.remove_key().await?;
-    state.worker.stop().await;
-    Ok(settings)
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state.settings_store.remove_key().await?;
+        state.worker.stop().await;
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -530,16 +457,22 @@ fn get_default_skills() -> Vec<SkillFile> {
 }
 
 #[tauri::command]
-async fn get_overview(state: State<'_, AppState>) -> Result<Overview, String> {
-    state.repo.overview().await.map_err(|err| err.to_string())
+async fn get_overview(state: State<'_, AppState>) -> Result<DashboardOverview, String> {
+    state
+        .repo
+        .overview()
+        .await
+        .map(projections::dashboard_overview)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunWithIssueRow>, String> {
+async fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
     state
         .repo
         .list_runs(200)
         .await
+        .map(|rows| rows.into_iter().map(projections::run_summary).collect())
         .map_err(|err| err.to_string())
 }
 
@@ -552,7 +485,12 @@ async fn get_run_detail(
         .repo
         .get_run_detail(&id)
         .await
-        .map(|detail| detail.map(|(run, events)| RunDetail { run, events }))
+        .map(|detail| {
+            detail.map(|(run, events)| RunDetail {
+                run: projections::run_summary(run),
+                events: events.into_iter().map(projections::agent_event).collect(),
+            })
+        })
         .map_err(|err| err.to_string())
 }
 
@@ -567,16 +505,22 @@ async fn stop_run(state: State<'_, AppState>, id: String) -> Result<Option<RunDe
         .repo
         .get_run_detail(&id)
         .await
-        .map(|detail| detail.map(|(run, events)| RunDetail { run, events }))
+        .map(|detail| {
+            detail.map(|(run, events)| RunDetail {
+                run: projections::run_summary(run),
+                events: events.into_iter().map(projections::agent_event).collect(),
+            })
+        })
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
+async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummary>, String> {
     state
         .repo
         .list_issues(200)
         .await
+        .map(|rows| rows.into_iter().map(projections::issue_summary).collect())
         .map_err(|err| err.to_string())
 }
 
@@ -595,7 +539,7 @@ async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String
     }
     state
         .worker
-        .start(worker_start_config(&state, &settings))
+        .start(worker_start_config(&state, &settings)?)
         .await
         .map_err(|err| err.to_string())
 }
@@ -605,16 +549,23 @@ async fn stop_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String>
     Ok(state.worker.stop().await)
 }
 
-fn worker_start_config(state: &AppState, settings: &AppSettings) -> WorkerStartConfig {
+fn worker_start_config(
+    state: &AppState,
+    settings: &AppSettings,
+) -> Result<WorkerStartConfig, String> {
     let api_key = linear_api_key();
-    WorkerStartConfig {
-        workflow: workflow_from_settings(settings, api_key.as_deref()),
-        repos: settings.repos.clone(),
+    Ok(WorkerStartConfig {
+        runtime: symphony_core::RunnableConfig::new(
+            settings.settings_revision,
+            workflow_from_settings(settings, api_key.as_deref()),
+            settings.repos.clone(),
+            settings.session_env.clone(),
+        )
+        .map_err(|error| error.to_string())?,
         skills: bundled_skills(),
         env: build_env(),
-        session_env: settings.session_env.clone(),
         app_data_dir: state.app_data_dir.clone(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -646,8 +597,12 @@ async fn get_retro_status(state: State<'_, AppState>) -> Result<RetroStatus, Str
 }
 
 #[tauri::command]
-async fn list_retros(state: State<'_, AppState>) -> Result<Vec<RetroRow>, String> {
-    state.retro.list().await
+async fn list_retros(state: State<'_, AppState>) -> Result<Vec<RetroSummary>, String> {
+    state
+        .retro
+        .list()
+        .await
+        .map(|rows| rows.into_iter().map(projections::retro_summary).collect())
 }
 
 #[tauri::command]
@@ -655,7 +610,11 @@ async fn get_retro_detail(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Option<RetroDetail>, String> {
-    state.retro.detail(id).await
+    state
+        .retro
+        .detail(id)
+        .await
+        .map(|detail| detail.map(projections::retro_detail))
 }
 
 #[tauri::command]
@@ -672,28 +631,41 @@ async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), Stri
 async fn set_retro_suggestion_decision(
     state: State<'_, AppState>,
     id: String,
-    decision: String,
-) -> Result<RetroSuggestionRow, String> {
-    state.retro.review(id, decision).await
+    decision: symphony_core::SuggestionDecision,
+) -> Result<RetroSuggestionReview, String> {
+    state
+        .retro
+        .review(id, decision)
+        .await
+        .map(projections::retro_suggestion_review)
 }
 
 #[tauri::command]
 async fn apply_retro_workflow(
     state: State<'_, AppState>,
     retro_id: String,
-) -> Result<RetroBatchRow, String> {
+) -> Result<RetroChangeBatch, String> {
     state
         .retro
         .apply_workflow(retro_id, retro_runtime(&state))
         .await
+        .map(projections::retro_change_batch)
 }
 
 #[tauri::command]
 async fn start_retro_prs(
     state: State<'_, AppState>,
     retro_id: String,
-) -> Result<Vec<RetroBatchRow>, String> {
-    state.retro.start_prs(retro_id, retro_runtime(&state)).await
+) -> Result<Vec<RetroChangeBatch>, String> {
+    state
+        .retro
+        .start_prs(retro_id, retro_runtime(&state))
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(projections::retro_change_batch)
+                .collect()
+        })
 }
 
 // Both skills commands take the repo URL straight from the caller's form
@@ -903,7 +875,6 @@ pub fn run() {
                 repo.clone(),
                 settings_store.clone(),
                 worker.clone(),
-                validate_workflow_settings,
             );
             let state = AppState {
                 repo,
@@ -1005,16 +976,28 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
         while let Some(event) = storage_events::next_event(&mut rx).await {
             match &event {
                 StorageEvent::DbChanged { .. } => {
-                    let _ = handle.emit("db_changed", &event);
+                    let _ = handle.emit(
+                        "db_changed",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::AgentEvent { .. } => {
-                    let _ = handle.emit("agent_event", &event);
+                    let _ = handle.emit(
+                        "agent_event",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::RateLimitChanged { .. } => {
-                    let _ = handle.emit("rate_limit_changed", &event);
+                    let _ = handle.emit(
+                        "rate_limit_changed",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::WorkflowReady => {
-                    let _ = handle.emit("workflow_ready", &event);
+                    let _ = handle.emit(
+                        "workflow_ready",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
             }
         }

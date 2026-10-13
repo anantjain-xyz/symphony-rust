@@ -3,7 +3,6 @@ import {
   describeEvent,
   formatTokens,
   nullable,
-  parseSessionInfo,
   prettyPayload,
   priorityLabel,
   providerRateLimits,
@@ -20,21 +19,8 @@ describe("format helpers", () => {
     expect(nullable("SYM-")).toBe("SYM-");
   });
 
-  it("parses session info and rejects malformed values", () => {
-    const info = parseSessionInfo(
-      '{"model":"claude-opus-4-8","permission_mode":"acceptEdits","thinking_tokens":42}',
-    );
-    expect(info?.model).toBe("claude-opus-4-8");
-    expect(info?.permission_mode).toBe("acceptEdits");
-    expect(info?.thinking_tokens).toBe(42);
-    expect(parseSessionInfo(null)).toBeNull();
-    expect(parseSessionInfo("")).toBeNull();
-    expect(parseSessionInfo("not json")).toBeNull();
-    expect(parseSessionInfo("[1,2]")).toBeNull();
-  });
-
   it("pretty prints JSON payloads", () => {
-    expect(prettyPayload('{"message":"ok"}')).toContain('"message": "ok"');
+    expect(prettyPayload({ message: "ok" })).toContain('"message": "ok"');
     expect(prettyPayload("not json")).toBe("not json");
   });
 
@@ -166,63 +152,69 @@ describe("format helpers", () => {
   });
 
   it("summarizes known agent events", () => {
-    expect(describeEvent("status", '{"message":"cloning repo"}')).toEqual({
+    expect(describeEvent("status", { message: "cloning repo" })).toEqual({
       label: "Status",
       summary: "cloning repo",
     });
     expect(
-      describeEvent(
-        "tool_call",
-        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"exit 0"}',
-      ),
+      describeEvent("tool_call", {
+        tool: "bash",
+        args: { command: "pnpm test" },
+        result_summary: "exit 0",
+      }),
     ).toEqual({ label: "Tool call", summary: "bash: pnpm test (exit 0)" });
     expect(
-      describeEvent(
-        "tool_call",
-        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"exit 1"}',
-      ),
+      describeEvent("tool_call", {
+        tool: "bash",
+        args: { command: "pnpm test" },
+        result_summary: "exit 1",
+      }),
     ).toEqual({ label: "Tool call", summary: "bash: pnpm test (exit 1)" });
     expect(
-      describeEvent(
-        "tool_call",
-        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"running"}',
-      ),
+      describeEvent("tool_call", {
+        tool: "bash",
+        args: { command: "pnpm test" },
+        result_summary: "running",
+      }),
     ).toEqual({ label: "Tool call", summary: "bash: pnpm test" });
-    expect(describeEvent("tool_call", '{"tool":"bash","args":{"command":"pnpm test"}}')).toEqual({
+    expect(describeEvent("tool_call", { tool: "bash", args: { command: "pnpm test" } })).toEqual({
       label: "Tool call",
       summary: "bash: pnpm test",
     });
     expect(
-      describeEvent(
-        "tool_call",
-        '{"tool":"bash","args":{"command":"pnpm test"},"result_summary":"custom output"}',
-      ),
+      describeEvent("tool_call", {
+        tool: "bash",
+        args: { command: "pnpm test" },
+        result_summary: "custom output",
+      }),
     ).toEqual({ label: "Tool call", summary: "bash: custom output" });
-    expect(describeEvent("token_count", '{"input_tokens":184223,"output_tokens":9281}')).toEqual({
+    expect(describeEvent("token_count", { input_tokens: 184223, output_tokens: 9281 })).toEqual({
       label: "Tokens",
       summary: "184k in · 9.3k out",
     });
     expect(
-      describeEvent("error", '{"class":"AgentTurnTimeout","message":"turn exceeded budget"}'),
+      describeEvent("error", { class: "AgentTurnTimeout", message: "turn exceeded budget" }),
     ).toEqual({
       label: "Error",
       summary: "AgentTurnTimeout: turn exceeded budget",
       tone: "error",
     });
-    expect(describeEvent("rate_limit", '{"source":"codex","remaining":12}')).toEqual({
+    expect(describeEvent("rate_limit", { source: "codex", remaining: 12 })).toEqual({
       label: "Rate limit",
       summary: "codex — 12 remaining",
     });
   });
 
-  it("falls back gracefully for unknown or malformed events", () => {
+  it("renders opaque JSON values without interpreting strings as encoded JSON", () => {
     expect(describeEvent("status", "not json")).toEqual({
       label: "Status",
       summary: "not json",
     });
-    expect(describeEvent("mystery.kind", '{"a":1}')).toEqual({
-      label: "mystery.kind",
-      summary: "",
+    expect(describeEvent("status", '{"message":"opaque text"}')).toEqual({
+      label: "Status",
+      summary: '{"message":"opaque text"}',
     });
+    expect(describeEvent("status", null).summary).toBe("null");
+    expect(describeEvent("status", [1, true]).summary).toBe("[\n  1,\n  true\n]");
   });
 });
