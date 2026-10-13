@@ -3,7 +3,6 @@ mod migration_contract_tests;
 mod repo;
 
 use serde::{Deserialize, Serialize};
-use specta::Type;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     SqlitePool,
@@ -63,7 +62,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StorageEvent {
     DbChanged { table: String, op: String },

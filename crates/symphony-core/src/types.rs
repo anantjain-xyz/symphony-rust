@@ -550,12 +550,32 @@ impl SessionInfoPayload {
     }
 }
 
+/// A visible timeline record is distinct from a metadata-only update.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct MappedAgentEvent {
-    pub kind: AgentEventKind,
-    pub payload: Value,
-    pub humanized: Option<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MappedAgentEvent {
+    Visible {
+        kind: AgentEventKind,
+        payload: Value,
+        humanized: Option<String>,
+        metadata: AgentEventMetadata,
+    },
+    Metadata {
+        metadata: AgentEventMetadata,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentEventMetadata {
     pub tokens: Option<TokenCountPayload>,
     pub rate_limit: Option<RateLimitPayload>,
     pub session_info: Option<SessionInfoPayload>,
+}
+
+impl MappedAgentEvent {
+    pub fn metadata(&self) -> &AgentEventMetadata {
+        match self {
+            Self::Visible { metadata, .. } | Self::Metadata { metadata } => metadata,
+        }
+    }
 }

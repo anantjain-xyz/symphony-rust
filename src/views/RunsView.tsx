@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { RunDetail, RunWithIssueRow } from "../bindings";
-import { formatTokens, parseSessionInfo, shortTime } from "../format";
+import type { RunDetail, RunSummary } from "../bindings";
+import { formatTokens, shortTime } from "../format";
 import { Badge, Empty, Panel, RunTable } from "../viewPrimitives";
 import { EventStream } from "./EventStream";
 import "./IconSelect.css";
 import "./RunsView.css";
 
-function SessionChips({ raw }: { raw: string | null }) {
-  const info = parseSessionInfo(raw);
+function SessionChips({ info }: { info: RunSummary["session_info"] }) {
   if (!info) return null;
   const chips: { label: string; title: string; mono?: boolean }[] = [];
   if (info.model) {
@@ -59,7 +58,7 @@ function RunsView({
   triggeringRetryIds,
   stoppingRunIds,
 }: {
-  runs: RunWithIssueRow[];
+  runs: RunSummary[];
   selected: RunDetail | null;
   activeRunIds: Set<string>;
   multiRepo: boolean;
@@ -174,7 +173,7 @@ function RunsView({
                     <span>Ended {shortTime(selected.run.ended_at)}</span>
                   ) : null}
                 </div>
-                <SessionChips raw={selected.run.session_info} />
+                <SessionChips info={selected.run.session_info} />
                 <code className="run-meta-path" title={selected.run.workspace_path}>
                   {selected.run.workspace_path}
                 </code>

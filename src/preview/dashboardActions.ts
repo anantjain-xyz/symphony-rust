@@ -1,10 +1,17 @@
-import type { AgentEventRow, Overview, RetroDetail, RunDetail, RunWithIssueRow } from "../bindings";
+import type {
+  AgentEvent,
+  DashboardOverview,
+  RetroDetail,
+  RunDetail,
+  RunSummary,
+  SuggestionDecision,
+} from "../bindings";
 export function cancelRun(
   id: string,
-  snapshot: { runs: RunWithIssueRow[]; overview: Overview; selectedRun: RunDetail | null },
+  snapshot: { runs: RunSummary[]; overview: DashboardOverview; selectedRun: RunDetail | null },
 ) {
   const endedAt = new Date().toISOString();
-  const cancelRun = (run: RunWithIssueRow): RunWithIssueRow =>
+  const cancelRun = (run: RunSummary): RunSummary =>
     run.id === id
       ? {
           ...run,
@@ -14,11 +21,11 @@ export function cancelRun(
           error_message: "run cancelled",
         }
       : run;
-  const event: AgentEventRow = {
+  const event: AgentEvent = {
     id: Date.now(),
     run_id: id,
     kind: "status",
-    payload: JSON.stringify({ message: "Run cancellation requested" }),
+    payload: { message: "Run cancellation requested" },
     created_at: endedAt,
   };
   const runs = snapshot.runs.map(cancelRun);
@@ -39,7 +46,7 @@ export function cancelRun(
 export function decideSuggestion(
   current: RetroDetail | null,
   id: string,
-  decision: string,
+  decision: SuggestionDecision,
 ): RetroDetail | null {
   return current
     ? {

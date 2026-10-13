@@ -22,7 +22,7 @@
       ]
     },
     "symphony-contracts": {
-      "allowedInternalDependencies": ["symphony-core", "symphony-storage", "symphony-worker"]
+      "allowedInternalDependencies": ["symphony-core"]
     },
     "symphony-desktop": {
       "allowedInternalDependencies": [
@@ -33,6 +33,9 @@
         "symphony-tracker",
         "symphony-worker"
       ]
+    },
+    "symphony-bindings": {
+      "allowedInternalDependencies": ["symphony-core", "symphony-contracts", "symphony-worker"]
     }
   },
   "restrictedDependencies": {

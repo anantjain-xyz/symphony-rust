@@ -214,21 +214,7 @@ pub fn resolve_workspace_root_dir(spec: &str, app_data_dir: &Path) -> PathBuf {
     }
 }
 
-pub fn sanitize_key(identifier: &str) -> String {
-    if identifier.is_empty() || identifier == "." || identifier == ".." {
-        return "_".to_string();
-    }
-    identifier
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
+pub use symphony_core::sanitize_key;
 
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();

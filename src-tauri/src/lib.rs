@@ -5,12 +5,13 @@ use std::{
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
-    LinearViewerProfile, RunDetail, SaveSettingsRequest, SettingsSaveResult, TrackerTestResult,
-    ValidationResult, WorkflowStateRow,
+    DashboardOverview, IssueSummary, LinearViewerProfile, RetroChangeBatch, RetroSuggestionReview,
+    RetroSummary, RunDetail, RunSummary, SaveSettingsRequest, SettingsSaveResult,
+    TrackerTestResult, ValidationResult, WorkflowStateRow,
 };
 use symphony_storage::{
-    now_iso, open_sqlite, EventBus, IssueRow, Overview, Repository, RetroBatchReservation,
-    RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow, StorageEvent,
+    now_iso, open_sqlite, EventBus, Repository, RetroBatchReservation, RetroBatchRow,
+    RetroSuggestionRow, StorageEvent,
 };
 use symphony_tracker::{LinearTracker, TrackerClient};
 use symphony_worker::{
@@ -24,6 +25,7 @@ use tauri::{Emitter, Listener, Manager, State};
 #[cfg(desktop)]
 mod application_instance;
 mod path_env;
+mod projections;
 mod retro;
 mod settings;
 #[cfg(test)]
@@ -201,7 +203,7 @@ async fn finish_settings_save_after_commit(
     state: &AppState,
     mut settings: AppSettings,
 ) -> SettingsSaveResult {
-    let runtime_update_error = match apply_settings_to_worker(state).await {
+    let runtime_update_error = match apply_settings_to_worker(state, &settings).await {
         Ok(admitted) => {
             // Keep the committed fields and revision; only overlay availability
             // that was actually observed by this runtime continuation.
@@ -228,8 +230,9 @@ async fn validate_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<ValidationResult, String> {
-    let workflow_error = validate_workflow_settings(&settings);
-    let workflow_blocking = workflow_error.is_some() && !workflow_setup_incomplete(&settings);
+    let issues = workflow_validation_issues(&settings);
+    let workflow_error = primary_validation_issue(&issues).map(|issue| issue.message.clone());
+    let workflow_blocking = issues.iter().any(|issue| issue.blocking);
     let codex_command = effective_command(settings.codex_command.as_deref(), "codex");
     let claude_command = effective_command(settings.claude_command.as_deref(), "claude");
     let cursor_command = settings::effective_cursor_command(&settings.cursor_command);
@@ -238,6 +241,7 @@ async fn validate_settings(
         workflow_ok: workflow_error.is_none(),
         workflow_blocking,
         workflow_error,
+        issues,
         codex_found: command_found(&codex_command),
         claude_found: command_found(&claude_command),
         cursor_found: command_found(&cursor_command),
@@ -251,117 +255,86 @@ async fn validate_settings(
     })
 }
 
-fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
-    if settings
-        .active_states
-        .iter()
-        .all(|state| state.trim().is_empty())
-    {
-        return Some(
-            "Active states is empty — the worker would never pick up an issue. Add at least one Linear state under Settings → Linear.".to_string(),
-        );
-    }
-    if let Some(error) = validate_repos(&settings.repos) {
-        return Some(error);
-    }
-    if let Some(error) = validate_session_env(&settings.session_env) {
-        return Some(error);
-    }
-    if let Err(error) = symphony_core::validate_prompt_template(&settings.prompt_template) {
-        return Some(error.replace("The workflow is empty.", "The prompt template is empty."));
-    }
-    None
+fn workflow_validation_issues(settings: &AppSettings) -> Vec<symphony_core::ValidationIssue> {
+    symphony_core::validate_runtime_config(
+        &workflow_from_settings(settings, None),
+        &settings.repos,
+        &settings.session_env,
+    )
 }
 
-/// Whether the workflow is unrunnable only because setup is not finished yet,
-/// rather than because something entered is wrong. The setup checklist already
-/// guides the user through configuring a repository, so this state must not
-/// block a save — a first-time user who has typed only their Linear API key
-/// (no repo yet) still needs `save_settings` to persist that key. Genuine
-/// mistakes once a repo exists (duplicate names, bad placeholders, …) do block.
+fn validate_workflow_settings(settings: &AppSettings) -> Option<String> {
+    primary_validation_issue(&workflow_validation_issues(settings))
+        .map(|issue| issue.message.clone())
+}
+
+fn primary_validation_issue(
+    issues: &[symphony_core::ValidationIssue],
+) -> Option<&symphony_core::ValidationIssue> {
+    issues
+        .iter()
+        .find(|issue| issue.blocking)
+        .or(issues.first())
+}
+
+async fn apply_settings_to_worker(
+    state: &AppState,
+    settings: &AppSettings,
+) -> Result<AppSettings, String> {
+    // A committed revision must fence older work even if its fresh runtime
+    // snapshot cannot be read or validated.
+    state
+        .worker
+        .observe_settings_revision(settings.settings_revision)
+        .await;
+    let snapshot = worker_settings_with_effects(state).await?;
+    if snapshot.settings.linear_api_key_error.is_some() {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.",
+            )
+            .await;
+    } else if live_reconfigure_allowed(&snapshot.settings) {
+        if let Some(api_key) = snapshot.credential.as_deref() {
+            state
+                .worker
+                .reconfigure(worker_start_config(state, &snapshot.settings, api_key)?)
+                .await;
+        }
+    } else {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.",
+            )
+            .await;
+    }
+    Ok(snapshot.settings)
+}
+
+#[cfg(test)]
 fn workflow_setup_incomplete(settings: &AppSettings) -> bool {
-    settings.repos.is_empty()
+    workflow_validation_issues(settings)
+        .iter()
+        .any(|issue| issue.code == symphony_core::ValidationCode::MissingRepository)
 }
 
 fn live_reconfigure_allowed(settings: &AppSettings) -> bool {
-    settings.linear_api_key_error.is_none() && validate_workflow_settings(settings).is_none()
+    settings.linear_api_key_error.is_none() && workflow_validation_issues(settings).is_empty()
 }
 
 fn validate_session_env(env: &BTreeMap<String, String>) -> Option<String> {
-    let invalid = env
-        .keys()
-        .filter(|key| !valid_env_key(key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !invalid.is_empty() {
-        return Some(format!(
-            "Session environment variable name{} invalid: {}. Use letters, numbers, and underscores, and do not start with a number.",
-            if invalid.len() == 1 { " is" } else { "s are" },
-            invalid.join(", ")
-        ));
-    }
-
-    let nul_values = env
-        .iter()
-        .filter(|(_key, value)| value.contains('\0'))
-        .map(|(key, _value)| key.clone())
-        .collect::<Vec<_>>();
-    if !nul_values.is_empty() {
-        return Some(format!(
-            "Session environment variable value{} contain a NUL byte: {}.",
-            if nul_values.len() == 1 {
-                " must not"
-            } else {
-                "s must not"
-            },
-            nul_values.join(", ")
-        ));
-    }
-
-    None
+    symphony_core::validate_session_environment(env)
+        .first()
+        .map(|issue| issue.message.clone())
 }
 
-fn valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-/// Repository names are label routing keys (either `repo:<name>` or bare
-/// `<name>`) and workspace namespaces, so they have to exist and be unique.
+#[cfg(test)]
 fn validate_repos(repos: &[symphony_core::RepoConfig]) -> Option<String> {
-    if repos.is_empty() {
-        return Some(
-            "No repository configured — add one under Settings → Repositories.".to_string(),
-        );
-    }
-    let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-    for repo in repos {
-        let name = repo.name.trim();
-        if name.is_empty() {
-            return Some(
-                "Every repository needs a name — it is the key issues route by (repo:<name> or matching bare labels) and the workspace folder.".to_string(),
-            );
-        }
-        if repo.url.trim().is_empty() {
-            return Some(format!("Repository \"{name}\" has no Git URL."));
-        }
-        // Uniqueness is checked on the sanitized form the worker uses as the
-        // workspace folder: distinct names like "api.v2" and "api_v2" map to
-        // the same directory and would silently share checkouts.
-        if let Some(other) = names.insert(sanitize_key(name).to_lowercase(), name) {
-            if other.eq_ignore_ascii_case(name) {
-                return Some(format!("Two repositories share the name \"{name}\"."));
-            }
-            return Some(format!(
-                "Repository names \"{other}\" and \"{name}\" collide — they map to the same workspace folder."
-            ));
-        }
-    }
-    if repos.iter().filter(|repo| repo.is_default).count() > 1 {
-        return Some("Only one repository can be marked as the default.".to_string());
-    }
-    None
+    symphony_core::validate_repositories(repos)
+        .first()
+        .map(|issue| issue.message.clone())
 }
 
 fn effective_command(override_cmd: Option<&str>, default: &str) -> String {
@@ -520,7 +493,7 @@ async fn set_issue_state(
 }
 
 #[tauri::command]
-async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
+async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummary>, String> {
     let snapshot = load_runtime_settings(&state).await?;
     let Some(api_key) = snapshot.credential else {
         return Err(
@@ -536,28 +509,21 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, 
         .await
         .map_err(|err| err.to_string())?;
     let seen_at = now_iso();
-    issues
+    Ok(issues
         .into_iter()
-        .map(|issue| {
-            // Serialize the raw snapshot before moving fields out of `issue`.
-            let labels = serde_json::to_string(&issue.labels).map_err(|err| err.to_string())?;
-            let blockers = serde_json::to_string(&issue.blockers).map_err(|err| err.to_string())?;
-            let raw = serde_json::to_string(&issue).map_err(|err| err.to_string())?;
-            Ok(IssueRow {
-                id: issue.id,
-                identifier: issue.identifier,
-                title: issue.title,
-                description: issue.description,
-                priority: i64::from(issue.priority),
-                state: issue.state,
-                branch: issue.branch,
-                labels,
-                blockers,
-                raw,
-                last_seen_at: seen_at.clone(),
-            })
+        .map(|issue| IssueSummary {
+            id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            description: issue.description,
+            priority: i64::from(issue.priority),
+            state: issue.state,
+            branch: issue.branch,
+            labels: issue.labels,
+            blockers: issue.blockers,
+            last_seen_at: seen_at.clone(),
         })
-        .collect()
+        .collect())
 }
 
 #[tauri::command]
@@ -571,7 +537,10 @@ async fn remove_linear_api_key_owned(state: AppState) -> Result<AppSettings, Str
         let result = state.settings_store.remove_key().await;
         finish_settings_recovery(&state).await;
         let settings = result?;
-        state.worker.stop().await;
+        state
+            .worker
+            .stop_for_settings_revision(settings.settings_revision)
+            .await;
         Ok(settings)
     })
     .await
@@ -588,16 +557,22 @@ fn get_default_skills() -> Vec<SkillFile> {
 }
 
 #[tauri::command]
-async fn get_overview(state: State<'_, AppState>) -> Result<Overview, String> {
-    state.repo.overview().await.map_err(|err| err.to_string())
+async fn get_overview(state: State<'_, AppState>) -> Result<DashboardOverview, String> {
+    state
+        .repo
+        .overview()
+        .await
+        .map(projections::dashboard_overview)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunWithIssueRow>, String> {
+async fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
     state
         .repo
         .list_runs(200)
         .await
+        .map(|rows| rows.into_iter().map(projections::run_summary).collect())
         .map_err(|err| err.to_string())
 }
 
@@ -610,7 +585,12 @@ async fn get_run_detail(
         .repo
         .get_run_detail(&id)
         .await
-        .map(|detail| detail.map(|(run, events)| RunDetail { run, events }))
+        .map(|detail| {
+            detail.map(|(run, events)| RunDetail {
+                run: projections::run_summary(run),
+                events: events.into_iter().map(projections::agent_event).collect(),
+            })
+        })
         .map_err(|err| err.to_string())
 }
 
@@ -625,16 +605,22 @@ async fn stop_run(state: State<'_, AppState>, id: String) -> Result<Option<RunDe
         .repo
         .get_run_detail(&id)
         .await
-        .map(|detail| detail.map(|(run, events)| RunDetail { run, events }))
+        .map(|detail| {
+            detail.map(|(run, events)| RunDetail {
+                run: projections::run_summary(run),
+                events: events.into_iter().map(projections::agent_event).collect(),
+            })
+        })
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
-async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueRow>, String> {
+async fn list_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummary>, String> {
     state
         .repo
         .list_issues(200)
         .await
+        .map(|rows| rows.into_iter().map(projections::issue_summary).collect())
         .map_err(|err| err.to_string())
 }
 
@@ -645,25 +631,30 @@ async fn get_worker_status(state: State<'_, AppState>) -> Result<WorkerStatus, S
 
 #[tauri::command]
 async fn start_worker(state: State<'_, AppState>) -> Result<WorkerStatus, String> {
-    let state = state.inner().clone();
+    start_worker_owned(state.inner().clone()).await
+}
+
+async fn start_worker_owned(state: AppState) -> Result<WorkerStatus, String> {
     settings_store::finish_operation(async move {
         let _effects = state.settings_store.commit_effects().await;
         let snapshot = worker_settings_with_effects(&state).await?;
         if let Some(error) = snapshot.settings.linear_api_key_error.as_ref() {
             return Err(error.clone());
         }
-        let api_key = snapshot.credential.as_deref().ok_or_else(|| {
-            "No Linear API key configured. Add one under Settings → Linear.".to_string()
-        })?;
-        let settings = snapshot.settings;
+        let Some(api_key) = snapshot.credential.as_deref() else {
+            return Err(
+                "No Linear API key configured. Add one under Settings → Linear, then start the worker."
+                    .to_string(),
+            );
+        };
         // A worker started from invalid settings (e.g. no active states) would
         // poll forever without dispatching anything — fail up front instead.
-        if let Some(error) = validate_workflow_settings(&settings) {
+        if let Some(error) = validate_workflow_settings(&snapshot.settings) {
             return Err(error);
         }
         state
             .worker
-            .start(worker_start_config(&state, &settings, api_key))
+            .start(worker_start_config(&state, &snapshot.settings, api_key)?)
             .await
             .map_err(|err| err.to_string())
     })
@@ -679,15 +670,19 @@ fn worker_start_config(
     state: &AppState,
     settings: &AppSettings,
     api_key: &str,
-) -> WorkerStartConfig {
-    WorkerStartConfig {
-        workflow: workflow_from_settings(settings, Some(api_key)),
-        repos: settings.repos.clone(),
+) -> Result<WorkerStartConfig, String> {
+    Ok(WorkerStartConfig {
+        runtime: symphony_core::RunnableConfig::new(
+            settings.settings_revision,
+            workflow_from_settings(settings, Some(api_key)),
+            settings.repos.clone(),
+            settings.session_env.clone(),
+        )
+        .map_err(|error| error.to_string())?,
         skills: bundled_skills(),
         env: build_env(api_key),
-        session_env: settings.session_env.clone(),
         app_data_dir: state.app_data_dir.clone(),
-    }
+    })
 }
 
 #[tauri::command]
@@ -740,11 +735,12 @@ async fn get_retro_status(state: State<'_, AppState>) -> Result<RetroStatus, Str
 }
 
 #[tauri::command]
-async fn list_retros(state: State<'_, AppState>) -> Result<Vec<RetroRow>, String> {
+async fn list_retros(state: State<'_, AppState>) -> Result<Vec<RetroSummary>, String> {
     state
         .repo
         .list_retros(50)
         .await
+        .map(|rows| rows.into_iter().map(projections::retro_summary).collect())
         .map_err(|err| err.to_string())
 }
 
@@ -772,10 +768,16 @@ async fn get_retro_detail(
         .await
         .map_err(|err| err.to_string())?;
     Ok(Some(RetroDetail {
-        report: parse_report(&row),
-        row,
-        suggestions,
-        batches,
+        report: parse_report(&row)?,
+        row: projections::retro_summary(row),
+        suggestions: suggestions
+            .into_iter()
+            .map(projections::retro_suggestion_review)
+            .collect(),
+        batches: batches
+            .into_iter()
+            .map(projections::retro_change_batch)
+            .collect(),
     }))
 }
 
@@ -809,24 +811,22 @@ async fn delete_retro(state: State<'_, AppState>, id: String) -> Result<(), Stri
 async fn set_retro_suggestion_decision(
     state: State<'_, AppState>,
     id: String,
-    decision: String,
-) -> Result<RetroSuggestionRow, String> {
-    if !matches!(decision.as_str(), "pending" | "accepted" | "rejected") {
-        return Err("Decision must be pending, accepted, or rejected.".to_string());
-    }
+    decision: symphony_core::SuggestionDecision,
+) -> Result<RetroSuggestionReview, String> {
     state
         .repo
-        .set_retro_suggestion_decision(&id, &decision)
+        .set_retro_suggestion_decision(&id, decision)
         .await
         .map_err(|err| err.to_string())?
+        .map(projections::retro_suggestion_review)
         .ok_or_else(|| "Suggestion was not found.".to_string())
 }
 
 fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<(), String> {
-    if suggestions
-        .iter()
-        .any(|suggestion| suggestion.proposal_status == "ready" && suggestion.decision == "pending")
-    {
+    if suggestions.iter().any(|suggestion| {
+        suggestion.proposal_status == symphony_core::ProposalState::Ready
+            && suggestion.decision == symphony_core::SuggestionDecision::Pending
+    }) {
         Err(RETRO_REVIEW_INCOMPLETE_MESSAGE.to_string())
     } else {
         Ok(())
@@ -837,9 +837,11 @@ fn ensure_retro_review_complete(suggestions: &[RetroSuggestionRow]) -> Result<()
 async fn apply_retro_workflow(
     state: State<'_, AppState>,
     retro_id: String,
-) -> Result<RetroBatchRow, String> {
+) -> Result<RetroChangeBatch, String> {
     let state = state.inner().clone();
-    settings_store::finish_operation(apply_retro_workflow_inner(state, retro_id)).await
+    settings_store::finish_operation(apply_retro_workflow_inner(state, retro_id))
+        .await
+        .map(projections::retro_change_batch)
 }
 
 async fn apply_retro_workflow_inner(
@@ -855,9 +857,9 @@ async fn apply_retro_workflow_inner(
     let suggestions = all_suggestions
         .into_iter()
         .filter(|suggestion| {
-            suggestion.target_type == "prompt"
-                && suggestion.decision == "accepted"
-                && suggestion.proposal_status == "ready"
+            suggestion.target_type == symphony_core::SuggestionTarget::Prompt
+                && suggestion.decision == symphony_core::SuggestionDecision::Accepted
+                && suggestion.proposal_status == symphony_core::ProposalState::Ready
         })
         .collect::<Vec<_>>();
     if suggestions.is_empty() {
@@ -882,11 +884,11 @@ async fn apply_retro_workflow_inner(
     let batch = RetroBatchRow {
         id: Uuid::new_v4().to_string(),
         retro_id: retro_id.clone(),
-        kind: "workflow_update".to_string(),
+        kind: symphony_core::BatchKind::WorkflowUpdate,
         repo_name: None,
         repo_url: None,
         base_ref: Some(expected_ref.clone()),
-        state: "running".to_string(),
+        state: symphony_core::BatchState::Running,
         progress: Some("Checking workflow freshness…".to_string()),
         error: None,
         pr_url: None,
@@ -919,7 +921,7 @@ async fn apply_retro_workflow_inner(
             .repo
             .update_retro_batch(
                 &batch.id,
-                "stale",
+                symphony_core::BatchState::Stale,
                 Some("The proposal format changed."),
                 Some("Generate a new retro and review the updated in-place diff."),
                 None,
@@ -940,7 +942,7 @@ async fn apply_retro_workflow_inner(
             .repo
             .update_retro_batch(
                 &batch.id,
-                "stale",
+                symphony_core::BatchState::Stale,
                 Some("Prompt changed since this diff was prepared."),
                 Some("Generate a new retro and review the updated diff."),
                 None,
@@ -1021,7 +1023,7 @@ async fn apply_retro_workflow_inner(
             .repo
             .update_retro_batch(
                 &batch.id,
-                "stale",
+                symphony_core::BatchState::Stale,
                 Some("A repository workflow source changed."),
                 Some(&format!(
                     "{error} Generate a new retro and review the updated diff."
@@ -1049,7 +1051,13 @@ async fn apply_retro_workflow_inner(
     if let Some(error) = validate_workflow_settings(&updated) {
         state
             .repo
-            .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+            .update_retro_batch(
+                &batch.id,
+                symphony_core::BatchState::Failed,
+                None,
+                Some(&error),
+                None,
+            )
             .await
             .map_err(|err| err.to_string())?;
         return Err(error);
@@ -1066,18 +1074,24 @@ async fn apply_retro_workflow_inner(
         )
         .await;
     finish_settings_recovery(&state).await;
-    match result {
-        Ok(_) => {}
+    let committed = match result {
+        Ok(settings) => settings,
         Err(error) => {
             state
                 .repo
-                .update_retro_batch(&batch.id, "failed", None, Some(&error), None)
+                .update_retro_batch(
+                    &batch.id,
+                    symphony_core::BatchState::Failed,
+                    None,
+                    Some(&error),
+                    None,
+                )
                 .await
                 .map_err(|update_err| update_err.to_string())?;
             return Err(error);
         }
     };
-    finish_retro_workflow_after_prompt_save(&state, &batch).await
+    finish_retro_workflow_after_prompt_save(&state, &batch, &committed).await
 }
 
 /// The prompt has committed. The owned caller keeps the settings effects gate
@@ -1085,12 +1099,19 @@ async fn apply_retro_workflow_inner(
 async fn finish_retro_workflow_after_prompt_save(
     state: &AppState,
     batch: &RetroBatchRow,
+    committed: &AppSettings,
 ) -> Result<RetroBatchRow, String> {
-    if let Err(error) = apply_settings_to_worker(state).await {
+    if let Err(error) = apply_settings_to_worker(state, committed).await {
         let progress = "Workflow prompt saved; runtime refresh failed.";
         state
             .repo
-            .update_retro_batch(&batch.id, "failed", Some(progress), Some(&error), None)
+            .update_retro_batch(
+                &batch.id,
+                symphony_core::BatchState::Failed,
+                Some(progress),
+                Some(&error),
+                None,
+            )
             .await
             .map_err(|update_error| {
                 format!("{progress} {error} Could not record the batch outcome: {update_error}")
@@ -1101,7 +1122,7 @@ async fn finish_retro_workflow_after_prompt_save(
         .repo
         .update_retro_batch(
             &batch.id,
-            "completed",
+            symphony_core::BatchState::Completed,
             Some("Workflow prompt updated."),
             None,
             None,
@@ -1141,6 +1162,17 @@ fn prompt_revision(settings: &AppSettings) -> String {
 async fn start_retro_prs(
     state: State<'_, AppState>,
     retro_id: String,
+) -> Result<Vec<RetroChangeBatch>, String> {
+    start_retro_prs_inner(state, retro_id).await.map(|rows| {
+        rows.into_iter()
+            .map(projections::retro_change_batch)
+            .collect()
+    })
+}
+
+async fn start_retro_prs_inner(
+    state: State<'_, AppState>,
+    retro_id: String,
 ) -> Result<Vec<RetroBatchRow>, String> {
     let settings = load_settings_from_disk(&state).await?;
     let all_suggestions = state
@@ -1153,8 +1185,8 @@ async fn start_retro_prs(
         .into_iter()
         .filter(|suggestion| {
             matches!(suggestion.target_type.as_str(), "skill" | "repo_workflow")
-                && suggestion.decision == "accepted"
-                && suggestion.proposal_status == "ready"
+                && suggestion.decision == symphony_core::SuggestionDecision::Accepted
+                && suggestion.proposal_status == symphony_core::ProposalState::Ready
         })
         .collect::<Vec<_>>();
     if suggestions.is_empty() {
@@ -1174,7 +1206,7 @@ async fn start_retro_prs(
         .map_err(|err| err.to_string())?
         .into_iter()
         .filter(|batch| {
-            batch.kind == "repo_pr"
+            batch.kind == symphony_core::BatchKind::RepoPr
                 && matches!(
                     batch.state.as_str(),
                     "queued" | "running" | "completed" | "stale"
@@ -1213,16 +1245,15 @@ async fn start_retro_prs(
         let batch = RetroBatchRow {
             id: Uuid::new_v4().to_string(),
             retro_id: retro_id.clone(),
-            kind: "repo_pr".to_string(),
+            kind: symphony_core::BatchKind::RepoPr,
             repo_name: Some(repo_name.clone()),
             repo_url,
             base_ref: suggestions.first().and_then(|item| item.base_ref.clone()),
             state: if stale_error.is_some() {
-                "stale"
+                symphony_core::BatchState::Stale
             } else {
-                "queued"
-            }
-            .to_string(),
+                symphony_core::BatchState::Queued
+            },
             progress: stale_error
                 .as_ref()
                 .map(|_| {
@@ -1590,16 +1621,28 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
         while let Some(event) = storage_events::next_event(&mut rx).await {
             match &event {
                 StorageEvent::DbChanged { .. } => {
-                    let _ = handle.emit("db_changed", &event);
+                    let _ = handle.emit(
+                        "db_changed",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::AgentEvent { .. } => {
-                    let _ = handle.emit("agent_event", &event);
+                    let _ = handle.emit(
+                        "agent_event",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::RateLimitChanged { .. } => {
-                    let _ = handle.emit("rate_limit_changed", &event);
+                    let _ = handle.emit(
+                        "rate_limit_changed",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
                 StorageEvent::WorkflowReady => {
-                    let _ = handle.emit("workflow_ready", &event);
+                    let _ = handle.emit(
+                        "workflow_ready",
+                        projections::storage_notification(event.clone()),
+                    );
                 }
             }
         }
@@ -1619,6 +1662,39 @@ async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String
 async fn load_settings_with_effects(state: &AppState) -> Result<AppSettings, String> {
     let result = state.settings_store.load().await;
     finish_settings_recovery(state).await;
+    if let Ok(settings) = &result {
+        state
+            .worker
+            .observe_settings_revision(settings.settings_revision)
+            .await;
+        if settings.linear_api_key_error.is_none() && !settings.linear_api_key_set {
+            state
+                .worker
+                .stop_for_settings_revision(settings.settings_revision)
+                .await;
+        }
+    }
+    result
+}
+
+/// Caller owns the settings effects gate and an operation that outlives IPC.
+async fn worker_settings_with_effects(
+    state: &AppState,
+) -> Result<settings_store::SettingsSnapshot, String> {
+    let result = state.settings_store.runtime_snapshot().await;
+    finish_settings_recovery(state).await;
+    if let Ok(snapshot) = &result {
+        state
+            .worker
+            .observe_settings_revision(snapshot.settings.settings_revision)
+            .await;
+        if snapshot.settings.linear_api_key_error.is_none() && snapshot.credential.is_none() {
+            state
+                .worker
+                .stop_for_settings_revision(snapshot.settings.settings_revision)
+                .await;
+        }
+    }
     result
 }
 
@@ -1646,47 +1722,6 @@ async fn request_linear_api_key(
         return Ok(Some(key));
     }
     Ok(load_runtime_settings(state).await?.credential)
-}
-
-/// Caller owns the settings effects gate and an operation that outlives IPC.
-async fn worker_settings_with_effects(
-    state: &AppState,
-) -> Result<settings_store::SettingsSnapshot, String> {
-    let result = state.settings_store.runtime_snapshot().await;
-    finish_settings_recovery(state).await;
-    if let Ok(snapshot) = &result {
-        if snapshot.settings.linear_api_key_error.is_none() && snapshot.credential.is_none() {
-            state.worker.stop().await;
-        }
-    }
-    result
-}
-
-async fn apply_settings_to_worker(state: &AppState) -> Result<AppSettings, String> {
-    let snapshot = worker_settings_with_effects(state).await?;
-    if snapshot.settings.linear_api_key_error.is_some() {
-        state
-            .worker
-            .report_configuration_error(
-                "Settings saved, but credential access prevented worker update. Restart worker after unlocking credential store.",
-            )
-            .await;
-    } else if live_reconfigure_allowed(&snapshot.settings) {
-        if let Some(api_key) = snapshot.credential.as_deref() {
-            state
-                .worker
-                .reconfigure(worker_start_config(state, &snapshot.settings, api_key))
-                .await;
-        }
-    } else {
-        state
-            .worker
-            .report_configuration_error(
-                "Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.",
-            )
-            .await;
-    }
-    Ok(snapshot.settings)
 }
 
 async fn finish_settings_recovery(state: &AppState) {
@@ -1984,6 +2019,23 @@ mod tests {
         };
         assert!(validate_workflow_settings(&broken).is_some());
         assert!(!workflow_setup_incomplete(&broken));
+    }
+
+    #[test]
+    fn blocking_validation_message_matches_the_field_that_needs_attention() {
+        let mut draft = AppSettings::default();
+        draft
+            .session_env
+            .insert("INVALID-NAME".into(), "value".into());
+        let issues = workflow_validation_issues(&draft);
+        assert!(!issues.first().unwrap().blocking);
+        let primary = primary_validation_issue(&issues).unwrap();
+        assert!(primary.blocking);
+        assert_eq!(
+            validate_workflow_settings(&draft).as_deref(),
+            Some(primary.message.as_str())
+        );
+        assert_eq!(primary.field, symphony_core::ValidationField::SessionEnv);
     }
 
     #[test]

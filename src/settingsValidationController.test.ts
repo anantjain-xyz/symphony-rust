@@ -6,8 +6,22 @@ import {
 } from "./settingsValidationController";
 
 const settings = (prompt_template: string) => ({ prompt_template }) as AppSettings;
-const valid = (workflow_error: string | null = null): ValidationResult =>
-  ({ workflow_blocking: workflow_error !== null, workflow_error }) as ValidationResult;
+const valid = (workflow_error: string | null = null): ValidationResult => ({
+  issues: [],
+  workflow_ok: workflow_error === null,
+  workflow_blocking: workflow_error !== null,
+  workflow_error,
+  codex_found: true,
+  claude_found: true,
+  cursor_found: true,
+  opencode_found: true,
+  codex_command: "codex",
+  claude_command: "claude",
+  cursor_command: "agent",
+  opencode_command: "opencode",
+  app_data_dir: "/tmp/symphony",
+  database_path: "/tmp/symphony/symphony.db",
+});
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => (resolve = next));

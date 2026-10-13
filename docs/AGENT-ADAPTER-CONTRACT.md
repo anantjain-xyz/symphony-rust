@@ -44,9 +44,44 @@ their streams into:
 - `rate_limit`
 - session metadata
 
+`MappedAgentEvent` separates two valid cases:
+
+| Variant | Meaning | Persistence |
+| --- | --- | --- |
+| `Visible` | Kind, normalized payload, optional human summary, optional metadata | Append a visible event and apply metadata |
+| `Metadata` | Session/usage/rate-limit metadata without a log entry | Apply metadata only |
+
+Thinking estimates use `Metadata`; a null payload is not a control signal.
 The storage layer persists normalized payloads and separately generated
 human-readable summaries. It does not persist each provider stdout line as an
 opaque transcript.
+
+## Known provider records
+
+`provider_records.rs` types only the fields used for terminal outcomes and
+usage accounting. Other provider fields and unknown record kinds stay opaque.
+
+| Record | Required structure | Compatible omissions |
+| --- | --- | --- |
+| Codex `turn.completed` | Present usage must be an object with integer token buckets | Missing usage/buckets mean zero |
+| Codex `turn.failed` | Error object; non-null type/message must be strings | Missing type/message uses the generic failure text |
+| Claude/Cursor `result` | Nonempty string subtype; present error flag must be boolean; non-null result/error text must be strings | Missing usage/buckets mean zero; missing error flag means false |
+| OpenCode `step_finish` | Part object; present tokens/cache must be objects | Missing usage buckets mean zero |
+| OpenCode `error` | Error object; non-null message/name/data/status code must have their declared types | Missing descriptive fields use generic failure text |
+
+- Token buckets must be nonnegative integers. Per-record and accumulated totals
+  use checked addition; overflow is a protocol error.
+- A malformed known record returns `AgentError::Protocol` with the backend and
+  event name before publishing completion or usage. It cannot silently become
+  a successful zero-token run.
+- Malformed JSON remains `AgentError::Json`. Unknown event kinds are ignored,
+  and unknown extra fields do not invalidate an otherwise supported record.
+- Sanitized fixture tests preserve provider-specific token semantics; focused
+  tests cover malformed shapes, older omissions, overflow, and metadata-only events.
+
+Known result subtypes are decoded into success or an opaque failure code. Only
+`success` with no error flag can succeed; future nonempty subtype codes remain
+available in failure diagnostics. Unknown event types remain opaque and ignored.
 
 ## Process contract
 
@@ -88,7 +123,8 @@ All native adapters share these process rules:
 
 Cancellation returns `AgentOutcome::Cancelled` with class `cancelled`.
 Timeout is an `AgentError::Timeout`, not a provider-reported result. Spawn,
-I/O, JSON parsing, and missing-result failures are also `AgentError` variants.
+I/O, JSON parsing, known-record protocol validation, and missing-result failures
+are also `AgentError` variants.
 
 ## Backend matrix
 

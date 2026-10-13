@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { IssueRow } from "../bindings";
+import type { IssueSummary } from "../bindings";
 import { Badge, Empty } from "../viewPrimitives";
 import "./DependencyGraphPanel.css";
 
@@ -21,7 +21,7 @@ export type GraphModel = Readonly<{
 
 type DependencyNode = Readonly<{
   identifier: string;
-  issue: Readonly<IssueRow> | null;
+  issue: Readonly<IssueSummary> | null;
   external: boolean;
   layer: number;
   row: number;
@@ -37,7 +37,7 @@ type DependencyEdge = Readonly<{
   external: boolean;
 }>;
 
-const graphModels = new WeakMap<readonly IssueRow[], GraphModel>();
+const graphModels = new WeakMap<readonly IssueSummary[], GraphModel>();
 let graphMeasureSequence = 0;
 
 function DependencyGraphView({ graph }: { graph: GraphModel }) {
@@ -177,8 +177,8 @@ function DependencyNodeCard({ node }: { node: DependencyNode }) {
   );
 }
 
-export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
-  const issueByIdentifier = new Map<string, IssueRow>();
+export function buildDependencyGraph(issues: readonly IssueSummary[]): GraphModel {
+  const issueByIdentifier = new Map<string, IssueSummary>();
   const order = new Map<string, number>();
   const blockersByIssue = new Map<string, string[]>();
 
@@ -192,9 +192,9 @@ export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
   let nextOrder = issues.length;
 
   for (const issue of issues) {
-    const blockers = uniqueIdentifiers(parseIssueStringList(issue.blockers)).filter(
-      (identifier) => isIssueIdentifier(identifier) && identifier !== issue.identifier,
-    );
+    const blockers = uniqueIdentifiers(
+      issue.blockers.map((blocker) => blocker.trim()).filter(Boolean),
+    ).filter((identifier) => isIssueIdentifier(identifier) && identifier !== issue.identifier);
     blockersByIssue.set(issue.identifier, blockers);
     for (const blocker of blockers) {
       if (!order.has(blocker)) {
@@ -309,19 +309,6 @@ export function buildDependencyGraph(issues: readonly IssueRow[]): GraphModel {
   });
 }
 
-function parseIssueStringList(raw: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
 function uniqueIdentifiers(identifiers: string[]): string[] {
   return Array.from(new Set(identifiers));
 }
@@ -331,8 +318,8 @@ function isIssueIdentifier(identifier: string): boolean {
 }
 
 export function getDependencyGraphModel(
-  issues: readonly IssueRow[],
-  builder: (snapshot: readonly IssueRow[]) => GraphModel = buildDependencyGraph,
+  issues: readonly IssueSummary[],
+  builder: (snapshot: readonly IssueSummary[]) => GraphModel = buildDependencyGraph,
 ): GraphModel {
   const cached = graphModels.get(issues);
   if (cached) return cached;
@@ -343,8 +330,8 @@ export function getDependencyGraphModel(
 }
 
 function measureGraphBuild(
-  issues: readonly IssueRow[],
-  builder: (snapshot: readonly IssueRow[]) => GraphModel,
+  issues: readonly IssueSummary[],
+  builder: (snapshot: readonly IssueSummary[]) => GraphModel,
 ): GraphModel {
   if (!import.meta.env.DEV) return builder(issues);
 
@@ -369,7 +356,7 @@ function measureGraphBuild(
   }
 }
 
-export default function DependencyGraphPanel({ issues }: { issues: readonly IssueRow[] }) {
+export default function DependencyGraphPanel({ issues }: { issues: readonly IssueSummary[] }) {
   const graph = useMemo(() => getDependencyGraphModel(issues), [issues]);
   return <DependencyGraphView graph={graph} />;
 }

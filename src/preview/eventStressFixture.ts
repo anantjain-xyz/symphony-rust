@@ -1,4 +1,4 @@
-import type { AgentEventRow } from "../bindings";
+import type { AgentEvent } from "../bindings";
 
 const LONG_MARKDOWN = [
   "Inspecting a production-sized event stream with wrapped Markdown.",
@@ -13,9 +13,9 @@ const LONG_MARKDOWN = [
   "```",
 ].join("\n");
 
-export function createEventStressFixture(count = 5_000): AgentEventRow[] {
+export function createEventStressFixture(count = 5_000): AgentEvent[] {
   const startedAt = Date.UTC(2026, 6, 18, 18, 0, 0);
-  return Array.from({ length: count }, (_, index) => {
+  return Array.from({ length: count }, (_, index): AgentEvent => {
     const common = {
       id: 10_000 + index,
       run_id: "preview-run-stress",
@@ -28,14 +28,14 @@ export function createEventStressFixture(count = 5_000): AgentEventRow[] {
       return {
         ...common,
         kind: "status",
-        payload: JSON.stringify({ message: `${LONG_MARKDOWN}\n\nEvent fixture ${index}.` }),
+        payload: { message: `${LONG_MARKDOWN}\n\nEvent fixture ${index}.` },
       };
     }
     if (index % 7 === 0) {
       return {
         ...common,
         kind: "error",
-        payload: JSON.stringify({
+        payload: {
           class: "StressFixtureError",
           message: `Recoverable fixture error ${index}`,
           context: {
@@ -43,25 +43,25 @@ export function createEventStressFixture(count = 5_000): AgentEventRow[] {
             retryable: true,
             values: Array.from({ length: 30 }, (_, value) => value),
           },
-        }),
+        },
       };
     }
     if (index % 3 === 0) {
       return {
         ...common,
         kind: "tool_call",
-        payload: JSON.stringify({
+        payload: {
           tool: "bash",
           args: { command: `pnpm test -- shard-${index % 16}` },
           result_summary: index % 2 === 0 ? "exit 0" : "running",
           output: "expanded payload fixture ".repeat(12),
-        }),
+        },
       };
     }
     return {
       ...common,
       kind: "token_count",
-      payload: JSON.stringify({ input_tokens: index * 31, output_tokens: index * 7 }),
+      payload: { input_tokens: index * 31, output_tokens: index * 7 },
     };
   });
 }

@@ -1,8 +1,6 @@
+use crate::{AgentEvent, RetroChangeBatch, RetroSuggestionReview, RetroSummary, RunSummary};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use symphony_storage::{
-    AgentEventRow, RetroBatchRow, RetroRow, RetroSuggestionRow, RunWithIssueRow,
-};
 
 use crate::AppSettings;
 
@@ -27,6 +25,7 @@ pub struct ValidationResult {
     /// does not, so partial progress stays saveable.
     pub workflow_blocking: bool,
     pub workflow_error: Option<String>,
+    pub issues: Vec<symphony_core::ValidationIssue>,
     pub codex_found: bool,
     pub claude_found: bool,
     pub cursor_found: bool,
@@ -66,8 +65,8 @@ pub struct WorkflowStateRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RunDetail {
-    pub run: RunWithIssueRow,
-    pub events: Vec<AgentEventRow>,
+    pub run: RunSummary,
+    pub events: Vec<AgentEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -102,10 +101,10 @@ impl RetroStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RetroDetail {
-    pub row: RetroRow,
+    pub row: RetroSummary,
     pub report: Option<RetroReport>,
-    pub suggestions: Vec<RetroSuggestionRow>,
-    pub batches: Vec<RetroBatchRow>,
+    pub suggestions: Vec<RetroSuggestionReview>,
+    pub batches: Vec<RetroChangeBatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

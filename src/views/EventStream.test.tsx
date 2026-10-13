@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentEventRow } from "../bindings";
+import type { AgentEvent } from "../bindings";
 import { createEventStressFixture } from "../preview/eventStressFixture";
 import { EventRow, EventStream, measureEventElement } from "./EventStream";
 import { prepareEvent } from "./eventStreamModel";
@@ -43,12 +43,12 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 200));
 });
 
-function event(id: number, message = `event ${id}`): AgentEventRow {
+function event(id: number, message = `event ${id}`): AgentEvent {
   return {
     id,
     run_id: "run-1",
     kind: "status",
-    payload: JSON.stringify({ message }),
+    payload: { message },
     created_at: "2026-07-18T00:00:00Z",
   };
 }
@@ -174,7 +174,7 @@ describe("EventStream virtualization", () => {
     expect(screen.getByText("No events recorded")).toBeTruthy();
     rerender(
       <EventStream
-        events={[{ ...event(1), kind: "mystery", payload: "only-once" }]}
+        events={[{ ...event(1), kind: "tool_call", payload: "only-once" }]}
         live={false}
       />,
     );
@@ -185,7 +185,7 @@ describe("EventStream virtualization", () => {
   });
 
   it("reopens a collapsed payload before navigating its only match", async () => {
-    const payload = JSON.stringify({ message: "ordinary", detail: "payload-only-match" });
+    const payload = { message: "ordinary", detail: "payload-only-match" };
     const { container } = render(<EventStream events={[{ ...event(1), payload }]} live={false} />);
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
     fireEvent.change(screen.getByLabelText("Search run log"), {

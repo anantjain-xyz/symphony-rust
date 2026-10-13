@@ -20,7 +20,7 @@ export function bindingsDifference(checkedIn, generated) {
     `src/bindings.ts is stale at byte ${byte} (line ${line}).`,
     `checked in: ${JSON.stringify(checkedLine)}`,
     `generated:  ${JSON.stringify(generatedLine)}`,
-    "Regenerate with: cargo run -p symphony-contracts --bin export-bindings -- src/bindings.ts",
+    "Regenerate with: cargo run -p symphony-bindings --bin export-bindings -- src/bindings.ts",
   ].join("\n");
 }
 
@@ -35,7 +35,7 @@ export function checkBindings(root = ROOT) {
         "--quiet",
         "--locked",
         "-p",
-        "symphony-contracts",
+        "symphony-bindings",
         "--bin",
         "export-bindings",
         "--",

@@ -1,6 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
-import type { IssueRow, WorkflowStateRow } from "../bindings";
-import { ChunkErrorBoundary, ViewLoading, createLazyAttempts } from "../ChunkBoundary";
+import type { IssueSummary, WorkflowStateRow } from "../bindings";
+import { ChunkErrorBoundary, createLazyAttempts, ViewLoading } from "../ChunkBoundary";
 import { openExternalUrl } from "../desktop/shell";
 import { priorityLabel } from "../format";
 import { markRelativeTimeNow, RelativeTime } from "../RelativeTime";
@@ -71,12 +71,12 @@ function IssuesView({
   onModeChange,
   onOpenSettings,
 }: {
-  issues: IssueRow[];
+  issues: IssueSummary[];
   linearWorkspace: string | null;
   stateOrder?: string[];
   loadWorkflowStates?: () => Promise<WorkflowStateRow[]>;
   onMoveIssue?: (issueId: string, stateId: string) => Promise<void>;
-  loadBoardIssues?: () => Promise<IssueRow[]>;
+  loadBoardIssues?: () => Promise<IssueSummary[]>;
   activeRunIssueIds?: string[];
   activeStates?: string[];
   initialMode?: IssueViewMode;
@@ -222,7 +222,7 @@ function IssuesTable({
   issues,
   linearWorkspace,
 }: {
-  issues: IssueRow[];
+  issues: IssueSummary[];
   linearWorkspace: string | null;
 }) {
   return (
@@ -279,7 +279,7 @@ function priorityRank(priority: number): number {
   return priority === 0 ? Number.POSITIVE_INFINITY : priority;
 }
 
-function sortBoardIssues(issues: IssueRow[]): IssueRow[] {
+function sortBoardIssues(issues: IssueSummary[]): IssueSummary[] {
   return [...issues].sort((a, b) => {
     const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
     if (byPriority !== 0) return byPriority;
@@ -303,7 +303,7 @@ export type BoardColumn = {
   type: string | null;
   key: string;
   label: string;
-  issues: IssueRow[];
+  issues: IssueSummary[];
 };
 
 // Board ordering follows Linear: by state category first, then position within it.
@@ -322,7 +322,7 @@ function stateTypeRank(type: string): number {
 }
 
 export function boardColumns(
-  issues: IssueRow[],
+  issues: IssueSummary[],
   options: {
     workflowStates?: WorkflowStateRow[] | null;
     stateOrder?: string[];
@@ -330,10 +330,10 @@ export function boardColumns(
   },
 ): BoardColumn[] {
   const overrides = options.overrides ?? new Map<string, { target: string; from: string }>();
-  const effectiveKey = (issue: IssueRow) =>
+  const effectiveKey = (issue: IssueSummary) =>
     overrides.get(issue.id)?.target ?? normalizeStateKey(issue.state);
 
-  const groups = new Map<string, IssueRow[]>();
+  const groups = new Map<string, IssueSummary[]>();
   for (const issue of issues) {
     const key = effectiveKey(issue);
     const bucket = groups.get(key);
@@ -401,17 +401,17 @@ function IssuesBoard({
   activeStates,
   onMoveIssue,
 }: {
-  issues: IssueRow[];
+  issues: IssueSummary[];
   linearWorkspace: string | null;
   stateOrder?: string[];
   loadWorkflowStates?: () => Promise<WorkflowStateRow[]>;
-  loadBoardIssues?: () => Promise<IssueRow[]>;
+  loadBoardIssues?: () => Promise<IssueSummary[]>;
   activeRunIssueIds?: string[];
   activeStates?: string[];
   onMoveIssue?: (issueId: string, stateId: string) => Promise<void>;
 }) {
   const [workflowStates, setWorkflowStates] = useState<WorkflowStateRow[] | null>(null);
-  const [boardIssues, setBoardIssues] = useState<IssueRow[] | null>(null);
+  const [boardIssues, setBoardIssues] = useState<IssueSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [overrides, setOverrides] = useState<Map<string, { target: string; from: string }>>(
     () => new Map(),
@@ -568,7 +568,7 @@ function IssuesBoard({
     [activeStates],
   );
   const [pendingMove, setPendingMove] = useState<{
-    issue: IssueRow;
+    issue: IssueSummary;
     column: BoardColumn;
     entering: boolean;
     restoreFocus: boolean;
@@ -588,7 +588,7 @@ function IssuesBoard({
   }, [focusAfterMove]);
 
   const moveIssue = useCallback(
-    (issue: IssueRow, column: BoardColumn, restoreFocus = false) => {
+    (issue: IssueSummary, column: BoardColumn, restoreFocus = false) => {
       if (!onMoveIssue || !column.id) return;
       if (activeRunSet.has(issue.id)) {
         setMoveError(
@@ -651,7 +651,7 @@ function IssuesBoard({
   // Gate a move behind a confirm when it crosses Symphony's watched (dispatch)
   // boundary — moving into a watched state enqueues an agent; moving out drops it.
   const requestMove = useCallback(
-    (issue: IssueRow, column: BoardColumn, restoreFocus = false) => {
+    (issue: IssueSummary, column: BoardColumn, restoreFocus = false) => {
       if (!onMoveIssue || !column.id) return;
       if (movingIds.has(issue.id) || overrides.has(issue.id)) return;
       const currentKey = overrides.get(issue.id)?.target ?? normalizeStateKey(issue.state);
@@ -783,7 +783,7 @@ function IssuesBoard({
   }, [dragEnabled, columns, effectiveIssues, requestMove, updateHoveredColumnAtPoint]);
 
   const startDrag = useCallback(
-    (event: React.PointerEvent, issue: IssueRow) => {
+    (event: React.PointerEvent, issue: IssueSummary) => {
       // event.button > 0 rejects right/middle click; undefined (jsdom) passes.
       if (!dragEnabled || event.button > 0) return;
       // Let clicks on the Open link through instead of starting a drag.
@@ -1015,7 +1015,7 @@ function IssueCard({
   cardRef,
   moveControlRef,
 }: {
-  issue: IssueRow;
+  issue: IssueSummary;
   linearWorkspace: string | null;
   draggable?: boolean;
   moving?: boolean;

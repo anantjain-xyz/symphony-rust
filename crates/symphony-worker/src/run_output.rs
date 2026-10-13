@@ -25,28 +25,39 @@ impl<'a> RunOutput<'a> {
         event: &MappedAgentEvent,
     ) -> Result<(), StorageError> {
         let event = self.sanitizer.event(event);
-        if !event.payload.is_null() {
+        if let MappedAgentEvent::Visible { kind, payload, .. } = &event {
             self.repo
-                .append_event(run_id, event.kind, &event.payload)
+                .append_event(run_id, kind.clone(), payload)
                 .await?;
         }
-        if let Some(info) = &event.session_info {
+        let metadata = event.metadata();
+        if let Some(info) = &metadata.session_info {
             self.repo.set_run_session_info(run_id, info).await?;
         }
-        if let Some(tokens) = &event.tokens {
+        if let Some(tokens) = &metadata.tokens {
             self.repo
-                .upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
+                .upsert_live_session(
+                    run_id,
+                    &symphony_core::AgentSessionId::new(format!("pending-{run_id}")),
+                    &symphony_core::AgentThreadId::new(""),
+                    &symphony_core::AgentTurnId::new(""),
+                    tokens,
+                )
                 .await?;
             self.repo.record_token_usage(provider, tokens).await?;
         }
-        if let Some(rate_limit) = event
+        if let Some(rate_limit) = metadata
             .rate_limit
             .as_ref()
             .and_then(|limit| canonical_rate_limit(provider, limit))
         {
             self.repo.upsert_rate_limit(&rate_limit).await?;
         }
-        if let Some(summary) = &event.humanized {
+        if let MappedAgentEvent::Visible {
+            humanized: Some(summary),
+            ..
+        } = &event
+        {
             self.repo
                 .append_event(
                     run_id,
@@ -82,9 +93,9 @@ impl<'a> RunOutput<'a> {
         self.repo
             .upsert_live_session(
                 run_id,
-                &format!("{thread_id}-{turn_id}"),
-                &thread_id,
-                &turn_id,
+                &symphony_core::AgentSessionId::new(format!("{thread_id}-{turn_id}")),
+                &symphony_core::AgentThreadId::new(&thread_id),
+                &symphony_core::AgentTurnId::new(&turn_id),
                 &TokenCountPayload {
                     input_tokens: 0,
                     output_tokens: 0,
