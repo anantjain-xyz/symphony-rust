@@ -14,7 +14,10 @@ only when a boundary below requires it.
 | SQLite schema, queries, run history, or storage events | `crates/symphony-storage/src/` | Consumers in `symphony-worker`, Tauri commands, then dashboard invalidation |
 | Polling, routing, retries, hooks, workspaces, repository workflows, or skills | `crates/symphony-worker/src/` | Domain contracts in `symphony-core` and state transitions in `symphony-storage` |
 | App startup, settings, keychain, commands, event forwarding, or retros | `src-tauri/src/` | The owning Rust crate, `src/bindings.ts`, and the invoking React code |
-| Dashboard shell, refresh coordination, or settings orchestration | `src/App.tsx` and `src/dashboard*.ts` | Feature views in `src/views/`, IPC types in `src/bindings.ts` |
+| Shell, navigation, theme, or lazy view composition | `src/App.tsx` | Feature owners in `src/features/`; rendering in `src/views/` |
+| Dashboard lifecycle or refresh coordination | `src/features/dashboard/` | `src/dashboard*.ts`, `src/desktop/events.ts`, and `src/App.test.tsx` |
+| Settings editing, validation, or Save | `src/features/settings/` | `src/views/SettingsView.tsx` and `src/settingsValidationController.ts` |
+| Repository readiness, skills install, or workflow transfer | `src/features/repositories/` | Settings view and `src/desktop/commands.ts` |
 | One visible frontend feature | `src/views/` and its colocated test/CSS | Lazy-loading ownership in `src/App.tsx`; bundle constraints in `scripts/check-bundle-budget.mjs` |
 | Browser-level behavior | `e2e/` and `playwright.config.ts` | Preview fixtures in `src/preview/` and the production build graph |
 | Packaging, updates, or releases | `src/AppUpdate.tsx`, `src-tauri/tauri.conf.json`, `scripts/` | Version manifests, release workflow, and updater tests |
@@ -103,16 +106,40 @@ growing the command layer.
 
 ### `src`
 
-React owns presentation and client-side interaction state. `App.tsx` is the
-shell and IPC coordinator: it bootstraps dashboard resources, invokes Tauri
-commands, listens for `db_changed`, `agent_event`, and `rate_limit_changed`, and
-lazy-loads feature views. `dashboardResources.ts`,
-`dashboardResourceState.ts`, and `dashboardRefreshCoordinator.ts` define which
-signals invalidate which reads and how concurrent refreshes settle.
+`App.tsx` owns shell navigation, theme, lazy view composition, and UI focus. It
+connects feature capabilities through commands and snapshots; mutable request,
+selection, draft, and validation references stay inside their owners.
 
-Feature rendering belongs in `src/views/`. Browser-only preview data belongs in
-`src/preview/`; it is a deterministic substitute when Tauri is unavailable, not
-a second backend.
+```text
+App shell ──> dashboard owner ──> refresh coordinator + resource state
+          ├─> settings owner ──> persistent edit/save session
+          │       └─ lazy settings editor ──> validation controller
+          └─> repository readiness owner ──> URL/auth checks + job polls
+Feature owners ──> desktop commands/events ──> generated IPC contracts
+```
+
+| Owner | State and lifecycle | Public integration |
+| --- | --- | --- |
+| `features/dashboard/useDashboardController.ts` | Bootstrap, cached resources, selected IDs, refresh generations, desktop subscriptions, worker/retro polls, stale timers | Data/resource/boot snapshots; navigation and mutation commands; accept updater snapshots |
+| `features/settings/useSettingsController.ts` | Saved settings, viewer identity, persistence, save feedback | Saved snapshot; accept saved settings; refresh repository/worker capabilities |
+| `features/settings/settingsSession.ts` | Draft/key, edit revision, dirty state, exact save owner across editor remounts | Draft/revision operations and owned Save acquisition/release |
+| `features/settings/useSettingsEditor.ts` | Lazy editor state, debounced validation, exact-revision Save, invalid-field focus | Form values and semantic editing actions |
+| `features/repositories/useRepositoryReadiness.ts` | URL/environment request identity, readiness invalidation, debounce, install/transfer polls | Readiness snapshots; check/install/transfer commands |
+| `features/shared/useDesktopActions.ts` | Aggregate pending-operation tokens and updater lock | Run a command; busy/error snapshot |
+
+- Views render feature snapshots. Settings accepts its owner and repository capabilities,
+  rather than sharing mutable reference boxes with the shell.
+- Controllers receive narrow callbacks for cross-feature changes; they do not import
+  one another or own one another's internal state.
+- Validation and feature rendering retain their lazy boundaries. Preview fixtures and
+  simulated mutations stay in `src/preview/`, loaded only without a desktop runtime.
+- `dashboardResources.ts`, `dashboardResourceState.ts`, and
+  `dashboardRefreshCoordinator.ts` retain the invalidation and authority rules.
+
+Feature-owner extraction bundle baseline: eager JavaScript changed from
+254.36 kB raw / 80.63 kB normalized gzip to 256.67 kB raw / 81.28 kB gzip.
+The startup budget is 81.50 kB; existing view boundaries, lazy budgets, and
+forbidden eager entries are unchanged. This retains immediate Overview rendering.
 
 `src/bindings.ts` is reproducible generated IPC output. The Tauri-free
 `symphony-contracts` crate owns the shared DTOs and explicit export catalog;
@@ -169,7 +196,7 @@ configured session and runtime variables.
 | An agent backend or event | Core config/event contracts; agent driver; worker request mapping; settings validation/UI; persisted event display | Agent parser/command tests, worker tests, frontend event-format tests |
 | Dispatch, retry, hooks, or workspace behavior | The owning worker module; storage transitions/suppressions; desktop command/status; visible dashboard effects | Focused worker tests and any affected storage/frontend tests |
 | A Tauri command or IPC payload | Rust command and `generate_handler!`; Specta derives/export list; generated bindings; every string-based `invoke` call | Desktop tests, typecheck, targeted Vitest |
-| A storage event or dashboard read | Storage event/table name; `dashboardResources.ts`; refresh coordinator/state; `App.tsx`; selected view | Dashboard resource/coordinator tests and affected App test |
+| A storage event or dashboard read | Storage event/table name; `dashboardResources.ts`; refresh coordinator/state; dashboard controller; selected view | Dashboard resource/coordinator tests and affected App test |
 | A frontend view or lazy boundary | View/CSS/test; `App.tsx` lazy import; bundle manifest allowlists/budgets when entry ownership changes; E2E flow | Targeted Vitest, build, bundle checks, relevant Playwright test |
 | Updater or release behavior | `AppUpdate*`; Tauri updater config; version manifests; release scripts and tests | Updater tests, build, and release-script validation appropriate to the change |
 

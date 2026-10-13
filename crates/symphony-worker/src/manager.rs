@@ -1,5 +1,11 @@
 use crate::{
-    backoff_ms, resolve_repo_workflow, run_hook, sanitize_key,
+    backoff_ms,
+    dispatch_policy::{self, Admission, DispatchMode, EligibilityDecision, EligibilityFacts},
+    hooks::run_hook_with_sanitizer,
+    output::OutputSanitizer,
+    resolve_repo_workflow,
+    run_output::RunOutput,
+    sanitize_key,
     skills::{
         ensure_workspace_skills, github_token_env_has_token_for_repo_url,
         github_token_env_vars_for_repo_url,
@@ -18,8 +24,8 @@ use symphony_agents::{
 #[cfg(test)]
 use symphony_core::RunStatus;
 use symphony_core::{
-    append_retry_context, render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue,
-    MappedAgentEvent, ParsedWorkflow, RepoConfig, RetryContext, TokenCountPayload,
+    render_prompt, route_issue, AgentBackend, AgentOutcome, HookName, Issue, ParsedWorkflow,
+    RepoConfig, RetryContext, TokenCountPayload,
 };
 use symphony_storage::{
     now_iso, Repository, RunCompletion, RunRow, StorageError, USER_REQUESTED_RETRY_CLASS,
@@ -60,7 +66,7 @@ pub enum WorkerError {
     Storage(#[from] StorageError),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Clone, Serialize, Deserialize, Type)]
 pub struct WorkerStartConfig {
     pub workflow: ParsedWorkflow,
     /// Configured repositories; each issue is routed to one of them.
@@ -109,6 +115,7 @@ struct OwnedWorker {
     started_at: String,
     stop: CancellationToken,
     runtime_config: SharedRuntimeConfig,
+    output_credentials: Arc<std::sync::Mutex<OutputSanitizer>>,
     // The supervisor owns polling and all run tasks until they have exited.
     _supervisor: JoinHandle<()>,
 }
@@ -149,7 +156,7 @@ struct RunCancellationRegistry {
     runs: Arc<Mutex<BTreeMap<String, ManagedRun>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ManagedRun {
     token: CancellationToken,
     tracker_config: symphony_core::TrackerConfig,
@@ -267,6 +274,8 @@ impl WorkerManager {
             self.workspace_claims.clone(),
             run_tasks.clone(),
         );
+        let output_credentials = Arc::new(std::sync::Mutex::new(runtime.output_sanitizer()));
+        let supervisor_credentials = output_credentials.clone();
         let runtime_config = Arc::new(RwLock::new(runtime));
         inner.generation = inner.generation.wrapping_add(1);
         let generation = inner.generation;
@@ -297,16 +306,21 @@ impl WorkerManager {
             let mut tasks = run_tasks.lock().await;
             while let Some(result) = tasks.join_next().await {
                 if let Err(error) = result {
-                    error!(%error, "run supervisor failed while stopping");
+                    error!(error = %supervisor_credentials.lock().unwrap().error(&error.to_string()), "run supervisor failed while stopping");
                 }
             }
             drop(tasks);
+            let output_sanitizer = supervisor_credentials.lock().unwrap().clone();
             let mut inner = manager.inner.lock().await;
             if inner.owns_generation(generation) {
                 inner.lifecycle = WorkerLifecycle::Stopped;
                 inner.last_error = match result {
-                    Ok(result) => result.err().map(|error| error.to_string()),
-                    Err(error) => Some(format!("worker task failed: {error}")),
+                    Ok(result) => result
+                        .err()
+                        .map(|error| output_sanitizer.error(&error.to_string())),
+                    Err(error) => {
+                        Some(output_sanitizer.error(&format!("worker task failed: {error}")))
+                    }
                 };
                 inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             }
@@ -316,6 +330,7 @@ impl WorkerManager {
             started_at: now_iso(),
             stop,
             runtime_config,
+            output_credentials,
             _supervisor: supervisor,
         });
         Ok(inner.status())
@@ -362,7 +377,7 @@ impl WorkerManager {
                 if matches!(inner.lifecycle, WorkerLifecycle::Running(_))
                     && inner.reconfigure_generation == generation
                 {
-                    inner.last_error = Some(err.to_string());
+                    inner.last_error = Some(runtime.output_sanitizer().error(&err.to_string()));
                 }
                 return inner.status();
             }
@@ -373,6 +388,13 @@ impl WorkerManager {
                 || inner.reconfigure_generation != generation
             {
                 return inner.status();
+            }
+            if let WorkerLifecycle::Running(worker) = &inner.lifecycle {
+                worker
+                    .output_credentials
+                    .lock()
+                    .unwrap()
+                    .include(&runtime.output_sanitizer());
             }
             *runtime_config.write().await = runtime;
             inner.last_error = None;
@@ -533,7 +555,7 @@ impl WorkerManager {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RuntimeConfig {
     workflow: ParsedWorkflow,
     repos: Vec<RepoConfig>,
@@ -546,6 +568,46 @@ struct RuntimeConfig {
     workspace_cleanup: Option<WorkspaceCleanupManager>,
     workspace_claims: WorkspaceClaims,
     run_tasks: RunTasks,
+}
+
+// Configurations contain inherited and explicit credentials. Debug is structural
+// only; serializable settings APIs retain their existing contract.
+impl std::fmt::Debug for WorkerStartConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerStartConfig")
+            .field("backend", &self.workflow.front_matter.agent.backend)
+            .field("repo_count", &self.repos.len())
+            .field("env_count", &self.env.len())
+            .field("session_env_count", &self.session_env.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConfig")
+            .field("backend", &self.workflow.front_matter.agent.backend)
+            .field("repo_count", &self.repos.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ManagedRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedRun")
+            .field("cancelled", &self.token.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeConfig {
+    fn output_sanitizer(&self) -> OutputSanitizer {
+        OutputSanitizer::new(
+            &self.workflow.front_matter.tracker.api_key,
+            &self.env,
+            &self.session_env,
+        )
+    }
 }
 
 fn runtime_config_from_start(
@@ -672,7 +734,7 @@ async fn run_loop<T, F>(
             tracker = make_tracker(&tracker_config);
         }
         if let Err(err) = tick(repo, &tracker, &current_config, Some(config), stop).await {
-            error!(error = %err, "worker tick failed");
+            error!(error = %current_config.output_sanitizer().error(&err.to_string()), "worker tick failed");
         }
         let interval_ms = current_config.workflow.front_matter.polling.interval_ms;
         tokio::select! {
@@ -709,7 +771,7 @@ async fn run_terminal_workspace_cleanup_loop<T, F>(
         if let Err(err) =
             recover_terminal_workspaces(repo, &tracker, &current_config, Some(config), stop).await
         {
-            error!(error = %err, "hourly terminal workspace cleanup failed");
+            error!(error = %current_config.output_sanitizer().error(&err.to_string()), "hourly terminal workspace cleanup failed");
         }
         next_cleanup = tokio::time::Instant::now() + TERMINAL_WORKSPACE_CLEANUP_INTERVAL;
     }
@@ -827,7 +889,7 @@ async fn recover_terminal_workspaces_at_startup<T: TrackerClient>(
     match recover_terminal_workspaces(repo, tracker, config, None, stop).await {
         Ok(should_continue) => should_continue,
         Err(error) => {
-            warn!(%error, "startup terminal workspace cleanup failed; continuing worker startup");
+            warn!(error = %config.output_sanitizer().error(&error.to_string()), "startup terminal workspace cleanup failed; continuing worker startup");
             !stop.is_cancelled()
         }
     }
@@ -941,7 +1003,7 @@ async fn tick<T: TrackerClient>(
             ),
             Err(err) => warn!(
                 issue_id = %issue_id,
-                error = %err,
+                error = %config.output_sanitizer().error(&err.to_string()),
                 "failed to refresh issue that left the active set"
             ),
         }
@@ -952,59 +1014,49 @@ async fn tick<T: TrackerClient>(
         if stop.is_cancelled() {
             return Ok(());
         }
-        if !issue.blockers.is_empty() || retry_ids.contains(&issue.id) {
-            continue;
-        }
-        if let Some(fingerprint) = repo
+        let suppression = repo
             .issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
-            .await?
-        {
-            if fingerprint == issue_fingerprint(&issue) {
-                continue;
-            }
+            .await?;
+        let suppression_matches = suppression
+            .as_ref()
+            .is_some_and(|fingerprint| *fingerprint == issue_fingerprint(&issue));
+        if suppression.is_some() && !suppression_matches {
             repo.clear_issue_dispatch_suppression(&issue.id, USER_CANCELLED_SUPPRESSION)
                 .await?;
-        }
-        if repo.has_active_run(&issue.id).await? {
-            continue;
         }
         let Some(dispatch_config) =
             latest_runtime_config_if_tracker_matches(config, latest_config).await
         else {
             return Ok(());
         };
-        if provider_rate_limited(repo, &dispatch_config).await? {
-            return Ok(());
+        let decision = dispatch_policy::decide(EligibilityFacts {
+            issue: Some(&issue),
+            repos: &dispatch_config.repos,
+            active_states: &dispatch_config.workflow.front_matter.tracker.active_states,
+            mode: DispatchMode::Active,
+            has_active_run: repo.has_active_run(&issue.id).await?,
+            retry_queued: retry_ids.contains(&issue.id),
+            suppression_matches,
+            admission: dispatch_admission(repo, &dispatch_config).await?,
+        });
+        match decision {
+            EligibilityDecision::Skip(reason) if reason.pauses_dispatch() => return Ok(()),
+            EligibilityDecision::Skip(_) => continue,
+            EligibilityDecision::Dispatch(plan) => {
+                reserve_and_dispatch(
+                    repo.clone(),
+                    dispatch_config.clone(),
+                    plan.issue.clone(),
+                    plan.repository.clone(),
+                    plan.run_number,
+                    stop.clone(),
+                )
+                .await?;
+            }
         }
-        let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
-            warn!(
-                issue = %issue.identifier,
-                "no repository matches this issue; skipping (add a repo:<name> or matching bare label, or mark a default)"
-            );
-            continue;
-        };
-        if repo.count_active().await?
-            >= dispatch_config
-                .workflow
-                .front_matter
-                .agent
-                .max_concurrent_agents as i64
-        {
-            break;
-        }
-        reserve_and_dispatch(
-            repo.clone(),
-            dispatch_config.clone(),
-            issue,
-            repo_config.clone(),
-            None,
-            stop.clone(),
-        )
-        .await?;
     }
 
-    let due = repo.due_retries(&now_iso()).await?;
-    for retry in due {
+    for retry in repo.due_retries(&now_iso()).await? {
         if stop.is_cancelled() {
             return Ok(());
         }
@@ -1013,113 +1065,128 @@ async fn tick<T: TrackerClient>(
         else {
             return Ok(());
         };
-        if provider_rate_limited(repo, &dispatch_config).await? {
+        // Avoid fetching/moving tracker state while admission is paused.
+        if dispatch_admission(repo, &dispatch_config)
+            .await?
+            .skip()
+            .is_some()
+        {
             return Ok(());
         }
-        if repo.count_active().await?
-            >= dispatch_config
-                .workflow
-                .front_matter
-                .agent
-                .max_concurrent_agents as i64
-        {
-            break;
-        }
-        let fetched =
+        let mut fetched =
             match cancellable(stop, tracker.fetch_by_id_for_dispatch(&retry.issue_id)).await {
                 Some(result) => result?,
                 None => return Ok(()),
             };
-        if let Some(mut issue) = fetched {
-            if retry.error_class.as_deref() == Some(USER_REQUESTED_RETRY_CLASS)
-                && issue.state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE)
-            {
-                // A stopped run deliberately moved the issue out of the
-                // active set. An explicit retry reverses that transition
-                // before dispatch so the workflow prompt can act on it.
-                let active_states = &dispatch_config.workflow.front_matter.tracker.active_states;
-                let resume_state = active_states
-                    .iter()
-                    .find(|state| !state.eq_ignore_ascii_case(STOPPED_ISSUE_STATE))
-                    .or_else(|| active_states.first());
-                let Some(resume_state) = resume_state else {
-                    repo.clear_retry(&retry.issue_id).await?;
-                    continue;
-                };
-                match cancellable(
-                    stop,
-                    tracker.set_issue_state_by_name(&issue.id, resume_state),
-                )
-                .await
-                {
-                    Some(result) => result?,
-                    None => return Ok(()),
-                }
-                issue.state = resume_state.to_lowercase();
-                repo.upsert_issues(std::slice::from_ref(&issue)).await?;
-            }
-            // The issue may have left the active set since the failed run
-            // (e.g. moved to Done); drop the retry rather than keep it queued
-            // or dispatch a run nobody asked for.
-            let is_active = dispatch_config
-                .workflow
-                .front_matter
-                .tracker
-                .active_states
-                .iter()
-                .any(|state| state.eq_ignore_ascii_case(&issue.state));
-            if !is_active {
-                repo.clear_retry(&retry.issue_id).await?;
-                continue;
-            }
-            // The issue may have become blocked since the failed run; keep the
-            // retry queued so it dispatches once the blocker clears.
-            if !issue.blockers.is_empty() {
-                continue;
-            }
-            // If the issue is still active but no longer routes anywhere
-            // (e.g. the default repo was cleared), drop the retry. Otherwise
-            // retry_ids suppresses the normal active-dispatch path forever.
-            let Some(repo_config) = route_issue(&dispatch_config.repos, &issue) else {
-                warn!(
-                    issue = %issue.identifier,
-                    "no repository matches this retry; clearing it"
-                );
-                repo.clear_retry(&retry.issue_id).await?;
-                continue;
-            };
-            reserve_and_dispatch(
-                repo.clone(),
-                dispatch_config.clone(),
+        // Tracker I/O may overlap a settings edit; evaluate with the newest
+        // matching configuration instead of the pre-fetch provider/route.
+        let Some(dispatch_config) =
+            latest_runtime_config_if_tracker_matches(config, latest_config).await
+        else {
+            return Ok(());
+        };
+        if let Some(issue) = &mut fetched {
+            match dispatch_policy::retry_resume_state(
                 issue,
-                repo_config.clone(),
-                Some(retry.run_number),
-                stop.clone(),
-            )
-            .await?;
-        } else {
-            repo.clear_retry(&retry.issue_id).await?;
+                retry.error_class.as_deref() == Some(USER_REQUESTED_RETRY_CLASS),
+                STOPPED_ISSUE_STATE,
+                &dispatch_config.workflow.front_matter.tracker.active_states,
+            ) {
+                Ok(Some(resume_state)) => {
+                    match cancellable(
+                        stop,
+                        tracker.set_issue_state_by_name(&issue.id, resume_state),
+                    )
+                    .await
+                    {
+                        Some(result) => result?,
+                        None => return Ok(()),
+                    }
+                    issue.state = resume_state.to_lowercase();
+                    repo.upsert_issues(std::slice::from_ref(issue)).await?;
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    if reason.clears_retry() {
+                        repo.clear_retry(&retry.issue_id).await?;
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(dispatch_config) =
+            latest_runtime_config_if_tracker_matches(config, latest_config).await
+        else {
+            return Ok(());
+        };
+        let decision = dispatch_policy::decide(EligibilityFacts {
+            issue: fetched.as_ref(),
+            repos: &dispatch_config.repos,
+            active_states: &dispatch_config.workflow.front_matter.tracker.active_states,
+            mode: DispatchMode::Retry {
+                run_number: retry.run_number,
+            },
+            has_active_run: repo.has_active_run(&retry.issue_id).await?,
+            retry_queued: true,
+            suppression_matches: false,
+            admission: dispatch_admission(repo, &dispatch_config).await?,
+        });
+        match decision {
+            EligibilityDecision::Skip(reason) => {
+                if reason.clears_retry() {
+                    repo.clear_retry(&retry.issue_id).await?;
+                }
+                if reason.pauses_dispatch() {
+                    return Ok(());
+                }
+            }
+            EligibilityDecision::Dispatch(plan) => {
+                reserve_and_dispatch(
+                    repo.clone(),
+                    dispatch_config.clone(),
+                    plan.issue.clone(),
+                    plan.repository.clone(),
+                    plan.run_number,
+                    stop.clone(),
+                )
+                .await?;
+            }
         }
     }
     Ok(())
+}
+
+async fn dispatch_admission(
+    repo: &Repository,
+    config: &RuntimeConfig,
+) -> Result<Admission, WorkerError> {
+    Ok(Admission {
+        active_runs: repo.count_active().await?,
+        max_concurrent: config.workflow.front_matter.agent.max_concurrent_agents,
+        rate_limited: provider_rate_limited(repo, config).await?,
+    })
 }
 
 async fn provider_rate_limited(
     repo: &Repository,
     config: &RuntimeConfig,
 ) -> Result<bool, WorkerError> {
+    provider_rate_limited_at(repo, config, &now_iso()).await
+}
+
+async fn provider_rate_limited_at(
+    repo: &Repository,
+    config: &RuntimeConfig,
+    now: &str,
+) -> Result<bool, WorkerError> {
     let provider = config.workflow.front_matter.agent.backend.as_source_str();
-    Ok(repo
-        .active_rate_limits(&now_iso())
-        .await?
-        .iter()
-        .any(|limit| {
-            limit.source == provider
-                || limit
-                    .source
-                    .strip_prefix(provider)
-                    .is_some_and(|suffix| suffix.starts_with('_'))
-        }))
+    Ok(repo.active_rate_limits(now).await?.iter().any(|limit| {
+        limit.source == provider
+            || limit
+                .source
+                .strip_prefix(provider)
+                .is_some_and(|suffix| suffix.starts_with('_'))
+    }))
 }
 
 async fn acknowledge_stopped_state(
@@ -1249,6 +1316,7 @@ async fn reserve_and_dispatch_with_driver<D: AgentDriver + 'static>(
     let recovery_run = run.clone();
     let recovery_issue_id = issue.id.clone();
     let retry_backoff_cap = config.workflow.front_matter.agent.max_retry_backoff_ms;
+    let recovery_sanitizer = config.output_sanitizer();
     let run_stop = stop.child_token();
     config
         .run_cancellations
@@ -1264,7 +1332,7 @@ async fn reserve_and_dispatch_with_driver<D: AgentDriver + 'static>(
     let mut run_tasks = tasks.lock().await;
     while let Some(result) = run_tasks.try_join_next() {
         if let Err(error) = result {
-            error!(%error, "run supervisor failed");
+            error!(error = %recovery_sanitizer.error(&error.to_string()), "run supervisor failed");
         }
     }
     run_tasks.spawn(async move {
@@ -1285,6 +1353,7 @@ async fn reserve_and_dispatch_with_driver<D: AgentDriver + 'static>(
             &recovery_issue_id,
             &recovery_run,
             retry_backoff_cap,
+            &recovery_sanitizer,
         )
         .await;
         run_cancellations.unregister(&recovery_run.id).await;
@@ -1298,12 +1367,13 @@ async fn handle_dispatch_result(
     issue_id: &str,
     run: &RunRow,
     retry_backoff_cap: u64,
+    sanitizer: &OutputSanitizer,
 ) {
     match result {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            let message = err.to_string();
-            error!(error = %err, "dispatch failed");
+            let message = sanitizer.error(&err.to_string());
+            error!(error = %message, "dispatch failed");
             recover_stranded_run(
                 repo,
                 issue_id,
@@ -1311,6 +1381,7 @@ async fn handle_dispatch_result(
                 retry_backoff_cap,
                 "dispatch_error",
                 &message,
+                sanitizer,
             )
             .await;
         }
@@ -1320,9 +1391,18 @@ async fn handle_dispatch_result(
             } else {
                 "dispatch_cancelled"
             };
-            let message = format!("dispatch task ended without cleanup: {err}");
-            error!(error = %err, "dispatch task ended without cleanup");
-            recover_stranded_run(repo, issue_id, run, retry_backoff_cap, class, &message).await;
+            let message = sanitizer.error(&format!("dispatch task ended without cleanup: {err}"));
+            error!(error = %message, "dispatch task ended without cleanup");
+            recover_stranded_run(
+                repo,
+                issue_id,
+                run,
+                retry_backoff_cap,
+                class,
+                &message,
+                sanitizer,
+            )
+            .await;
         }
     }
 }
@@ -1331,7 +1411,7 @@ async fn handle_dispatch_result(
 /// and queue a retry — the safety net for the reserve → running → finish path.
 ///
 /// `dispatch_run` may have already reached a terminal state before the error
-/// escaped (e.g. `fail()` finished the run but its retry insert then errored),
+/// escaped. Its outcome, retry, and live-session cleanup commit together,
 /// so only rescue rows still stuck `pending`/`running`. That keeps this
 /// idempotent: we never re-stamp `ended_at` or double-queue a retry for a run
 /// that already finished. Every step is best-effort — we are already on the
@@ -1344,6 +1424,7 @@ async fn recover_stranded_run(
     retry_backoff_cap: u64,
     class: &str,
     message: &str,
+    sanitizer: &OutputSanitizer,
 ) {
     match repo.get_run(&run.id).await {
         Ok(Some(current)) if matches!(current.status.as_str(), "pending" | "running") => {}
@@ -1358,19 +1439,12 @@ async fn recover_stranded_run(
         }
     }
     let due = due_after(backoff_ms(run.run_number, retry_backoff_cap));
-    if let Err(finish_err) = repo
-        .complete_run(
-            &run.id,
-            RunCompletion::Failure {
-                error_class: class,
-                error_message: message,
-                retry_due_at: &due,
-            },
-        )
+    if let Err(err) = RunOutput::new(repo, sanitizer)
+        .failure(&run.id, &due, class, message)
         .await
     {
-        error!(error = %finish_err, run_id = %run.id,
-            "could not finish stranded run; leaving it for worker-restart recovery");
+        error!(error = %sanitizer.error(&err.to_string()), run_id = %run.id,
+            "could not persist stranded run recovery");
     }
 }
 
@@ -1386,6 +1460,8 @@ async fn dispatch_run_with_driver<D>(
 where
     D: AgentDriver + 'static,
 {
+    let sanitizer = config.output_sanitizer();
+    let output = RunOutput::new(&repo, &sanitizer);
     let workspaces = workspace_manager(&config, &repo_config);
     if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
         return Ok(());
@@ -1399,16 +1475,19 @@ where
     }
     if workspace.needs_init {
         if let Some(script) = &config.workflow.front_matter.hooks.after_create {
-            let result = run_hook(HookInvocation {
-                hook: HookName::AfterCreate,
-                script,
-                issue: &issue,
-                workspace_path: &workspace.path,
-                run_number: run.run_number,
-                timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
-                env: &env,
-                cancel: &stop,
-            })
+            let result = run_hook_with_sanitizer(
+                HookInvocation {
+                    hook: HookName::AfterCreate,
+                    script,
+                    issue: &issue,
+                    workspace_path: &workspace.path,
+                    run_number: run.run_number,
+                    timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+                    env: &env,
+                    cancel: &stop,
+                },
+                sanitizer.clone(),
+            )
             .await;
             if finish_if_cancelled_for_run(&repo, &config, &run, &issue, &stop).await? {
                 return Ok(());
@@ -1466,16 +1545,19 @@ where
         return Ok(());
     }
     if let Some(script) = &config.workflow.front_matter.hooks.before_run {
-        let _ = run_hook(HookInvocation {
-            hook: HookName::BeforeRun,
-            script,
-            issue: &issue,
-            workspace_path: &workspace.path,
-            run_number: run.run_number,
-            timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
-            env: &env,
-            cancel: &stop,
-        })
+        let _ = run_hook_with_sanitizer(
+            HookInvocation {
+                hook: HookName::BeforeRun,
+                script,
+                issue: &issue,
+                workspace_path: &workspace.path,
+                run_number: run.run_number,
+                timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+                env: &env,
+                cancel: &stop,
+            },
+            sanitizer.clone(),
+        )
         .await;
     }
 
@@ -1516,12 +1598,7 @@ where
             .clone()
             .unwrap_or_else(|| "Using the default workflow.".to_string()),
     };
-    repo.append_event(
-        &run.id,
-        symphony_core::AgentEventKind::Status,
-        &serde_json::json!({ "message": workflow_message }),
-    )
-    .await?;
+    output.status(&run.id, &workflow_message).await?;
     let mut prompt = render_prompt(
         &resolved_workflow.prompt_template,
         &issue,
@@ -1532,9 +1609,9 @@ where
             .recent_events_for_issue(&issue.id, 10)
             .await?
             .into_iter()
-            .map(|event| format!("{}: {}", event.kind, event.payload))
+            .map(|event| sanitizer.historical_event(&event.kind, &event.payload))
             .collect();
-        prompt = append_retry_context(
+        prompt = sanitizer.retry_prompt(
             &prompt,
             &RetryContext {
                 run_number: prior.run_number,
@@ -1617,7 +1694,7 @@ where
         tokio::select! {
             maybe_event = rx.recv() => {
                 if let Some(event) = maybe_event {
-                    persist_run_event(&repo, &run.id, provider, &event).await?;
+                    output.event(&run.id, provider, &event).await?;
                 }
             }
             result = &mut run_fut => break result,
@@ -1628,34 +1705,28 @@ where
     // count) may still sit in the channel. The completed driver dropped its
     // sender, so this drain terminates once the queue is empty.
     while let Some(event) = rx.recv().await {
-        persist_run_event(&repo, &run.id, provider, &event).await?;
+        output.event(&run.id, provider, &event).await?;
     }
 
     match result {
         Ok(result) => {
-            repo.upsert_live_session(
-                &run.id,
-                &format!("{}-{}", result.thread_id, result.turn_id),
-                &result.thread_id,
-                &result.turn_id,
-                &TokenCountPayload {
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    total_tokens: 0,
-                },
-            )
-            .await?;
+            output
+                .identity(&run.id, &result.thread_id, &result.turn_id)
+                .await?;
             if let Some(script) = &config.workflow.front_matter.hooks.after_run {
-                let _ = run_hook(HookInvocation {
-                    hook: HookName::AfterRun,
-                    script,
-                    issue: &issue,
-                    workspace_path: &workspace.path,
-                    run_number: run.run_number,
-                    timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
-                    env: &env,
-                    cancel: &stop,
-                })
+                let _ = run_hook_with_sanitizer(
+                    HookInvocation {
+                        hook: HookName::AfterRun,
+                        script,
+                        issue: &issue,
+                        workspace_path: &workspace.path,
+                        run_number: run.run_number,
+                        timeout_ms: config.workflow.front_matter.hooks.timeout_ms,
+                        env: &env,
+                        cancel: &stop,
+                    },
+                    sanitizer.clone(),
+                )
                 .await;
             }
             let managed = config.run_cancellations.get(&run.id).await;
@@ -1671,15 +1742,13 @@ where
                     repo.complete_run(&run.id, RunCompletion::Success).await?;
                 }
                 AgentOutcome::Cancelled => {
-                    repo.complete_run(
-                        &run.id,
-                        RunCompletion::Cancelled {
-                            error_class: result.error_class.as_deref(),
-                            error_message: result.error_message.as_deref(),
-                            suppression: None,
-                        },
-                    )
-                    .await?;
+                    output
+                        .cancelled(
+                            &run.id,
+                            result.error_class.as_deref(),
+                            result.error_message.as_deref(),
+                        )
+                        .await?;
                 }
                 AgentOutcome::Failure => {
                     fail(
@@ -1812,41 +1881,6 @@ fn issue_fingerprint(issue: &Issue) -> String {
     .expect("issue fingerprint serialization should not fail")
 }
 
-async fn persist_run_event(
-    repo: &Repository,
-    run_id: &str,
-    provider: &str,
-    event: &MappedAgentEvent,
-) -> Result<(), WorkerError> {
-    // A null payload marks a metadata-only event (e.g. a thinking-token
-    // update): persist the side channels but keep it out of the visible
-    // event log.
-    if !event.payload.is_null() {
-        repo.append_event(run_id, event.kind.clone(), &event.payload)
-            .await?;
-    }
-    if let Some(info) = &event.session_info {
-        repo.set_run_session_info(run_id, info).await?;
-    }
-    if let Some(tokens) = &event.tokens {
-        repo.upsert_live_session(run_id, &format!("pending-{run_id}"), "", "", tokens)
-            .await?;
-        repo.record_token_usage(provider, tokens).await?;
-    }
-    if let Some(rate_limit) = &event.rate_limit {
-        repo.upsert_rate_limit(rate_limit).await?;
-    }
-    if let Some(summary) = &event.humanized {
-        repo.append_event(
-            run_id,
-            symphony_core::AgentEventKind::Humanized,
-            &serde_json::json!({ "summary": summary }),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 async fn fail(
     repo: &Repository,
     config: &RuntimeConfig,
@@ -1859,15 +1893,9 @@ async fn fail(
         run.run_number,
         config.workflow.front_matter.agent.max_retry_backoff_ms,
     ));
-    repo.complete_run(
-        &run.id,
-        RunCompletion::Failure {
-            error_class: class,
-            error_message: message,
-            retry_due_at: &due,
-        },
-    )
-    .await?;
+    RunOutput::new(repo, &config.output_sanitizer())
+        .failure(&run.id, &due, class, message)
+        .await?;
     Ok(())
 }
 
@@ -2013,6 +2041,7 @@ fn agent_env(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use symphony_core::MappedAgentEvent;
     use symphony_tracker::StaticTracker;
 
     fn test_running_worker(
@@ -2024,6 +2053,7 @@ mod tests {
             started_at: now_iso(),
             stop,
             runtime_config,
+            output_credentials: Arc::new(std::sync::Mutex::new(OutputSanitizer::default())),
             _supervisor: tokio::spawn(async {}),
         })
     }
@@ -2357,29 +2387,29 @@ mod tests {
         repo.mark_running(&run.id).await.unwrap();
         let mut storage_events = repo.events().subscribe();
 
-        persist_run_event(
-            &repo,
-            &run.id,
-            "codex",
-            &MappedAgentEvent {
-                kind: symphony_core::AgentEventKind::TokenCount,
-                payload: serde_json::json!({
-                    "input_tokens": 120,
-                    "output_tokens": 34,
-                    "total_tokens": 154,
-                }),
-                humanized: None,
-                tokens: Some(TokenCountPayload {
-                    input_tokens: 120,
-                    output_tokens: 34,
-                    total_tokens: 154,
-                }),
-                rate_limit: None,
-                session_info: None,
-            },
-        )
-        .await
-        .unwrap();
+        RunOutput::new(&repo, &OutputSanitizer::default())
+            .event(
+                &run.id,
+                "codex",
+                &MappedAgentEvent {
+                    kind: symphony_core::AgentEventKind::TokenCount,
+                    payload: serde_json::json!({
+                        "input_tokens": 120,
+                        "output_tokens": 34,
+                        "total_tokens": 154,
+                    }),
+                    humanized: None,
+                    tokens: Some(TokenCountPayload {
+                        input_tokens: 120,
+                        output_tokens: 34,
+                        total_tokens: 154,
+                    }),
+                    rate_limit: None,
+                    session_info: None,
+                },
+            )
+            .await
+            .unwrap();
 
         let mut live_session_upserts = 0;
         let mut token_usage_upserts = 0;
@@ -2446,6 +2476,555 @@ mod tests {
         assert_eq!(usage[0].run_count, 1);
     }
 
+    const TRACKER_CANARY: &str = "synthetic-tracker-canary";
+    const ENV_CANARY: &str = "synthetic-inherited-canary";
+    const SESSION_CANARY: &str = "synthetic-session-\"\n界-canary";
+
+    fn canary_config(root: &std::path::Path) -> RuntimeConfig {
+        let mut config = runtime_config(root);
+        config.workflow.front_matter.tracker.api_key = TRACKER_CANARY.into();
+        config.env.insert("GH_TOKEN".into(), ENV_CANARY.into());
+        config
+            .session_env
+            .insert("CUSTOM_VALUE".into(), SESSION_CANARY.into());
+        config.repos[0].url = root.join("missing-local-repository").display().to_string();
+        config
+    }
+
+    fn assert_no_canaries(value: &str) {
+        for secret in [TRACKER_CANARY, ENV_CANARY, SESSION_CANARY] {
+            assert!(!value.contains(secret), "raw canary leaked");
+            let escaped = serde_json::to_string(secret).unwrap();
+            assert!(
+                !value.contains(&escaped[1..escaped.len() - 1]),
+                "JSON-escaped canary leaked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn output_boundary_redacts_durable_events_metadata_errors_and_ui_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = canary_config(temp.path());
+        let sanitizer = config.output_sanitizer();
+        let output = RunOutput::new(&repo, &sanitizer);
+        assert_no_canaries(&format!("{:?} {:?}", config, start_config(config.clone())));
+        assert_no_canaries(&format!(
+            "{:?}",
+            crate::SkillsInstallConfig {
+                repo_url: TRACKER_CANARY.into(),
+                workspace_root: temp.path().into(),
+                workflow: config.workflow.clone(),
+                skills: vec![],
+                env: config.env.clone(),
+                session_env: config.session_env.clone(),
+            }
+        ));
+        assert_no_canaries(&format!(
+            "{:?}",
+            crate::WorkflowTransferConfig {
+                repo_url: TRACKER_CANARY.into(),
+                prompt_template: SESSION_CANARY.into(),
+                workspace_root: temp.path().into(),
+                env: config.env.clone(),
+                session_env: config.session_env.clone(),
+            }
+        ));
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut updates = repo.events().subscribe();
+        let combined = format!("{TRACKER_CANARY} {ENV_CANARY} {SESSION_CANARY}");
+        output.event(&run.id, "codex", &MappedAgentEvent {
+            kind: symphony_core::AgentEventKind::ToolCall,
+            payload: serde_json::json!({"args": {"output": combined, "authorization": "unknown-canary"}, "input_tokens": 12}),
+            humanized: Some(combined.clone()),
+            tokens: Some(TokenCountPayload { input_tokens: 12, output_tokens: 3, total_tokens: 15 }),
+            rate_limit: Some(symphony_core::RateLimitPayload { source: ENV_CANARY.into(), remaining: Some(0), reset_at: Some(SESSION_CANARY.into()) }),
+            session_info: Some(symphony_core::SessionInfoPayload { model: Some(TRACKER_CANARY.into()), agent_version: Some(SESSION_CANARY.into()), ..Default::default() }),
+        }).await.unwrap();
+        output
+            .identity(&run.id, TRACKER_CANARY, SESSION_CANARY)
+            .await
+            .unwrap();
+        output.status(&run.id, &combined).await.unwrap();
+        // Identity must already be safe while the run is live, before atomic
+        // completion removes it from overview.
+        assert_no_canaries(&serde_json::to_string(&repo.overview().await.unwrap()).unwrap());
+        output
+            .failure(
+                &run.id,
+                "2099-01-01T00:00:00Z",
+                SESSION_CANARY,
+                &format!("{combined}{}", "界".repeat(10_000)),
+            )
+            .await
+            .unwrap();
+        let ui = serde_json::to_string(&repo.get_run_detail(&run.id).await.unwrap()).unwrap();
+        assert_no_canaries(&ui);
+        assert!(!ui.contains("unknown-canary"));
+        assert!(ui.contains("[REDACTED]"));
+        assert_no_canaries(&serde_json::to_string(&repo.overview().await.unwrap()).unwrap());
+        assert_no_canaries(
+            &serde_json::to_string(&repo.due_retries("9999-01-01T00:00:00Z").await.unwrap())
+                .unwrap(),
+        );
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert!(row.error_message.unwrap().len() <= crate::output::ERROR_LIMIT);
+        while let Ok(event) = updates.try_recv() {
+            assert_no_canaries(&serde_json::to_string(&event).unwrap());
+        }
+    }
+
+    fn rate_limit_event(source: &str, reset_at: &str) -> MappedAgentEvent {
+        let limit = symphony_core::RateLimitPayload {
+            source: source.into(),
+            remaining: Some(0),
+            reset_at: Some(reset_at.into()),
+        };
+        MappedAgentEvent {
+            kind: symphony_core::AgentEventKind::RateLimit,
+            payload: serde_json::to_value(&limit).unwrap(),
+            humanized: Some(format!("{source} resets at {reset_at}")),
+            tokens: None,
+            rate_limit: Some(limit),
+            session_info: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn output_preserves_quota_identity_and_expiry_despite_session_value_overlap() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(
+            symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+                .await
+                .unwrap(),
+            symphony_storage::EventBus::default(),
+        );
+        let mut config = runtime_config(temp.path());
+        config.session_env = BTreeMap::from([
+            ("AGENT".into(), "codex".into()),
+            ("YEAR".into(), "2026".into()),
+            ("BUCKET".into(), "primary".into()),
+        ]);
+        let sanitizer = config.output_sanitizer();
+        let output = RunOutput::new(&repo, &sanitizer);
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(&ready.id, 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        for source in ["codex", "codex_primary", "codex_secondary"] {
+            output
+                .event(
+                    &run.id,
+                    "codex",
+                    &rate_limit_event(source, "2026-12-01T00:00:00.000Z"),
+                )
+                .await
+                .unwrap();
+        }
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.rate_limits.len(), 3);
+        for (row, expected_source) in
+            overview
+                .rate_limits
+                .iter()
+                .zip(["codex", "codex_primary", "codex_secondary"])
+        {
+            assert_eq!(row.source, expected_source);
+            assert_eq!(row.reset_at.as_deref(), Some("2026-12-01T00:00:00.000Z"));
+        }
+        let detail = repo.get_run_detail(&run.id).await.unwrap().unwrap();
+        for event in detail.1 {
+            assert!(!event.payload.contains("codex"));
+            assert!(!event.payload.contains("2026"));
+            assert!(event.payload.contains("[REDACTED]"));
+        }
+        // Both polling paths consume this provider predicate through Admission.
+        // Drive the clock explicitly so expiry is tested without wall-clock sleeps.
+        for (at, paused) in [
+            ("2026-11-30T23:59:59.999Z", true),
+            ("2026-12-01T00:00:00.000Z", false),
+            ("2026-12-01T00:00:00.001Z", false),
+        ] {
+            let rate_limited = provider_rate_limited_at(&repo, &config, at).await.unwrap();
+            assert_eq!(rate_limited, paused);
+            for mode in [DispatchMode::Active, DispatchMode::Retry { run_number: 2 }] {
+                let decision = dispatch_policy::decide(EligibilityFacts {
+                    issue: Some(&ready),
+                    repos: &config.repos,
+                    active_states: &config.workflow.front_matter.tracker.active_states,
+                    mode,
+                    has_active_run: false,
+                    retry_queued: false,
+                    suppression_matches: false,
+                    admission: Admission {
+                        active_runs: 0,
+                        max_concurrent: 1,
+                        rate_limited,
+                    },
+                });
+                if paused {
+                    assert!(matches!(
+                        decision,
+                        EligibilityDecision::Skip(dispatch_policy::SkipReason::RateLimited)
+                    ));
+                } else {
+                    assert!(matches!(decision, EligibilityDecision::Dispatch(_)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn output_canonicalizes_untrusted_quota_buckets_and_timestamps_without_leaking() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(
+            symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+                .await
+                .unwrap(),
+            symphony_storage::EventBus::default(),
+        );
+        let config = canary_config(temp.path());
+        let sanitizer = config.output_sanitizer();
+        let output = RunOutput::new(&repo, &sanitizer);
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut updates = repo.events().subscribe();
+        let unknown = format!("codex_{SESSION_CANARY}");
+        for source in [&unknown, &unknown, &format!("codex_{ENV_CANARY}")] {
+            output
+                .event(
+                    &run.id,
+                    "codex",
+                    &rate_limit_event(source, "2026-12-01T04:00:00+04:00"),
+                )
+                .await
+                .unwrap();
+        }
+        let overview = repo.overview().await.unwrap();
+        // Repeated unknown bucket updates the same row; distinct buckets cannot
+        // clear one another's quota and still belong to the emitting provider.
+        assert_eq!(overview.rate_limits.len(), 2);
+        for row in &overview.rate_limits {
+            assert!(row.source.starts_with("codex_bucket_"));
+            assert_eq!(row.source.len(), "codex_bucket_".len() + 64);
+            assert_eq!(row.reset_at.as_deref(), Some("2026-12-01T00:00:00.000Z"));
+        }
+        assert!(
+            provider_rate_limited_at(&repo, &config, "2026-11-30T23:59:59.999Z")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider_rate_limited_at(&repo, &config, "2026-12-01T00:00:00.000Z")
+                .await
+                .unwrap()
+        );
+        output
+            .event(
+                &run.id,
+                "codex",
+                &rate_limit_event("codex_primary", SESSION_CANARY),
+            )
+            .await
+            .unwrap();
+        // A foreign source cannot create quota metadata for another provider.
+        output
+            .event(
+                &run.id,
+                "codex",
+                &rate_limit_event("claude", "2026-12-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.rate_limits.len(), 3);
+        assert!(overview
+            .rate_limits
+            .iter()
+            .find(|row| row.source == "codex_primary")
+            .unwrap()
+            .reset_at
+            .is_none());
+        assert_no_canaries(&serde_json::to_string(&overview).unwrap());
+        assert_no_canaries(
+            &serde_json::to_string(&repo.get_run_detail(&run.id).await.unwrap()).unwrap(),
+        );
+        while let Ok(event) = updates.try_recv() {
+            assert_no_canaries(&serde_json::to_string(&event).unwrap());
+        }
+    }
+
+    struct PromptCaptureDriver {
+        captured: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDriver for PromptCaptureDriver {
+        async fn run(
+            &self,
+            request: AgentRunRequest,
+            _events: symphony_agents::AgentEventSender,
+            _cancel: CancellationToken,
+        ) -> Result<symphony_agents::AgentRunResult, symphony_agents::AgentError> {
+            *self.captured.lock().await = Some(request.prompt);
+            Ok(symphony_agents::AgentRunResult {
+                thread_id: TRACKER_CANARY.into(),
+                turn_id: SESSION_CANARY.into(),
+                outcome: AgentOutcome::Failure,
+                error_class: Some(ENV_CANARY.into()),
+                error_message: Some(SESSION_CANARY.into()),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_redacts_legacy_retry_context_and_provider_terminal_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let config = canary_config(temp.path());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let prior = repo
+            .try_reserve_run(&ready.id, 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        // A historical row written before this boundary existed. This test
+        // deliberately does not claim migration of the historical database.
+        repo.finish_run(
+            &prior.id,
+            RunStatus::Failure,
+            Some(TRACKER_CANARY),
+            Some(SESSION_CANARY),
+        )
+        .await
+        .unwrap();
+        repo.append_event(
+            &prior.id,
+            symphony_core::AgentEventKind::Status,
+            &serde_json::json!({"output": SESSION_CANARY, "message": ENV_CANARY}),
+        )
+        .await
+        .unwrap();
+        let run = repo
+            .try_reserve_run(&ready.id, 2, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        dispatch_run_with_driver(
+            repo.clone(),
+            config.clone(),
+            ready,
+            config.repos[0].clone(),
+            run.clone(),
+            CancellationToken::new(),
+            PromptCaptureDriver {
+                captured: captured.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let prompt = captured.lock().await.clone().unwrap();
+        assert_no_canaries(&prompt);
+        assert!(prompt.contains("[REDACTED]"));
+        assert_no_canaries(
+            &serde_json::to_string(&repo.get_run_detail(&run.id).await.unwrap()).unwrap(),
+        );
+        assert_no_canaries(
+            &serde_json::to_string(&repo.due_retries("9999-01-01T00:00:00Z").await.unwrap())
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_failures_and_stranded_run_recovery_share_output_redaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = canary_config(temp.path());
+        config.workflow.front_matter.hooks.after_create =
+            Some("printf '%s' \"$GH_TOKEN\" >&2; exit 1".into());
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(&ready.id, 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch_run_with_driver(
+            repo.clone(),
+            config.clone(),
+            ready.clone(),
+            config.repos[0].clone(),
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(row.error_class.as_deref(), Some("after_create_failed"));
+        assert_eq!(row.error_message.as_deref(), Some("[REDACTED]"));
+        let stranded = repo
+            .try_reserve_run(&ready.id, 2, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        handle_dispatch_result(
+            Ok(Err(WorkerError::WorkspaceSkills(std::io::Error::other(
+                SESSION_CANARY,
+            )))),
+            &repo,
+            &ready.id,
+            &stranded,
+            60_000,
+            &config.output_sanitizer(),
+        )
+        .await;
+        assert_no_canaries(
+            &serde_json::to_string(&repo.get_run_detail(&stranded.id).await.unwrap()).unwrap(),
+        );
+        assert_no_canaries(
+            &serde_json::to_string(&repo.due_retries("9999-01-01T00:00:00Z").await.unwrap())
+                .unwrap(),
+        );
+        let cancelled = repo
+            .try_reserve_run(&ready.id, 3, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        RunOutput::new(&repo, &config.output_sanitizer())
+            .cancelled(&cancelled.id, Some(TRACKER_CANARY), Some(ENV_CANARY))
+            .await
+            .unwrap();
+        assert_no_canaries(
+            &serde_json::to_string(&repo.get_run_detail(&cancelled.id).await.unwrap()).unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_redacts_session_credential_before_the_stderr_tail_cutoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let mut config = canary_config(temp.path());
+        let secret = format!("synthetic-session-{}", "秘密".repeat(1000));
+        config
+            .session_env
+            .insert("CUSTOM_VALUE".into(), secret.clone());
+        // The hook need not receive a variable to echo it: output can come
+        // from files/tool results. Its capture still uses the run's full set.
+        config.workflow.front_matter.hooks.after_create =
+            Some(format!("printf '%s' '{secret}' >&2; exit 1"));
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(&ready.id, 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch_run_with_driver(
+            repo.clone(),
+            config.clone(),
+            ready,
+            config.repos[0].clone(),
+            run.clone(),
+            CancellationToken::new(),
+            mock_driver(AgentOutcome::Success),
+        )
+        .await
+        .unwrap();
+        let row = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(row.error_message.as_deref(), Some("[REDACTED]"));
+        assert!(
+            !serde_json::to_string(&repo.get_run_detail(&run.id).await.unwrap())
+                .unwrap()
+                .contains("秘密")
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_redacts_credentials_from_intermediate_reconfigurations() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool, symphony_storage::EventBus::default());
+        let manager = WorkerManager::new(repo);
+        let config = canary_config(temp.path());
+        let release = Arc::new(Notify::new());
+        let worker_release = release.clone();
+        manager
+            .start_with_runner(start_config(config.clone()), move |_, _, _| async move {
+                worker_release.notified().await;
+                Err(WorkerError::WorkspaceSkills(std::io::Error::other(
+                    "synthetic-intermediate-key",
+                )))
+            })
+            .await
+            .unwrap();
+        let mut changed = start_config(config.clone());
+        changed
+            .session_env
+            .insert("ROTATED_KEY".into(), "synthetic-intermediate-key".into());
+        manager
+            .reconfigure_with_tracker_preflight(changed, |_| async { Ok(()) })
+            .await;
+        manager
+            .reconfigure_with_tracker_preflight(start_config(config), |_| async { Ok(()) })
+            .await;
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status = manager.status().await;
+                if status.state == WorkerState::Stopped {
+                    assert!(!status
+                        .last_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("synthetic-intermediate-key"));
+                    assert!(status.last_error.unwrap().contains("[REDACTED]"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     async fn wait_for_path(path: &std::path::Path) {
         for _ in 0..500 {
             if tokio::fs::metadata(path).await.is_ok() {
@@ -2496,6 +3075,7 @@ mod tests {
             60_000,
             "dispatch_error",
             &WorkerError::AlreadyRunning.to_string(),
+            &OutputSanitizer::default(),
         )
         .await;
 
@@ -2551,7 +3131,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            handle_dispatch_result(Ok(Err(failure)), &repo, "lin-1", &run, 60_000).await;
+            handle_dispatch_result(
+                Ok(Err(failure)),
+                &repo,
+                "lin-1",
+                &run,
+                60_000,
+                &OutputSanitizer::default(),
+            )
+            .await;
 
             let row = repo.get_run(&run.id).await.unwrap().unwrap();
             assert_eq!(row.status, "failure");
@@ -2599,7 +3187,15 @@ mod tests {
             Ok::<(), WorkerError>(())
         })
         .await;
-        handle_dispatch_result(result, &repo, "lin-1", &run, 60_000).await;
+        handle_dispatch_result(
+            result,
+            &repo,
+            "lin-1",
+            &run,
+            60_000,
+            &OutputSanitizer::default(),
+        )
+        .await;
 
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
         assert_eq!(row.status, "failure");
@@ -2643,6 +3239,7 @@ mod tests {
             60_000,
             "dispatch_error",
             &WorkerError::AlreadyRunning.to_string(),
+            &OutputSanitizer::default(),
         )
         .await;
 
