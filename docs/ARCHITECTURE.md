@@ -13,7 +13,8 @@ only when a boundary below requires it.
 | Codex, Claude, Cursor, or opencode process protocols | `crates/symphony-agents/src/lib.rs` | Agent configuration in `symphony-core`, dispatch in `symphony-worker` |
 | SQLite schema, queries, run history, or storage events | `crates/symphony-storage/src/` | Consumers in `symphony-worker`, Tauri commands, then dashboard invalidation |
 | Polling, routing, retries, hooks, workspaces, repository workflows, or skills | `crates/symphony-worker/src/` | Domain contracts in `symphony-core` and state transitions in `symphony-storage` |
-| App startup, settings, keychain, commands, event forwarding, or retros | `src-tauri/src/` | The owning Rust crate, `src/bindings.ts`, and the invoking React code |
+| App startup, settings, keychain, commands, or event forwarding | `src-tauri/src/` | The owning Rust crate, `src/bindings.ts`, and the invoking React code |
+| Retro review, prompt application, or PR batches | `src-tauri/src/retro_service.rs` | Generation and native Git/PR effects in `retro.rs`; settings commits in `settings_store.rs`; reservations in `symphony-storage` |
 | Shell, navigation, theme, or lazy view composition | `src/App.tsx` | Feature owners in `src/features/`; rendering in `src/views/` |
 | Dashboard lifecycle or refresh coordination | `src/features/dashboard/` | `src/dashboard*.ts`, `src/desktop/events.ts`, and `src/App.test.tsx` |
 | Settings editing, validation, or Save | `src/features/settings/` | `src/views/SettingsView.tsx` and `src/settingsValidationController.ts` |
@@ -100,8 +101,9 @@ The `symphony-desktop` package is the composition and OS boundary.
 commands, projects typed storage records into UI DTOs, forwards events, and
 initializes logging. `settings.rs` owns settings serialization/defaults and their
 translation into core workflow configuration; secrets are read through the OS
-keychain. `retro.rs` owns the desktop-hosted retro generation and reviewed
-change-batch flow.
+keychain. `retro_service.rs` owns retro review and change application without
+Tauri types, application state, or direct credential/environment access.
+`retro.rs` supplies generation, diff materialization, and native Git/PR effects.
 
 Reusable domain or orchestration behavior should stay in a crate rather than
 growing the command layer.
@@ -212,6 +214,39 @@ environment provides either nonblank allowlisted token, both host/base token
 candidates are suppressed before the session values are applied. These agents
 do not receive the keychain-derived Linear key. Issue agents receive their
 configured session and runtime variables.
+
+### Reviewed retro changes
+
+```text
+Tauri command ──> RetroService ──> pure reviewed selection / workflow plan
+                      ├─────────> Repository: reserve reviewed suggestions
+                      ├─────────> SettingsStore: revision + prompt hash CAS
+                      ├─────────> WorkerManager: accept saved configuration
+                      └─────────> RetroEffects: verify source / execute PR batch
+```
+
+| Owner | Guarantee |
+| --- | --- |
+| Command adapter | Supplies environment, paths, and bundled skills; delegates and projects results |
+| Reviewed selection | Every available suggestion is reviewed before selecting accepted targets |
+| Settings admission | Holds the local effects gate; reads settings and credentials under one OS lock; replaces captured credential values and drains recovery effects |
+| Repository reservation | Rechecks the complete accepted repository plan and inserts all new batches in one transaction; returns only newly admitted IDs |
+| Workflow application | Uses core runtime validation; rejects changed prompt/source; saves through settings CAS before revision-fenced reconfiguration |
+| PR batch owner | Validates repository workspace names before reservation; launches admitted IDs only; tracks background jobs in a `JoinSet` |
+
+- Application, launch, and delete operations survive an IPC caller dropping its
+  future; deletion owns both the durable removal and status cleanup.
+- Source validation runs outside the settings gate; workflow application rechecks
+  the revision and captures credentials again immediately before CAS.
+- An unavailable Linear key blocks generation, while Git PR work and prompt
+  changes remain available. Ambiguous credential recovery blocks admission.
+- A prompt saved while credential access prevents runtime update leaves a
+  restart instruction in worker status, including after a webview reload.
+- Delete and review use storage guards so reserved work cannot lose its inputs.
+- Commands accept closed decision enums and project service snapshots into IPC
+  DTOs; malformed stored reports surface as errors rather than missing reports.
+- Service acceptance tests use synthetic credentials, barrier-controlled effects,
+  and a local Git fixture; no desktop runtime or external accounts are required.
 
 ## Change-impact map
 
