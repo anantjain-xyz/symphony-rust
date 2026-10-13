@@ -78,6 +78,7 @@ struct Fixture {
     credentials: Arc<FixtureCredentials>,
     settings_path: PathBuf,
     settings: AppSettings,
+    tracker_endpoint: String,
     tracker: JoinHandle<()>,
 }
 
@@ -135,8 +136,9 @@ impl Fixture {
             let _ = connected.send(());
             std::future::pending::<()>().await;
         });
+        let tracker_endpoint = format!("http://{address}/graphql");
         let mut workflow = workflow_from_settings(&settings, Some(OLD_KEY));
-        workflow.front_matter.tracker.endpoint = format!("http://{address}/graphql");
+        workflow.front_matter.tracker.endpoint = tracker_endpoint.clone();
         state
             .worker
             .start(WorkerStartConfig {
@@ -167,6 +169,7 @@ impl Fixture {
             credentials,
             settings_path,
             settings,
+            tracker_endpoint,
             tracker,
         }
     }
@@ -648,4 +651,73 @@ async fn migration_load_stops_stale_runtime_after_post_rename_sync_error() {
         fixture.credentials.key.lock().unwrap().as_deref(),
         Some(OLD_KEY)
     );
+}
+
+#[tokio::test]
+async fn incomplete_workflow_save_reports_skipped_update_until_successful_refresh() {
+    let fixture = Fixture::running().await;
+    let original_status = fixture.state.worker.status().await;
+    assert!(original_status.last_error.is_none());
+    let mut incomplete = fixture.settings.clone();
+    incomplete.repos.clear();
+    assert!(!live_reconfigure_allowed(&incomplete));
+    let saved = save_settings_owned(
+        fixture.state.clone(),
+        SaveSettingsRequest {
+            settings: incomplete,
+            linear_api_key: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.settings_revision, 11);
+    assert!(saved.linear_api_key_error.is_none());
+    let skipped = fixture.state.worker.status().await;
+    assert_eq!(skipped.state, symphony_worker::WorkerState::Running);
+    assert_eq!(skipped.started_at, original_status.started_at);
+    assert_eq!(
+        skipped.last_error.as_deref(),
+        Some("Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.")
+    );
+    load_settings_from_disk(&fixture.state).await.unwrap();
+    assert_eq!(
+        fixture.state.worker.status().await.last_error,
+        skipped.last_error
+    );
+
+    let mut complete = saved;
+    complete.repos = vec![symphony_core::RepoConfig {
+        name: "widgets".into(),
+        url: "https://example.invalid/widgets.git".into(),
+        install_cmd: None,
+        is_default: true,
+        skills_marked_installed: false,
+    }];
+    assert!(live_reconfigure_allowed(&complete));
+    let _effects = fixture.state.settings_store.commit_effects().await;
+    let complete = fixture
+        .state
+        .settings_store
+        .save(complete, None)
+        .await
+        .unwrap();
+    let mut refresh = worker_start_config(&fixture.state, &complete, OLD_KEY).unwrap();
+    // Keep the fixture's admitted tracker identity, so this actual worker
+    // reconfiguration needs no external preflight or native credential access.
+    let mut workflow = refresh.runtime.workflow().clone();
+    workflow.front_matter.tracker.endpoint = fixture.tracker_endpoint.clone();
+    refresh.runtime = symphony_core::RunnableConfig::new(
+        complete.settings_revision,
+        workflow,
+        complete.repos.clone(),
+        complete.session_env.clone(),
+    )
+    .unwrap();
+    let refreshed = fixture.state.worker.reconfigure(refresh).await;
+    assert_eq!(refreshed.state, symphony_worker::WorkerState::Running);
+    assert_eq!(refreshed.started_at, original_status.started_at);
+    assert!(refreshed.last_error.is_none());
+    assert!(fixture.state.worker.status().await.last_error.is_none());
+    fixture.state.worker.stop().await;
+    fixture.assert_stopped().await;
 }

@@ -267,6 +267,13 @@ async fn apply_settings_to_worker(
                 .reconfigure(worker_start_config(state, &snapshot.settings, api_key)?)
                 .await;
         }
+    } else {
+        state
+            .worker
+            .report_configuration_error(
+                "Settings saved, but incomplete configuration prevented worker update. Finish setup and save again to apply the saved settings.",
+            )
+            .await;
     }
     Ok(snapshot.settings)
 }
