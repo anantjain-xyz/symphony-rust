@@ -429,13 +429,22 @@ impl WorkflowTransferStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WorkflowTransferConfig {
     pub repo_url: String,
     pub prompt_template: String,
     pub workspace_root: PathBuf,
     pub env: BTreeMap<String, String>,
     pub session_env: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for WorkflowTransferConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowTransferConfig")
+            .field("env_count", &self.env.len())
+            .field("session_env_count", &self.session_env.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -61,8 +61,10 @@ All native adapters share these process rules:
    and verbose diagnostics cannot deadlock each other.
 4. Stdout is the structured event channel. A missing pipe is a missing result.
    Records exceeding 8 MiB fail with an I/O protocol error. Stderr is drained
-   as bytes with an 8 KiB tail; nonzero exit fallbacks include that tail with
-   lossy UTF-8 decoding, without retaining the full stream.
+   as bytes with an 8 KiB diagnostic limit. Nonzero exit fallbacks include
+   complete bounded diagnostics with lossy UTF-8 decoding. Overflowed stderr
+   is omitted with an explicit marker: retaining a partial credential before
+   worker redaction would expose fragments that no longer match its value.
 5. The process inherits the app environment plus the request overlay.
    `LINEAR_API_KEY`, repository coordinates, supported GitHub credentials,
    and configured session variables are injected by the worker.
@@ -332,5 +334,5 @@ process-group cases.
 | Cancellation and deadlines | Unread stdin and stdout EOF followed by a live process, for all providers |
 | Group ownership | Malformed JSON, abandoned futures, and stubborn descendants |
 | Event delivery | Cancellation with a full event channel; bounded OpenCode final usage delivery |
-| Bounded diagnostics | Oversized stdout rejection; bounded stderr tail on nonzero exits |
+| Bounded diagnostics | Oversized stdout rejection; complete bounded stderr or an explicit omission marker on nonzero exits |
 | Provider completion | Cursor terminal success and Claude/OpenCode requested aborts stop lingering groups |

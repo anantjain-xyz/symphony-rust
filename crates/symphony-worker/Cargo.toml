@@ -12,6 +12,7 @@ dirs.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 specta.workspace = true
 symphony-agents = { path = "../symphony-agents" }
 symphony-core = { path = "../symphony-core" }
