@@ -44,6 +44,10 @@ const TERMINAL_WORKSPACE_GRACE_PERIOD: ChronoDuration = ChronoDuration::hours(1)
 pub enum WorkerError {
     #[error("worker is already running")]
     AlreadyRunning,
+    #[error(
+        "settings revision {revision} is stale; the worker has accepted revision {latest_revision}"
+    )]
+    StaleSettings { revision: u64, latest_revision: u64 },
     #[error("run {0} was not found")]
     RunNotFound(String),
     #[error("run {0} is not active")]
@@ -266,6 +270,13 @@ impl WorkerManager {
         if !matches!(inner.lifecycle, WorkerLifecycle::Stopped) {
             return Err(WorkerError::AlreadyRunning);
         }
+        let revision = config.runtime.settings_revision();
+        if revision < inner.latest_settings_revision {
+            return Err(WorkerError::StaleSettings {
+                revision,
+                latest_revision: inner.latest_settings_revision,
+            });
+        }
         let stop = CancellationToken::new();
         let run_tasks = RunTasks::default();
         let runtime = runtime_config_from_start(
@@ -349,16 +360,16 @@ impl WorkerManager {
     {
         let (runtime_config, generation) = {
             let mut inner = self.inner.lock().await;
+            if config.runtime.settings_revision() < inner.latest_settings_revision {
+                return inner.status();
+            }
+            // Fence committed settings order in every lifecycle state. A stopped
+            // save must invalidate a delayed start as well as an older reconfigure.
+            inner.latest_settings_revision = config.runtime.settings_revision();
             let WorkerLifecycle::Running(worker) = &inner.lifecycle else {
                 return inner.status();
             };
             let runtime_config = worker.runtime_config.clone();
-            if config.runtime.settings_revision() < inner.latest_settings_revision {
-                return inner.status();
-            }
-            // Fence committed settings order before asynchronous preflight. A failed
-            // newer preflight must still reject a delayed older settings save.
-            inner.latest_settings_revision = config.runtime.settings_revision();
             inner.reconfigure_generation = inner.reconfigure_generation.wrapping_add(1);
             (runtime_config, inner.reconfigure_generation)
         };
@@ -3623,6 +3634,40 @@ exit 13
         let live = shared.read().await;
         assert_eq!(live.workflow.front_matter.tracker.api_key, "test-key");
         assert_eq!(live.repos[0].install_cmd.as_deref(), Some("make get"));
+    }
+
+    #[tokio::test]
+    async fn stopped_save_fences_a_delayed_start_without_starting_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = symphony_storage::open_sqlite(temp.path().join("revision.sqlite"))
+            .await
+            .unwrap();
+        let manager =
+            WorkerManager::new(Repository::new(pool, symphony_storage::EventBus::default()));
+        let mut newer = runtime_config(temp.path());
+        newer.settings_revision = 2;
+        let status = manager
+            .reconfigure_with_tracker_preflight(start_config(newer), |_| async {
+                panic!("stopped reconfiguration must not run preflight")
+            })
+            .await;
+        assert_eq!(status.state, WorkerState::Stopped);
+        let mut older = runtime_config(temp.path());
+        older.settings_revision = 1;
+        let result = manager
+            .start_with_runner(start_config(older), |_, _, _| async {
+                panic!("stale start must not run the worker")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(WorkerError::StaleSettings {
+                revision: 1,
+                latest_revision: 2
+            })
+        ));
+        assert_eq!(manager.status().await.state, WorkerState::Stopped);
+        assert_eq!(manager.inner.lock().await.latest_settings_revision, 2);
     }
 
     #[tokio::test]

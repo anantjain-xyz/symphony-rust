@@ -30,7 +30,7 @@ flowchart LR
 - Missing repositories represent saveable incomplete setup. Every validation issue still prevents that draft becoming runnable.
 - Command presence, positive numeric limits, prompt placeholders, repository namespace collisions, and session environment names/values share core validation.
 - Credentials and executable availability remain runtime preflight concerns.
-- Lower settings revisions cannot replace newer accepted runtime requests. Preflight generation guards still protect concurrent callbacks.
+- Lower settings revisions cannot replace newer accepted runtime requests or start after a newer stopped-worker save. The revision fence survives stopped/stopping states; preflight generation guards protect concurrent callbacks.
 - Agent session/thread/turn IDs are opaque newtypes at the storage API where adjacent string arguments were interchangeable.
 
 ## Compatibility

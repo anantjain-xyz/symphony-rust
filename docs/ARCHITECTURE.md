@@ -38,13 +38,15 @@ symphony-worker ─────> symphony-core
        ├─────────────> symphony-agents
        └─────────────> symphony-storage
 
-symphony-desktop (src-tauri) ──> all Rust crates
+symphony-contracts ──> symphony-core
+symphony-bindings (tooling) ──> contracts, core, worker
+symphony-desktop (src-tauri) ──> runtime crates and contracts
 React (src) ⇄ symphony-desktop via Tauri commands, events, and Specta types
 ```
 
 The crate/package names are `symphony-core`, `symphony-tracker`,
-`symphony-agents`, `symphony-storage`, `symphony-worker`, and
-`symphony-desktop`. The frontend package is `symphony-rust`.
+`symphony-agents`, `symphony-storage`, `symphony-worker`,
+`symphony-contracts`, `symphony-bindings`, and `symphony-desktop`. The frontend package is `symphony-rust`.
 
 ## Ownership and boundaries
 
@@ -95,8 +97,8 @@ The main files are deliberately split by operational concern:
 
 The `symphony-desktop` package is the composition and OS boundary.
 `src-tauri/src/lib.rs` opens storage, constructs managers, registers Tauri
-commands, forwards storage events, initializes logging, and exports debug
-Specta bindings. `settings.rs` owns settings serialization/defaults and their
+commands, projects typed storage records into UI DTOs, forwards events, and
+initializes logging. `settings.rs` owns settings serialization/defaults and their
 translation into core workflow configuration; secrets are read through the OS
 keychain. `retro.rs` owns the desktop-hosted retro generation and reviewed
 change-batch flow.
@@ -142,7 +144,8 @@ The startup budget is 81.50 kB; existing view boundaries, lazy budgets, and
 forbidden eager entries are unchanged. This retains immediate Overview rendering.
 
 `src/bindings.ts` is reproducible generated IPC output. The Tauri-free
-`symphony-contracts` crate owns the shared DTOs and explicit export catalog;
+`symphony-contracts` crate owns deliberate UI DTOs without storage or worker
+dependencies. The separate `symphony-bindings` tooling crate owns the export catalog;
 `pnpm generate:bindings` rewrites the file, while `pnpm check:bindings`
 regenerates it in a temporary directory and rejects drift.
 
@@ -174,7 +177,18 @@ regenerates it in a temporary directory and rejects drift.
 ### Settings and secrets
 
 Application settings are stored as JSON under the app-data directory. The Linear
-API key is stored separately in the OS keychain. The Tauri layer builds runtime
+API key is stored separately in the OS keychain.
+`SettingsStore` owns every read, migration, Save, retro prompt update, and
+credential change. Saved revisions reject stale drafts and retro applications.
+File updates use a synced temporary file followed by atomic replacement;
+credential changes are restored if replacement fails. Removing the Linear key
+advances the revision and stops the worker. A stable sidecar OS lock serializes
+separate application processes. The blocking operation owns both locks through
+commit; an owned asynchronous task also completes reconfiguration, key-removal
+shutdown, and retro batch finalization when an IPC caller disconnects. Drafts
+adopt a newer revision only from their own Save operation; unrelated updates
+retain the old revision and produce a conflict.
+The Tauri layer builds runtime
 configuration and environment maps. Repository install and workflow-transfer
 agents start with the repaired `PATH`. For `github.com` and
 `ghe.com`/`*.ghe.com` repositories, they also allowlist the host process

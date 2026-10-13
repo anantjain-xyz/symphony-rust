@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 pub use symphony_contracts::AppSettings;
 use symphony_contracts::{
@@ -26,6 +26,7 @@ mod path_env;
 mod projections;
 mod retro;
 mod settings;
+mod settings_store;
 mod storage_events;
 
 use retro::{
@@ -33,7 +34,7 @@ use retro::{
     uses_legacy_retro_section, RetroDetail, RetroManager, RetroProposalConfig, RetroStatus,
     INTERRUPTED_RETRO_MESSAGE,
 };
-use settings::{default_prompt_template, parse_settings, workflow_from_settings};
+use settings::{default_prompt_template, workflow_from_settings};
 use uuid::Uuid;
 
 const KEYRING_SERVICE: &str = "symphony";
@@ -132,7 +133,7 @@ struct AppState {
     workflow_transfer: WorkflowTransferManager,
     retro: RetroManager,
     app_data_dir: PathBuf,
-    settings_path: PathBuf,
+    settings_store: settings_store::SettingsStore,
     database_path: PathBuf,
 }
 
@@ -172,28 +173,21 @@ async fn save_settings(
     state: State<'_, AppState>,
     request: SaveSettingsRequest,
 ) -> Result<AppSettings, String> {
-    if let Some(key) = request.linear_api_key.as_ref() {
-        if !key.trim().is_empty() {
-            keyring_entry()
-                .map_err(|err| err.to_string())?
-                .set_password(key)
-                .map_err(|err| err.to_string())?;
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state
+            .settings_store
+            .save(request.settings, request.linear_api_key)
+            .await?;
+        if live_reconfigure_allowed(&settings) {
+            state
+                .worker
+                .reconfigure(worker_start_config(&state, &settings)?)
+                .await;
         }
-    }
-    let mut settings = request.settings;
-    settings::normalize_linear_filters(&mut settings);
-    settings.linear_api_key_set = linear_api_key().is_some();
-    let json = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    tokio::fs::write(&state.settings_path, json)
-        .await
-        .map_err(|err| err.to_string())?;
-    if live_reconfigure_allowed(&settings) {
-        state
-            .worker
-            .reconfigure(worker_start_config(&state, &settings)?)
-            .await;
-    }
-    Ok(settings)
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -454,14 +448,13 @@ async fn list_board_issues(state: State<'_, AppState>) -> Result<Vec<IssueSummar
 
 #[tauri::command]
 async fn remove_linear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    match keyring_entry() {
-        Ok(entry) => match entry.delete_credential() {
-            Ok(()) | Err(keyring_core::Error::NoEntry) => {}
-            Err(err) => return Err(err.to_string()),
-        },
-        Err(err) => return Err(err.to_string()),
-    }
-    load_settings_from_disk(&state).await
+    let state = state.inner().clone();
+    settings_store::finish_operation(async move {
+        let settings = state.settings_store.remove_key().await?;
+        state.worker.stop().await;
+        Ok(settings)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -738,13 +731,14 @@ async fn apply_retro_workflow(
     state: State<'_, AppState>,
     retro_id: String,
 ) -> Result<RetroChangeBatch, String> {
-    apply_retro_workflow_inner(state, retro_id)
+    let state = state.inner().clone();
+    settings_store::finish_operation(apply_retro_workflow_inner(state, retro_id))
         .await
         .map(projections::retro_change_batch)
 }
 
 async fn apply_retro_workflow_inner(
-    state: State<'_, AppState>,
+    state: AppState,
     retro_id: String,
 ) -> Result<RetroBatchRow, String> {
     let all_suggestions = state
@@ -961,20 +955,31 @@ async fn apply_retro_workflow_inner(
             .map_err(|err| err.to_string())?;
         return Err(error);
     }
-    if let Err(error) = write_settings_file(&state.settings_path, &updated).await {
-        state
-            .repo
-            .update_retro_batch(
-                &batch.id,
-                symphony_core::BatchState::Failed,
-                None,
-                Some(&error),
-                None,
-            )
-            .await
-            .map_err(|update_err| update_err.to_string())?;
-        return Err(error);
-    }
+    let updated = match state
+        .settings_store
+        .apply_prompt(
+            updated.settings_revision,
+            expected_prompt_hash,
+            updated.prompt_template.clone(),
+        )
+        .await
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            state
+                .repo
+                .update_retro_batch(
+                    &batch.id,
+                    symphony_core::BatchState::Failed,
+                    None,
+                    Some(&error),
+                    None,
+                )
+                .await
+                .map_err(|update_err| update_err.to_string())?;
+            return Err(error);
+        }
+    };
     if live_reconfigure_allowed(&updated) {
         state
             .worker
@@ -1019,13 +1024,6 @@ fn current_retro_repo_url(
 
 fn prompt_revision(settings: &AppSettings) -> String {
     hash_body(&settings.prompt_template)
-}
-
-async fn write_settings_file(path: &std::path::Path, settings: &AppSettings) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
-    tokio::fs::write(path, json)
-        .await
-        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1384,7 +1382,10 @@ pub fn run() {
                 workflow_transfer: WorkflowTransferManager::new(),
                 retro: RetroManager::new(),
                 app_data_dir: app_dir.clone(),
-                settings_path: app_dir.join("settings.json"),
+                settings_store: settings_store::SettingsStore::new(
+                    app_dir.join("settings.json"),
+                    Arc::new(settings_store::KeyringCredentials),
+                ),
                 database_path: db_path,
             };
             forward_events(handle, bus);
@@ -1506,34 +1507,7 @@ fn forward_events(handle: tauri::AppHandle, bus: EventBus) {
 }
 
 async fn load_settings_from_disk(state: &AppState) -> Result<AppSettings, String> {
-    let mut settings = match tokio::fs::read_to_string(&state.settings_path).await {
-        Ok(raw) => {
-            let (settings, migrated) = parse_settings(&raw)?;
-            if migrated {
-                // Keep the pre-migration file around in case the user needs to
-                // inspect or restore settings from an older shape.
-                let backup = state.settings_path.with_extension("json.bak");
-                tokio::fs::write(&backup, &raw)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let json =
-                    serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-                tokio::fs::write(&state.settings_path, json)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                tracing::info!(
-                    target: "symphony",
-                    backup = %backup.display(),
-                    "migrated settings to the current configuration shape"
-                );
-            }
-            settings
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
-        Err(err) => return Err(err.to_string()),
-    };
-    settings.linear_api_key_set = linear_api_key().is_some();
-    Ok(settings)
+    state.settings_store.load().await
 }
 
 /// Environment for hooks and agents (the structured settings feed the
@@ -1659,20 +1633,6 @@ mod tests {
 
         assert_ne!(original_workflow.source_hash, changed_workflow.source_hash);
         assert_eq!(prompt_revision(&changed), revision);
-    }
-
-    #[tokio::test]
-    async fn settings_write_errors_are_reported_to_retro_batches() {
-        let directory =
-            std::env::temp_dir().join(format!("symphony-settings-write-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&directory).await.unwrap();
-
-        let error = write_settings_file(&directory, &configured_settings())
-            .await
-            .unwrap_err();
-        assert!(!error.is_empty());
-
-        tokio::fs::remove_dir_all(directory).await.ok();
     }
 
     #[test]
