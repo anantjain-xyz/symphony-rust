@@ -858,6 +858,110 @@ describe("App settings", () => {
     );
   });
 
+  it("keeps a dirty draft's base revision when an unrelated Retro completes", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const { previewRuntime } = await import("./preview/runtime");
+    const settings = testSettings();
+    const retro = {
+      ...previewRuntime.retroDetail,
+      suggestions: previewRuntime.retroDetail.suggestions.map((suggestion) => ({
+        ...suggestion,
+        decision: suggestion.target_type === "prompt" ? "accepted" : "rejected",
+      })),
+    };
+    const apply = deferred<RetroChangeBatch>();
+    let saved = settings;
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "load_settings") return saved;
+      if (command === "list_retros") return [retro.row];
+      if (command === "get_retro_detail") return retro;
+      if (command === "apply_retro_workflow") return apply.promise;
+      if (command === "save_settings")
+        return Promise.reject(new Error("Settings changed; reload before saving."));
+      return baseInvoke(command, args);
+    });
+    const { container } = render(<App />);
+    await openView("Retro");
+    fireEvent.click(await screen.findByRole("button", { name: /Open retro from/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Apply default workflow/ }));
+    await waitFor(() => expect(commandCount("apply_retro_workflow")).toBe(1));
+    await openSettings();
+    fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+      target: { value: "Unsaved draft from the original workflow" },
+    });
+    saved = { ...settings, settings_revision: 1, prompt_template: "Retro's newer workflow" };
+    apply.resolve({
+      id: "batch-provenance",
+      retro_id: retro.row.id,
+      kind: "workflow_update",
+      repo_name: null,
+      repo_url: null,
+      base_ref: null,
+      state: "completed",
+      progress: null,
+      error: null,
+      pr_url: null,
+      created_at: retro.row.created_at,
+      completed_at: retro.row.created_at,
+    });
+    await waitFor(() => expect(commandCount("load_settings")).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    const request = tauriMocks.invoke.mock.calls.find(
+      ([command]) => command === "save_settings",
+    )![1].request;
+    expect(request.settings.settings_revision).toBe(0);
+    expect(request.settings.prompt_template).toBe("Unsaved draft from the original workflow");
+    expect(await screen.findByText(/Settings changed; reload before saving/)).toBeTruthy();
+  });
+
+  it.each([1, 2])(
+    "adopts key-removal revision %s only when it directly follows the dirty draft",
+    async (removedRevision) => {
+      tauriMocks.runtimeAvailable = true;
+      const settings = { ...testSettings(), linear_api_key_set: true };
+      const removal = deferred<AppSettings>();
+      const baseInvoke = dashboardInvoke({ settings });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "remove_linear_api_key") return removal.promise;
+        if (command === "save_settings")
+          return { ...args.request.settings, settings_revision: removedRevision + 1 };
+        return baseInvoke(command, args);
+      });
+      const { container } = render(<App />);
+      await openSettings();
+      const prompt = container.querySelector(".prompt-editor textarea")!;
+      fireEvent.change(prompt, { target: { value: "My unsaved prompt" } });
+      fireEvent.click(screen.getByRole("button", { name: "Remove saved key" }));
+      await waitFor(() => expect(commandCount("remove_linear_api_key")).toBe(1));
+      fireEvent.change(prompt, { target: { value: "Newer unsaved prompt" } });
+      removal.resolve({
+        ...settings,
+        settings_revision: removedRevision,
+        linear_api_key_set: false,
+        prompt_template:
+          removedRevision === 2 ? "Unrelated newer workflow" : settings.prompt_template,
+      });
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Remove saved key" })).toBeNull(),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+      const request = tauriMocks.invoke.mock.calls.find(
+        ([command]) => command === "save_settings",
+      )![1].request;
+      expect(request.settings.settings_revision).toBe(removedRevision === 1 ? 1 : 0);
+      expect(request.settings.prompt_template).toBe("Newer unsaved prompt");
+    },
+  );
+
   it("does not save when the Linear key changes during authoritative validation", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
@@ -3843,6 +3947,53 @@ describe("App settings", () => {
       }),
     );
   });
+
+  it.each(["resolves", "rejects"])(
+    "keeps global actions busy until both overlapping cancellations settle when the earlier one %s",
+    async (settlement) => {
+      tauriMocks.runtimeAvailable = true;
+      const first = runRow();
+      const second = runRow({ id: "run-2", issue_id: "issue-2", issue_identifier: "SYM-2" });
+      const firstStop = deferred<RunDetail>();
+      const secondStop = deferred<RunDetail>();
+      const baseInvoke = dashboardInvoke({
+        settings: testSettings(),
+        workerStatus: { state: "stopped", started_at: null, last_error: null },
+      });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "list_runs") return Promise.resolve([first, second]);
+        if (command === "get_run_detail") {
+          return Promise.resolve({ run: args?.id === first.id ? first : second, events: [] });
+        }
+        if (command === "stop_run")
+          return args?.id === first.id ? firstStop.promise : secondStop.promise;
+        return baseInvoke(command, args);
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open run SYM-2 number 1" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+      expect(commandCount("stop_run")).toBe(2);
+      const start = screen.getByRole("button", { name: "Start worker" }) as HTMLButtonElement;
+      expect(start.disabled).toBe(true);
+
+      await act(async () => {
+        secondStop.resolve({ run: second, events: [] });
+        await secondStop.promise;
+      });
+      await screen.findByRole("button", { name: "Stop run" });
+      expect(start.disabled).toBe(true);
+
+      await act(async () => {
+        if (settlement === "rejects") firstStop.reject(new Error("Cancellation failed"));
+        else firstStop.resolve({ run: first, events: [] });
+        await firstStop.promise.catch(() => undefined);
+      });
+      await waitFor(() => expect(start.disabled).toBe(false));
+    },
+  );
 
   it("clears stopping state when the post-stop dashboard refresh fails", async () => {
     tauriMocks.runtimeAvailable = true;

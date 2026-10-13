@@ -22,7 +22,7 @@ flowchart LR
 | Contracts | Define UI DTOs without storage or worker dependencies. Omit raw issue snapshots and report JSON from summaries. |
 | Desktop projections | Map typed records into DTOs; report decoding errors are explicit. |
 | Bindings exporter | Tooling crate may depend on worker types; runtime contracts do not. |
-| Frontend | Consume arrays and objects directly. Narrow opaque JSON values before reading fields. Focus validation fields by code, never message text. |
+| Frontend | Consume arrays and objects directly. Narrow opaque JSON values before reading fields. Focus validation fields by structured field identifiers, never message text. |
 
 ## Runtime invariants
 

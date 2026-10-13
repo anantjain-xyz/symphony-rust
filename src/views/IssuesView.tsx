@@ -134,7 +134,7 @@ function IssuesView({
           <h2>Issues</h2>
           <p>
             {selectedMode === "board"
-              ? "Every issue in the configured Linear scope. Drag cards when a single team is selected."
+              ? "Every issue in the configured Linear scope. Drag cards or use Move to when a single team is selected."
               : "The Linear issues Symphony is watching, refreshed on every poll."}
           </p>
         </div>
@@ -445,6 +445,14 @@ function IssuesBoard({
   const [visibleIssueCounts, setVisibleIssueCounts] = useState<Map<string, number>>(
     () => new Map(),
   );
+  const moveControls = useRef(new Map<string, HTMLSelectElement>());
+  const issueCards = useRef(new Map<string, HTMLElement>());
+  const cancelMoveButton = useRef<HTMLButtonElement>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
+  const [focusAfterMove, setFocusAfterMove] = useState<{
+    issueId: string;
+    target: "card" | "control";
+  } | null>(null);
 
   useEffect(() => {
     // Set on mount too: StrictMode's simulated unmount/remount would otherwise
@@ -563,21 +571,53 @@ function IssuesBoard({
     issue: IssueSummary;
     column: BoardColumn;
     entering: boolean;
+    restoreFocus: boolean;
   } | null>(null);
 
+  useEffect(() => {
+    if (pendingMove) cancelMoveButton.current?.focus();
+  }, [pendingMove]);
+
+  useEffect(() => {
+    if (!focusAfterMove) return;
+    const { issueId, target } = focusAfterMove;
+    const control = target === "control" ? moveControls.current.get(issueId) : undefined;
+    const focusable = control && !control.disabled ? control : issueCards.current.get(issueId);
+    (focusable ?? boardRef.current)?.focus();
+    setFocusAfterMove(null);
+  }, [focusAfterMove]);
+
   const moveIssue = useCallback(
-    (issue: IssueSummary, column: BoardColumn) => {
+    (issue: IssueSummary, column: BoardColumn, restoreFocus = false) => {
       if (!onMoveIssue || !column.id) return;
       if (activeRunSet.has(issue.id)) {
         setMoveError(
           `Can't move ${issue.identifier} while an agent run is active — stop the run first.`,
         );
+        if (restoreFocus) setFocusAfterMove({ issueId: issue.id, target: "control" });
         return;
       }
       const currentKey = overrides.get(issue.id)?.target ?? normalizeStateKey(issue.state);
       if (currentKey === column.key) return;
+      if (movingIds.has(issue.id) || overrides.has(issue.id)) return;
       const stateId = column.id;
       setMoveError(null);
+      if (restoreFocus) {
+        // An optimistic move reparents the card. Reveal its page and restore
+        // focus to the relocated card while its Move control is disabled.
+        const index = sortBoardIssues([...column.issues, issue]).findIndex(
+          (candidate) => candidate.id === issue.id,
+        );
+        const requiredCount =
+          Math.ceil((index + 1) / BOARD_COLUMN_PAGE_SIZE) * BOARD_COLUMN_PAGE_SIZE;
+        setVisibleIssueCounts((current) =>
+          new Map(current).set(
+            column.key,
+            Math.max(current.get(column.key) ?? BOARD_COLUMN_PAGE_SIZE, requiredCount),
+          ),
+        );
+        setFocusAfterMove({ issueId: issue.id, target: "card" });
+      }
       setOverrides((prev) => new Map(prev).set(issue.id, { target: column.key, from: currentKey }));
       setMovingIds((prev) => new Set(prev).add(issue.id));
       onMoveIssue(issue.id, stateId)
@@ -587,6 +627,9 @@ function IssuesBoard({
         })
         .catch((error) => {
           // Roll the card back to its original lane and surface the failure.
+          if (restoreFocus && document.activeElement === issueCards.current.get(issue.id)) {
+            setFocusAfterMove({ issueId: issue.id, target: "card" });
+          }
           setOverrides((prev) => {
             const next = new Map(prev);
             next.delete(issue.id);
@@ -602,26 +645,37 @@ function IssuesBoard({
           });
         });
     },
-    [activeRunSet, onMoveIssue, overrides, refreshBoardIssues],
+    [activeRunSet, movingIds, onMoveIssue, overrides, refreshBoardIssues],
   );
 
   // Gate a move behind a confirm when it crosses Symphony's watched (dispatch)
   // boundary — moving into a watched state enqueues an agent; moving out drops it.
   const requestMove = useCallback(
-    (issue: IssueSummary, column: BoardColumn) => {
+    (issue: IssueSummary, column: BoardColumn, restoreFocus = false) => {
       if (!onMoveIssue || !column.id) return;
+      if (movingIds.has(issue.id) || overrides.has(issue.id)) return;
       const currentKey = overrides.get(issue.id)?.target ?? normalizeStateKey(issue.state);
       if (currentKey === column.key) return;
       const fromWatched = watchedKeys.has(currentKey);
       const toWatched = watchedKeys.has(column.key);
       if (fromWatched !== toWatched) {
-        setPendingMove({ issue, column, entering: toWatched });
+        setPendingMove({ issue, column, entering: toWatched, restoreFocus });
         return;
       }
-      moveIssue(issue, column);
+      moveIssue(issue, column, restoreFocus);
     },
-    [moveIssue, onMoveIssue, overrides, watchedKeys],
+    [moveIssue, movingIds, onMoveIssue, overrides, watchedKeys],
   );
+
+  const cancelPendingMove = () => {
+    if (pendingMove) {
+      setFocusAfterMove({
+        issueId: pendingMove.issue.id,
+        target: pendingMove.restoreFocus ? "control" : "card",
+      });
+    }
+    setPendingMove(null);
+  };
 
   const setHoveredColumnKey = useCallback((key: string | null) => {
     const drag = dragRef.current;
@@ -709,13 +763,21 @@ function IssuesBoard({
         if (column && issue) requestMove(issue, column);
       }
     };
+    const onCancel = (event: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || !samePointer(drag.pointerId, event.pointerId)) return;
+      stopAutoScroll();
+      dragRef.current = null;
+      setDraggingLabel(null);
+      setDragKey(null);
+    };
     window.addEventListener("pointermove", onMove, { passive: false });
     window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointercancel", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointercancel", onCancel);
       stopAutoScroll();
     };
   }, [dragEnabled, columns, effectiveIssues, requestMove, updateHoveredColumnAtPoint]);
@@ -725,7 +787,7 @@ function IssuesBoard({
       // event.button > 0 rejects right/middle click; undefined (jsdom) passes.
       if (!dragEnabled || event.button > 0) return;
       // Let clicks on the Open link through instead of starting a drag.
-      if ((event.target as HTMLElement).closest("button, a")) return;
+      if ((event.target as HTMLElement).closest("button, a, select")) return;
       // Release implicit pointer capture (touch/pen) so lanes still receive
       // pointer events for hover detection during the drag.
       const target = event.target as Element;
@@ -807,6 +869,23 @@ function IssuesBoard({
                 draggable={dragEnabled && !movingIds.has(issue.id) && !overrides.has(issue.id)}
                 moving={movingIds.has(issue.id)}
                 onPointerDown={(event) => startDrag(event, issue)}
+                moveColumns={
+                  dragEnabled
+                    ? columns.filter((target) => target.id !== null && target.key !== column.key)
+                    : []
+                }
+                moveDisabled={
+                  movingIds.has(issue.id) || overrides.has(issue.id) || activeRunSet.has(issue.id)
+                }
+                onMove={(target) => requestMove(issue, target, true)}
+                cardRef={(element) => {
+                  if (element) issueCards.current.set(issue.id, element);
+                  else issueCards.current.delete(issue.id);
+                }}
+                moveControlRef={(element) => {
+                  if (element) moveControls.current.set(issue.id, element);
+                  else moveControls.current.delete(issue.id);
+                }}
               />
             ))
           )}
@@ -834,7 +913,9 @@ function IssuesBoard({
 
   return (
     <div
+      ref={boardRef}
       className="issue-board"
+      tabIndex={-1}
       aria-busy={
         loading || (Boolean(loadBoardIssues) && boardIssues === null && !boardError) || undefined
       }
@@ -870,8 +951,19 @@ function IssuesBoard({
         </p>
       ) : null}
       {pendingMove ? (
-        <div className="issue-board-confirm" role="alertdialog" aria-label="Confirm status change">
-          <span>
+        <div
+          className="issue-board-confirm"
+          role="alertdialog"
+          aria-label="Confirm status change"
+          aria-describedby="issue-board-confirm-description"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            cancelPendingMove();
+          }}
+        >
+          <span id="issue-board-confirm-description">
             {pendingMove.entering
               ? `Move ${pendingMove.issue.identifier} to ${pendingMove.column.label}? Symphony will dispatch an agent on the next poll.`
               : `Move ${pendingMove.issue.identifier} to ${pendingMove.column.label}? Symphony will stop working it (any active run keeps going).`}
@@ -880,13 +972,13 @@ function IssuesBoard({
             <button
               type="button"
               onClick={() => {
-                moveIssue(pendingMove.issue, pendingMove.column);
+                moveIssue(pendingMove.issue, pendingMove.column, true);
                 setPendingMove(null);
               }}
             >
               Move
             </button>
-            <button type="button" onClick={() => setPendingMove(null)}>
+            <button ref={cancelMoveButton} type="button" onClick={cancelPendingMove}>
               Cancel
             </button>
           </div>
@@ -917,12 +1009,22 @@ function IssueCard({
   draggable = false,
   moving = false,
   onPointerDown,
+  moveColumns,
+  moveDisabled,
+  onMove,
+  cardRef,
+  moveControlRef,
 }: {
   issue: IssueSummary;
   linearWorkspace: string | null;
   draggable?: boolean;
   moving?: boolean;
   onPointerDown?: (event: React.PointerEvent) => void;
+  moveColumns: BoardColumn[];
+  moveDisabled: boolean;
+  onMove: (column: BoardColumn) => void;
+  cardRef: (element: HTMLElement | null) => void;
+  moveControlRef: (element: HTMLSelectElement | null) => void;
 }) {
   const openInLinear = linearWorkspace
     ? () =>
@@ -932,6 +1034,8 @@ function IssueCard({
     : undefined;
   return (
     <article
+      ref={cardRef}
+      tabIndex={-1}
       className={`issue-card${draggable ? " draggable" : ""}${moving ? " moving" : ""}`}
       onPointerDown={draggable ? onPointerDown : undefined}
     >
@@ -945,6 +1049,28 @@ function IssueCard({
       <div className="issue-card-foot">
         <RelativeTime value={issue.last_seen_at} />
         {moving ? <span className="issue-card-moving">Moving…</span> : null}
+        {moveColumns.length > 0 ? (
+          <select
+            ref={moveControlRef}
+            className="issue-card-move"
+            aria-label={`Move ${issue.identifier} to`}
+            value=""
+            disabled={moveDisabled}
+            onChange={(event) => {
+              const column = moveColumns.find((candidate) => candidate.key === event.target.value);
+              if (column) onMove(column);
+            }}
+          >
+            <option value="" disabled>
+              Move to…
+            </option>
+            {moveColumns.map((column) => (
+              <option key={column.key} value={column.key}>
+                {column.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         {openInLinear ? (
           <button
             type="button"

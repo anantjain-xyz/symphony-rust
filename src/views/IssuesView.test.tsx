@@ -207,7 +207,12 @@ it("scrolls the board toward columns near either horizontal edge", () => {
   expect(boardDragScrollDelta(480, 100, 500)).toBeGreaterThan(0);
 });
 
-async function dragCardToColumn(card: HTMLElement, column: HTMLElement, expectActive = true) {
+async function dragCardToColumn(
+  card: HTMLElement,
+  column: HTMLElement,
+  expectActive = true,
+  finish: "up" | "cancel" = "up",
+) {
   // Pointer-based drag (matches the WKWebView-safe implementation).
   fireEvent.pointerDown(card, { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
   // Cross the movement threshold on window to activate the drag.
@@ -221,8 +226,127 @@ async function dragCardToColumn(card: HTMLElement, column: HTMLElement, expectAc
   }
   // Move over the target lane so it becomes the hovered drop target.
   fireEvent.pointerMove(column, { pointerId: 1, clientX: 200, clientY: 80 });
-  fireEvent.pointerUp(window, { pointerId: 1, clientX: 200, clientY: 80 });
+  if (finish === "cancel") {
+    fireEvent.pointerCancel(window, { pointerId: 1, clientX: 200, clientY: 80 });
+  } else {
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 200, clientY: 80 });
+  }
 }
+
+it.each([{ activeStates: [] }, { activeStates: ["In Progress"] }])(
+  "cancels a drag without moving or requesting confirmation (watched states: %j)",
+  async ({ activeStates }) => {
+    const onMoveIssue = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IssuesView
+        issues={[issue("SYM-1", "todo")]}
+        linearWorkspace={null}
+        loadWorkflowStates={() => Promise.resolve(workflowStates)}
+        onMoveIssue={onMoveIssue}
+        activeStates={activeStates}
+        initialMode="board"
+        onOpenSettings={() => undefined}
+      />,
+    );
+    const target = await screen.findByRole("region", { name: "In Progress (0)" });
+    const card = screen
+      .getByRole("region", { name: "Todo (1)" })
+      .querySelector(".issue-card") as HTMLElement;
+    await dragCardToColumn(card, target, true, "cancel");
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 200, clientY: 80 });
+
+    expect(onMoveIssue).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(document.querySelector(".issue-drag-ghost")).toBeNull();
+    expect(document.querySelector(".drag-over")).toBeNull();
+    expect(screen.getByRole("region", { name: "Todo (1)" })).toBeTruthy();
+  },
+);
+
+it("moves through the accessible control and focuses the relocated card", async () => {
+  const onMoveIssue = vi.fn().mockResolvedValue(undefined);
+  render(
+    <IssuesView
+      issues={[issue("SYM-1", "todo")]}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(workflowStates)}
+      onMoveIssue={onMoveIssue}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+  const control = await screen.findByRole("combobox", { name: "Move SYM-1 to" });
+  control.focus();
+  fireEvent.change(control, { target: { value: "in progress" } });
+
+  await waitFor(() => expect(onMoveIssue).toHaveBeenCalledWith("issue-SYM-1", "state-in-progress"));
+  const moved = screen
+    .getByRole("region", { name: "In Progress (1)" })
+    .querySelector(".issue-card");
+  expect(document.activeElement).toBe(moved);
+  expect(
+    (screen.getByRole("combobox", { name: "Move SYM-1 to" }) as HTMLSelectElement).disabled,
+  ).toBe(true);
+});
+
+it("uses the shared dispatch confirmation and restores control focus on Escape", async () => {
+  const onMoveIssue = vi.fn().mockResolvedValue(undefined);
+  render(
+    <IssuesView
+      issues={[issue("SYM-1", "in review")]}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(threeStates)}
+      onMoveIssue={onMoveIssue}
+      activeStates={["Todo", "In Progress"]}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+  const control = await screen.findByRole("combobox", { name: "Move SYM-1 to" });
+  control.focus();
+  fireEvent.change(control, { target: { value: "in progress" } });
+  const confirmation = screen.getByRole("alertdialog");
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
+  expect(onMoveIssue).not.toHaveBeenCalled();
+  fireEvent.keyDown(confirmation, { key: "Escape" });
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(document.activeElement).toBe(control);
+  expect(onMoveIssue).not.toHaveBeenCalled();
+
+  fireEvent.change(control, { target: { value: "in progress" } });
+  fireEvent.click(screen.getByRole("button", { name: "Move" }));
+  await waitFor(() => expect(onMoveIssue).toHaveBeenCalledWith("issue-SYM-1", "state-in-progress"));
+  expect(document.activeElement).toBe(
+    screen.getByRole("region", { name: "In Progress (1)" }).querySelector(".issue-card"),
+  );
+});
+
+it("disables accessible moves for active runs and while a move awaits reconciliation", async () => {
+  const onMoveIssue = vi.fn().mockResolvedValue(undefined);
+  render(
+    <IssuesView
+      issues={[issue("SYM-1", "todo"), issue("SYM-2", "todo")]}
+      linearWorkspace={null}
+      loadWorkflowStates={() => Promise.resolve(threeStates)}
+      onMoveIssue={onMoveIssue}
+      activeRunIssueIds={["issue-SYM-1"]}
+      initialMode="board"
+      onOpenSettings={() => undefined}
+    />,
+  );
+  expect(
+    ((await screen.findByRole("combobox", { name: "Move SYM-1 to" })) as HTMLSelectElement)
+      .disabled,
+  ).toBe(true);
+  const movable = screen.getByRole("combobox", { name: "Move SYM-2 to" });
+  fireEvent.change(movable, { target: { value: "in progress" } });
+  await waitFor(() => expect(onMoveIssue).toHaveBeenCalledTimes(1));
+  const locked = screen.getByRole("combobox", { name: "Move SYM-2 to" }) as HTMLSelectElement;
+  expect(locked.disabled).toBe(true);
+  // Even a stale event cannot dispatch a second move before reconciliation.
+  fireEvent.change(locked, { target: { value: "in review" } });
+  expect(onMoveIssue).toHaveBeenCalledTimes(1);
+});
 
 it("moves a card to another workflow lane via drag and drop", async () => {
   const onMoveIssue = vi.fn().mockResolvedValue(undefined);

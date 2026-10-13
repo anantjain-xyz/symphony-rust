@@ -2060,6 +2060,28 @@ fn retro_relevant_workpad_hash(body: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_stored_report_is_an_error_instead_of_an_absent_report() {
+        let mut row = RetroRow {
+            id: "retro-corrupt".into(),
+            since_at: "2026-01-01T00:00:00Z".into(),
+            until_at: "2026-01-02T00:00:00Z".into(),
+            status: symphony_core::RetroState::Completed,
+            run_count: 0,
+            issue_count: 0,
+            report_json: None,
+            error_message: None,
+            created_at: "2026-01-02T00:00:00Z".into(),
+            completed_at: None,
+        };
+        assert!(parse_report(&row).unwrap().is_none());
+        for invalid in ["{", "null", "{}"] {
+            row.report_json = Some(invalid.into());
+            let error = parse_report(&row).unwrap_err();
+            assert!(error.contains("invalid stored retro report retro-corrupt"));
+        }
+    }
+
     async fn git_test_ok(cwd: Option<&Path>, args: &[&str]) {
         let output = command_output("git", args, cwd, &BTreeMap::new())
             .await
