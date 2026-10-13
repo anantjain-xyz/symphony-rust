@@ -55,8 +55,10 @@ it("keeps skipped runtime status through unlock and reload until a worker restar
   );
   expect(result.current.saved?.linear_api_key_error).toBeNull();
   expect(result.current.savedLiveConfigKept).toBe(true);
+  expect(result.current.savedLiveConfigKeptReason).toBe("credential");
   rerender({ workerState: "stopped" });
   expect(result.current.savedLiveConfigKept).toBe(false);
+  expect(result.current.savedLiveConfigKeptReason).toBeNull();
   rerender({ workerState: "running" });
   expect(result.current.savedLiveConfigKept).toBe(false);
 });

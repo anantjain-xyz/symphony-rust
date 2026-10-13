@@ -245,6 +245,8 @@ function SettingsFeature({
       settingsDirty={controller.dirty}
       workerRunning={worker.state === "running"}
       workerConfigError={worker.state === "running" && worker.last_error !== null}
+      workerConfigMessage={worker.last_error}
+      liveCredentialSkipped={controller.savedLiveConfigKeptReason === "credential"}
       liveReconfigureSkipped={
         worker.state === "running" &&
         ((controller.validation?.workflow_ok === false &&
@@ -287,7 +289,9 @@ function SettingsView({
   settingsDirty,
   workerRunning,
   workerConfigError,
+  workerConfigMessage,
   liveReconfigureSkipped,
+  liveCredentialSkipped,
   activeRunCount,
   busy,
   runtimeAvailable,
@@ -323,7 +327,9 @@ function SettingsView({
   settingsDirty: boolean;
   workerRunning: boolean;
   workerConfigError: boolean;
+  workerConfigMessage: string | null;
   liveReconfigureSkipped: boolean;
+  liveCredentialSkipped: boolean;
   activeRunCount: number;
   busy: boolean;
   runtimeAvailable: boolean;
@@ -496,10 +502,10 @@ function SettingsView({
             {workerConfigError || liveReconfigureSkipped ? "Worker configuration" : "Live worker"}
           </strong>
           <span>
-            {workerConfigError
-              ? "Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed."
-              : liveReconfigureSkipped && credentialError
-                ? "Settings save to disk, but credential access is unavailable, so the worker keeps its previous configuration. Unlock the credential store, then restart the worker to apply the saved settings."
+            {liveCredentialSkipped || (liveReconfigureSkipped && credentialError)
+              ? "Settings are saved, but credential access prevented the live worker from updating. Unlock the credential store if needed, then restart the worker to apply the saved settings."
+              : workerConfigError
+                ? `Settings save to disk, but the live worker reported a configuration error and may keep its previous runtime config until the error is fixed. ${workerConfigMessage ?? ""}`
                 : liveReconfigureSkipped
                   ? "Settings save to disk, but the worker keeps its previous configuration. Finish any incomplete setup, then restart the worker to apply the saved settings."
                   : `Saved settings apply to future dispatches without restarting the worker. ${
