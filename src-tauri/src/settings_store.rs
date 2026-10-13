@@ -85,7 +85,18 @@ impl SettingsStore {
     pub async fn load(&self) -> Result<AppSettings, String> {
         self.access(|path, credentials| {
             let mut settings = read_settings(path)?;
-            settings.linear_api_key_set = credentials.read()?.is_some();
+            match credentials.read() {
+                Ok(key) => {
+                    settings.linear_api_key_set = key.is_some();
+                    settings.linear_api_key_error = None;
+                }
+                Err(_) => {
+                    settings.linear_api_key_set = false;
+                    settings.linear_api_key_error = Some(
+                        "The OS credential store is unavailable. Unlock it and retry to access the saved Linear API key.".into(),
+                    );
+                }
+            }
             Ok(settings)
         })
         .await
@@ -160,6 +171,7 @@ fn commit_settings(
     key_change: Option<Option<&str>>,
 ) -> Result<AppSettings, String> {
     let previous_key = credentials.read()?;
+    settings.linear_api_key_error = None;
     settings.linear_api_key_set = key_change.unwrap_or(previous_key.as_deref()).is_some();
     let prepared = prepare(
         path,
@@ -189,6 +201,7 @@ fn read_settings(path: &Path) -> Result<AppSettings, String> {
         Err(error) => return Err(error.to_string()),
     };
     let (mut settings, migrated) = parse_settings(&raw)?;
+    settings.linear_api_key_error = None;
     if migrated {
         write_atomic(&path.with_extension("json.bak"), &raw)?;
         settings.settings_revision = next_revision(settings.settings_revision)?;
@@ -304,6 +317,47 @@ mod tests {
             .save(settings, Some("new-key".to_string()))
             .await
             .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+    }
+
+    #[tokio::test]
+    async fn unavailable_keyring_does_not_block_settings_or_allow_partial_mutations() {
+        struct UnavailableCredentials;
+        impl Credentials for UnavailableCredentials {
+            fn read(&self) -> Result<Option<String>, String> {
+                Err("private-service-diagnostic".into())
+            }
+            fn set(&self, _value: Option<&str>) -> Result<(), String> {
+                panic!("an unavailable credential service must not admit a write")
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let original = AppSettings {
+            settings_revision: 7,
+            prompt_template: "Readable saved prompt".into(),
+            ..Default::default()
+        };
+        write_atomic(&path, &serde_json::to_string(&original).unwrap()).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        let store = SettingsStore::new(path.clone(), Arc::new(UnavailableCredentials));
+        let loaded = store.load().await.unwrap();
+        assert_eq!(loaded.settings_revision, 7);
+        assert_eq!(loaded.prompt_template, original.prompt_template);
+        assert!(!loaded.linear_api_key_set);
+        assert!(loaded
+            .linear_api_key_error
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"));
+        assert!(!serde_json::to_string(&loaded)
+            .unwrap()
+            .contains("private-service-diagnostic"));
+        assert!(store
+            .save(loaded, Some("replacement".into()))
+            .await
+            .is_err());
+        assert!(store.remove_key().await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), previous);
     }
 

@@ -137,6 +137,7 @@ function testSettings(): AppSettings {
     opencode_agent: null,
     opencode_skip_permissions: true,
     linear_api_key_set: false,
+    linear_api_key_error: null,
   };
 }
 
@@ -961,6 +962,72 @@ describe("App settings", () => {
       expect(request.settings.prompt_template).toBe("Newer unsaved prompt");
     },
   );
+
+  it("adopts concurrent settings after removing the only dirty replacement key", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const removal = deferred<AppSettings>();
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "remove_linear_api_key") return removal.promise;
+      if (command === "save_settings") return { ...args.request.settings, settings_revision: 3 };
+      return baseInvoke(command, args);
+    });
+    const { container } = render(<App />);
+    await openSettings();
+    const key = screen.getByLabelText(/^API key/, { selector: "input" });
+    fireEvent.change(key, { target: { value: "lin_api_replacement" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove saved key" }));
+    await waitFor(() => expect(commandCount("remove_linear_api_key")).toBe(1));
+    removal.resolve({
+      ...settings,
+      settings_revision: 2,
+      prompt_template: "Workflow saved by another process",
+      linear_api_key_set: false,
+    });
+    await waitFor(() => expect((key as HTMLInputElement).value).toBe(""));
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    await waitFor(() => expect(prompt.value).toBe("Workflow saved by another process"));
+    expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull();
+
+    fireEvent.change(prompt, { target: { value: "Edit of the fresh workflow" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    const request = tauriMocks.invoke.mock.calls.find(
+      ([command]) => command === "save_settings",
+    )![1].request;
+    expect(request.settings.settings_revision).toBe(2);
+    expect(request.settings.prompt_template).toBe("Edit of the fresh workflow");
+    expect(request.linear_api_key).toBeNull();
+  });
+
+  it("shows a credential-store error without making loaded settings dirty", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const error = "The saved Linear API key is unavailable. Check your OS keychain and try again.";
+    const settings = { ...testSettings(), linear_api_key_error: error };
+    const baseInvoke = dashboardInvoke({ settings });
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "save_settings")
+        return {
+          ...args.request.settings,
+          settings_revision: 1,
+          linear_api_key_set: true,
+          linear_api_key_error: null,
+        };
+      return baseInvoke(command, args);
+    });
+    render(<App />);
+    await openSettings();
+    expect(screen.getByText(error).closest('[role="alert"]')).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull();
+    fireEvent.change(screen.getByLabelText(/^API key/, { selector: "input" }), {
+      target: { value: "lin_api_replacement" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(commandCount("save_settings")).toBe(1));
+    await waitFor(() => expect(screen.queryByText(error)).toBeNull());
+    expect(screen.getByRole("button", { name: "Remove saved key" })).toBeTruthy();
+  });
 
   it("does not save when the Linear key changes during authoritative validation", async () => {
     tauriMocks.runtimeAvailable = true;

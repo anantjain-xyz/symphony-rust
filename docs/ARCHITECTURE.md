@@ -188,6 +188,9 @@ commit; an owned asynchronous task also completes reconfiguration, key-removal
 shutdown, and retro batch finalization when an IPC caller disconnects. Drafts
 adopt a newer revision only from their own Save operation; unrelated updates
 retain the old revision and produce a conflict.
+Readable settings remain available when the credential service fails; derived
+credential-error metadata explains the unavailable key. Credential mutations
+still fail before changing the file when that service cannot be read.
 The Tauri layer builds runtime
 configuration and environment maps. Repository install and workflow-transfer
 agents start with the repaired `PATH`. For `github.com` and
