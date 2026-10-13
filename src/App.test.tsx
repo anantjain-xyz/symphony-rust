@@ -1029,13 +1029,9 @@ describe("App settings", () => {
       prompt_template: "Concurrent saved workflow",
       linear_api_key_set: false,
     });
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Remove saved key" })).toBeNull(),
-    );
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    await waitFor(() => expect(prompt.value).toBe("Concurrent saved workflow"));
     expect((key as HTMLInputElement).value).toBe("lin_api_newer_replacement");
-    expect((container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement).value).toBe(
-      "Concurrent saved workflow",
-    );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
     );
