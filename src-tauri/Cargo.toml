@@ -26,6 +26,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 keyring.workspace = true
 keyring-core.workspace = true
 serde.workspace = true

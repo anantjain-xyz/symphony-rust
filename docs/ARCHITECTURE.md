@@ -13,7 +13,8 @@ only when a boundary below requires it.
 | Codex, Claude, Cursor, or opencode process protocols | `crates/symphony-agents/src/lib.rs` | Agent configuration in `symphony-core`, dispatch in `symphony-worker` |
 | SQLite schema, queries, run history, or storage events | `crates/symphony-storage/src/` | Consumers in `symphony-worker`, Tauri commands, then dashboard invalidation |
 | Polling, routing, retries, hooks, workspaces, repository workflows, or skills | `crates/symphony-worker/src/` | Domain contracts in `symphony-core` and state transitions in `symphony-storage` |
-| App startup, settings, keychain, commands, event forwarding, or retros | `src-tauri/src/` | The owning Rust crate, `src/bindings.ts`, and the invoking React code |
+| App startup, settings, keychain, commands, or event forwarding | `src-tauri/src/` | The owning Rust crate, `src/bindings.ts`, and the invoking React code |
+| Retro review, prompt application, or PR batches | `src-tauri/src/retro_service.rs` | Generation and native Git/PR effects in `retro.rs`; settings commits in `settings_store.rs`; reservations in `symphony-storage` |
 | Dashboard shell, refresh coordination, or settings orchestration | `src/App.tsx` and `src/dashboard*.ts` | Feature views in `src/views/`, IPC types in `src/bindings.ts` |
 | One visible frontend feature | `src/views/` and its colocated test/CSS | Lazy-loading ownership in `src/App.tsx`; bundle constraints in `scripts/check-bundle-budget.mjs` |
 | Browser-level behavior | `e2e/` and `playwright.config.ts` | Preview fixtures in `src/preview/` and the production build graph |
@@ -95,8 +96,9 @@ The `symphony-desktop` package is the composition and OS boundary.
 commands, forwards storage events, initializes logging, and exports debug
 Specta bindings. `settings.rs` owns settings serialization/defaults and their
 translation into core workflow configuration; secrets are read through the OS
-keychain. `retro.rs` owns the desktop-hosted retro generation and reviewed
-change-batch flow.
+keychain. `retro_service.rs` owns retro review and change application without
+Tauri types, application state, or direct credential/environment access.
+`retro.rs` supplies generation, diff materialization, and native Git/PR effects.
 
 Reusable domain or orchestration behavior should stay in a crate rather than
 growing the command layer.
@@ -165,6 +167,29 @@ environment provides either nonblank allowlisted token, both host/base token
 candidates are suppressed before the session values are applied. These agents
 do not receive the keychain-derived Linear key. Issue agents receive their
 configured session and runtime variables.
+
+### Reviewed retro changes
+
+```text
+Tauri command ──> RetroService ──> pure reviewed selection / workflow plan
+                      ├─────────> Repository: reserve reviewed suggestions
+                      ├─────────> SettingsStore: revision + prompt hash CAS
+                      ├─────────> WorkerManager: accept saved configuration
+                      └─────────> RetroEffects: verify source / execute PR batch
+```
+
+| Owner | Guarantee |
+| --- | --- |
+| Command adapter | Supplies a fresh runtime snapshot; delegates and projects results |
+| Reviewed selection | Every available suggestion is reviewed before selecting accepted targets |
+| Repository reservation | Rechecks review and accepted IDs atomically; admits one batch per target |
+| Workflow application | Rejects changed prompt/source; saves through settings CAS before reconfiguration |
+| PR batch owner | Groups accepted targets by repository; tracks background jobs in a `JoinSet` |
+
+- Application and launch operations survive an IPC caller dropping its future.
+- Delete and review use storage guards so reserved work cannot lose its inputs.
+- Service acceptance tests use synthetic credentials, barrier-controlled effects,
+  and a local Git fixture; no desktop runtime or external accounts are required.
 
 ## Change-impact map
 

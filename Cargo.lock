@@ -5715,6 +5715,7 @@ dependencies = [
 name = "symphony-desktop"
 version = "0.1.28"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "keyring",
  "keyring-core",
