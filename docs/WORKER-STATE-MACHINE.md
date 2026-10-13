@@ -367,6 +367,13 @@ flowchart LR
   Explicit adapter ellipses also redact trailing credential-prefix fragments.
 - Worker/configuration `Debug` implementations omit environment values and
   workflow text.
+- Quota metadata has a separate canonicalization boundary: provider names and
+  known Codex buckets retain their identities even when session values overlap.
+  Unknown Codex bucket names become stable provider-prefixed SHA-256 identities;
+  foreign provider sources are ignored. Reset times are parsed as RFC3339 and
+  stored as UTC milliseconds. Invalid reset times become unknown (`None`),
+  preserving the existing policy that only a known future reset pauses dispatch.
+  Visible event JSON and summaries remain redacted.
 - Existing database rows are not migrated. Retry prompt construction sanitizes
   historical errors and decoded event payloads again.
 - This boundary does not discover unknown secrets or arbitrary encodings, and

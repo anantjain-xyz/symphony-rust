@@ -1,8 +1,11 @@
 //! The persistence boundary for provider/hook output. Keep all dynamic event,
 //! session and terminal strings behind this adapter before storage emits UI
-//! invalidations or makes them available to future retry prompts.
+//! invalidations or makes them available to future retry prompts. Operational
+//! quota metadata is canonicalized separately, never rewritten by redaction.
 use crate::output::{OutputSanitizer, ID_LIMIT};
-use symphony_core::{AgentEventKind, MappedAgentEvent, TokenCountPayload};
+use chrono::{DateTime, SecondsFormat, Utc};
+use sha2::{Digest, Sha256};
+use symphony_core::{AgentEventKind, MappedAgentEvent, RateLimitPayload, TokenCountPayload};
 use symphony_storage::{Repository, RunCompletion, StorageError};
 
 pub(crate) struct RunOutput<'a> {
@@ -36,8 +39,12 @@ impl<'a> RunOutput<'a> {
                 .await?;
             self.repo.record_token_usage(provider, tokens).await?;
         }
-        if let Some(rate_limit) = &event.rate_limit {
-            self.repo.upsert_rate_limit(rate_limit).await?;
+        if let Some(rate_limit) = event
+            .rate_limit
+            .as_ref()
+            .and_then(|limit| canonical_rate_limit(provider, limit))
+        {
+            self.repo.upsert_rate_limit(&rate_limit).await?;
         }
         if let Some(summary) = &event.humanized {
             self.repo
@@ -127,4 +134,38 @@ impl<'a> RunOutput<'a> {
             )
             .await
     }
+}
+
+/// Provider keys and reset timestamps affect scheduling, so neither may depend
+/// on configured credential values. Unknown Codex buckets retain distinct,
+/// stable identities without persisting arbitrary provider-controlled labels.
+fn canonical_rate_limit(provider: &str, limit: &RateLimitPayload) -> Option<RateLimitPayload> {
+    if !matches!(provider, "codex" | "claude" | "cursor" | "opencode") {
+        return None;
+    }
+    let source = if limit.source == provider
+        || (provider == "codex"
+            && matches!(limit.source.as_str(), "codex_primary" | "codex_secondary"))
+    {
+        limit.source.clone()
+    } else if provider == "codex" && limit.source.starts_with("codex_") {
+        format!("codex_bucket_{:x}", Sha256::digest(limit.source.as_bytes()))
+    } else {
+        return None;
+    };
+    let reset_at = limit
+        .reset_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| {
+            value
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+        });
+    Some(RateLimitPayload {
+        source,
+        remaining: limit.remaining,
+        // An invalid reset carries no known expiry, just like an absent reset.
+        reset_at,
+    })
 }

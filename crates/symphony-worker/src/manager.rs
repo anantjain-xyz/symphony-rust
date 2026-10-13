@@ -1171,18 +1171,22 @@ async fn provider_rate_limited(
     repo: &Repository,
     config: &RuntimeConfig,
 ) -> Result<bool, WorkerError> {
+    provider_rate_limited_at(repo, config, &now_iso()).await
+}
+
+async fn provider_rate_limited_at(
+    repo: &Repository,
+    config: &RuntimeConfig,
+    now: &str,
+) -> Result<bool, WorkerError> {
     let provider = config.workflow.front_matter.agent.backend.as_source_str();
-    Ok(repo
-        .active_rate_limits(&now_iso())
-        .await?
-        .iter()
-        .any(|limit| {
-            limit.source == provider
-                || limit
-                    .source
-                    .strip_prefix(provider)
-                    .is_some_and(|suffix| suffix.starts_with('_'))
-        }))
+    Ok(repo.active_rate_limits(now).await?.iter().any(|limit| {
+        limit.source == provider
+            || limit
+                .source
+                .strip_prefix(provider)
+                .is_some_and(|suffix| suffix.starts_with('_'))
+    }))
 }
 
 async fn acknowledge_stopped_state(
@@ -2574,6 +2578,195 @@ mod tests {
         );
         let row = repo.get_run(&run.id).await.unwrap().unwrap();
         assert!(row.error_message.unwrap().len() <= crate::output::ERROR_LIMIT);
+        while let Ok(event) = updates.try_recv() {
+            assert_no_canaries(&serde_json::to_string(&event).unwrap());
+        }
+    }
+
+    fn rate_limit_event(source: &str, reset_at: &str) -> MappedAgentEvent {
+        let limit = symphony_core::RateLimitPayload {
+            source: source.into(),
+            remaining: Some(0),
+            reset_at: Some(reset_at.into()),
+        };
+        MappedAgentEvent {
+            kind: symphony_core::AgentEventKind::RateLimit,
+            payload: serde_json::to_value(&limit).unwrap(),
+            humanized: Some(format!("{source} resets at {reset_at}")),
+            tokens: None,
+            rate_limit: Some(limit),
+            session_info: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn output_preserves_quota_identity_and_expiry_despite_session_value_overlap() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(
+            symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+                .await
+                .unwrap(),
+            symphony_storage::EventBus::default(),
+        );
+        let mut config = runtime_config(temp.path());
+        config.session_env = BTreeMap::from([
+            ("AGENT".into(), "codex".into()),
+            ("YEAR".into(), "2026".into()),
+            ("BUCKET".into(), "primary".into()),
+        ]);
+        let sanitizer = config.output_sanitizer();
+        let output = RunOutput::new(&repo, &sanitizer);
+        let ready = issue("todo", vec![]);
+        repo.upsert_issues(std::slice::from_ref(&ready))
+            .await
+            .unwrap();
+        let run = repo
+            .try_reserve_run(&ready.id, 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        for source in ["codex", "codex_primary", "codex_secondary"] {
+            output
+                .event(
+                    &run.id,
+                    "codex",
+                    &rate_limit_event(source, "2026-12-01T00:00:00.000Z"),
+                )
+                .await
+                .unwrap();
+        }
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.rate_limits.len(), 3);
+        for (row, expected_source) in
+            overview
+                .rate_limits
+                .iter()
+                .zip(["codex", "codex_primary", "codex_secondary"])
+        {
+            assert_eq!(row.source, expected_source);
+            assert_eq!(row.reset_at.as_deref(), Some("2026-12-01T00:00:00.000Z"));
+        }
+        let detail = repo.get_run_detail(&run.id).await.unwrap().unwrap();
+        for event in detail.1 {
+            assert!(!event.payload.contains("codex"));
+            assert!(!event.payload.contains("2026"));
+            assert!(event.payload.contains("[REDACTED]"));
+        }
+        // Both polling paths consume this provider predicate through Admission.
+        // Drive the clock explicitly so expiry is tested without wall-clock sleeps.
+        for (at, paused) in [
+            ("2026-11-30T23:59:59.999Z", true),
+            ("2026-12-01T00:00:00.000Z", false),
+            ("2026-12-01T00:00:00.001Z", false),
+        ] {
+            let rate_limited = provider_rate_limited_at(&repo, &config, at).await.unwrap();
+            assert_eq!(rate_limited, paused);
+            for mode in [DispatchMode::Active, DispatchMode::Retry { run_number: 2 }] {
+                let decision = dispatch_policy::decide(EligibilityFacts {
+                    issue: Some(&ready),
+                    repos: &config.repos,
+                    active_states: &config.workflow.front_matter.tracker.active_states,
+                    mode,
+                    has_active_run: false,
+                    retry_queued: false,
+                    suppression_matches: false,
+                    admission: Admission {
+                        active_runs: 0,
+                        max_concurrent: 1,
+                        rate_limited,
+                    },
+                });
+                if paused {
+                    assert!(matches!(
+                        decision,
+                        EligibilityDecision::Skip(dispatch_policy::SkipReason::RateLimited)
+                    ));
+                } else {
+                    assert!(matches!(decision, EligibilityDecision::Dispatch(_)));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn output_canonicalizes_untrusted_quota_buckets_and_timestamps_without_leaking() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(
+            symphony_storage::open_sqlite(temp.path().join("test.sqlite"))
+                .await
+                .unwrap(),
+            symphony_storage::EventBus::default(),
+        );
+        let config = canary_config(temp.path());
+        let sanitizer = config.output_sanitizer();
+        let output = RunOutput::new(&repo, &sanitizer);
+        repo.upsert_issues(&[issue("todo", vec![])]).await.unwrap();
+        let run = repo
+            .try_reserve_run("lin-1", 1, "/tmp/ws", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut updates = repo.events().subscribe();
+        let unknown = format!("codex_{SESSION_CANARY}");
+        for source in [&unknown, &unknown, &format!("codex_{ENV_CANARY}")] {
+            output
+                .event(
+                    &run.id,
+                    "codex",
+                    &rate_limit_event(source, "2026-12-01T04:00:00+04:00"),
+                )
+                .await
+                .unwrap();
+        }
+        let overview = repo.overview().await.unwrap();
+        // Repeated unknown bucket updates the same row; distinct buckets cannot
+        // clear one another's quota and still belong to the emitting provider.
+        assert_eq!(overview.rate_limits.len(), 2);
+        for row in &overview.rate_limits {
+            assert!(row.source.starts_with("codex_bucket_"));
+            assert_eq!(row.source.len(), "codex_bucket_".len() + 64);
+            assert_eq!(row.reset_at.as_deref(), Some("2026-12-01T00:00:00.000Z"));
+        }
+        assert!(
+            provider_rate_limited_at(&repo, &config, "2026-11-30T23:59:59.999Z")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider_rate_limited_at(&repo, &config, "2026-12-01T00:00:00.000Z")
+                .await
+                .unwrap()
+        );
+        output
+            .event(
+                &run.id,
+                "codex",
+                &rate_limit_event("codex_primary", SESSION_CANARY),
+            )
+            .await
+            .unwrap();
+        // A foreign source cannot create quota metadata for another provider.
+        output
+            .event(
+                &run.id,
+                "codex",
+                &rate_limit_event("claude", "2026-12-01T00:00:00.000Z"),
+            )
+            .await
+            .unwrap();
+        let overview = repo.overview().await.unwrap();
+        assert_eq!(overview.rate_limits.len(), 3);
+        assert!(overview
+            .rate_limits
+            .iter()
+            .find(|row| row.source == "codex_primary")
+            .unwrap()
+            .reset_at
+            .is_none());
+        assert_no_canaries(&serde_json::to_string(&overview).unwrap());
+        assert_no_canaries(
+            &serde_json::to_string(&repo.get_run_detail(&run.id).await.unwrap()).unwrap(),
+        );
         while let Ok(event) = updates.try_recv() {
             assert_no_canaries(&serde_json::to_string(&event).unwrap());
         }

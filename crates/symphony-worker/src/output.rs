@@ -191,10 +191,10 @@ impl OutputSanitizer {
                 *value = value.as_ref().map(|s| self.text(s, ID_LIMIT));
             }
         }
-        if let Some(limit) = &mut safe.rate_limit {
-            limit.source = self.text(&limit.source, ID_LIMIT);
-            limit.reset_at = limit.reset_at.as_ref().map(|s| self.text(s, ID_LIMIT));
-        }
+        // Quota keys and timestamps control dispatch. Redacting an overlapping
+        // session value (for example `codex` or `2026`) would change that policy.
+        // RunOutput validates those operational fields separately; only their
+        // visible payload representation passes through text redaction.
         safe
     }
 
