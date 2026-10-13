@@ -3,6 +3,7 @@ import type { SettingsValidationController } from "../../settingsValidationContr
 import { formSnapshot } from "../../viewPrimitives";
 
 type DraftLineage = { lineage: object; settingsRevision: number };
+type KeyRemovalSource = DraftLineage & { keyRevision: number };
 
 export function createSettingsSession(
   notifyDirty: (dirty: boolean) => void,
@@ -13,6 +14,7 @@ export function createSettingsSession(
   let latestSaved: AppSettings | null = null;
   let lineage = {};
   let key = "";
+  let keyRevision = 0;
   let revision = 0;
   let dirty = false;
   let saving = false;
@@ -41,6 +43,9 @@ export function createSettingsSession(
     captureDraftLineage(source: AppSettings) {
       return { lineage, settingsRevision: source.settings_revision };
     },
+    captureKeyRemoval(source: AppSettings): KeyRemovalSource {
+      return { lineage, settingsRevision: source.settings_revision, keyRevision };
+    },
     acknowledgeSave(source: DraftLineage, saved: AppSettings) {
       if (!recordSaved(saved)) return false;
       if (
@@ -59,14 +64,14 @@ export function createSettingsSession(
       draftBase = saved;
       return true;
     },
-    completeKeyRemoval(source: DraftLineage | null, saved: AppSettings) {
+    completeKeyRemoval(source: KeyRemovalSource | null, saved: AppSettings) {
       // A later published snapshot wins over a delayed removal response.
       if (!recordSaved(saved)) return false;
       const hasFormEdits = draft && draftBase && formSnapshot(draft) !== formSnapshot(draftBase);
-      key = "";
+      if (source?.keyRevision === keyRevision) key = "";
       if (!hasFormEdits || (draft && formSnapshot(draft) === formSnapshot(saved))) {
         adoptSaved(saved);
-        setDirty(false);
+        setDirty(key.trim() !== "");
       } else if (draft) {
         if (source?.lineage === lineage && draft.settings_revision === source.settingsRevision) {
           const directlyFollows = saved.settings_revision === source.settingsRevision + 1;
@@ -85,6 +90,7 @@ export function createSettingsSession(
     readKey: () => key,
     replaceKey(next: string) {
       key = next;
+      keyRevision += 1;
     },
     revision: () => revision,
     advanceRevision: () => ++revision,

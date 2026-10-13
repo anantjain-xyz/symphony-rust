@@ -165,7 +165,7 @@ export function useSettingsController(options: Options) {
 
   async function removeLinearKey() {
     const draft = session.readDraft() ?? settings;
-    const source = draft ? session.captureDraftLineage(draft) : null;
+    const source = draft ? session.captureKeyRemoval(draft) : null;
     const fromDisk = await call(desktopCommands.removeLinearApiKey);
     if (!session.completeKeyRemoval(source, fromDisk)) return false;
     setSettings(fromDisk);

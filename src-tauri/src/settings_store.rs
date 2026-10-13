@@ -3,9 +3,17 @@ use sha2::{Digest, Sha256};
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use symphony_contracts::AppSettings;
+
+enum AccessMode {
+    Load,
+    Commit,
+}
 
 pub trait Credentials: Send + Sync {
     fn read(&self) -> Result<Option<String>, String>;
@@ -42,6 +50,8 @@ impl Credentials for KeyringCredentials {
 pub struct SettingsStore {
     path: PathBuf,
     gate: Arc<Mutex<()>>,
+    effects_gate: Arc<tokio::sync::Mutex<()>>,
+    recovery_stop: Arc<AtomicBool>,
     credentials: Arc<dyn Credentials>,
 }
 
@@ -50,15 +60,33 @@ impl SettingsStore {
         Self {
             path,
             gate: Arc::new(Mutex::new(())),
+            effects_gate: Arc::new(tokio::sync::Mutex::new(())),
+            recovery_stop: Arc::new(AtomicBool::new(false)),
             credentials,
         }
+    }
+
+    /// Keep a local settings commit and its worker effects in the same order.
+    /// Acquire inside an owned operation, before capturing settings for Start;
+    /// Retro acquires only after slow source validation, immediately before CAS.
+    pub async fn commit_effects(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.effects_gate.clone().lock_owned().await
+    }
+
+    /// Drain only inside an owned operation holding `commit_effects`, which
+    /// must finish stopping the worker even if its IPC caller disconnects.
+    pub fn take_recovery_stop(&self) -> bool {
+        self.recovery_stop.swap(false, Ordering::AcqRel)
     }
 
     // The blocking task owns the lock: dropping an IPC future cannot release
     // ownership while its disk/keychain operation is still committing.
     async fn access<T: Send + 'static>(
         &self,
-        action: impl FnOnce(&Path, &dyn Credentials) -> Result<T, String> + Send + 'static,
+        mode: AccessMode,
+        action: impl FnOnce(&Path, &dyn Credentials, Option<String>) -> Result<T, String>
+            + Send
+            + 'static,
     ) -> Result<T, String> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -76,26 +104,50 @@ impl SettingsStore {
                 .open(store.path.with_extension("json.lock"))
                 .map_err(|error| error.to_string())?;
             lock.lock().map_err(|error| error.to_string())?;
-            action(&store.path, store.credentials.as_ref())
+            let recovery_error = match crate::settings_transaction::recover(
+                &store.path,
+                store.credentials.as_ref(),
+            ) {
+                Ok(crate::settings_transaction::RecoveryOutcome::Ready) => None,
+                Ok(crate::settings_transaction::RecoveryOutcome::Recovered { .. }) => {
+                    // Record before releasing the blocking task's ownership.
+                    // Cancellation of its async waiter cannot erase this effect.
+                    store.recovery_stop.store(true, Ordering::Release);
+                    None
+                }
+                Ok(crate::settings_transaction::RecoveryOutcome::Deferred) => Some(
+                    "A Linear credential update is pending recovery. Unlock the OS credential store and retry before changing settings.".to_string(),
+                ),
+                Err(error) => Some(error),
+            };
+            if recovery_error.is_some() {
+                store.recovery_stop.store(true, Ordering::Release);
+            }
+            if matches!(mode, AccessMode::Commit) {
+                if let Some(error) = recovery_error {
+                    return Err(error);
+                }
+            }
+            let result = action(&store.path, store.credentials.as_ref(), recovery_error);
+            if result.is_err() && crate::settings_transaction::has_pending(&store.path) {
+                store.recovery_stop.store(true, Ordering::Release);
+            }
+            result
         })
         .await
         .map_err(|error| error.to_string())?
     }
 
     pub async fn load(&self) -> Result<AppSettings, String> {
-        self.access(|path, credentials| {
-            let mut settings = read_settings(path)?;
-            match credentials.read() {
-                Ok(key) => {
-                    settings.linear_api_key_set = key.is_some();
-                    settings.linear_api_key_error = None;
-                }
-                Err(_) => {
-                    settings.linear_api_key_set = false;
-                    settings.linear_api_key_error = Some(
-                        "The OS credential store is unavailable. Unlock it and retry to access the saved Linear API key.".into(),
-                    );
-                }
+        self.access(AccessMode::Load, |path, credentials, recovery_error| {
+            // An unresolved credential journal owns the existing file bytes;
+            // even an automatic migration must wait until recovery can finish.
+            let mut settings = read_settings_with_migration(path, recovery_error.is_none())?;
+            if let Some(error) = recovery_error {
+                settings.linear_api_key_set = false;
+                settings.linear_api_key_error = Some(error);
+            } else {
+                credential_availability(&mut settings, credentials);
             }
             Ok(settings)
         })
@@ -107,15 +159,18 @@ impl SettingsStore {
         mut settings: AppSettings,
         key: Option<String>,
     ) -> Result<AppSettings, String> {
-        self.access(move |path, credentials| {
+        let recovery_stop = self.recovery_stop.clone();
+        self.access(AccessMode::Commit, move |path, credentials, _| {
             let current = read_settings(path)?;
             if current.settings_revision != settings.settings_revision {
                 return Err("Settings changed since this draft was loaded. Reload the latest settings before saving.".to_string());
             }
             normalize_linear_filters(&mut settings);
+            // Availability metadata from a draft is not durable credential state.
+            settings.linear_api_key_set = current.linear_api_key_set;
             settings.settings_revision = next_revision(current.settings_revision)?;
             let key = key.filter(|value| !value.trim().is_empty());
-            commit_settings(path, settings, credentials, key.as_deref().map(Some))
+            commit_settings(path, settings, credentials, key.as_deref().map(Some), &recovery_stop)
         }).await
     }
 
@@ -125,7 +180,8 @@ impl SettingsStore {
         expected_hash: String,
         prompt: String,
     ) -> Result<AppSettings, String> {
-        self.access(move |path, credentials| {
+        let recovery_stop = self.recovery_stop.clone();
+        self.access(AccessMode::Commit, move |path, credentials, _| {
             let mut settings = read_settings(path)?;
             let current_hash = format!("{:x}", Sha256::digest(settings.prompt_template.as_bytes()));
             if settings.settings_revision != expected_revision || current_hash != expected_hash {
@@ -133,15 +189,16 @@ impl SettingsStore {
             }
             settings.prompt_template = prompt;
             settings.settings_revision = next_revision(settings.settings_revision)?;
-            commit_settings(path, settings, credentials, None)
+            commit_settings(path, settings, credentials, None, &recovery_stop)
         }).await
     }
 
     pub async fn remove_key(&self) -> Result<AppSettings, String> {
-        self.access(|path, credentials| {
+        let recovery_stop = self.recovery_stop.clone();
+        self.access(AccessMode::Commit, move |path, credentials, _| {
             let mut settings = read_settings(path)?;
             settings.settings_revision = next_revision(settings.settings_revision)?;
-            commit_settings(path, settings, credentials, Some(None))
+            commit_settings(path, settings, credentials, Some(None), &recovery_stop)
         })
         .await
     }
@@ -169,30 +226,61 @@ fn commit_settings(
     mut settings: AppSettings,
     credentials: &dyn Credentials,
     key_change: Option<Option<&str>>,
+    recovery_stop: &AtomicBool,
 ) -> Result<AppSettings, String> {
-    let previous_key = credentials.read()?;
     settings.linear_api_key_error = None;
-    settings.linear_api_key_set = key_change.unwrap_or(previous_key.as_deref()).is_some();
-    let prepared = prepare(
+    if key_change.is_none() {
+        write_atomic(
+            path,
+            &serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?,
+        )?;
+        // A locked credential store does not prevent a prompt or config edit.
+        // Overlay availability only in the response, after preserving metadata
+        // about the last durable key mutation in the settings file.
+        credential_availability(&mut settings, credentials);
+        return Ok(settings);
+    }
+    let previous_key = credentials.read()?;
+    settings.linear_api_key_set = key_change.flatten().is_some();
+    let result = crate::settings_transaction::commit(
         path,
-        &serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?,
-    )?;
-    if let Some(value) = key_change {
-        credentials.set(value)?;
+        &settings,
+        credentials,
+        key_change.flatten(),
+        previous_key.as_deref(),
+    );
+    if result.is_err() {
+        // Even a final journal-cleanup sync failure can follow a durable key
+        // change. Stop before returning an ambiguous credential mutation result.
+        recovery_stop.store(true, Ordering::Release);
     }
-    if let Err(error) = prepared.persist(path) {
-        let mut message = format!("Could not save settings: {}", error.error);
-        if key_change.is_some() {
-            if let Err(rollback) = credentials.set(previous_key.as_deref()) {
-                message.push_str(&format!(" Credential restoration also failed: {rollback}. Check the Linear credential before restarting work."));
-            }
-        }
-        return Err(message);
-    }
+    result?;
     Ok(settings)
 }
 
+fn credential_availability(settings: &mut AppSettings, credentials: &dyn Credentials) {
+    match credentials.read() {
+        Ok(key) => {
+            settings.linear_api_key_set = key.is_some();
+            settings.linear_api_key_error = None;
+        }
+        Err(_) => {
+            settings.linear_api_key_set = false;
+            settings.linear_api_key_error = Some(
+                "The OS credential store is unavailable. Unlock it and retry to access the saved Linear API key.".into(),
+            );
+        }
+    }
+}
+
 fn read_settings(path: &Path) -> Result<AppSettings, String> {
+    read_settings_with_migration(path, true)
+}
+
+fn read_settings_with_migration(
+    path: &Path,
+    persist_migration: bool,
+) -> Result<AppSettings, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -202,7 +290,7 @@ fn read_settings(path: &Path) -> Result<AppSettings, String> {
     };
     let (mut settings, migrated) = parse_settings(&raw)?;
     settings.linear_api_key_error = None;
-    if migrated {
+    if migrated && persist_migration {
         write_atomic(&path.with_extension("json.bak"), &raw)?;
         settings.settings_revision = next_revision(settings.settings_revision)?;
         write_atomic(
@@ -336,6 +424,7 @@ mod tests {
         let original = AppSettings {
             settings_revision: 7,
             prompt_template: "Readable saved prompt".into(),
+            linear_api_key_set: true,
             ..Default::default()
         };
         write_atomic(&path, &serde_json::to_string(&original).unwrap()).unwrap();
@@ -354,11 +443,283 @@ mod tests {
             .unwrap()
             .contains("private-service-diagnostic"));
         assert!(store
-            .save(loaded, Some("replacement".into()))
+            .save(loaded.clone(), Some("replacement".into()))
             .await
             .is_err());
         assert!(store.remove_key().await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), previous);
+
+        let mut draft = loaded;
+        draft.polling_interval_ms = 12345;
+        draft.linear_api_key_error = Some("client-supplied-diagnostic".into());
+        let saved = store.save(draft, None).await.unwrap();
+        assert_eq!(saved.settings_revision, 8);
+        assert_eq!(saved.polling_interval_ms, 12345);
+        assert!(!saved.linear_api_key_set);
+        assert!(saved
+            .linear_api_key_error
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"));
+        let durable = read_settings(&path).unwrap();
+        assert!(durable.linear_api_key_set);
+        assert!(durable.linear_api_key_error.is_none());
+        let hash = format!("{:x}", Sha256::digest(saved.prompt_template.as_bytes()));
+        let applied = store
+            .apply_prompt(8, hash, "Reviewed update".into())
+            .await
+            .unwrap();
+        assert_eq!(applied.settings_revision, 9);
+        assert_eq!(applied.prompt_template, "Reviewed update");
+        assert!(!applied.linear_api_key_set);
+        assert!(applied.linear_api_key_error.is_some());
+        let durable = read_settings(&path).unwrap();
+        assert!(durable.linear_api_key_set);
+        assert!(durable.linear_api_key_error.is_none());
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!disk.contains("client-supplied-diagnostic"));
+        assert!(!disk.contains("private-service-diagnostic"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_save_cannot_persist_client_credential_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let store = store(path.clone());
+        let draft = AppSettings {
+            linear_api_key_set: true,
+            linear_api_key_error: Some("client-diagnostic".into()),
+            ..Default::default()
+        };
+        let saved = store.save(draft, None).await.unwrap();
+        assert!(!saved.linear_api_key_set);
+        assert!(saved.linear_api_key_error.is_none());
+        let durable = read_settings(&path).unwrap();
+        assert!(!durable.linear_api_key_set);
+        assert!(durable.linear_api_key_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn unresolved_recovery_keeps_settings_readable_without_migration_or_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("codex_permission_mode");
+        legacy["codex_approval_policy"] = serde_json::json!("never");
+        let original = serde_json::to_string(&legacy).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        std::fs::write(
+            path.with_extension("json.transaction"),
+            "interrupted journal",
+        )
+        .unwrap();
+        let store = store(path.clone());
+        let settings = store.load().await.unwrap();
+        assert!(settings
+            .linear_api_key_error
+            .as_deref()
+            .unwrap()
+            .contains("Recovery"));
+        assert!(!settings.linear_api_key_set);
+        assert!(store.save(settings, None).await.is_err());
+        assert!(store.remove_key().await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!path.with_extension("json.bak").exists());
+        assert!(path.with_extension("json.transaction").exists());
+    }
+
+    #[tokio::test]
+    async fn cancelled_save_retains_gate_through_effects_before_the_next_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path().join("settings.json"));
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let (committed, committed_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let writer = store.clone();
+        let recorded = effects.clone();
+        let first = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = writer.commit_effects().await;
+                let saved = writer.save(AppSettings::default(), None).await?;
+                committed.send(()).unwrap();
+                release_rx.await.unwrap();
+                recorded.lock().unwrap().push(saved.settings_revision);
+                Ok(())
+            })
+            .await
+        });
+        committed_rx.await.unwrap();
+        first.abort();
+        let writer = store.clone();
+        let recorded = effects.clone();
+        let second = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = writer.commit_effects().await;
+                let settings = writer.load().await?;
+                let saved = writer.save(settings, None).await?;
+                recorded.lock().unwrap().push(saved.settings_revision);
+                Ok(())
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!second.is_finished());
+        assert_eq!(store.load().await.unwrap().settings_revision, 1);
+        release.send(()).unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(*effects.lock().unwrap(), [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn captured_start_finishes_before_removal_commits_and_stops() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path().join("settings.json"));
+        store
+            .save(AppSettings::default(), Some("old-key".into()))
+            .await
+            .unwrap();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let (captured, captured_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let reader = store.clone();
+        let recorded = effects.clone();
+        let start = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = reader.commit_effects().await;
+                let settings = reader.load().await?;
+                assert!(settings.linear_api_key_set);
+                captured.send(()).unwrap();
+                release_rx.await.unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(("start", settings.settings_revision));
+                Ok(())
+            })
+            .await
+        });
+        captured_rx.await.unwrap();
+        // Detaching Start must not let a captured old key escape the gate.
+        start.abort();
+        let writer = store.clone();
+        let recorded = effects.clone();
+        let removal = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = writer.commit_effects().await;
+                let settings = writer.remove_key().await?;
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(("stop", settings.settings_revision));
+                Ok(())
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!removal.is_finished());
+        assert!(store.load().await.unwrap().linear_api_key_set);
+        release.send(()).unwrap();
+        removal.await.unwrap().unwrap();
+        assert_eq!(*effects.lock().unwrap(), [("start", 1), ("stop", 2)]);
+        assert!(!store.load().await.unwrap().linear_api_key_set);
+    }
+
+    #[tokio::test]
+    async fn removal_stop_cannot_run_after_a_newer_save_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path().join("settings.json"));
+        store
+            .save(AppSettings::default(), Some("old-key".into()))
+            .await
+            .unwrap();
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let (committed, committed_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let writer = store.clone();
+        let recorded = effects.clone();
+        let removal = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = writer.commit_effects().await;
+                let settings = writer.remove_key().await?;
+                committed.send(()).unwrap();
+                release_rx.await.unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(("stop", settings.settings_revision));
+                Ok(())
+            })
+            .await
+        });
+        committed_rx.await.unwrap();
+        let writer = store.clone();
+        let recorded = effects.clone();
+        let save = tokio::spawn(async move {
+            finish_operation(async move {
+                let _effects = writer.commit_effects().await;
+                let settings = writer.load().await?;
+                let saved = writer.save(settings, Some("new-key".into())).await?;
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(("reconfigure", saved.settings_revision));
+                Ok(())
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!save.is_finished());
+        assert_eq!(store.load().await.unwrap().settings_revision, 2);
+        release.send(()).unwrap();
+        removal.await.unwrap().unwrap();
+        save.await.unwrap().unwrap();
+        assert_eq!(*effects.lock().unwrap(), [("stop", 2), ("reconfigure", 3)]);
+        assert!(store.load().await.unwrap().linear_api_key_set);
+    }
+
+    #[tokio::test]
+    async fn retro_preparation_allows_save_then_rejects_stale_prompt_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = store(directory.path().join("settings.json"));
+        let original = store.save(AppSettings::default(), None).await.unwrap();
+        let hash = format!("{:x}", Sha256::digest(original.prompt_template.as_bytes()));
+        let (prepared, prepared_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let writer = store.clone();
+        let retro = tokio::spawn(async move {
+            finish_operation(async move {
+                // Remote source validation runs before acquiring commit/effects ownership.
+                prepared.send(()).unwrap();
+                release_rx.await.unwrap();
+                let _effects = writer.commit_effects().await;
+                writer
+                    .apply_prompt(original.settings_revision, hash, "Retro prompt".into())
+                    .await
+            })
+            .await
+        });
+        prepared_rx.await.unwrap();
+        let mut draft = store.load().await.unwrap();
+        draft.prompt_template = "User prompt".into();
+        let writer = store.clone();
+        finish_operation(async move {
+            let _effects = writer.commit_effects().await;
+            writer.save(draft, None).await
+        })
+        .await
+        .unwrap();
+        release.send(()).unwrap();
+        assert!(retro
+            .await
+            .unwrap()
+            .unwrap_err()
+            .starts_with("Settings changed"));
+        let saved = store.load().await.unwrap();
+        assert_eq!(saved.settings_revision, 2);
+        assert_eq!(saved.prompt_template, "User prompt");
     }
 
     #[tokio::test]
@@ -393,7 +754,8 @@ mod tests {
             directory.path(),
             AppSettings::default(),
             &credentials,
-            Some(Some("new-key"))
+            Some(Some("new-key")),
+            &AtomicBool::new(false),
         )
         .is_err());
         assert_eq!(credentials.read().unwrap().as_deref(), Some("old-key"));
@@ -450,7 +812,10 @@ mod tests {
         let first = tokio::spawn(async move {
             finish_operation(async move {
                 let saved = writer
-                    .save(AppSettings::default(), Some("key".to_string()))
+                    .save(
+                        AppSettings::default(),
+                        Some("lin_api_cancel_fixture".to_string()),
+                    )
                     .await?;
                 notify.notify_one();
                 Ok(saved)
