@@ -1,0 +1,106 @@
+{
+  "sourceRoot": "/Users/anant/.codex/worktrees/05b7/symphony-rust",
+  "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+  "sourceWorkingTreeClean": true,
+  "sourceFileSha256": {
+    "App.tsx": "9546cd47e19e1b5d7f6e8b28351962232c8bb69be6a376d0b22579020d456a00",
+    "views/SettingsView.tsx": "add83d6fba21d2e3de78ce81c22e2b6525aac6114f488f4de2deadb8bb91acc7",
+    "bindings.ts": "d1f06a62d73cf54a31fff3a58237ce2b69d384c34bb1d6e226348de10254aa6b",
+    "desktop/commands.ts": "e41a9e54630234cd913035063e92324e4810f17d61c1c7552724b1b9d6a9ce9a",
+    "features/settings/useSettingsController.ts": "e1922e482f3b2341f8487fe968b11add2765d44b3fb700bcd9188fa722513226",
+    "features/settings/settingsSession.ts": "ac3b8757a52654aaf4ab1cb4cec2a4b97095cdb4014dde6becb43015a1c5954d",
+    "features/settings/useSettingsEditor.ts": "47cc46637123006367c89727d5539e473912918eff6fb50269e5c234537cd8eb"
+  },
+  "fixture": "fixture.tsx",
+  "fixtureSha256": "bf1eec8c61feb6584a20e982051b94d5c2990ae7fa7230479f6524f4a7879d3b",
+  "ipc": "@tauri-apps/api/mocks; all commands synthetic and local, unexpected commands rejected",
+  "secretHandling": "No credential values, OS keyring, live Linear, or remote API used. Only synthetic save_settings writes mutate in-memory fixture state.",
+  "capture": "Unmodified symphony-screenshot SKILL.md capture.mjs; direct fullPage Chromium PNG, 1440x1040 viewport; no editing or cropping. Preserves real application internal scrolling.",
+  "images": {
+    "after-runtime-update-error-dark.png": "93a3149a3a1dd062f0f1602d353f60a73d71aad25619da1290eec7d4d98d6f8e",
+    "after-runtime-update-error-light.png": "4a9d57d7a78dbde2cddc483216fcb6fc789dc5c4ad1420850d1bd9b74964cab3",
+    "after-unavailable-dark.png": "bd314e2e99765a2ff7612dd7bed8ed98df569b355c414d39ec3361f4d868fea7",
+    "after-unavailable-light.png": "7fbdfb7012105cd74b5cbdf019fc5d8ed4d43175d5c5212e7ab973fc891d781f",
+    "after-unlocked-with-kept-worker-dark.png": "8c7d475f62733b5dfb840352bcfb24434771fdba2a5e02aa88058d43b5f528bf",
+    "after-unlocked-with-kept-worker-light.png": "42889f63d972dae0b69add8161a1a8a3f46f70cf375cef7874eac508fd75974b",
+    "before-available-dark.png": "237e81add4381bf41de71ca2e77aff379a59cb101e4c44a795bccb9e5e93ce41",
+    "before-available-light.png": "dca7337dfe180381ace196f8b0cb1f28f5dc0d8fa7a49698959de414700033c7"
+  },
+  "imageSources": {
+    "before-available-dark.png": {
+      "sourceCommit": "33cf800badfe7bd88521a52e08441620c90f1135",
+      "workerState": "stopped",
+      "fixture": "fixture-33cf800.tsx"
+    },
+    "before-available-light.png": {
+      "sourceCommit": "33cf800badfe7bd88521a52e08441620c90f1135",
+      "workerState": "stopped",
+      "fixture": "fixture-33cf800.tsx"
+    },
+    "after-runtime-update-error-dark.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "unavailable",
+      "credentialAvailability": "available",
+      "scenario": "Actual Save returns durable revision 5 plus runtime_update_error; unknown status refresh does not imply retained runtime.",
+      "visuallyInspected": true
+    },
+    "after-runtime-update-error-light.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "unavailable",
+      "credentialAvailability": "available",
+      "scenario": "Actual Save returns durable revision 5 plus runtime_update_error; unknown status refresh does not imply retained runtime.",
+      "visuallyInspected": true
+    },
+    "after-unavailable-dark.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "running with persistent configuration diagnostic",
+      "credentialAvailability": "unavailable",
+      "scenario": "Fresh load of persisted worker configuration diagnostic after earlier skipped update; no in-memory Save latch injected.",
+      "visuallyInspected": true
+    },
+    "after-unavailable-light.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "running with persistent configuration diagnostic",
+      "credentialAvailability": "unavailable",
+      "scenario": "Fresh load of persisted worker configuration diagnostic after earlier skipped update; no in-memory Save latch injected.",
+      "visuallyInspected": true
+    },
+    "after-unlocked-with-kept-worker-dark.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "running with persistent configuration diagnostic",
+      "credentialAvailability": "available",
+      "scenario": "Fresh load of persisted worker configuration diagnostic after earlier skipped update; no in-memory Save latch injected.",
+      "visuallyInspected": true
+    },
+    "after-unlocked-with-kept-worker-light.png": {
+      "sourceCommit": "972a56a800638e15e341a330ad3c47e92e5bfbc0",
+      "fixture": "fixture.tsx",
+      "workerStateBeforeSave": "running",
+      "workerStatusAfterSave": "running with persistent configuration diagnostic",
+      "credentialAvailability": "available",
+      "scenario": "Fresh load of persisted worker configuration diagnostic after earlier skipped update; no in-memory Save latch injected.",
+      "visuallyInspected": true
+    }
+  },
+  "baseline": "Both before images retained byte-for-byte from source33cf800, originally hosted in85e17 screenshot commit.",
+  "validation": {
+    "captureReport": "capture-report-after-972a56a.json",
+    "behaviorReport": "state-validation-after-972a56a.json",
+    "pageErrors": 0,
+    "externalRequests": 0,
+    "http200WithoutRedirect": 6,
+    "durableReceiptProof": "Both light and dark tests submit revision4, acknowledge saved revision5 and clear dirty state despite runtime error, then submit revision5 and acknowledge revision6. Screenshot shows first Save. Unknown worker refresh retains neutral runtime error, without claiming config was kept or applied.",
+    "visualInspection": "All six final PNGs inspected at full image size; warnings readable, themes correct, Save acknowledgment visible, no layout overlap."
+  },
+  "server": "Local127.0.0.1:1437; task-owned server stopped after capture."
+}
