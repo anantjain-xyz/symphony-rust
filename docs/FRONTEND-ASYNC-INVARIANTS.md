@@ -98,6 +98,46 @@ Foreground actions should reject when their requested work fails. Background
 refreshes should record resource failure without producing duplicate global
 error UI. No path may leave a waiter unresolved after unmount or disposal.
 
+## Pending mutations
+
+### Current behavior
+
+- Each command started through `App.call` acquires an operation token from
+  [`usePendingOperations.ts`](../src/usePendingOperations.ts). Its `finally`
+  releases only that token, on success or failure.
+- Global action controls remain busy until every command token is released.
+- The updater install lock has a separate owner. Completing a command cannot
+  release an updater lock, and releasing that lock cannot finish a command.
+- Per-run cancellation controls continue to track individual run IDs, so
+  independent run cancellations can overlap.
+
+### Proposed invariant
+
+An asynchronous operation must release only the busy state it owns. Do not
+replace aggregate pending state with a boolean that any caller can clear. Test
+overlapping actions with reverse settlement order and a rejected action.
+
+## Board movement and focus
+
+### Current behavior
+
+- Pointer drops and the keyboard-accessible **Move to** selector use the same
+  mutation, active-run checks, optimistic updates, and dispatch confirmation.
+- `pointercancel` only clears the drag and auto-scroll state. It never requests
+  a move or a dispatch confirmation.
+- Pending moves and unresolved optimistic overrides lock the issue against a
+  second move. Issues with active runs cannot be moved.
+- Confirmation focuses **Cancel**. Escape or Cancel returns focus to the
+  originating Move control. A confirmed keyboard move reveals and focuses the
+  relocated card while its Move control is locked.
+
+### Proposed invariant
+
+Cancellation is never a commit. Every pointer-only mutation must have a keyboard
+equivalent that shares the same eligibility and reconciliation path. When an
+action reparents or removes its focused control, restore focus to a meaningful
+surviving element.
+
 ## Stale results and local writes
 
 ### Current behavior

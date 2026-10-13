@@ -159,6 +159,29 @@
   font-size: 0.75rem;
   gap: 8px;
   justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.issue-card-move {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  max-width: 100%;
+  padding: 3px 5px;
+}
+
+.issue-card-move:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.issue-card:focus-visible,
+.issue-card-move:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .issue-board-column.drag-over {
