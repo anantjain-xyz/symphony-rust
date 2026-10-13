@@ -3702,6 +3702,53 @@ describe("App settings", () => {
     );
   });
 
+  it.each(["resolves", "rejects"])(
+    "keeps global actions busy until both overlapping cancellations settle when the earlier one %s",
+    async (settlement) => {
+      tauriMocks.runtimeAvailable = true;
+      const first = runRow();
+      const second = runRow({ id: "run-2", issue_id: "issue-2", issue_identifier: "SYM-2" });
+      const firstStop = deferred<RunDetail>();
+      const secondStop = deferred<RunDetail>();
+      const baseInvoke = dashboardInvoke({
+        settings: testSettings(),
+        workerStatus: { state: "stopped", started_at: null, last_error: null },
+      });
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "list_runs") return Promise.resolve([first, second]);
+        if (command === "get_run_detail") {
+          return Promise.resolve({ run: args?.id === first.id ? first : second, events: [] });
+        }
+        if (command === "stop_run")
+          return args?.id === first.id ? firstStop.promise : secondStop.promise;
+        return baseInvoke(command, args);
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Runs" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Open run SYM-1 number 1" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open run SYM-2 number 1" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop run" }));
+      expect(commandCount("stop_run")).toBe(2);
+      const start = screen.getByRole("button", { name: "Start worker" }) as HTMLButtonElement;
+      expect(start.disabled).toBe(true);
+
+      await act(async () => {
+        secondStop.resolve({ run: second, events: [] });
+        await secondStop.promise;
+      });
+      await screen.findByRole("button", { name: "Stop run" });
+      expect(start.disabled).toBe(true);
+
+      await act(async () => {
+        if (settlement === "rejects") firstStop.reject(new Error("Cancellation failed"));
+        else firstStop.resolve({ run: first, events: [] });
+        await firstStop.promise.catch(() => undefined);
+      });
+      await waitFor(() => expect(start.disabled).toBe(false));
+    },
+  );
+
   it("clears stopping state when the post-stop dashboard refresh fails", async () => {
     tauriMocks.runtimeAvailable = true;
     const settings = testSettings();
