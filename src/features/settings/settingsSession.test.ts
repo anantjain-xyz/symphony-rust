@@ -63,6 +63,31 @@ describe("settings draft provenance", () => {
     },
   );
 
+  it.each(["", "newer-key"])(
+    "adopts the saved revision when a later edit matches it, preserving key %s",
+    (key) => {
+      const session = sessionWithDraft();
+      const original = session.readDraft()!;
+      const removal = session.captureKeyRemoval(original);
+      const external = settings(5, "External prompt");
+      session.acceptSaved(external);
+      expect(session.readDraft()).toBe(original);
+      session.replaceKey(key);
+
+      const reconciled = session.replaceDraft({
+        ...original,
+        prompt_template: external.prompt_template,
+      });
+      expect(reconciled).toBe(external);
+      expect(session.readDraft()).toBe(external);
+      expect(session.isDirty()).toBe(key !== "");
+      session.replaceDraft({ ...reconciled, prompt_template: "Next edit" });
+      expect(session.readDraft()?.settings_revision).toBe(5);
+      session.completeKeyRemoval(removal, { ...external, settings_revision: 6 });
+      expect(session.readKey()).toBe(key);
+    },
+  );
+
   it("recomputes dirtiness when an in-flight save changes the saved baseline", () => {
     const session = sessionWithDraft();
     const submitted = session.readDraft()!;

@@ -13,6 +13,7 @@ import type {
   RunDetail,
   RunWithIssueRow,
   SaveSettingsRequest,
+  SettingsSaveResult,
   SkillFile,
   SkillsInstallStatus,
   SkillsStatus,
@@ -45,7 +46,7 @@ export const hasInProgressRetroBatches = () =>
   invokeCommand<boolean>("has_in_progress_retro_batches");
 export const loadSettings = () => invokeCommand<AppSettings>("load_settings");
 export const saveSettings = (request: SaveSettingsRequest) =>
-  invokeCommand<AppSettings>("save_settings", { request });
+  invokeCommand<SettingsSaveResult>("save_settings", { request });
 export const validateSettings = (settings: AppSettings) =>
   invokeCommand<ValidationResult>("validate_settings", { settings });
 export const getLinearViewer = (request: SaveSettingsRequest) =>
