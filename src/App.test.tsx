@@ -22,6 +22,7 @@ import type {
   RetroSummary,
   RunDetail,
   RunSummary,
+  SettingsSaveResult,
   SkillsStatus,
   ValidationResult,
   WorkerStatus,
@@ -142,6 +143,13 @@ function testSettings(): AppSettings {
   };
 }
 
+function saveResult(
+  settings: AppSettings,
+  runtime_update_error: string | null = null,
+): SettingsSaveResult {
+  return { settings, runtime_update_error };
+}
+
 function expectLiteralInput(element: Element) {
   expect(element.getAttribute("autocomplete")).toBe("off");
   expect(element.getAttribute("autocorrect")).toBe("off");
@@ -237,7 +245,7 @@ function settingsInvoke({
         if (!allowSave) {
           throw new Error("save_settings should not run after failed validation");
         }
-        return { ...settings, linear_api_key_set: true };
+        return saveResult({ ...settings, linear_api_key_set: true });
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
@@ -351,7 +359,7 @@ function dashboardInvoke({
           email: "alice@example.com",
         };
       case "save_settings":
-        return { ...(args?.request?.settings ?? settings) };
+        return saveResult({ ...(args?.request?.settings ?? settings) });
       default:
         throw new Error(`Unhandled command: ${command}`);
     }
@@ -777,7 +785,9 @@ describe("App settings", () => {
     const save = deferred<AppSettings>();
     const baseInvoke = dashboardInvoke({ settings });
     tauriMocks.invoke.mockImplementation((command, args) =>
-      command === "save_settings" ? save.promise : baseInvoke(command, args),
+      command === "save_settings"
+        ? save.promise.then((saved) => saveResult(saved))
+        : baseInvoke(command, args),
     );
     const { container } = render(<App />);
     await openSettings();
@@ -865,12 +875,14 @@ describe("App settings", () => {
       if (command !== "save_settings") return baseInvoke(command, args);
       saves += 1;
       return saves === 1
-        ? save.promise
-        : Promise.resolve({
-            ...settings,
-            settings_revision: 2,
-            prompt_template: "Newer unsaved revision",
-          });
+        ? save.promise.then((saved) => saveResult(saved))
+        : Promise.resolve(
+            saveResult({
+              ...settings,
+              settings_revision: 2,
+              prompt_template: "Newer unsaved revision",
+            }),
+          );
     });
     const { container } = render(<App />);
     await openSettings();
@@ -923,7 +935,9 @@ describe("App settings", () => {
     const save = deferred<AppSettings>();
     const baseInvoke = dashboardInvoke({ settings });
     tauriMocks.invoke.mockImplementation((command, args) =>
-      command === "save_settings" ? save.promise : baseInvoke(command, args),
+      command === "save_settings"
+        ? save.promise.then((saved) => saveResult(saved))
+        : baseInvoke(command, args),
     );
     const { container } = render(<App />);
     await openSettings();
@@ -946,9 +960,10 @@ describe("App settings", () => {
     });
   });
 
-  it.each([false, true])(
+  it.each(["unrelated", "already equal", "later equal"])(
     "reconciles a Retro revision only when its form matches the dirty draft: %s",
-    async (matchesDraft) => {
+    async (equivalence) => {
+      const matchesDraft = equivalence !== "unrelated";
       tauriMocks.runtimeAvailable = true;
       const { previewRuntime } = await import("./preview/runtime");
       const settings = testSettings();
@@ -983,9 +998,10 @@ describe("App settings", () => {
       saved = {
         ...settings,
         settings_revision: 1,
-        prompt_template: matchesDraft
-          ? "Unsaved draft from the original workflow"
-          : "Retro's newer workflow",
+        prompt_template:
+          equivalence === "already equal"
+            ? "Unsaved draft from the original workflow"
+            : "Retro's newer workflow",
       };
       apply.resolve({
         id: "batch-provenance",
@@ -1003,6 +1019,16 @@ describe("App settings", () => {
       });
       await waitFor(() => expect(commandCount("load_settings")).toBe(2));
       if (matchesDraft) {
+        if (equivalence === "later equal") {
+          // Let the external settings publication finish while the draft differs.
+          await act(async () => {
+            await Promise.resolve();
+          });
+          expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull();
+          fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+            target: { value: saved.prompt_template },
+          });
+        }
         await waitFor(() =>
           expect(
             screen.getByRole("button", { name: "Save" }).getAttribute("disabled"),
@@ -1045,7 +1071,7 @@ describe("App settings", () => {
       tauriMocks.invoke.mockImplementation((command, args) => {
         if (command === "remove_linear_api_key") return removal.promise;
         if (command === "save_settings")
-          return { ...args.request.settings, settings_revision: removedRevision + 1 };
+          return saveResult({ ...args.request.settings, settings_revision: removedRevision + 1 });
         return baseInvoke(command, args);
       });
       const { container } = render(<App />);
@@ -1085,7 +1111,8 @@ describe("App settings", () => {
     const baseInvoke = dashboardInvoke({ settings });
     tauriMocks.invoke.mockImplementation((command, args) => {
       if (command === "remove_linear_api_key") return removal.promise;
-      if (command === "save_settings") return { ...args.request.settings, settings_revision: 3 };
+      if (command === "save_settings")
+        return saveResult({ ...args.request.settings, settings_revision: 3 });
       return baseInvoke(command, args);
     });
     const { container } = render(<App />);
@@ -1124,11 +1151,11 @@ describe("App settings", () => {
     tauriMocks.invoke.mockImplementation((command, args) => {
       if (command === "remove_linear_api_key") return removal.promise;
       if (command === "save_settings")
-        return {
+        return saveResult({
           ...args.request.settings,
           settings_revision: 3,
           linear_api_key_set: true,
-        };
+        });
       return baseInvoke(command, args);
     });
     const { container } = render(<App />);
@@ -1167,17 +1194,20 @@ describe("App settings", () => {
     const baseInvoke = dashboardInvoke({ settings });
     tauriMocks.invoke.mockImplementation((command, args) => {
       if (command === "save_settings")
-        return {
+        return saveResult({
           ...args.request.settings,
           settings_revision: 1,
           linear_api_key_set: true,
           linear_api_key_error: null,
-        };
+        });
       return baseInvoke(command, args);
     });
     render(<App />);
     await openSettings();
     expect(screen.getByText(error).closest('[role="alert"]')).toBeTruthy();
+    expect(screen.queryByText(/credential access prevented the live worker/)).toBeNull();
+    expect(screen.queryByText(/worker keeps its previous configuration/)).toBeNull();
+    expect(commandCount("save_settings")).toBe(0);
     expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).not.toBeNull();
     fireEvent.change(screen.getByLabelText(/^API key/, { selector: "input" }), {
       target: { value: "lin_api_replacement" },
@@ -3125,10 +3155,91 @@ describe("App settings", () => {
     fireEvent.click(saveButton);
 
     await waitFor(() =>
-      expect(container.querySelector(".topbar")?.textContent).toContain(
-        "Saved; future runs use changes",
+      expect(container.querySelector(".topbar .save-status")?.textContent).toBe("Saved"),
+    );
+  });
+
+  it.each([null, "Previous worker configuration error"])(
+    "uses a neutral Save confirmation when status refresh fails with prior error %s",
+    async (previousError) => {
+      tauriMocks.runtimeAvailable = true;
+      const settings = { ...testSettings(), linear_api_key_set: true };
+      const baseInvoke = dashboardInvoke({
+        settings,
+        workerStatus: { state: "running", started_at: null, last_error: previousError },
+      });
+      let reads = 0;
+      tauriMocks.invoke.mockImplementation((command, args) => {
+        if (command === "get_worker_status" && ++reads > 1)
+          return Promise.reject(new Error("Status unavailable"));
+        return baseInvoke(command, args);
+      });
+      const { container } = render(<App />);
+      await openSettings();
+      fireEvent.change(container.querySelector(".prompt-editor textarea")!, {
+        target: { value: "Saved prompt" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() =>
+        expect(container.querySelector(".topbar .save-status")?.textContent).toBe("Saved"),
+      );
+      expect(container.querySelector(".topbar")?.textContent).not.toContain("kept previous config");
+      expect(screen.queryByText(/worker keeps its previous configuration/)).toBeNull();
+      expect(screen.queryByText(/worker update failed/i)).toBeNull();
+    },
+  );
+
+  it("acknowledges saved settings even when the runtime update and status refresh fail", async () => {
+    tauriMocks.runtimeAvailable = true;
+    const settings = { ...testSettings(), linear_api_key_set: true };
+    const baseInvoke = dashboardInvoke({ settings });
+    const save = deferred<SettingsSaveResult>();
+    const runtimeError =
+      "Settings were saved, but the worker update could not complete. Check settings and retry.";
+    let reads = 0;
+    let saves = 0;
+    tauriMocks.invoke.mockImplementation((command, args) => {
+      if (command === "get_worker_status" && ++reads > 1)
+        return Promise.reject(new Error("Status unavailable"));
+      if (command === "save_settings") {
+        saves += 1;
+        return saves === 1
+          ? save.promise
+          : saveResult({ ...args.request.settings, settings_revision: 2 });
+      }
+      return baseInvoke(command, args);
+    });
+    const { container } = render(<App />);
+    await openSettings();
+    const prompt = container.querySelector(".prompt-editor textarea") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "Durable saved prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toBe(1));
+    fireEvent.change(prompt, { target: { value: "Edited while saving" } });
+    save.resolve(
+      saveResult(
+        { ...settings, settings_revision: 1, prompt_template: "Durable saved prompt" },
+        runtimeError,
       ),
     );
+    expect(await screen.findByText(runtimeError)).toBeTruthy();
+    expect(container.querySelector(".topbar")?.textContent).toContain(
+      "Saved; worker update failed",
+    );
+    expect(container.querySelector(".topbar")?.textContent).not.toContain("kept previous config");
+    expect(screen.queryByText(/worker keeps its previous configuration/)).toBeNull();
+    expect(prompt.value).toBe("Edited while saving");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" }).getAttribute("disabled")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toBe(2));
+    const request = tauriMocks.invoke.mock.calls.filter(
+      ([command]) => command === "save_settings",
+    )[1][1].request;
+    expect(request.settings.settings_revision).toBe(1);
+    expect(request.settings.prompt_template).toBe("Edited while saving");
+    await waitFor(() => expect(screen.queryByText(runtimeError)).toBeNull());
   });
 
   it("does not promise live settings after a worker reconfigure error", async () => {
@@ -3241,10 +3352,7 @@ describe("App settings", () => {
     const { container } = render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(await screen.findByText(/Finish any incomplete setup/)).toBeTruthy();
-    expect(
-      screen.queryByText(/Saved settings apply to future dispatches without restarting/),
-    ).toBeNull();
+    expect(screen.queryByText(/worker keeps its previous configuration/)).toBeNull();
 
     const hookTimeout = await screen.findByLabelText(/^Hook timeout/, {
       selector: "input",
@@ -3274,12 +3382,12 @@ describe("App settings", () => {
     });
     tauriMocks.invoke.mockImplementation((command, args) =>
       command === "save_settings"
-        ? {
+        ? saveResult({
             ...args.request.settings,
             settings_revision: 1,
             linear_api_key_set: false,
             linear_api_key_error: "The OS credential store is unavailable. Unlock it and retry.",
-          }
+          })
         : baseInvoke(command, args),
     );
     const { container } = render(<App />);
@@ -3546,7 +3654,9 @@ describe("App settings", () => {
     const save = deferred<AppSettings>();
     const baseInvoke = dashboardInvoke({ settings });
     tauriMocks.invoke.mockImplementation((command, args) =>
-      command === "save_settings" ? save.promise : baseInvoke(command, args),
+      command === "save_settings"
+        ? save.promise.then((saved) => saveResult(saved))
+        : baseInvoke(command, args),
     );
     const { container } = render(<App />);
     await waitFor(() => expect(commandCount("get_skills_status")).toBe(1));

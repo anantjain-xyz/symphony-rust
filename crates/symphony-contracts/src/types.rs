@@ -10,6 +10,13 @@ pub struct SaveSettingsRequest {
     pub linear_api_key: Option<String>,
 }
 
+/// A durable settings commit and the independent result of refreshing runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SettingsSaveResult {
+    pub settings: AppSettings,
+    pub runtime_update_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ValidationResult {
     pub workflow_ok: bool,
@@ -174,4 +181,37 @@ pub enum RetroConfidence {
     Low,
     Medium,
     High,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_save_receipt_separates_runtime_outcome_from_durable_settings() {
+        let settings = AppSettings {
+            settings_revision: 7,
+            ..Default::default()
+        };
+        for error in [
+            None,
+            Some("Runtime refresh failed after saving.".to_string()),
+        ] {
+            let receipt = SettingsSaveResult {
+                settings: settings.clone(),
+                runtime_update_error: error.clone(),
+            };
+            assert_eq!(
+                serde_json::to_value(receipt).unwrap(),
+                serde_json::json!({
+                    "settings": settings,
+                    "runtime_update_error": error,
+                })
+            );
+            assert!(serde_json::to_value(&settings)
+                .unwrap()
+                .get("runtime_update_error")
+                .is_none());
+        }
+    }
 }

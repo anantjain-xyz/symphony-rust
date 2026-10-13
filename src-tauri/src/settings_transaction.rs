@@ -348,7 +348,13 @@ fn write_atomic(path: &Path, body: &[u8], replace: bool) -> Result<(), String> {
 }
 
 fn sync_current(path: &Path) -> Result<(), String> {
-    match File::open(path) {
+    let mut options = File::options();
+    options.read(true);
+    // Windows sync_all calls FlushFileBuffers, which requires GENERIC_WRITE.
+    // Do not require write permission for the POSIX fsync path.
+    #[cfg(windows)]
+    options.write(true);
+    match options.open(path) {
         Ok(file) => file.sync_all().map_err(|error| error.to_string())?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
@@ -363,6 +369,9 @@ pub(crate) fn sync_parent(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        // BACKUP_SEMANTICS admits directory handles; FlushFileBuffers also
+        // requires GENERIC_WRITE on the handle used by sync_all.
+        options.write(true);
         options.custom_flags(0x02000000); // FILE_FLAG_BACKUP_SEMANTICS opens a directory.
     }
     options

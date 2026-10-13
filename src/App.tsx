@@ -181,6 +181,7 @@ function App() {
     savePending: settingsSavePending,
     validation,
     savedFlash,
+    runtimeUpdateError,
     savedLiveConfigKept,
   } = settingsFeature;
   const {
@@ -271,11 +272,6 @@ function App() {
     linearConnected: settings?.linear_api_key_set ?? false,
     repoConfigured: settings !== null && anyRepoConfigured(settings),
   };
-
-  const liveReconfigureSkipped =
-    worker.state === "running" &&
-    ((validation?.workflow_ok === false && !validation.workflow_blocking) ||
-      (savedFlash && savedLiveConfigKept));
 
   function requestStop() {
     if (overview.active_runs.length > 0 && !confirmStop) {
@@ -394,9 +390,8 @@ function App() {
                   validation={validation}
                   dirty={dirty}
                   savedFlash={savedFlash}
-                  workerRunning={worker.state === "running"}
-                  workerConfigError={worker.state === "running" && worker.last_error !== null}
-                  liveReconfigureSkipped={liveReconfigureSkipped}
+                  runtimeUpdateError={runtimeUpdateError}
+                  liveReconfigureSkipped={savedLiveConfigKept}
                   busy={busy || settingsSavePending}
                   runtimeAvailable={runtimeAvailable}
                 />

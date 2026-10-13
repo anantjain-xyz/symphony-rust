@@ -33,6 +33,7 @@ export function useSettingsController(options: Options) {
   const [linearViewerError, setLinearViewerError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const [runtimeUpdateError, setRuntimeUpdateError] = useState<string | null>(null);
   const [savedLiveConfigKeptReason, setSavedLiveConfigKeptReason] = useState<
     "credential" | "workflow" | "worker" | null
   >(null);
@@ -53,7 +54,10 @@ export function useSettingsController(options: Options) {
         worker !== skipped.refreshed &&
         worker.last_error === null)
     ) {
-      keptWorkerSnapshots.current = null;
+      if (worker.state === "running") {
+        keptWorkerSnapshots.current = null;
+        setRuntimeUpdateError(null);
+      }
       setSavedLiveConfigKeptReason(null);
     }
   }, [options.readWorkerStatus]);
@@ -133,16 +137,20 @@ export function useSettingsController(options: Options) {
     setValidation(result);
     if (result.workflow_blocking) return;
     const source = session.captureDraftLineage(exactSettings);
-    const saved = await call(() =>
+    const receipt = await call(() =>
       desktopCommands.saveSettings({
         settings: exactSettings,
         linear_api_key: exactLinearKey.trim() ? exactLinearKey : null,
       }),
     );
+    const saved = receipt.settings;
     // Only this operation may advance a descendant draft's concurrency token.
     const acknowledged = session.acknowledgeSave(source, saved);
     if (session.readSaved() !== saved) return;
+    // A prior Save's snapshots cannot clear this receipt's runtime error.
+    keptWorkerSnapshots.current = null;
     setSettings(saved);
+    setRuntimeUpdateError(receipt.runtime_update_error);
     let refreshedWorker: WorkerStatus | null = null;
     try {
       refreshedWorker = await desktopCommands.getWorkerStatus();
@@ -155,15 +163,14 @@ export function useSettingsController(options: Options) {
     // proves that a later operation has applied the settings.
     const observedWorker = context.current.readWorkerStatus();
     keptWorkerSnapshots.current = { observed: observedWorker, refreshed: refreshedWorker };
-    const liveWorkerState = refreshedWorker?.state ?? observedWorker.state;
     setSavedLiveConfigKeptReason(
-      liveWorkerState !== "running"
+      refreshedWorker?.state !== "running"
         ? null
         : saved.linear_api_key_error !== null
           ? "credential"
           : !result.workflow_ok
             ? "workflow"
-            : refreshedWorker?.last_error !== null
+            : refreshedWorker.last_error !== null
               ? "worker"
               : null,
     );
@@ -220,6 +227,7 @@ export function useSettingsController(options: Options) {
     savePending,
     validation,
     savedFlash,
+    runtimeUpdateError,
     savedLiveConfigKept: savedLiveConfigKeptReason !== null,
     savedLiveConfigKeptReason,
     viewer: { linearViewer, linearViewerLoading, linearViewerError, trackerTest },

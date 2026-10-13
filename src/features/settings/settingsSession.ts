@@ -39,6 +39,15 @@ export function createSettingsSession(
     readSaved: () => latestSaved,
     replaceDraft(next: AppSettings) {
       draft = next;
+      if (
+        latestSaved &&
+        next.settings_revision < latestSaved.settings_revision &&
+        formSnapshot(next) === formSnapshot(latestSaved)
+      ) {
+        adoptSaved(latestSaved);
+        setDirty(key.trim() !== "");
+      }
+      return draft;
     },
     captureDraftLineage(source: AppSettings) {
       return { lineage, settingsRevision: source.settings_revision };
