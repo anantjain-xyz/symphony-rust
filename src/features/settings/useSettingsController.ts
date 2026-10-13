@@ -17,7 +17,7 @@ type Options = {
   runtimeAvailable: boolean;
   run: RunDesktopAction;
   acceptWorker: (status: WorkerStatus) => void;
-  readWorkerState: () => WorkerStatus["state"];
+  readWorkerStatus: () => WorkerStatus;
   refreshRepositories: (settings: AppSettings) => void;
 };
 export function useSettingsController(options: Options) {
@@ -39,9 +39,25 @@ export function useSettingsController(options: Options) {
   const [trackerTest, setTrackerTest] = useState<TrackerTestResult | null>(null);
   const savedFlashTimer = useRef<number | null>(null);
   const linearViewerSeq = useRef(0);
+  const keptWorkerSnapshots = useRef<{
+    observed: WorkerStatus;
+    refreshed: WorkerStatus | null;
+  } | null>(null);
   useEffect(() => {
-    if (options.readWorkerState() !== "running") setSavedLiveConfigKeptReason(null);
-  }, [options.readWorkerState]);
+    const worker = options.readWorkerStatus();
+    const skipped = keptWorkerSnapshots.current;
+    if (
+      worker.state !== "running" ||
+      (skipped &&
+        savedLiveConfigKeptReason !== "workflow" &&
+        worker !== skipped.observed &&
+        worker !== skipped.refreshed &&
+        worker.last_error === null)
+    ) {
+      keptWorkerSnapshots.current = null;
+      setSavedLiveConfigKeptReason(null);
+    }
+  }, [options.readWorkerStatus, savedLiveConfigKeptReason]);
   const refreshLinearViewer = useCallback(
     (exactSettings: AppSettings, exactKey: string) => {
       if (!runtimeAvailable || !exactSettings.tracker_assigned_to_me) {
@@ -136,7 +152,11 @@ export function useSettingsController(options: Options) {
       // Settings are saved even if this status refresh fails; the next dashboard
       // refresh will reconcile worker state.
     }
-    const liveWorkerState = refreshedWorker?.state ?? context.current.readWorkerState();
+    // Neither the previously rendered status nor this Save's status response
+    // proves that a later operation has applied the settings.
+    const observedWorker = context.current.readWorkerStatus();
+    keptWorkerSnapshots.current = { observed: observedWorker, refreshed: refreshedWorker };
+    const liveWorkerState = refreshedWorker?.state ?? observedWorker.state;
     setSavedLiveConfigKeptReason(
       liveWorkerState !== "running"
         ? null
