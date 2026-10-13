@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const REQUIRED_SETTINGS_CONTRACT_SOURCE = "crates/symphony-contracts/src/settings.rs";
 const REQUIRED_SETTINGS_RUNTIME_SOURCE = "src-tauri/src/settings.rs";
+const RETRO_SERVICE_SOURCE = "src-tauri/src/retro_service.rs";
 
 function skillRuntimeConsumers(inventoryFunction) {
   return [
@@ -22,7 +23,7 @@ function skillRuntimeConsumers(inventoryFunction) {
     },
     {
       functionName: "start_retro",
-      sequences: [["skills", ":", inventoryFunction, "(", ")"]],
+      sequences: [],
     },
     {
       functionName: "get_skills_status",
@@ -611,7 +612,7 @@ function rustStructFieldExpressions(struct, fieldName) {
     .map((field) => field.slice(2));
 }
 
-function returnedRustStruct(tokens, body, structName) {
+function returnedRustStruct(tokens, body, structName, moduleName = null) {
   // Inspect only the function's tail expression. An earlier constructor can be
   // a decoy, and arbitrary wrappers could transform or replace its skills.
   const statements = splitTopLevel(tokens.slice(body.start, body.end), ";");
@@ -623,6 +624,14 @@ function returnedRustStruct(tokens, body, structName) {
   ) {
     expression = expression.slice(2, -1);
     if (expression.at(-1)?.value === ",") expression = expression.slice(0, -1);
+  }
+  if (
+    moduleName &&
+    expression[0]?.value === moduleName &&
+    expression[1]?.value === ":" &&
+    expression[2]?.value === ":"
+  ) {
+    expression = expression.slice(3);
   }
   const structs = rustStructExpressions(expression, 0, expression.length, structName).filter(
     (struct) => struct.start === 0 && struct.end === expression.length,
@@ -705,6 +714,171 @@ function requireModuleImport(tokens, moduleName, symbol, sourcePath, errors) {
   }
 }
 
+function requireExactFunctionBody(tokens, body, expected, label, errors) {
+  if (!body) return;
+  const actual = tokens.slice(body.start, body.end).map((token) => token.value);
+  const required = rustTokens(expected).map((token) => token.value);
+  if (JSON.stringify(actual) !== JSON.stringify(required)) {
+    errors.push(`${label} must forward the validated runtime without replacing it`);
+  }
+}
+
+function validateRetroServiceSkills(
+  root,
+  tokens,
+  retroBody,
+  sourcePath,
+  inventoryFunction,
+  errors,
+) {
+  const runtimeBody = requireFunctionSequences(tokens, "retro_runtime", [], sourcePath, errors);
+  if (runtimeBody) {
+    const returned = returnedRustStruct(tokens, runtimeBody, "RetroRuntime", "retro_service");
+    if (!returned) {
+      errors.push(`${sourcePath} retro_runtime must directly return one RetroRuntime`);
+    } else {
+      requireStructField(
+        returned,
+        "skills",
+        [inventoryFunction, "(", ")"],
+        sourcePath,
+        "retro_runtime",
+        errors,
+      );
+    }
+  }
+  requireExactFunctionBody(
+    tokens,
+    retroBody,
+    "state.retro.start(retro_runtime(&state)).await",
+    `${sourcePath} start_retro`,
+    errors,
+  );
+
+  const absolute = resolveInside(root, RETRO_SERVICE_SOURCE, errors, "retro skill consumer source");
+  if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) {
+    errors.push(`retro skill consumer source is missing at ${RETRO_SERVICE_SOURCE}`);
+    return;
+  }
+  const serviceTokens = rustTokens(readFileSync(absolute, "utf8"));
+  const startBody = requireFunctionSequences(
+    serviceTokens,
+    "start",
+    [],
+    RETRO_SERVICE_SOURCE,
+    errors,
+  );
+  requireExactFunctionBody(
+    serviceTokens,
+    startBody,
+    `let service = self.clone();
+    tokio::spawn(async move { service.start_inner(runtime).await })
+      .await.map_err(|error| error.to_string())?`,
+    `${RETRO_SERVICE_SOURCE} start`,
+    errors,
+  );
+  const body = requireFunctionSequences(
+    serviceTokens,
+    "start_inner",
+    [],
+    RETRO_SERVICE_SOURCE,
+    errors,
+  );
+  if (!body) return;
+  const proposals = rustStructExpressions(
+    serviceTokens,
+    body.start,
+    body.end,
+    "RetroProposalConfig",
+  ).filter(
+    (struct) =>
+      JSON.stringify(
+        serviceTokens.slice(struct.start - 3, struct.start).map((token) => token.value),
+      ) === JSON.stringify(["let", "proposal_config", "="]),
+  );
+  if (proposals.length !== 1) {
+    errors.push(
+      `${RETRO_SERVICE_SOURCE} start_inner must construct exactly one proposal_config from RetroProposalConfig`,
+    );
+  } else {
+    requireStructField(
+      proposals[0],
+      "skills",
+      rustTokens(
+        "runtime.skills.clone().into_iter().map(|skill| (skill.name, skill.content)).collect()",
+      ).map((token) => token.value),
+      RETRO_SERVICE_SOURCE,
+      "start_inner",
+      errors,
+    );
+  }
+  // Bindings and mutations must not replace the inventory between injection
+  // and consumption. Comments/string literals cannot satisfy these token checks.
+  const runtimeBindings = countTokenSequence(
+    serviceTokens,
+    ["let", "runtime"],
+    body.start,
+    body.end,
+  );
+  if (runtimeBindings !== 0) {
+    const credentialRefresh = rustTokens(
+      "let runtime = runtime.with_credential(snapshot.credential);",
+    ).map((token) => token.value);
+    if (
+      runtimeBindings !== 1 ||
+      countTokenSequence(serviceTokens, credentialRefresh, body.start, body.end) !== 1
+    ) {
+      errors.push(
+        `${RETRO_SERVICE_SOURCE} start_inner may rebind runtime only through the verified credential refresh`,
+      );
+    } else {
+      const refreshBody = requireFunctionSequences(
+        serviceTokens,
+        "with_credential",
+        [],
+        RETRO_SERVICE_SOURCE,
+        errors,
+      );
+      requireExactFunctionBody(
+        serviceTokens,
+        refreshBody,
+        `self.env.remove("LINEAR_API_KEY");
+        if let Some(key) = &credential { self.env.insert("LINEAR_API_KEY".into(), key.clone()); }
+        self.api_key = credential;
+        self`,
+        `${RETRO_SERVICE_SOURCE} with_credential`,
+        errors,
+      );
+    }
+  }
+  const replacements = [
+    ["let", "mut", "runtime"],
+    ["&", "mut", "runtime"],
+  ];
+  if (
+    replacements.some(
+      (sequence) => countTokenSequence(serviceTokens, sequence, body.start, body.end) > 0,
+    ) ||
+    countTokenSequence(serviceTokens, ["runtime", "="], body.start, body.end) !== runtimeBindings ||
+    countTokenSequence(serviceTokens, ["runtime", ".", "skills"], body.start, body.end) !== 1
+  ) {
+    errors.push(
+      `${RETRO_SERVICE_SOURCE} start_inner must consume the injected runtime skills without replacing them`,
+    );
+  }
+  const startSequence = rustTokens(
+    "self.generation.start(self.repo.clone(), tracker, proposal_config)",
+  ).map((token) => token.value);
+  if (
+    countTokenSequence(serviceTokens, ["proposal_config"], body.start, body.end) !== 2 ||
+    countTokenSequence(serviceTokens, startSequence, body.start, body.end) !== 1
+  ) {
+    errors.push(
+      `${RETRO_SERVICE_SOURCE} start_inner must pass its unchanged proposal_config to the retro manager exactly once`,
+    );
+  }
+}
+
 function validateSkillRuntimeConsumers(root, sourcePath, inventoryFunction, errors) {
   const absolute = resolveInside(root, sourcePath, errors, "bundled skill runtime source");
   if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) return;
@@ -735,7 +909,20 @@ function validateSkillRuntimeConsumers(root, sourcePath, inventoryFunction, erro
   }
 
   const retroBody = bodies.get("start_retro");
-  if (retroBody) {
+  if (
+    retroBody &&
+    rustStructExpressions(tokens, retroBody.start, retroBody.end, "RetroProposalConfig").length ===
+      0
+  ) {
+    validateRetroServiceSkills(root, tokens, retroBody, sourcePath, inventoryFunction, errors);
+  } else if (retroBody) {
+    requireFunctionSequences(
+      tokens,
+      "start_retro",
+      [["skills", ":", inventoryFunction, "(", ")"]],
+      sourcePath,
+      errors,
+    );
     const proposals = rustStructExpressions(
       tokens,
       retroBody.start,

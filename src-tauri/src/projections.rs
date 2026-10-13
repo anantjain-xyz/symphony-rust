@@ -111,6 +111,23 @@ pub fn retro_summary(row: db::RetroRow) -> RetroSummary {
     }
 }
 
+pub fn retro_detail(snapshot: crate::retro_service::RetroSnapshot) -> RetroDetail {
+    RetroDetail {
+        row: retro_summary(snapshot.row),
+        report: snapshot.report,
+        suggestions: snapshot
+            .suggestions
+            .into_iter()
+            .map(retro_suggestion_review)
+            .collect(),
+        batches: snapshot
+            .batches
+            .into_iter()
+            .map(retro_change_batch)
+            .collect(),
+    }
+}
+
 pub fn retro_suggestion_review(row: db::RetroSuggestionRow) -> RetroSuggestionReview {
     RetroSuggestionReview {
         id: row.id,

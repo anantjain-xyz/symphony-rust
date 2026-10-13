@@ -217,6 +217,19 @@ pub enum RetroBatchReservation {
     AlreadyReserved,
 }
 
+#[derive(Debug, Clone)]
+pub struct RetroRepoBatchPlan {
+    pub batch: RetroBatchRow,
+    pub suggestion_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetroRepoBatchReservation {
+    Reserved { created_batch_ids: Vec<String> },
+    ReviewIncomplete,
+    AcceptedSetChanged,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WorkpadSnapshotRow {
     pub issue_id: String,
@@ -1676,59 +1689,90 @@ impl Repository {
             tx.rollback().await?;
             return Ok(RetroBatchReservation::AcceptedSetChanged);
         }
-        let result = sqlx::query(
-            r#"
-            insert into retro_batches (
-              id, retro_id, kind, repo_name, repo_url, base_ref, state,
-              progress, error, pr_url, created_at, completed_at
-            )
-            select ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
-            where not exists (
-              select 1 from retro_suggestions
-              where retro_id = ?2
-                and proposal_status = 'ready'
-                and decision = 'pending'
-            )
-              and not exists (
-                select 1 from retro_batches
-                where retro_id = ?2
-                  and kind = ?3
-                  and (
-                    (?3 = 'workflow_update' and repo_name is null)
-                    or (?3 = 'repo_pr' and repo_name = ?4)
-                  )
-                  and state in ('queued', 'running', 'completed', 'stale')
-              )
-            "#,
-        )
-        .bind(&batch.id)
-        .bind(&batch.retro_id)
-        .bind(batch.kind.as_str())
-        .bind(&batch.repo_name)
-        .bind(&batch.repo_url)
-        .bind(&batch.base_ref)
-        .bind(batch.state.as_str())
-        .bind(&batch.progress)
-        .bind(&batch.error)
-        .bind(&batch.pr_url)
-        .bind(&batch.created_at)
-        .bind(&batch.completed_at)
-        .execute(&mut *tx)
-        .await?;
-        if result.rows_affected() == 0 {
+        if !insert_reserved_retro_batch(&mut tx, batch, suggestion_ids).await? {
             tx.rollback().await?;
             return Ok(RetroBatchReservation::AlreadyReserved);
-        }
-        for suggestion_id in suggestion_ids {
-            sqlx::query("insert into retro_batch_items (batch_id, suggestion_id) values (?1, ?2)")
-                .bind(&batch.id)
-                .bind(suggestion_id)
-                .execute(&mut *tx)
-                .await?;
         }
         tx.commit().await?;
         self.changed("retro_batches", "insert");
         Ok(RetroBatchReservation::Created)
+    }
+
+    /// Reserve the whole accepted repository selection before any PR job starts.
+    /// Include already-reserved repositories in `plans`: they still participate
+    /// in selection validation but never produce another launchable batch ID.
+    pub async fn reserve_retro_repo_batches(
+        &self,
+        retro_id: &str,
+        plans: &[RetroRepoBatchPlan],
+    ) -> Result<RetroRepoBatchReservation, StorageError> {
+        let mut expected = BTreeMap::new();
+        for plan in plans {
+            let Some(repo_name) = plan.batch.repo_name.as_deref() else {
+                return Ok(RetroRepoBatchReservation::AcceptedSetChanged);
+            };
+            if plan.batch.retro_id != retro_id
+                || plan.batch.kind != BatchKind::RepoPr
+                || !matches!(plan.batch.state, BatchState::Queued | BatchState::Stale)
+                || repo_name.trim().is_empty()
+                || plan.suggestion_ids.is_empty()
+            {
+                return Ok(RetroRepoBatchReservation::AcceptedSetChanged);
+            }
+            let mut ids = plan.suggestion_ids.clone();
+            ids.sort();
+            if expected.insert(repo_name.to_string(), ids).is_some() {
+                return Ok(RetroRepoBatchReservation::AcceptedSetChanged);
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // Take the write lock before reading any decisions. Review and deletion
+        // commands can observe either the entire reservation or none of it.
+        let locked = sqlx::query("update retros set id = id where id = ?1")
+            .bind(retro_id)
+            .execute(&mut *tx)
+            .await?;
+        if locked.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(RetroRepoBatchReservation::AcceptedSetChanged);
+        }
+        let review_incomplete: bool = sqlx::query_scalar(
+            "select exists (select 1 from retro_suggestions where retro_id = ?1 and proposal_status = 'ready' and decision = 'pending')",
+        )
+        .bind(retro_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if review_incomplete {
+            tx.rollback().await?;
+            return Ok(RetroRepoBatchReservation::ReviewIncomplete);
+        }
+        let accepted = sqlx::query_as::<_, (String, String)>(
+            "select repo_name, id from retro_suggestions where retro_id = ?1 and proposal_status = 'ready' and decision = 'accepted' and target_type in ('skill', 'repo_workflow') order by repo_name, id",
+        )
+        .bind(retro_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut current = BTreeMap::<String, Vec<String>>::new();
+        for (repo_name, id) in accepted {
+            current.entry(repo_name).or_default().push(id);
+        }
+        if current.is_empty() || current != expected {
+            tx.rollback().await?;
+            return Ok(RetroRepoBatchReservation::AcceptedSetChanged);
+        }
+
+        let mut created_batch_ids = Vec::new();
+        for plan in plans {
+            if insert_reserved_retro_batch(&mut tx, &plan.batch, &plan.suggestion_ids).await? {
+                created_batch_ids.push(plan.batch.id.clone());
+            }
+        }
+        tx.commit().await?;
+        if !created_batch_ids.is_empty() {
+            self.changed("retro_batches", "insert");
+        }
+        Ok(RetroRepoBatchReservation::Reserved { created_batch_ids })
     }
 
     pub async fn fail_in_progress_retro_batches(
@@ -1987,6 +2031,63 @@ impl Repository {
     }
 }
 
+async fn insert_reserved_retro_batch(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    batch: &RetroBatchRow,
+    suggestion_ids: &[String],
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        r#"
+        insert into retro_batches (
+          id, retro_id, kind, repo_name, repo_url, base_ref, state,
+          progress, error, pr_url, created_at, completed_at
+        )
+        select ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+        where not exists (
+          select 1 from retro_suggestions
+          where retro_id = ?2
+            and proposal_status = 'ready'
+            and decision = 'pending'
+        )
+          and not exists (
+            select 1 from retro_batches
+            where retro_id = ?2
+              and kind = ?3
+              and (
+                (?3 = 'workflow_update' and repo_name is null)
+                or (?3 = 'repo_pr' and repo_name = ?4)
+              )
+              and state in ('queued', 'running', 'completed', 'stale')
+          )
+        "#,
+    )
+    .bind(&batch.id)
+    .bind(&batch.retro_id)
+    .bind(batch.kind.as_str())
+    .bind(&batch.repo_name)
+    .bind(&batch.repo_url)
+    .bind(&batch.base_ref)
+    .bind(batch.state.as_str())
+    .bind(&batch.progress)
+    .bind(&batch.error)
+    .bind(&batch.pr_url)
+    .bind(&batch.created_at)
+    .bind(&batch.completed_at)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    for suggestion_id in suggestion_ids {
+        sqlx::query("insert into retro_batch_items (batch_id, suggestion_id) values (?1, ?2)")
+            .bind(&batch.id)
+            .bind(suggestion_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2069,6 +2170,28 @@ mod tests {
             created_at: now_iso(),
             completed_at: None,
         }
+    }
+
+    async fn test_repo_batch_plan(repo: &Repository) -> (RetroRow, Vec<RetroRepoBatchPlan>) {
+        let retro = repo
+            .create_retro("1970-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z")
+            .await
+            .unwrap();
+        repo.finish_retro(&retro.id, "{}", 0, 0).await.unwrap();
+        let mut plans = Vec::new();
+        for name in ["alpha", "beta"] {
+            let mut suggestion =
+                test_retro_suggestion(&retro.id, &format!("suggestion-{name}"), "accepted");
+            suggestion.repo_name = name.into();
+            repo.insert_retro_suggestions(std::slice::from_ref(&suggestion))
+                .await
+                .unwrap();
+            plans.push(RetroRepoBatchPlan {
+                batch: test_retro_batch(&retro.id, &format!("batch-{name}"), "repo_pr", Some(name)),
+                suggestion_ids: vec![suggestion.id],
+            });
+        }
+        (retro, plans)
     }
 
     #[tokio::test]
@@ -3247,6 +3370,274 @@ mod tests {
 
         pool.close().await;
         tokio::fs::remove_file(path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn reserves_all_repo_batches_and_reports_only_new_launches() {
+        let repo = repo().await;
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        assert_eq!(
+            repo.reserve_retro_batch(&plans[0].batch, &plans[0].suggestion_ids)
+                .await
+                .unwrap(),
+            RetroBatchReservation::Created
+        );
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::Reserved {
+                created_batch_ids: vec![plans[1].batch.id.clone()]
+            }
+        );
+        assert_eq!(repo.list_retro_batches(&retro.id).await.unwrap().len(), 2);
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::Reserved {
+                created_batch_ids: vec![]
+            }
+        );
+        for plan in &plans {
+            let reviewed = repo
+                .set_retro_suggestion_decision(
+                    &plan.suggestion_ids[0],
+                    SuggestionDecision::Rejected,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reviewed.decision, SuggestionDecision::Accepted);
+        }
+        assert!(!repo.delete_retro(&retro.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_incomplete_or_malformed_repo_plan_without_reserving_any_group() {
+        let repo = repo().await;
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        let mut malformed = Vec::new();
+        malformed.push(vec![plans[0].clone()]);
+        malformed.push(vec![plans[0].clone(), plans[0].clone()]);
+        for field in [
+            "retro",
+            "kind",
+            "name",
+            "state",
+            "membership",
+            "empty",
+            "duplicate",
+        ] {
+            let mut changed = plans.clone();
+            match field {
+                "retro" => changed[1].batch.retro_id = "another-retro".into(),
+                "kind" => changed[1].batch.kind = BatchKind::WorkflowUpdate,
+                "name" => changed[1].batch.repo_name = None,
+                "state" => changed[1].batch.state = BatchState::Completed,
+                "membership" => changed[1].suggestion_ids = plans[0].suggestion_ids.clone(),
+                "empty" => changed[1].suggestion_ids.clear(),
+                "duplicate" => changed[1]
+                    .suggestion_ids
+                    .push(plans[1].suggestion_ids[0].clone()),
+                _ => unreachable!(),
+            }
+            malformed.push(changed);
+        }
+        for plan in malformed {
+            assert_eq!(
+                repo.reserve_retro_repo_batches(&retro.id, &plan)
+                    .await
+                    .unwrap(),
+                RetroRepoBatchReservation::AcceptedSetChanged
+            );
+            assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+        }
+        let mut newly_accepted = test_retro_suggestion(&retro.id, "new-selection", "accepted");
+        newly_accepted.repo_name = "new-repository".into();
+        repo.insert_retro_suggestions(&[newly_accepted])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::AcceptedSetChanged
+        );
+        assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn changed_second_repo_selection_reserves_no_first_repo_and_emits_no_event() {
+        let repo = repo().await;
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        repo.set_retro_suggestion_decision(
+            &plans[1].suggestion_ids[0],
+            SuggestionDecision::Rejected,
+        )
+        .await
+        .unwrap();
+        let mut events = repo.events.subscribe();
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::AcceptedSetChanged
+        );
+        assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn requires_whole_retro_review_before_reserving_repo_plan() {
+        let repo = repo().await;
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        let mut prompt = test_retro_suggestion(&retro.id, "unreviewed-prompt", "pending");
+        prompt.target_type = SuggestionTarget::Prompt;
+        repo.insert_retro_suggestions(&[prompt]).await.unwrap();
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::ReviewIncomplete
+        );
+        assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rolls_back_the_entire_repo_plan_when_a_later_insert_conflicts() {
+        let repo = repo().await;
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        let mut events = repo.events.subscribe();
+        sqlx::query("create trigger reject_second_batch before insert on retro_batches when new.repo_name = 'beta' begin select raise(abort, 'injected batch conflict'); end")
+            .execute(&repo.pool).await.unwrap();
+
+        assert!(repo
+            .reserve_retro_repo_batches(&retro.id, &plans)
+            .await
+            .is_err());
+        assert!(repo.list_retro_batches(&retro.id).await.unwrap().is_empty());
+        let items: i64 = sqlx::query_scalar("select count(*) from retro_batch_items")
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(items, 0);
+        assert!(events.try_recv().is_err());
+
+        sqlx::query("drop trigger reject_second_batch")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans)
+                .await
+                .unwrap(),
+            RetroRepoBatchReservation::Reserved {
+                created_batch_ids: plans.iter().map(|plan| plan.batch.id.clone()).collect()
+            }
+        );
+        assert!(
+            matches!(events.try_recv().unwrap(), StorageEvent::DbChanged { table, .. } if table == "retro_batches")
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_repo_plans_reserve_one_complete_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = crate::open_sqlite(directory.path().join("plans.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool.clone(), EventBus::default());
+        let (retro, first) = test_repo_batch_plan(&repo).await;
+        let mut second = first.clone();
+        for plan in &mut second {
+            plan.batch.id = format!("other-{}", plan.batch.id);
+        }
+        let (one, two) = tokio::join!(
+            repo.reserve_retro_repo_batches(&retro.id, &first),
+            repo.reserve_retro_repo_batches(&retro.id, &second),
+        );
+        let results = [one.unwrap(), two.unwrap()];
+        let counts = results
+            .iter()
+            .map(|result| match result {
+                RetroRepoBatchReservation::Reserved { created_batch_ids } => {
+                    created_batch_ids.len()
+                }
+                other => panic!("unexpected reservation result: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(counts == [2, 0] || counts == [0, 2]);
+        let batches = repo.list_retro_batches(&retro.id).await.unwrap();
+        assert_eq!(batches.len(), 2);
+        assert!(
+            batches.iter().all(|batch| batch.id.starts_with("other-"))
+                || batches.iter().all(|batch| !batch.id.starts_with("other-"))
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_reviewer_cannot_change_only_part_of_a_reserved_repo_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = crate::open_sqlite(directory.path().join("review.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool.clone(), EventBus::default());
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        let (reservation, decision) = tokio::join!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans),
+            repo.set_retro_suggestion_decision(
+                &plans[1].suggestion_ids[0],
+                SuggestionDecision::Rejected
+            ),
+        );
+        let decision = decision.unwrap().unwrap().decision;
+        let batches = repo.list_retro_batches(&retro.id).await.unwrap();
+        match reservation.unwrap() {
+            RetroRepoBatchReservation::Reserved { created_batch_ids } => {
+                assert_eq!(created_batch_ids.len(), 2);
+                assert_eq!(batches.len(), 2);
+                assert_eq!(decision, SuggestionDecision::Accepted);
+            }
+            RetroRepoBatchReservation::AcceptedSetChanged => {
+                assert!(batches.is_empty());
+                assert_eq!(decision, SuggestionDecision::Rejected);
+            }
+            other => panic!("unexpected reservation result: {other:?}"),
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_delete_cannot_remove_a_reserved_repo_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = crate::open_sqlite(directory.path().join("delete.sqlite"))
+            .await
+            .unwrap();
+        let repo = Repository::new(pool.clone(), EventBus::default());
+        let (retro, plans) = test_repo_batch_plan(&repo).await;
+        let (reservation, deleted) = tokio::join!(
+            repo.reserve_retro_repo_batches(&retro.id, &plans),
+            repo.delete_retro(&retro.id),
+        );
+        let batches = repo.list_retro_batches(&retro.id).await.unwrap();
+        match reservation.unwrap() {
+            RetroRepoBatchReservation::Reserved { created_batch_ids } => {
+                assert_eq!(created_batch_ids.len(), 2);
+                assert_eq!(batches.len(), 2);
+                assert!(!deleted.unwrap());
+                assert!(repo.get_retro(&retro.id).await.unwrap().is_some());
+            }
+            RetroRepoBatchReservation::AcceptedSetChanged => {
+                assert!(deleted.unwrap());
+                assert!(batches.is_empty());
+                assert!(repo.get_retro(&retro.id).await.unwrap().is_none());
+            }
+            other => panic!("unexpected reservation result: {other:?}"),
+        }
+        pool.close().await;
     }
 
     #[tokio::test]

@@ -81,6 +81,73 @@ function replaceWorkerConfig(root, replacement) {
   );
 }
 
+function useRetroService(root) {
+  const desktop = join(root, "src-tauri/src/lib.rs");
+  const legacy = `async fn start_retro() {
+  let proposal_config = RetroProposalConfig {
+    skills: bundled_skills().into_iter().map(transform_skill).collect(),
+  };
+  state
+    .retro
+    .start(state.repo.clone(), tracker, proposal_config);
+}`;
+  writeFileSync(
+    desktop,
+    readFileSync(desktop, "utf8").replace(
+      legacy,
+      `fn retro_runtime(state: &AppState) -> retro_service::RetroRuntime {
+  retro_service::RetroRuntime { skills: bundled_skills() }
+}
+
+
+async fn start_retro(state: State<'_, AppState>) {
+  state.retro.start(retro_runtime(&state)).await
+}`,
+    ),
+  );
+  write(
+    root,
+    "src-tauri/src/retro_service.rs",
+    `impl RetroService {
+  pub async fn start(&self, runtime: RetroRuntime) {
+    let service = self.clone();
+    tokio::spawn(async move { service.start_inner(runtime).await })
+      .await.map_err(|error| error.to_string())?
+  }
+
+  async fn start_inner(&self, runtime: RetroRuntime) {
+    let proposal_config = RetroProposalConfig {
+      skills: runtime.skills.clone().into_iter().map(|skill| (skill.name, skill.content)).collect(),
+    };
+    self.generation.start(self.repo.clone(), tracker, proposal_config).await
+  }
+}
+`,
+  );
+}
+
+function refreshRetroServiceCredentials(root) {
+  const source = join(root, "src-tauri/src/retro_service.rs");
+  writeFileSync(
+    source,
+    `${readFileSync(source, "utf8").replace(
+      "let proposal_config = RetroProposalConfig {",
+      "let runtime = runtime.with_credential(snapshot.credential);\n    let proposal_config = RetroProposalConfig {",
+    )}
+impl RetroRuntime {
+  fn with_credential(mut self, credential: Option<String>) -> Self {
+    self.env.remove("LINEAR_API_KEY");
+    if let Some(key) = &credential {
+      self.env.insert("LINEAR_API_KEY".into(), key.clone());
+    }
+    self.api_key = credential;
+    self
+  }
+}
+`,
+  );
+}
+
 function defaultPromptContractConsumers() {
   return `struct AppSettings {
   #[serde(default = "default_prompt_template")]
@@ -787,6 +854,147 @@ test("ties the validated skill inventory to every runtime consumer", (t) => {
   );
   assert.match(errors, /runtime consumer install_skills must set skills from bundled_skills \( \)/);
 });
+
+test("follows bundled skills through the injected RetroService runtime", (t) => {
+  const root = harnessFixture(t);
+  useRetroService(root);
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+for (const [name, path, original, replacement, diagnostic] of [
+  [
+    "empty runtime inventory after a valid decoy",
+    "src-tauri/src/lib.rs",
+    "retro_service::RetroRuntime { skills: bundled_skills() }",
+    `let _decoy = retro_service::RetroRuntime { skills: bundled_skills() };
+    retro_service::RetroRuntime { skills: empty_skills() }`,
+    /runtime consumer retro_runtime must set skills from bundled_skills/,
+  ],
+  [
+    "replaced runtime after a valid decoy",
+    "src-tauri/src/lib.rs",
+    "retro_service::RetroRuntime { skills: bundled_skills() }",
+    `let _decoy = retro_service::RetroRuntime { skills: bundled_skills() };
+    replacement_runtime()`,
+    /retro_runtime must directly return one RetroRuntime/,
+  ],
+  [
+    "desktop delegation using a replacement runtime",
+    "src-tauri/src/lib.rs",
+    "state.retro.start(retro_runtime(&state)).await",
+    "let _decoy = retro_runtime(&state); state.retro.start(replacement_runtime()).await",
+    /start_retro must forward the validated runtime without replacing it/,
+  ],
+  [
+    "owned service continuation using a replacement runtime",
+    "src-tauri/src/retro_service.rs",
+    "service.start_inner(runtime).await",
+    "service.start_inner(replacement_runtime()).await",
+    /start must forward the validated runtime without replacing it/,
+  ],
+  [
+    "empty proposal inventory after a valid decoy",
+    "src-tauri/src/retro_service.rs",
+    "let proposal_config = RetroProposalConfig {",
+    `let _decoy = RetroProposalConfig {
+      skills: runtime.skills.clone().into_iter().map(|skill| (skill.name, skill.content)).collect(),
+    };
+    let proposal_config = RetroProposalConfig { skills: empty_skills(), .._decoy };
+    let _unused = RetroProposalConfig {`,
+    /runtime consumer start_inner must set skills from runtime/,
+  ],
+  [
+    "filtered proposal inventory",
+    "src-tauri/src/retro_service.rs",
+    "runtime.skills.clone().into_iter().map",
+    "runtime.skills.clone().into_iter().take(0).map",
+    /runtime consumer start_inner must set skills from runtime/,
+  ],
+  [
+    "mutated injected inventory",
+    "src-tauri/src/retro_service.rs",
+    "let proposal_config = RetroProposalConfig {",
+    "runtime.skills.clear(); let proposal_config = RetroProposalConfig {",
+    /start_inner must consume the injected runtime skills without replacing them/,
+  ],
+  [
+    "shadowed proposal configuration",
+    "src-tauri/src/retro_service.rs",
+    "self.generation.start(self.repo.clone(), tracker, proposal_config).await",
+    `let proposal_config = replacement_config();
+    self.generation.start(self.repo.clone(), tracker, proposal_config).await`,
+    /start_inner must pass its unchanged proposal_config to the retro manager exactly once/,
+  ],
+  [
+    "unused validated proposal configuration",
+    "src-tauri/src/retro_service.rs",
+    "self.generation.start(self.repo.clone(), tracker, proposal_config).await",
+    "self.generation.start(self.repo.clone(), tracker, replacement_config()).await",
+    /start_inner must pass its unchanged proposal_config to the retro manager exactly once/,
+  ],
+]) {
+  test(`rejects ${name} in the RetroService skill flow`, (t) => {
+    const root = harnessFixture(t);
+    useRetroService(root);
+    const target = join(root, path);
+    const source = readFileSync(target, "utf8");
+    assert.ok(source.includes(original));
+    writeFileSync(target, source.replace(original, replacement));
+    assert.match(validateAgentAssets(root).join("\n"), diagnostic);
+  });
+}
+
+test("requires the delegated RetroService skill consumer source", (t) => {
+  const root = harnessFixture(t);
+  useRetroService(root);
+  rmSync(join(root, "src-tauri/src/retro_service.rs"));
+  assert.match(validateAgentAssets(root).join("\n"), /retro skill consumer source is missing/);
+});
+
+test("allows credential refresh only through a helper that preserves runtime skills", (t) => {
+  const root = harnessFixture(t);
+  useRetroService(root);
+  refreshRetroServiceCredentials(root);
+  assert.deepEqual(validateAgentAssets(root), []);
+});
+
+for (const [name, original, replacement, diagnostic] of [
+  [
+    "cleared skills",
+    "self.api_key = credential;",
+    "self.skills.clear(); self.api_key = credential;",
+    /with_credential must forward the validated runtime without replacing it/,
+  ],
+  [
+    "replaced runtime",
+    "self.api_key = credential;\n    self",
+    "self.api_key = credential;\n    replacement_runtime()",
+    /with_credential must forward the validated runtime without replacing it/,
+  ],
+  [
+    "unverified rebind",
+    "let runtime = runtime.with_credential(snapshot.credential);",
+    "let runtime = replacement_runtime();",
+    /may rebind runtime only through the verified credential refresh/,
+  ],
+  [
+    "transformed credential refresh",
+    "let runtime = runtime.with_credential(snapshot.credential);",
+    "let runtime = replace_skills(runtime.with_credential(snapshot.credential));",
+    /may rebind runtime only through the verified credential refresh/,
+  ],
+]) {
+  test(`rejects ${name} in credential-refresh skill flow`, (t) => {
+    const root = harnessFixture(t);
+    useRetroService(root);
+    refreshRetroServiceCredentials(root);
+    const target = join(root, "src-tauri/src/retro_service.rs");
+    const source = readFileSync(target, "utf8");
+    assert.ok(source.includes(original));
+    writeFileSync(target, source.replace(original, replacement));
+    assert.match(validateAgentAssets(root).join("\n"), diagnostic);
+  });
+}
 
 test("rejects conditional compilation inside bundled inventory", (t) => {
   const root = harnessFixture(t);
