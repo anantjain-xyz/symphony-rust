@@ -410,3 +410,51 @@ fn malformed_marker_remains_available_for_diagnosis() {
         "{invalid"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_recovery_flushes_existing_file_and_parent_with_write_access() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings.json");
+    let body = b"saved settings whose buffers must be flushed";
+    std::fs::write(&path, body).unwrap();
+
+    // Reproduce both former handles: opening succeeds, but flushing without
+    // GENERIC_WRITE fails. The production helpers must use flush-capable handles.
+    let read_only_directory = File::options()
+        .read(true)
+        .custom_flags(0x02000000)
+        .open(directory.path())
+        .unwrap();
+    assert_eq!(
+        read_only_directory.sync_all().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        File::open(&path).unwrap().sync_all().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    sync_parent(&path).unwrap();
+    sync_current(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_recovery_flush_does_not_require_file_write_permission() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings.json");
+    let body = b"readable settings retained during recovery";
+    std::fs::write(&path, body).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    sync_current(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+}
