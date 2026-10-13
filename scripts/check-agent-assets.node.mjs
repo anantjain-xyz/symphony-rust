@@ -51,6 +51,36 @@ fn get_default_prompt() -> String {
 `;
 }
 
+function validatedWorkerConfigSource(
+  tail = "Ok(WorkerStartConfig { runtime, skills: bundled_skills() })",
+) {
+  return `fn worker_start_config(state: &AppState, settings: &AppSettings) -> Result<WorkerStartConfig, String> {
+  let api_key = linear_api_key();
+  ${tail.replace(
+    "runtime,",
+    `runtime: symphony_core::RunnableConfig::new(
+      settings.settings_revision,
+      workflow_from_settings(settings, api_key.as_deref()),
+      settings.repos.clone(),
+      settings.session_env.clone(),
+    ).map_err(|error| error.to_string())?,`,
+  )}
+}`;
+}
+
+function replaceWorkerConfig(root, replacement) {
+  const source = join(root, "src-tauri/src/lib.rs");
+  writeFileSync(
+    source,
+    readFileSync(source, "utf8").replace(
+      `fn worker_start_config() {
+  WorkerStartConfig { skills: bundled_skills() }
+}`,
+      replacement,
+    ),
+  );
+}
+
 function defaultPromptContractConsumers() {
   return `struct AppSettings {
   #[serde(default = "default_prompt_template")]
@@ -621,6 +651,70 @@ test("requires inventoryFunction configuration", (t) => {
     /skills\.inventoryFunction must be a non-empty string/,
   );
 });
+
+for (const trailingComma of [false, true]) {
+  test(`accepts a validated Result worker factory with trailing comma ${trailingComma}`, (t) => {
+    const root = harnessFixture(t);
+    const config = "WorkerStartConfig { runtime, skills: bundled_skills() }";
+    replaceWorkerConfig(
+      root,
+      validatedWorkerConfigSource(`Ok(${config}${trailingComma ? "," : ""})`),
+    );
+
+    assert.deepEqual(validateAgentAssets(root), []);
+  });
+}
+
+for (const [name, tail, diagnostic] of [
+  [
+    "returned empty inventory after a valid decoy",
+    `let _decoy = Ok(WorkerStartConfig { skills: bundled_skills() });
+  Ok(WorkerStartConfig { runtime, skills: empty_skills() })`,
+    /runtime consumer worker_start_config must set skills from bundled_skills \( \)/,
+  ],
+  [
+    "replaced returned config after a valid decoy",
+    `let _decoy = Ok(WorkerStartConfig { runtime, skills: bundled_skills() });
+  replacement_config()`,
+    /worker_start_config must directly return one WorkerStartConfig/,
+  ],
+  [
+    "transformed returned inventory",
+    "Ok(WorkerStartConfig { runtime, skills: bundled_skills().into_iter().take(0).collect() })",
+    /runtime consumer worker_start_config must set skills from bundled_skills \( \)/,
+  ],
+  [
+    "a transforming wrapper around Ok",
+    "replace_skills(Ok(WorkerStartConfig { runtime, skills: bundled_skills() }))",
+    /worker_start_config must directly return one WorkerStartConfig/,
+  ],
+  [
+    "a transforming wrapper inside Ok",
+    "Ok(replace_skills(WorkerStartConfig { runtime, skills: bundled_skills() }))",
+    /worker_start_config must directly return one WorkerStartConfig/,
+  ],
+  [
+    "a tuple inside Ok",
+    "Ok((WorkerStartConfig { runtime, skills: bundled_skills() }, replacement_config()))",
+    /worker_start_config must directly return one WorkerStartConfig/,
+  ],
+  [
+    "a conditional tail with only one valid branch",
+    `if enabled {
+    Ok(WorkerStartConfig { runtime, skills: bundled_skills() })
+  } else {
+    replacement_config()
+  }`,
+    /worker_start_config must directly return one WorkerStartConfig/,
+  ],
+]) {
+  test(`rejects ${name} in a Result worker factory`, (t) => {
+    const root = harnessFixture(t);
+    replaceWorkerConfig(root, validatedWorkerConfigSource(tail));
+
+    assert.match(validateAgentAssets(root).join("\n"), diagnostic);
+  });
+}
 
 test("ties the validated skill inventory to every runtime consumer", (t) => {
   const root = harnessFixture(t);
