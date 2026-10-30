@@ -49,6 +49,15 @@ The crate/package names are `symphony-core`, `symphony-tracker`,
 `symphony-agents`, `symphony-storage`, `symphony-worker`,
 `symphony-contracts`, `symphony-bindings`, and `symphony-desktop`. The frontend package is `symphony-rust`.
 
+## Service diagram
+
+[service-architecture.excalidraw](service-architecture.excalidraw) is the runtime
+picture: one desktop process, the worker, the capability crates, and the
+systems outside that process. Open the file in [Excalidraw](https://excalidraw.com)
+to edit it.
+
+![Symphony service architecture](service-architecture.png)
+
 ## Ownership and boundaries
 
 ### `crates/symphony-core`

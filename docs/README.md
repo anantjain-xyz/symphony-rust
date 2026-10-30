@@ -20,6 +20,7 @@ documentation:
 - [Dashboard, light theme](overview-light.png)
 - [Dashboard, dark theme](overview-dark.png)
 - [Issues dependency graph](issues-dependency-graph.png)
+- [Service architecture](service-architecture.excalidraw) ([preview](service-architecture.png))
 
 When behavior, repository ownership, or a validation command changes, update the
 smallest relevant document in the same pull request. Treat source files and
