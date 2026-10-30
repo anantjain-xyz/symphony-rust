@@ -1,2 +1,8 @@
 allowBuilds:
   esbuild: true
+
+# @babel/helper-compilation-targets allows these ranges but does not require the
+# patched releases. Keep the lockfile on the fixed versions.
+overrides:
+  browserslist: 4.28.7
+  baseline-browser-mapping: 2.11.0
