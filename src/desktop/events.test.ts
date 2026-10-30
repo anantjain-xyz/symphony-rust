@@ -124,8 +124,8 @@ describe("desktop event subscription", () => {
     expect(handlers.onError).not.toHaveBeenCalled();
 
     registrations[1].reject(new Error("event bridge unavailable"));
-    registrations[3].resolve(vi.fn());
-    registrations[4].resolve(vi.fn());
+    registrations[3].resolve(vi.fn<() => void>());
+    registrations[4].resolve(vi.fn<() => void>());
     await flushRegistration();
     expect(handlers.onError).not.toHaveBeenCalled();
   });
@@ -164,8 +164,8 @@ describe("desktop event subscription", () => {
     expect(unlisteners[0]).toHaveBeenCalledOnce();
 
     registrations[2].resolve(unlisteners[1]);
-    registrations[3].resolve(vi.fn());
-    registrations[4].resolve(vi.fn());
+    registrations[3].resolve(vi.fn<() => void>());
+    registrations[4].resolve(vi.fn<() => void>());
     await flushRegistration();
     expect(unlisteners[1]).toHaveBeenCalledOnce();
   });

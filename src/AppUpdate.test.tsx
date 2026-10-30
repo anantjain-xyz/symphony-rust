@@ -3,7 +3,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppUpdate, UPDATE_CHECK_INTERVAL_MS } from "./AppUpdate";
-import type { UpdateSafety } from "./appUpdateTypes";
+import type { AppUpdateProps, UpdateSafety } from "./appUpdateTypes";
+
+type VerifyInstallSafety = NonNullable<AppUpdateProps["verifyInstallSafety"]>;
+type PrepareForInstall = AppUpdateProps["prepareForInstall"];
+type InstallLockChange = NonNullable<AppUpdateProps["onInstallLockChange"]>;
+type ActionError = AppUpdateProps["onActionError"];
+type RestoreWorker = () => Promise<void>;
 
 const tauriMocks = vi.hoisted(() => ({
   check: vi.fn(),
@@ -55,16 +61,18 @@ function deferred<T>() {
 
 function renderUpdate({
   safety = safe,
-  verifyInstallSafety = vi.fn().mockImplementation(async () => safety),
-  prepareForInstall = vi.fn().mockResolvedValue(vi.fn().mockResolvedValue(undefined)),
-  onInstallLockChange = vi.fn(),
-  onActionError = vi.fn(),
+  verifyInstallSafety = vi.fn<VerifyInstallSafety>().mockImplementation(async () => safety),
+  prepareForInstall = vi
+    .fn<PrepareForInstall>()
+    .mockResolvedValue(vi.fn<RestoreWorker>().mockResolvedValue(undefined)),
+  onInstallLockChange = vi.fn<InstallLockChange>(),
+  onActionError = vi.fn<ActionError>(),
 }: {
   safety?: UpdateSafety;
-  verifyInstallSafety?: ReturnType<typeof vi.fn>;
-  prepareForInstall?: ReturnType<typeof vi.fn>;
-  onInstallLockChange?: ReturnType<typeof vi.fn>;
-  onActionError?: ReturnType<typeof vi.fn>;
+  verifyInstallSafety?: VerifyInstallSafety;
+  prepareForInstall?: PrepareForInstall;
+  onInstallLockChange?: InstallLockChange;
+  onActionError?: ActionError;
 } = {}) {
   const update = (manualCheckRequest: number) => (
     <AppUpdate
@@ -262,7 +270,7 @@ describe("AppUpdate", () => {
   it("uses fresh backend safety before installation", async () => {
     const candidate = updateCandidate();
     tauriMocks.check.mockResolvedValue(candidate);
-    const verifyInstallSafety = vi.fn().mockResolvedValue({
+    const verifyInstallSafety = vi.fn<VerifyInstallSafety>().mockResolvedValue({
       ...safe,
       activeRunCount: 1,
       activeRunIds: ["newly-reserved-run"],
@@ -391,9 +399,9 @@ describe("AppUpdate", () => {
       install: vi.fn().mockRejectedValue(new Error("signature mismatch")),
     });
     tauriMocks.check.mockResolvedValue(candidate);
-    const restoreWorker = vi.fn().mockResolvedValue(undefined);
-    const prepareForInstall = vi.fn().mockResolvedValue(restoreWorker);
-    const onActionError = vi.fn();
+    const restoreWorker = vi.fn<RestoreWorker>().mockResolvedValue(undefined);
+    const prepareForInstall = vi.fn<PrepareForInstall>().mockResolvedValue(restoreWorker);
+    const onActionError = vi.fn<ActionError>();
     const { onInstallLockChange } = renderUpdate({
       prepareForInstall,
       onActionError,
@@ -413,7 +421,7 @@ describe("AppUpdate", () => {
     const candidate = updateCandidate();
     tauriMocks.check.mockResolvedValue(candidate);
     tauriMocks.relaunch.mockRejectedValueOnce(new Error("restart denied"));
-    const onActionError = vi.fn();
+    const onActionError = vi.fn<ActionError>();
     const { rerender, prepareForInstall } = renderUpdate({ onActionError });
 
     fireEvent.click(await screen.findByRole("button", { name: "Update Symphony to v0.1.12" }));
