@@ -666,8 +666,9 @@ function checkPublishScript(source, contract, diagnostics) {
     ".assets[].name",
     "|",
     "grep",
-    "-qxF",
+    "-xF",
     "$asset",
+    ">/dev/null",
     "then",
   ];
   const verifierIndexes = loopBody
