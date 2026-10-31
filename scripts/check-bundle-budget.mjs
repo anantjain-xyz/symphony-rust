@@ -13,8 +13,10 @@ export const BUDGETS = {
   // Exact Save acknowledgements fence dirty-draft provenance; the measured
   // integrated shell with credential diagnostics/reconciliation is 81.80 kB
   // gzip. Keep a small runner cushion.
+  // Tauri API 2.12.4 adds 132 gzip bytes (81,895 -> 82,027) to align with
+  // the Rust release dependencies; retain a small cushion for this baseline.
   // Preserve startup behavior and every existing lazy/forbidden entry boundary.
-  eagerJavaScript: 82_000,
+  eagerJavaScript: 82_200,
   eagerCss: 7_000,
   lazyViewJavaScript: 50_000,
 };
