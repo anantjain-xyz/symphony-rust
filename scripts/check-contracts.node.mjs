@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { bindingsDifference } from "./check-bindings.mjs";
@@ -667,7 +669,7 @@ const releaseFixture = {
       Symphony.app.tar.gz \\
       Symphony.app.tar.gz.sig \\
       latest.json; do
-      if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qxF "$asset"; then
+      if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -xF "$asset" >/dev/null; then
         exit 1
       fi
     done
@@ -800,13 +802,76 @@ test("release checker requires draft creation targeted at the verified commit", 
 
 test("release checker requires exact-name post-upload verification to fail closed", () => {
   const publishScript = releaseFixture.publishScript.replace(
-    'if ! gh release view "$TAG" --json assets --jq \'.assets[].name\' | grep -qxF "$asset"; then',
-    'if gh release view "$TAG" --json assets --jq \'.assets[].name\' | grep -qxF "$asset"; then',
+    'if ! gh release view "$TAG" --json assets --jq \'.assets[].name\' | grep -xF "$asset" >/dev/null; then',
+    'if gh release view "$TAG" --json assets --jq \'.assets[].name\' | grep -xF "$asset" >/dev/null; then',
   );
   assert.notEqual(publishScript, releaseFixture.publishScript);
   const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
   assert.ok(diagnostics.some((message) => message.includes("exact-name gh release view")));
 });
+
+test("release checker rejects asset verification that closes the producer pipe early", () => {
+  const publishScript = releaseFixture.publishScript.replace(
+    'grep -xF "$asset" >/dev/null',
+    'grep -qxF "$asset"',
+  );
+  assert.notEqual(publishScript, releaseFixture.publishScript);
+  const diagnostics = checkReleaseContract({ ...releaseFixture, publishScript });
+  assert.ok(diagnostics.some((message) => message.includes("exact-name gh release view")));
+});
+
+for (const [label, firstAsset, producerExit, expectedStatus] of [
+  ["drains names after an early match", "latest.json", 0, 0],
+  ["rejects a partial-name match", "latest.json.extra", 0, 1],
+  ["preserves producer failures after a match", "latest.json", 73, 1],
+]) {
+  test(`published asset verification ${label}`, () => {
+    const verification = readFileSync(new URL("./publish-macos.sh", import.meta.url), "utf8")
+      .split("\n")
+      .find((line) => line.trim().startsWith("if ! gh release view "));
+    assert.ok(verification, "publish script must contain the asset verification condition");
+    const result = spawnSync(
+      "bash",
+      [
+        "-euo",
+        "pipefail",
+        "-c",
+        `
+          gh() {
+            "$SYMPHONY_TEST_NODE" -e '
+              const fs = require("node:fs");
+              try {
+                fs.writeSync(1, process.env.SYMPHONY_TEST_FIRST_ASSET + "\\n");
+                // Exceed the pipe buffer so an early reader exit always reaches the producer.
+                for (let i = 0; i < 64; i++) fs.writeSync(1, "other-asset\\n".repeat(1024));
+              } catch {
+                process.exit(71);
+              }
+              process.exit(Number(process.env.SYMPHONY_TEST_PRODUCER_EXIT));
+            '
+          }
+          TAG=v1.2.3
+          asset=latest.json
+          ${verification}
+            exit 1
+          fi
+        `,
+      ],
+      {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          ...process.env,
+          SYMPHONY_TEST_NODE: process.execPath,
+          SYMPHONY_TEST_FIRST_ASSET: firstAsset,
+          SYMPHONY_TEST_PRODUCER_EXIT: String(producerExit),
+        },
+      },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, expectedStatus, result.stderr);
+  });
+}
 
 test("release checker rejects publication before post-upload verification", () => {
   const publish = '    gh release edit "$TAG" --draft=false\n';

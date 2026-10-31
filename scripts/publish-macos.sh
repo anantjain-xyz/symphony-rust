@@ -137,7 +137,8 @@ for asset in \
   Symphony.app.tar.gz \
   Symphony.app.tar.gz.sig \
   latest.json; do
-  if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qxF "$asset"; then
+  # Read every asset name so gh cannot hit SIGPIPE after an early grep match.
+  if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -xF "$asset" >/dev/null; then
     echo "error: draft release is missing $asset; leaving $TAG as a draft" >&2
     exit 1
   fi
