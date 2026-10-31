@@ -151,7 +151,8 @@ Feature owners ──> desktop commands/events ──> generated IPC contracts
 
 Feature-owner extraction bundle baseline: eager JavaScript changed from
 254.36 kB raw / 80.63 kB normalized gzip to 256.67 kB raw / 81.28 kB gzip.
-The current eager JavaScript budget is 82,000 normalized gzip bytes; existing
+The current eager JavaScript budget is 82,200 normalized gzip bytes, allowing
+for the Tauri API 2.12.4 update (81,895 -> 82,027 measured bytes); existing
 view boundaries, lazy budgets, and forbidden eager entries are unchanged.
 This retains immediate Overview rendering.
 
