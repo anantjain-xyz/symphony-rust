@@ -1452,8 +1452,6 @@ fn strip_day_ordinal(value: &str) -> String {
 fn opencode_args(request: &AgentRunRequest) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
-        "--dir".to_string(),
-        request.cwd.display().to_string(),
         "--format".to_string(),
         "json".to_string(),
     ];
@@ -1697,13 +1695,12 @@ fn detect_opencode_rate_limit(status_code: Option<u16>, message: &str) -> Option
 }
 
 fn spawn_shell_command(
-    command: &str,
+    request: &AgentRunRequest,
     args: &[String],
-    cwd: &PathBuf,
-    envs: &[(String, String)],
 ) -> Result<tokio::process::Child, AgentError> {
+    let command = &request.command;
     let full = if args.is_empty() {
-        command.to_string()
+        command.clone()
     } else {
         format!(
             "{} {}",
@@ -1717,20 +1714,24 @@ fn spawn_shell_command(
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-lc")
         .arg(full)
-        .current_dir(cwd)
+        .current_dir(&request.cwd)
         // The process supervisor also owns a group-wide drop guard. Keep
         // Tokio's direct-child kill/reaping fallback for runtime shutdown.
         .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    if request_env_has_github_token(envs) {
+    if request_env_has_github_token(&request.env) {
         for key in GITHUB_TOKEN_ENV_VARS {
             cmd.env_remove(key);
         }
     }
-    for (key, value) in envs {
+    for (key, value) in &request.env {
         cmd.env(key, value);
+    }
+    if request.backend == AgentBackend::Opencode {
+        // OpenCode checks PWD first. Let the shell derive it from the workspace cwd.
+        cmd.env_remove("PWD");
     }
     // Put the agent in its own process group (the /bin/sh leader becomes the
     // group leader). The agent CLI spawns its own tree -- MCP servers, language
@@ -2147,8 +2148,6 @@ mod tests {
             opencode_args(&opencode_request),
             [
                 "run",
-                "--dir",
-                "/fixture/workspace",
                 "--format",
                 "json",
                 "--dangerously-skip-permissions",
