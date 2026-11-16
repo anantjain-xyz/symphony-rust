@@ -11,6 +11,17 @@ members = [
 ]
 resolver = "2"
 
+# macOS 27's dyld rejects proc-macro dylibs whose __LINKEDIT string pool is
+# not 8-byte aligned. rustc's release-profile `strip = "debuginfo"` (the Cargo
+# default) produces exactly that corruption, which breaks `cargo build
+# --release` with "mis-aligned LINKEDIT string pool" while compiling crates
+# that dlopen proc macros (for example sqlx). Keep host-side build artifacts
+# unstripped; this only affects build scripts and proc macros, not the
+# optimization or size of the shipped app binary.
+# https://github.com/rust-lang/rust/issues/157750
+[profile.release.build-override]
+strip = "none"
+
 [workspace.package]
 edition = "2021"
 license = "MIT"
