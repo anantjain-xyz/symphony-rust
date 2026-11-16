@@ -218,6 +218,15 @@ The release build uses
 commands unless explicitly overridden, selecting Tauri's deterministic DMG path
 instead of Finder automation.
 
+macOS 27's `dyld` rejects dylibs whose `__LINKEDIT` string pool is not 8-byte
+aligned. rustc's release-profile `strip = "debuginfo"` can produce exactly that
+corruption in proc-macro dylibs, aborting the build with `mis-aligned LINKEDIT
+string pool` ([rust-lang/rust#157750](https://github.com/rust-lang/rust/issues/157750)).
+[`Cargo.toml`](../Cargo.toml) sets `[profile.release.build-override]
+strip = "none"` so host-side build scripts and proc macros are built
+unstripped; the shipped binary's optimization and stripping are unchanged. Keep
+this override until the toolchain in use includes the fix (Rust 1.98 or later).
+
 After building, `release-macos.sh` verifies:
 
 - Gatekeeper acceptance with `spctl`;
