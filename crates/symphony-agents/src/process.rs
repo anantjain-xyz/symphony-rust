@@ -51,12 +51,7 @@ pub(crate) async fn run(
     if cancel.is_cancelled() {
         return Ok(protocol.cancelled());
     }
-    let mut process = ProcessGroup::new(crate::spawn_shell_command(
-        &request.command,
-        args,
-        &request.cwd,
-        &request.env,
-    )?);
+    let mut process = ProcessGroup::new(crate::spawn_shell_command(request, args)?);
     enum Outcome {
         Finished(Result<PumpOutput, AgentError>),
         Cancelled,

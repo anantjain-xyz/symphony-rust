@@ -275,16 +275,12 @@ and triggers process-group cleanup before the driver returns.
 
 ## OpenCode
 
-The OpenCode adapter invokes:
+Symphony runs `opencode run --format json` in the issue workspace. It clears
+`PWD` from the launch environment so the shell derives it from the workspace.
+OpenCode checks `PWD` before the process working directory.
 
-```text
-opencode run --dir <workspace> --format json
-```
-
-It optionally adds `--model` and `--agent`. By default it also adds
-`--dangerously-skip-permissions`; noninteractive OpenCode otherwise
-auto-rejects permission requests and cannot perform an unattended writable
-run.
+Symphony adds `--model` and `--agent` when configured. By default it also adds
+`--dangerously-skip-permissions` to auto-approve permission requests.
 
 OpenCode's verbose log mode is intentionally not enabled. The shared
 supervisor drains stderr for every provider, including OpenCode.

@@ -390,6 +390,36 @@ async fn nonzero_exit_preserves_complete_bounded_stderr_for_every_provider() {
 }
 
 #[tokio::test]
+async fn opencode_uses_the_issue_workspace_without_a_directory_flag() {
+    let fixture = Fixture::new(&format!(
+        r#"
+set -eu
+for arg in "$@"; do
+    if [ "$arg" = --dir ]; then
+        echo 'Unrecognized flag: --dir in command opencode run' >&2
+        exit 1
+    fi
+done
+test -f "${{PWD:-.}}/workspace-marker"
+test "$(cat)" = 'fixture prompt'
+printf '%s\n' {}
+"#,
+        shell_quote(success_record(&AgentBackend::Opencode)),
+    ));
+    std::fs::write(fixture.directory.join("workspace-marker"), "").unwrap();
+    let mut request = fixture.request(AgentBackend::Opencode);
+    request.env.push(("PWD".into(), "/".into()));
+    request.opencode.skip_permissions = true;
+    let (tx, _rx) = mpsc::channel(64);
+    let mut running = Running::start(request, tx, CancellationToken::new());
+    let result = running.result().await.unwrap();
+    assert!(
+        matches!(result.outcome, AgentOutcome::Success),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
 async fn opencode_final_usage_delivery_keeps_the_execution_deadline() {
     let fixture = Fixture::new("cat >/dev/null\nprintf '%s\\n' '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1,\"output\":1}}}'");
     let (tx, _rx) = mpsc::channel(1);
